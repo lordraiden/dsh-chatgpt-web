@@ -37,10 +37,33 @@ turndown.addRule("removeMapAndWidgets", {
       return true;
     }
 
+    const text = el.textContent?.trim() || "";
     if (el.children?.length === 0) {
-      const text = el.textContent?.trim() || "";
       if (/Use two fingers to move the map|Hold Ctrl to zoom|Map data|Report a map error/i.test(text)) {
         return true;
+      }
+    }
+
+    if (/^\d+$/.test(text)) {
+      let insideListOrCode = false;
+      for (let cur: Node | null = el; cur; cur = cur.parentNode) {
+        const tag = cur.nodeName?.toUpperCase();
+        if (tag === "OL" || tag === "LI" || tag === "PRE" || tag === "CODE" || /^H[1-6]$/.test(tag)) {
+          insideListOrCode = true;
+          break;
+        }
+      }
+      if (!insideListOrCode) {
+        const tag = el.nodeName?.toLowerCase();
+        if (["div", "p", "section"].includes(tag)) {
+          return true;
+        }
+        if (tag === "span") {
+          const parentText = el.parentNode?.textContent?.trim();
+          if (!parentText || parentText === text) {
+            return true;
+          }
+        }
       }
     }
 
@@ -167,11 +190,30 @@ function cleanCitationBadges(markdown: string): string {
   return markdown.replace(/\[([^\]]+?)\s*\+\d+\]\((https?:\/\/[^)]+)\)/g, "[$1]($2)");
 }
 
+function stripOrphanDigitBlocks(markdown: string): string {
+  if (!markdown.includes("```")) {
+    return markdown
+      .replace(/(?:^|\n\n)\d+(?=\n\n|$)/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+  const parts = markdown.split(/(```[\s\S]*?```)/g);
+  return parts
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      return part.replace(/(?:^|\n\n)\d+(?=\n\n|$)/g, "");
+    })
+    .join("")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function chatGptHtmlToMarkdown(html: string): string {
   if (!html.trim()) return "";
-  return cleanCitationBadges(
+  const cleaned = cleanCitationBadges(
     restoreToolCallTags(linkObsidianWikiLinks(preserveObsidianWikiLinks(turndown.turndown(html))))
   ).trim();
+  return stripOrphanDigitBlocks(cleaned);
 }
 
 export interface ChatGptMarkdownSegment {

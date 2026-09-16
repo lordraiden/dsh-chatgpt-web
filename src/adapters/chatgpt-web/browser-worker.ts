@@ -3693,13 +3693,19 @@ export class ChatGptBrowserWorker {
           return true;
         }
         if (candidate.tagName.toLowerCase() === "canvas") return true;
+        const text = candidate.textContent?.trim() || "";
         if (candidate.children.length === 0) {
-          const text = candidate.textContent?.trim() || "";
           if (/Use two fingers to move the map|Hold Ctrl to zoom|Map data|Report a map error/i.test(text)) {
             return true;
           }
-          if (/^\d+$/.test(text) && candidate.tagName.toLowerCase() === "span") {
-            return true;
+        }
+        if (/^\d+$/.test(text)) {
+          const tag = candidate.tagName.toLowerCase();
+          if (["div", "span", "p", "section"].includes(tag)) {
+            const isSafeContext = candidate.closest?.("ol, li, pre, code, h1, h2, h3, h4, h5, h6");
+            if (!isSafeContext) {
+              return true;
+            }
           }
         }
         return false;
@@ -3784,6 +3790,9 @@ export class ChatGptBrowserWorker {
           ? [...child.children].filter(candidate => candidate.tagName === "LI") as HTMLElement[]
           : [];
         if (listItems.length === 0) {
+          if (tag !== "li" && /^\d+$/.test(child.innerText?.trim() ?? "")) {
+            return;
+          }
           flattenedMarkdownSegments.push({
             tag,
             html: child.outerHTML,
