@@ -1484,11 +1484,11 @@ Browser-backed ProviderCore role
   = provider-private continuity
   = context projection
   = capability binding
+  = cancellation/retry/settlement
+  = provider diagnostics
 
 ChatGPTWebProviderCore (Phase 1)
   = first concrete implementation of that role
-  = cancellation/retry/settlement
-  = provider diagnostics
 
 CapabilityProjector
   = what DSH exposes
