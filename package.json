@@ -44,6 +44,7 @@
     "setup": "node lib/cli.js setup",
     "login": "node lib/cli.js login",
     "doctor": "node lib/cli.js doctor",
+    "test": "node scripts/smoke-tarball.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

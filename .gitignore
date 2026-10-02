@@ -9,3 +9,4 @@ storageState.*.json
 *.tsbuildinfo
 launcher/
 graphify-out/
+*.tgz

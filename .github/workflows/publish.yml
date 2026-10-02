@@ -7,8 +7,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  validate-tarball:
+    name: Validate clean tarball
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build bundles
+        run: bun run build
+
+      - name: Smoke test the packed tarball
+        run: npm run test
+
   publish-gpr:
     name: Publish to GitHub Packages
+    needs: validate-tarball
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -44,6 +73,7 @@ jobs:
 
   publish-npm:
     name: Publish to npmjs.com
+    needs: validate-tarball
     runs-on: ubuntu-latest
     permissions:
       contents: read
