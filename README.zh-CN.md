@@ -96,12 +96,49 @@ dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
 ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /path/to/chrome
 ```
 
-> **注意（snap 版 Chromium）：** 受 snap 沙箱限制的浏览器只能写入 `$HOME` 下的*非隐藏*路径。如果你的浏览器是 snap（例如 `/snap/bin/chromium`），且 setup 在 profile 的 `SingletonLock` 上报 `Permission denied`，请在运行 setup 前将插件的存储主目录指向一个非隐藏目录：
->
-> ```bash
-> DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web" \
->   ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /snap/bin/chromium
-> ```
+#### 使用受 snap 沙箱限制的浏览器（例如 snap 版 Chromium）
+
+受 snap 沙箱限制的浏览器只能写入 `$HOME` 下的**非隐藏**路径。插件的默认存储目录（`~/.dsh/storages/chatgpt-web/`）是隐藏目录，因此 snap 浏览器无法在其中创建 profile 锁文件，setup 会失败并报告：
+
+```text
+Failed to create .../login-profile-XXXX/SingletonLock: Permission denied (13)
+```
+
+解决方法是通过环境变量 `DSH_CHATGPT_WEB_HOME` 将插件的存储主目录指向一个**非隐藏**目录。
+
+**该变量的工作原理：** `VAR=value command` 是标准的 shell 语法——它只为*那一条命令*设置环境变量，不会持久化。插件在启动时读取 `DSH_CHATGPT_WEB_HOME`；一旦设置，它拥有的所有文件（配置、浏览器 profile、存储状态）都会放在该目录下，而不是 `~/.dsh/storages/chatgpt-web/`。
+
+**逐步操作：**
+
+1. **在命令上附加该变量，运行一次性 setup：**
+
+   ```bash
+   DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web" \
+     ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /snap/bin/chromium
+   ```
+
+   浏览器窗口会打开；登录 ChatGPT。会话将保存在 `~/dsh-chatgpt-web/` 下。
+
+2. **为启动 DSH 的 shell 持久化该变量。** 后台 Sidecar 进程由 DeepSeek Harness 启动，继承的是 DSH 的环境——它*不会*继承你在终端里一次性使用的 `VAR=value` 前缀。因此请在你的 shell 配置文件（例如 `~/.bashrc`）中导出该变量，然后从该 shell 启动 DSH：
+
+   ```bash
+   # 添加到 ~/.bashrc（或 ~/.zshrc）：
+   export DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web"
+
+   # 重新加载，然后在该 shell 中启动 DSH：
+   source ~/.bashrc
+   dsh --profile <profile> web
+   ```
+
+   这样 Sidecar 就能找到 setup 创建的同一份 `config.json` 和浏览器状态。
+
+3. **用 doctor 验证**（在相同的环境中运行）：
+
+   ```bash
+   ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web doctor
+   ```
+
+> **重要：** 所有接触插件状态的命令——`setup`、`login`、`doctor`，以及运行 Sidecar 的 DSH 进程——必须看到**同一个** `DSH_CHATGPT_WEB_HOME`。如果一部分使用隐藏默认路径、另一部分使用非隐藏路径，Sidecar 会报告 `Configuration is missing`。
 
 ### 3. 在 DeepSeek Harness 中启用
 

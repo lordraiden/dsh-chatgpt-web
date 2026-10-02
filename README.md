@@ -96,12 +96,49 @@ If your browser is not at the default path, pass it explicitly:
 ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /path/to/chrome
 ```
 
-> **Note (snap Chromium):** snap-confined browsers can only write to *non-hidden* paths in `$HOME`. If your browser is a snap (e.g. `/snap/bin/chromium`) and setup fails with `Permission denied` on the profile's `SingletonLock`, point the plugin's storage home at a non-hidden directory before running setup:
->
-> ```bash
-> DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web" \
->   ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /snap/bin/chromium
-> ```
+#### Using a snap-confined browser (e.g. snap Chromium)
+
+Snap-confined browsers can only write to **non-hidden** paths in `$HOME`. The plugin's default storage directory (`~/.dsh/storages/chatgpt-web/`) is hidden, so a snap browser cannot create its profile lock there and setup fails with:
+
+```text
+Failed to create .../login-profile-XXXX/SingletonLock: Permission denied (13)
+```
+
+The fix is to point the plugin's storage home at a **non-hidden** directory using the `DSH_CHATGPT_WEB_HOME` environment variable.
+
+**How the variable works:** `VAR=value command` is standard shell syntax — it sets the environment variable *only for that one command* and does not persist it. The plugin reads `DSH_CHATGPT_WEB_HOME` on startup; when set, every file it owns (config, browser profile, storage state) lives under that directory instead of `~/.dsh/storages/chatgpt-web/`.
+
+**Step by step:**
+
+1. **Run the one-time setup with the variable applied to the command:**
+
+   ```bash
+   DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web" \
+     ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /snap/bin/chromium
+   ```
+
+   The browser window opens; log in to ChatGPT. The session is saved under `~/dsh-chatgpt-web/`.
+
+2. **Persist the variable for the shell that starts DSH.** The background sidecar is started by DeepSeek Harness and inherits DSH's environment — it does *not* inherit a one-off `VAR=value` prefix from your terminal. So export the variable in your shell (e.g. `~/.bashrc`), then start DSH from that shell:
+
+   ```bash
+   # add to ~/.bashrc (or ~/.zshrc):
+   export DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web"
+
+   # reload, then start DSH in that shell:
+   source ~/.bashrc
+   dsh --profile <profile> web
+   ```
+
+   The sidecar now finds the same `config.json` and browser state that setup created.
+
+3. **Verify with the doctor** (run it in the same environment):
+
+   ```bash
+   ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web doctor
+   ```
+
+> **Important:** every command that touches the plugin state — `setup`, `login`, `doctor`, and the DSH process that runs the sidecar — must see the **same** `DSH_CHATGPT_WEB_HOME`. If some of them use the hidden default path and others use the non-hidden one, the sidecar will report `Configuration is missing`.
 
 ### 3. Enable in DeepSeek Harness
 
