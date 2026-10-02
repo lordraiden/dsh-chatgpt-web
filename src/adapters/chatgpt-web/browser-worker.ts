@@ -113,6 +113,23 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
 
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 /**
+ * Upper bound for the size-scaled first-token grace. It stays below the provider's
+ * streamIdleTimeoutMs (300 s) so the browser worker, not the HTTP client, owns the failure.
+ */
+export const CHATGPT_RESPONSE_DOM_GRACE_MAX_MS = 240_000;
+/**
+ * Free accounts take longer to expose the first assistant token the larger the visible prompt is:
+ * ChatGPT reads the whole message before generating. A 32k-token prompt regularly exceeds the flat
+ * 60 s grace, so the grace scales with the estimated message size (~5 ms per token), never below
+ * the flat grace and never above the hard maximum.
+ */
+export function chatGptResponseDomGraceMs(estimatedMessageTokens: number): number {
+  return Math.min(
+    CHATGPT_RESPONSE_DOM_GRACE_MAX_MS,
+    Math.max(CHATGPT_RESPONSE_DOM_GRACE_MS, estimatedMessageTokens * 5),
+  );
+}
+/**
  * How long a staged Bigger Context part may take to produce its assistant turn. A staged part is two
  * orders of magnitude larger than an ordinary prompt and ChatGPT reads all of it before answering.
  * No MCP activity exists while that inert part is being ingested, so the response grace matches
@@ -4630,7 +4647,7 @@ export class ChatGptBrowserWorker {
         deadline,
         turn.abortSignal,
         turn.externalProgress,
-        CHATGPT_RESPONSE_DOM_GRACE_MS,
+        chatGptResponseDomGraceMs(estimatedMessageTokens),
         completionTracker,
         toolTurnObservationRecovery
           ? async (...args) => {
