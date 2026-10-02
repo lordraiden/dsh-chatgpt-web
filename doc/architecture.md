@@ -8,7 +8,7 @@
 
 > API-like outside, product-native inside.
 
-This project makes an authenticated ChatGPT Web session available to DeepSeek Harness (DSH) as a native LLM provider. The public boundary is a normal DSH provider contract. The internal implementation deliberately remains ChatGPT-Web-native: browser interaction, product-side tool looping, account state, and UI recovery are provider internals.
+This project makes an authenticated ChatGPT Web session available to DeepSeek Harness (DSH) as a native LLM provider. The public boundary is a normal DSH provider contract. The Phase 1 implementation is ChatGPT-Web-specific, while the browser execution seams are intentionally service-neutral enough to support future browser-backed providers without creating a generic provider framework. Browser interaction, product-side tool looping, account state, and UI recovery remain provider/service internals.
 
 The architecture is intentionally conservative. Phase 1 contains only the boundaries and invariants required for a solid first pilot. Phase 2 contains compatibility convergence, cleanup, and optional hardening that does not need to block the first native provider.
 
@@ -43,7 +43,8 @@ This architecture does not attempt to:
 - guarantee arbitrary browser concurrency;
 - promise theoretical model context as usable web transport capacity;
 - force the first-party Codex passthrough through the browser provider;
-- build a generic provider framework above DSH ctx.llm.
+- build a generic provider framework above DSH ctx.llm;
+- implement additional browser-backed providers as part of the Phase 1 pilot.
 
 ---
 
@@ -136,6 +137,13 @@ The adapter must hide browser mechanics from DSH while preserving DSH-visible pr
 
 Not every web property is equivalent to an API property. The provider must publish the strongest contract the browser can actually satisfy.
 
+A browser-backed provider has two kinds of state:
+
+- shared execution machinery that is independent of the upstream web service;
+- service-specific semantics such as authentication/session state, model catalogue, model selection, reasoning controls, context rules, submission/completion mechanics, native capabilities, and WebSurfaceTransport behavior.
+
+The first category may be reused by later providers. The second category must remain behind the provider-specific service profile. Phase 1 implements only ChatGPT Web.
+
 ---
 
 ## 4. Identity model
@@ -175,23 +183,34 @@ many DSH turns
 
 The system must never silently switch a DSH session to another ChatGPT conversation.
 
-### 4.2 Account/Browser Lease
+### 4.2 BrowserAccountLease
 
-Phase 1 introduces a small internal concept equivalent to AccountBrowserLease.
+Phase 1 introduces a small internal concept equivalent to BrowserAccountLease.
 
-It is not a new public abstraction. It is a lifecycle/coordination primitive that answers:
+It is not a new public abstraction. It is a lifecycle/coordination primitive whose identity is service-scoped:
 
-- which authenticated account is being used;
-- which browser context/page owns the active turn;
+~~~text
+serviceId
+account/session identity
+browser profile identity
+browser context/page
+DSH turn identity
+ownership state
+~~~
+
+For ChatGPT Web, the serviceId is chatgpt-web. A future DeepSeek Web or Grok Web implementation would use its own service/session identity and must not share authenticated product state merely because it shares Chromium.
+
+The lease answers:
+
+- which authenticated service account/session is being used;
+- which browser profile/context/page owns the active turn;
 - whether that resource is available;
 - which DSH turn currently holds it;
 - when it may be reused;
 - how it is released after physical settlement;
 - how shutdown/crash revokes it.
 
-The lease owns resource ownership, not authorization policy.
-
-A lease must not contain the canonical DSH tool registry, sandbox policy, approval state, or skill policy.
+The lease owns resource ownership, not authorization policy. It must not contain the canonical DSH tool registry, sandbox policy, approval state, or skill policy.
 
 ---
 
@@ -299,6 +318,42 @@ Native Codex passthrough -> first-party Codex backend
 
 The browser ProviderCore is the single execution core for ChatGPT Web, not a universal execution core for every upstream protocol in the repository.
 
+### 6.1 Future browser-backed providers
+
+The reusable architectural role is a browser-backed provider execution core, but Phase 1 does not require a generic framework or a second implementation.
+
+Future provider routes may look like:
+
+~~~text
+chatgpt-web -> ChatGPT service profile -> ChatGPT WebSurfaceTransport
+deepseek-web -> DeepSeek service profile -> DeepSeek WebSurfaceTransport
+grok-web -> Grok service profile -> Grok WebSurfaceTransport
+~~~
+
+Shared machinery may include:
+
+- browser/account resource leasing;
+- turn lifecycle and physical settlement;
+- retry/submit safety;
+- capability snapshot/binding;
+- broker coordination;
+- transport budgeting;
+- browser process lifecycle.
+
+Service-specific machinery remains provider-local:
+
+- authenticated account/session semantics;
+- model catalogue and model selection;
+- reasoning/configuration controls;
+- context and transport limits;
+- submission/completion mechanics;
+- provider-private continuity and replay rules;
+- model-visible control protocol;
+- native product capabilities;
+- DOM/browser surface behavior.
+
+The first implementation remains ChatGPT Web. Later services should reuse only seams proven useful by the first implementation rather than forcing premature abstraction.
+
 ---
 
 ## 7. Native DSH provider boundary
@@ -379,8 +434,8 @@ The minimum internal seams are:
 
 ~~~text
 ChatGPTWebProviderCore
-├── ModelResolver
-├── AccountBrowserLease
+├── ModelResolver / service profile
+├── BrowserAccountLease
 ├── TurnCoordinator
 ├── ContextProjector
 ├── CapabilityProjector
@@ -458,7 +513,7 @@ logical failure
 safe resource reuse
 ~~~
 
-A timeout, cancellation, or unknown browser outcome must not release the AccountBrowserLease until physical settlement is proven or the browser resource is forcibly retired.
+A timeout, cancellation, or unknown browser outcome must not release the BrowserAccountLease until physical settlement is proven or the browser resource is forcibly retired.
 
 This prevents a subsequent turn from inheriting a still-running browser operation.
 
@@ -812,7 +867,7 @@ Never rely on browser/editor truncation as context management.
 
 ## 17. WebSurfaceTransport
 
-All ChatGPT DOM knowledge belongs behind one small internal transport boundary.
+All service-specific DOM/browser knowledge belongs behind one small WebSurfaceTransport boundary for each browser-backed provider.
 
 Conceptual contract:
 
@@ -893,7 +948,14 @@ model = luna
 browserInteractionMode = automatic | manual
 ~~~
 
-Browser mechanics remain in WebSurfaceTransport.
+For a future browser-backed provider, the same DSH boundary remains:
+
+~~~text
+provider = <service-specific route>
+model = <service-specific model id>
+~~~
+
+while service-specific browser mechanics remain inside that provider's WebSurfaceTransport. A service does not inherit ChatGPT-specific DOM assumptions merely by reusing the common lifecycle machinery.
 
 ---
 
@@ -976,9 +1038,9 @@ It must not be forced through the browser execution path.
 
 ## 20. Native ChatGPT capabilities
 
-ChatGPT-native product capabilities are a separate trust domain.
+Native capabilities supplied by a browser-backed product are a separate trust domain.
 
-Examples include product-provided web search or other account-controlled features.
+For ChatGPT Web these include product-provided web search or other account-controlled features. Future providers may expose different native capabilities.
 
 They must be represented as:
 
@@ -1210,6 +1272,8 @@ The following are non-negotiable.
 16. Browser transport capacity is not the same as theoretical model context.
 17. A provider-owned turn may re-enter DSH, but cannot synchronously re-enter itself.
 18. Compatibility is an ingress concern, not a second execution core.
+19. Browser execution seams must not require ChatGPT-specific semantics when a service-neutral contract is sufficient.
+20. Additional browser-backed providers reuse proven execution seams but provide their own service profile and WebSurfaceTransport.
 
 ---
 
@@ -1247,6 +1311,10 @@ Rejected because model output is untrusted data.
 
 Rejected as unnecessary pilot complexity.
 
+### Build a generic multi-service browser framework before a second provider exists
+
+Rejected because the reusable boundaries can be defined now without inventing factories, registries, or plugin hierarchies whose value has not yet been demonstrated. DeepSeek Web and Grok Web remain future provider additions, not Phase 1 abstraction requirements.
+
 ---
 
 ## 28. Migration and issue mapping
@@ -1259,7 +1327,7 @@ Only the DSH-facing seam changes. Existing browser execution is reused.
 
 **#9 ProviderCore and execution authority**
 
-Extract the shared ChatGPT Web provider orchestration. Introduce AccountBrowserLease, turn lifecycle, logical/physical settlement, retry boundary, continuity states, reentrancy rule, and control-protocol trust boundary.
+Extract the ChatGPT Web provider orchestration while keeping its internal seams service-neutral. Introduce BrowserAccountLease, turn lifecycle, logical/physical settlement, retry boundary, continuity states, reentrancy rule, and control-protocol trust boundary. Do not build a multi-provider framework.
 
 **#10 Capability architecture**
 
@@ -1409,13 +1477,16 @@ ChatGPT
   = model output
   = ChatGPT-native product behavior
 
-ChatGPTWebProviderCore
+Browser-backed ProviderCore role
   = provider orchestration
   = turn lifecycle
   = account/browser coordination
   = provider-private continuity
   = context projection
   = capability binding
+
+ChatGPTWebProviderCore (Phase 1)
+  = first concrete implementation of that role
   = cancellation/retry/settlement
   = provider diagnostics
 
