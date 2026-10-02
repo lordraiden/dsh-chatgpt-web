@@ -320,6 +320,8 @@ export interface CodexProviderConfig {
     solAvailable?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     proAvailable?: boolean;
+    /** Whether Zero Risk exposes the explicit Pro-sized manual route. */
+    zeroRiskProEnabled?: boolean;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */
     autoApproveToolCalls?: boolean;
     /** DEV-only experimental transport: adapt one context across one, two, or three ChatGPT messages. */

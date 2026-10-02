@@ -677,6 +677,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
+      zeroRiskProEnabled: manual ? config.zeroRiskProEnabled : false,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       ...(config.tuning !== undefined ? { tuning: config.tuning } : {}),
