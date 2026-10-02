@@ -65,7 +65,7 @@ jobs:
 
       - name: Publish to GitHub Packages
         run: |
-          echo "@wlv-zedd:registry=https://npm.pkg.github.com/" > ~/.npmrc
+          echo "@lordraiden:registry=https://npm.pkg.github.com/" > ~/.npmrc
           echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> ~/.npmrc
           npm publish --registry https://npm.pkg.github.com
         env:
@@ -99,7 +99,7 @@ jobs:
 
       - name: Publish to npmjs.com
         run: |
-          echo "@wlv-zedd:registry=https://registry.npmjs.org/" > ~/.npmrc
+          echo "@lordraiden:registry=https://registry.npmjs.org/" > ~/.npmrc
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" >> ~/.npmrc
           npm publish --registry https://registry.npmjs.org --access public
         env:

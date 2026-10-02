@@ -1,16 +1,16 @@
 {
-  "name": "@wlv-zedd/dsh-chatgpt-web",
+  "name": "@lordraiden/dsh-chatgpt-web",
   "version": "1.0.3",
-  "description": "DeepSeek Harness Cordis plugin for free ChatGPT Web (GPT 5.6 Luna) pure chat and zero API fees.",
+  "description": "DeepSeek Harness Cordis plugin that bridges an authenticated ChatGPT Web session into DSH.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/WLV-ZEDD/dsh-chatgpt-web.git"
+    "url": "git+https://github.com/lordraiden/dsh-chatgpt-web.git"
   },
-  "homepage": "https://github.com/WLV-ZEDD/dsh-chatgpt-web#readme",
+  "homepage": "https://github.com/lordraiden/dsh-chatgpt-web#readme",
   "bugs": {
-    "url": "https://github.com/WLV-ZEDD/dsh-chatgpt-web/issues"
+    "url": "https://github.com/lordraiden/dsh-chatgpt-web/issues"
   },
-  "author": "WLV-ZEDD",
+  "author": "lordraiden",
   "type": "module",
   "main": "./lib/plugin.js",
   "bin": {
