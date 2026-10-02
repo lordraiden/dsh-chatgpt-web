@@ -23,6 +23,7 @@
       },
       "peerDependencies": {
         "@deepseek-ai/cordis": "^3.0.0 || workspace:^",
+        "@deepseek-ai/schemastery": "~3.18.4",
       },
       "optionalPeers": [
         "@deepseek-ai/cordis",
