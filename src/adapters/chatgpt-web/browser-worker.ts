@@ -144,7 +144,9 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "class",
   "data-item-anchor",
   "data-is-last-node",
+  "data-markdown-text-style",
   "data-message-author-role",
+  "data-chatgpt-search-unit-key",
   "data-state",
   "data-streaming-response-status",
   "data-testid",
@@ -1770,7 +1772,7 @@ class ChatGptBrowserDiagnostics {
             connectorRows: rows('.__menu-item[tabindex="0"]', 40),
             overlays: rows('[role="dialog"], [role="alert"], [role="status"]', 30),
             turns: {
-              user: document.querySelectorAll('[data-testid^="conversation-turn-"][data-message-author-role="user"]').length,
+              user: document.querySelectorAll('[data-testid^="conversation-turn-"][data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"]').length,
               assistant: assistantTurns.map(element => ({
                 textChars: (element.textContent ?? "").length,
                 htmlChars: (element as HTMLElement).innerHTML.length,
@@ -2616,9 +2618,11 @@ export class ChatGptBrowserWorker {
       const observerKey = `${observerState.id}:${observerState.revision}`;
       if (options.knownKey === observerKey) return { key: observerKey };
       const identities = (selector: string): string[] => {
-        const values = [...document.querySelectorAll(selector)].map(element => element.getAttribute("data-testid"));
-        if (values.some(value => typeof value !== "string" || !value.startsWith("conversation-turn-"))) {
-          throw new Error("ChatGPT conversation turn has no stable data-testid identity");
+        const values = [...document.querySelectorAll(selector)].map(element =>
+          element.getAttribute("data-chatgpt-search-unit-key") ?? element.getAttribute("data-testid"));
+        if (values.some(value => typeof value !== "string"
+          || (!value.startsWith("conversation-turn-") && !value.startsWith("fallback-turn-")))) {
+          throw new Error("ChatGPT conversation turn has no stable identity");
         }
         const typed = values as string[];
         if (new Set(typed).size !== typed.length) {
@@ -2693,7 +2697,7 @@ export class ChatGptBrowserWorker {
       state.responseIdentities,
     );
     if (!identity) return "";
-    const locator = page.locator(`[data-testid=${JSON.stringify(identity)}]`);
+    const locator = page.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`);
     return (await this.responseDomSnapshot(locator, {})).visibleText;
   }
 
@@ -2799,7 +2803,7 @@ export class ChatGptBrowserWorker {
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
         const boundaryText = identity
           ? (await this.responseDomSnapshot(
-            observationPage.locator(`[data-testid=${JSON.stringify(identity)}]`),
+            observationPage.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`),
             {},
           )).visibleText
           : "";
@@ -2808,7 +2812,7 @@ export class ChatGptBrowserWorker {
       }
       if (identity) return {
         identity,
-        locator: observationPage.locator(`[data-testid=${JSON.stringify(identity)}]`),
+        locator: observationPage.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`),
         acceptedUserTurnIdentities: state.userIdentities,
       };
       await this.waitForTurnDomOrExternalProgress(
@@ -2846,7 +2850,7 @@ export class ChatGptBrowserWorker {
     if (!identity || identity === binding.identity) return binding;
     return {
       identity,
-      locator: page.locator(`[data-testid=${JSON.stringify(identity)}]`),
+      locator: page.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`),
       acceptedUserTurnIdentities: state.userIdentities,
     };
   }
@@ -3717,8 +3721,8 @@ export class ChatGptBrowserWorker {
       // render a completed commentary Markdown root immediately before that live status container.
       // Final-answer Markdown follows the live status instead, so DOM order remains the semantic
       // boundary without relying on localized labels such as "Pro thinking".
-      const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]
-        .filter(candidate => !candidate.parentElement?.closest(".markdown"))
+      const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>('.markdown, [data-markdown-text-style="assistant-message"]')]
+        .filter(candidate => !candidate.parentElement?.closest('.markdown, [data-markdown-text-style="assistant-message"]'))
         .filter(renderedInDom)
         .filter(candidate => !isNoiseWidget(candidate));
       const streamingStatusContainers = [...root.querySelectorAll<HTMLElement>("[data-streaming-response-status]")]
@@ -3889,8 +3893,12 @@ export class ChatGptBrowserWorker {
         streamable: index < segments.length - 1,
       }));
       const rendered = renderedRoots.at(-1);
+      // The completed-turn copy action lives in a sibling wrapper of the turn's search-unit
+      // element in the current ProseMirror DOM, so it is not contained in the turn root. The
+      // FOLLOWING-document-order predicate against the rendered answer root still scopes the
+      // match to this turn's own action row, so the search may safely widen to the document.
       const completionAction = rendered
-        ? [...root.querySelectorAll<HTMLElement>(options.completionActionSelector)]
+        ? [...document.querySelectorAll<HTMLElement>(options.completionActionSelector)]
           .filter(renderedInDom)
           .find(candidate => !rendered.contains(candidate)
             && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
