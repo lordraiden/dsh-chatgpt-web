@@ -451,7 +451,7 @@ export async function loginToChatGpt(
       for (const p of context.pages()) {
         try {
           const composer = p.locator(
-            '[data-testid="prompt-textarea"], #prompt-textarea, [contenteditable="true"][data-lexical-editor="true"]',
+            '[data-testid="prompt-textarea"], #prompt-textarea, [contenteditable="true"][data-lexical-editor="true"], [role="textbox"][aria-label="Ask ChatGPT"], .ProseMirror[contenteditable="true"]',
           ).first();
           if (await composer.isVisible().catch(() => false)) {
             activePage = p;

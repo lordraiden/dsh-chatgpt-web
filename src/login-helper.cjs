@@ -45,7 +45,7 @@ async function isUserAuthenticated(context, page) {
     ).first().isVisible().catch(() => false);
 
     const hasComposer = await page.locator(
-      '[data-testid="prompt-textarea"], #prompt-textarea, [contenteditable="true"][data-lexical-editor="true"]'
+      '[data-testid="prompt-textarea"], #prompt-textarea, [contenteditable="true"][data-lexical-editor="true"], [role="textbox"][aria-label="Ask ChatGPT"], .ProseMirror[contenteditable="true"]'
     ).first().isVisible().catch(() => false);
 
     if ((hasAuthCookie || hasProfile) && !hasLoginButton && hasComposer) {
