@@ -5,9 +5,8 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](./LICENSE)
 [![tarball smoke](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/tarball-smoke.yml?style=flat&label=tarball%20smoke)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/tarball-smoke.yml)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-Cordis%20Plugin-0078d4?style=flat)](https://github.com/deepseek-ai/deepseek-harness)
-[![Mode](https://img.shields.io/badge/Mode-Pure%20Chat%20%26%20Markdown-success?style=flat)](./README.zh-CN.md#%E6%A6%82%E8%BF%B0)
 
-> **基于免费 ChatGPT Web（GPT 5.6 Luna）驱动的 DeepSeek Harness 零成本对话 AI 模型提供者。**
+> **将已认证的 ChatGPT Web 会话桥接到 DSH 的 DeepSeek Harness Cordis 插件。**
 
 <p align="center">
   <img src="./assets/hero-demo.png" alt="dsh-chatgpt-web 在 DeepSeek Harness 中" width="100%">
@@ -33,22 +32,28 @@
 
 ## 概述
 
-**dsh-chatgpt-web** 将你本地的 ChatGPT 浏览器会话转变为 DeepSeek Harness (DSH) 内部无缝运行的 **$0.00 免 API 费用的对话模型提供者**。
+**dsh-chatgpt-web** 将经过认证的 ChatGPT Web 会话桥接到 DeepSeek Harness (DSH)，通过本地 provider/兼容性入口暴露浏览器后端模型。
 
-它通过无头（Headless）或可视的 Chrome/Chromium 浏览器自动化连接至 `chatgpt.com`，将实时的 Markdown 回答、代码方案、解释以及推理过程直接流式传输回 DSH 对话中，无需消耗任何 API 额度。
+它通过无头或可视的 Chrome/Chromium 浏览器自动化连接至 `chatgpt.com`，将网页会话转换为 DSH 可用的模型请求，并流式传递回答、推理、使用量、错误以及取消语义。浏览器只是 provider 的实现细节，并不是 OpenAI 官方 API。
 
-### 为什么选择纯对话模式（Pure Chat）？
+### 架构与能力边界
 
-轻量级对话网页模型（如 GPT 5.6 Luna）非常擅长解释、对话、问答、头脑风暴、代码片段生成以及侧边助手任务。通过运行在 **纯对话模式** 下，该桥接器消除了提示词开销、工具幻觉以及自主多工具循环中的语法错误，提供快速、稳定且零成本的 LLM 提供者。
+项目遵循明确的所有权边界：
+
+- **DSH 仍是运行时权威：** 负责 DSH 会话、工具、技能、审批、沙箱策略以及 provider 生命周期。
+- **ChatGPT 负责模型能力：** 包括模型推理和 ChatGPT 原生产品能力。
+- **浏览器自动化只是传输层：** 负责 ChatGPT Web 的就绪、提交、流式、完成、取消和恢复。
+- **兼容性入口共享同一执行路径：** 避免为不同入口维护重复的浏览器执行实现。
+
+仓库还包含有意保持独立的集成路径，包括原生 Codex passthrough 和本地 Responses 兼容入口。
 
 ### 核心功能
 
-- **100% 完全免费（$0.00 成本）：** 使用你现有的免费 ChatGPT 网页会话，无需 OpenAI API Key 或信用卡。
+- **经过认证的 ChatGPT Web 后端：** 浏览器后端路线复用本地会话，无需为该路线配置 OpenAI API Key。
 - **Cordis 插件优先生命周期：** 由 DSH 通过 `ctx.effect` 管理。DeepSeek Harness 在启动时自动拉起后台 Sidecar 进程，并在退出时安全关闭。
-- **动态模型自动检测：** 自动检测你的 ChatGPT 账户等级：
-  - **免费账户：** 默认为 `chatgpt-web/luna`（`gpt-5-6-luna`）。
-  - **Plus / Team 账户：** 自动检测并暴露可用的付费模型（如 `gpt-4o`、`o1`）。
-- **完整流式 Markdown 与代码块：** 实时向 DSH Web UI 或 CLI 投递生成的内容。
+- **运行时模型/账户发现：** 根据已认证会话发现可用的 ChatGPT Web 模型与账户能力。
+- **流式与 provider 语义：** 向 DSH 侧暴露流式文本、推理、使用量、错误和取消语义。
+- **控制与诊断入口：** 提供 setup/login/doctor 工具，以及用于传输状态和调优的本地控制入口。
 - **可移植且经过校验的发布产物：** 发布的 tarball 在到达仓库（registry）之前会由 CI 校验（干净安装、运行时冒烟测试、依赖解析、无构建环境路径污染）。
 
 ---
@@ -216,8 +221,8 @@ Doctor result: ready
 
 1. **非官方桥接：** 通过本地 Playwright 自动化驱动 `chatgpt.com` 网页。与 OpenAI 官方无隶属或背书关系。
 2. **单会话并发：** 运行在单个浏览器标签页中。顺序查询和正常的 DSH 智能体对话完全顺畅；请避免同时对同一标签页发起多个高并发子智能体任务。
-3. **纯对话支持：** 该提供者专注于纯对话回复、解释、推理以及代码块生成。不支持执行本地文件系统、终端命令或自主工具循环。
-4. **免费额度频率限制：** 遵循 OpenAI 官方网页免费版的小时级调用频次限制。
+3. **能力边界：** DSH 所拥有的工具、技能、审批和沙箱策略仍由 DSH 控制；ChatGPT 原生产品能力不应被视为 DSH 权限。
+4. **浏览器与会话限制：** 浏览器后端路线受 ChatGPT Web 产品行为以及账户级限制影响。
 
 ---
 
@@ -226,4 +231,5 @@ Doctor result: ready
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — 开发环境与贡献指南。
 - [SECURITY.md](./SECURITY.md) — 插件如何保管你的会话凭据。
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) — 配置与运行时问题诊断。
+- [doc/architecture.md](./doc/architecture.md) — provider 架构与能力所有权边界。
 - [LICENSE](./LICENSE) — MIT。
