@@ -74,8 +74,7 @@ dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
 发布到软件包仓库后，也可以直接安装已发布的软件包：
 
 ```bash
-   dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
-```
+dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
 ```
 
 这会将插件注册到 profile 的 `package.json` bundles 中，其 Cordis 条目会被自动组合——无需手动 `insert`。

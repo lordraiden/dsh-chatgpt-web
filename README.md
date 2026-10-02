@@ -74,8 +74,7 @@ dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
 The published package can also be installed from the package registries:
 
 ```bash
-   dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
-```
+dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
 ```
 
 This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
