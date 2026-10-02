@@ -8,7 +8,7 @@
  * component-local <style> element so unmounting removes it.
  */
 window.__ModuleLoader__.load({
-  id: '@wlv-zedd/dsh-chatgpt-web',
+  id: '@lordraiden/dsh-chatgpt-web',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
