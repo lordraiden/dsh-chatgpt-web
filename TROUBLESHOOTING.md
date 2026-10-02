@@ -49,9 +49,9 @@ plugins:
 ### 3. `Chrome executable is missing`
 **Cause:** Google Chrome or Chromium could not be automatically located on the default system path.
 **Solution:**
-Specify your browser executable path explicitly:
+Specify your browser executable path explicitly. Login uses Chromium/Chrome driven by Playwright, and the executable can be pointed at explicitly:
 ```bash
-dsh-chatgpt-web setup --browser-executable "C:\Program Files\Google\Chrome\Application\chrome.exe"
+dsh-chatgpt-web setup --chrome "C:\Program Files\Google\Chrome\Application\chrome.exe"
 ```
 
 ---
