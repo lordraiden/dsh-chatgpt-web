@@ -557,9 +557,10 @@ async function main(): Promise<void> {
       throw new Error("--port must be an integer between 1 and 65535");
     }
 
+    const activeHost = hostOverride === undefined ? config.host : "127.0.0.1";
     const activeConfig = {
       ...config,
-      ...(hostOverride !== undefined ? { host: hostOverride } : {}),
+      host: activeHost,
       ...(portOverride !== undefined ? { port } : {}),
     };
     const server = startServer(activeConfig);
