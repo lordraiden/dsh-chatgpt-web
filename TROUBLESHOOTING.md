@@ -1,6 +1,6 @@
 # Troubleshooting dsh-chatgpt-web
 
-This guide covers common issues and resolutions when running `@wlv-zedd/dsh-chatgpt-web` in DeepSeek Harness.
+This guide covers common issues and resolutions when running `dsh-chatgpt-web` in DeepSeek Harness.
 
 ## Quick Diagnostics
 
@@ -37,12 +37,7 @@ Identify and terminate any lingering instance, or run `doctor` to see if the run
 ```bash
 dsh-chatgpt-web serve --port 17842
 ```
-or in `cordis.yml`:
-```yaml
-plugins:
-  "@wlv-zedd/dsh-chatgpt-web":
-    port: 17842
-```
+or configure the plugin port in your profile's Cordis configuration.
 
 ---
 
@@ -67,8 +62,8 @@ dsh-chatgpt-web setup --chrome "C:\Program Files\Google\Chrome\Application\chrom
 **Solution:**
 - Check that your internet connection is active and `chatgpt.com` is accessible.
 - Verify that Chrome is open and logged in.
-- Run `npx @wlv-zedd/dsh-chatgpt-web doctor` to check proxy and session status.
-- Restart the daemon if needed: `npx @wlv-zedd/dsh-chatgpt-web serve`.
+- Run `dsh-chatgpt-web doctor` to check proxy and session status.
+- Restart the daemon if needed: `dsh-chatgpt-web serve`.
 
 ### 6. ChatGPT Rate Limits (HTTP 429)
 **Cause:** Hourly prompt limit reached on the ChatGPT Free tier.
@@ -86,7 +81,7 @@ bun run build
 ```
 
 To remove or disable `dsh-chatgpt-web` in DeepSeek Harness:
-1. Remove `@wlv-zedd/dsh-chatgpt-web` from your profile's `cordis.patch.yml` or `cordis.yml`.
+1. Remove the `dsh-chatgpt-web` plugin entry from your profile's `cordis.patch.yml` or `cordis.yml`.
 2. Delete saved browser session data if desired:
    - On Windows: `%USERPROFILE%\.dsh\storages\chatgpt-web\`
    - On macOS/Linux: `~/.dsh/storages/chatgpt-web/`
@@ -97,7 +92,7 @@ When opening an issue or bug report on GitHub:
 - Specify your OS and architecture (e.g., Windows 11 x64, macOS arm64, Linux x64).
 - ChatGPT account tier (Free Tier Luna or Plus/Team).
 - Node.js and Bun versions.
-- Output from `npx @wlv-zedd/dsh-chatgpt-web doctor`.
+- Output from `dsh-chatgpt-web doctor`.
 - Clear reproduction steps and console error traces.
 
 Before sharing logs or screenshots, ensure all personal session cookies, authentication tokens, and private prompts are redacted.
