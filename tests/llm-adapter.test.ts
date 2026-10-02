@@ -7,7 +7,9 @@
  * Responses server. The backend is a scripted in-memory `ProviderAdapter`,
  * so no browser is started.
  */
-import { describe, expect, test } from "bun:test";\nimport { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";\nimport type { TurnBrokerOwner } from "../src/adapters/chatgpt-web/turn-broker";
+import { describe, expect, test } from "bun:test";
+import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import type { TurnBrokerOwner } from "../src/adapters/chatgpt-web/turn-broker";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
