@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 
 export interface CordisContext {
   effect?: (cb: () => void | Promise<void> | (() => void) | (() => Promise<void>)) => void;
+  on?: (
+    event: string,
+    listener: (table: Array<{ kind: "global"; name: string; value: unknown }>) => void,
+  ) => void;
   logger?: (name: string) => {
     info(msg: string): void;
     warn(msg: string): void;
@@ -34,34 +38,35 @@ import { pathToFileURL } from "node:url";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-function resolveLauncher(customBunPath?: string): { cmd: string; args: string[] } {
+function resolveLauncher(customBunPath: string | undefined, host: string, port: number): { cmd: string; args: string[] } {
+  const serveArgs = ["serve", "--host", host, "--port", String(port)];
   const libCliPath = resolve(ROOT_DIR, "lib", "cli.js");
   if (existsSync(libCliPath)) {
     return {
       cmd: process.execPath,
-      args: [libCliPath, "serve"],
+      args: [libCliPath, ...serveArgs],
     };
   }
 
   // Development fallback: check for bun or tsx
   if (customBunPath && existsSync(customBunPath)) {
-    return { cmd: customBunPath, args: ["run", "src/cli.ts", "serve"] };
+    return { cmd: customBunPath, args: ["run", "src/cli.ts", ...serveArgs] };
   }
 
   const winBun = join(homedir(), ".bun", "bin", "bun.exe");
   if (existsSync(winBun)) {
-    return { cmd: winBun, args: ["run", "src/cli.ts", "serve"] };
+    return { cmd: winBun, args: ["run", "src/cli.ts", ...serveArgs] };
   }
 
   const tsxPath = resolve(ROOT_DIR, "../deepseek-harness/node_modules/tsx/dist/esm/index.mjs");
   if (existsSync(tsxPath)) {
     return {
       cmd: process.execPath,
-      args: ["--import", pathToFileURL(tsxPath).href, "src/cli.ts", "serve"],
+      args: ["--import", pathToFileURL(tsxPath).href, "src/cli.ts", ...serveArgs],
     };
   }
 
-  return { cmd: process.execPath, args: ["src/cli.ts", "serve"] };
+  return { cmd: process.execPath, args: ["src/cli.ts", ...serveArgs] };
 }
 
 async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
@@ -87,6 +92,16 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   const readyTimeoutMs = config.readyTimeoutMs || 30_000;
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
 
+  if (typeof ctx.on === "function") {
+    ctx.on("webserver/index-inject", (table) => {
+      table.push({
+        kind: "global",
+        name: "__DSH_CHATGPT_WEB_RUNTIME__",
+        value: { port },
+      });
+    });
+  }
+
   let spawnedProcess: ChildProcess | undefined;
 
   const startDaemon = async () => {
@@ -101,7 +116,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       return;
     }
 
-    const launcher = resolveLauncher(config.bunPath);
+    const launcher = resolveLauncher(config.bunPath, host, port);
     logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${port}/v1...`);
 
     const child = spawn(launcher.cmd, launcher.args, {

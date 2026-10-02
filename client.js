@@ -13,18 +13,26 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    const TOKEN_KEY = 'dsh-chatgpt-web.controlToken';
-    const BASE = 'http://127.0.0.1:17841';
+    const RUNTIME_GLOBAL = '__DSH_CHATGPT_WEB_RUNTIME__';
+
+    function sidecarBaseUrl() {
+      const runtime = window[RUNTIME_GLOBAL];
+      const port = runtime && runtime.port;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('The configured dsh-chatgpt-web sidecar endpoint is unavailable in this DSH Web page.');
+      }
+      return `http://127.0.0.1:${port}`;
+    }
 
     const DICT_EN = {
       'section.title': 'ChatGPT Web',
       'conn.title': 'Connection',
       'conn.token': 'Control token',
-      'conn.tokenHint': 'The sidecar control token (config.json controlToken). Stored only in this browser.',
+      'conn.tokenHint': 'The sidecar control token (config.json controlToken). Held only in this open settings page.',
       'conn.reload': 'Reload',
       'status.title': 'Sidecar status',
       'status.offline': 'Sidecar offline',
-      'status.offlineHint': 'No chatgpt-web sidecar answered on 127.0.0.1:17841. Start it with "dsh-chatgpt-web serve" and reload this page.',
+      'status.offlineHint': 'No chatgpt-web sidecar answered on the configured loopback endpoint. Start it with "dsh-chatgpt-web serve" and reload this page.',
       'tuning.title': 'Transport limits',
       'tuning.hint': 'Applied from the next browser turn; no sidecar restart needed. Blank = default.',
       'tuning.save': 'Save',
@@ -90,17 +98,10 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function readToken() {
-      try { return window.localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
-    }
-    function writeToken(value) {
-      try { window.localStorage.setItem(TOKEN_KEY, value); } catch { /* private mode */ }
-    }
-
     async function api(token, path, options) {
       const headers = { Authorization: `Bearer ${token}` };
       if (options && options.body) headers['Content-Type'] = 'application/json';
-      const res = await fetch(BASE + path, { ...options, headers });
+      const res = await fetch(sidecarBaseUrl() + path, { ...options, headers });
       if (!res.ok) {
         let message = `HTTP ${res.status}`;
         try {
@@ -123,7 +124,7 @@ window.__ModuleLoader__.load({
     ];
 
     function ChatGptWebSettings(t) {
-      const [token, setToken] = React.useState(readToken);
+      const [token, setToken] = React.useState('');
       const [status, setStatus] = React.useState(null);
       const [configInfo, setConfigInfo] = React.useState(null);
       const [turns, setTurns] = React.useState([]);
@@ -221,11 +222,11 @@ window.__ModuleLoader__.load({
               type: 'password',
               value: token,
               placeholder: 'FJ86_…',
-              onChange: (e) => { setToken(e.target.value); writeToken(e.target.value); },
+              onChange: (e) => { setToken(e.target.value); },
             }),
           ),
           h('div', { className: 'cwg-row' },
-            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token (config.json controlToken). Stored only in this browser.')),
+            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token (config.json controlToken). Held only in this open settings page.')),
           ),
           h('div', { className: 'cwg-row cwg-actions' },
             h('button', {
@@ -249,7 +250,7 @@ window.__ModuleLoader__.load({
             )
           : h('section', { className: 'cwg-card cwg-offline' },
               h('h3', null, t('status.offline', 'Sidecar offline')),
-              h('p', { className: 'cwg-muted' }, t('status.offlineHint', 'No chatgpt-web sidecar answered on 127.0.0.1:17841. Start it with "dsh-chatgpt-web serve" and reload this page.')),
+              h('p', { className: 'cwg-muted' }, t('status.offlineHint', 'No chatgpt-web sidecar answered on the configured loopback endpoint. Start it with "dsh-chatgpt-web serve" and reload this page.')),
             ),
 
         configInfo
