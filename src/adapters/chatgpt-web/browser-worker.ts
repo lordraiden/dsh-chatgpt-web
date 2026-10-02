@@ -3513,7 +3513,11 @@ export class ChatGptBrowserWorker {
         Date.now(),
       );
       const externalToolCallsInFlight = chatGptExternalToolCallsAreInFlight(externalProgressSnapshot);
+      const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
+      // A visible Stop button means generation is running, so a transient "Stopped thinking"
+      // label (the Free-plan Think "Deep diving" → answer transition) is stale, not terminal.
       if (externalProgressLive) stoppedThinkingTracker.clear();
+      else if (running) stoppedThinkingTracker.clear();
       else if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible)) {
         throw chatGptStoppedThinkingError();
       }
@@ -3524,7 +3528,6 @@ export class ChatGptBrowserWorker {
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
         continue;
       }
-      const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
       const domError = domHealthTracker.update({
         responsePresent: snapshot.responsePresent,
         running,
@@ -4951,9 +4954,16 @@ export class ChatGptBrowserWorker {
           Date.now(),
         );
         const externalToolCallsInFlight = chatGptExternalToolCallsAreInFlight(externalProgressSnapshot);
+        const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+        const running = await stop.isVisible().catch(() => false);
+        if (running) sawRunning = true;
         // A stale "Stopped thinking" label is not terminal while the model is still driving tool
-        // calls, and the window must be forgotten rather than merely ignored.
+        // calls, and the window must be forgotten rather than merely ignored. Free-plan Think has
+        // the same transition: the "Deep diving" phase ends with a brief "Stopped thinking" label
+        // while the answer already starts streaming, so a visible Stop button (generation running)
+        // also forgets the window.
         if (externalProgressLive) stoppedThinkingTracker.clear();
+        else if (running) stoppedThinkingTracker.clear();
         else if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible)) {
           throw chatGptStoppedThinkingError();
         }
@@ -4965,9 +4975,6 @@ export class ChatGptBrowserWorker {
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
-        const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-        const running = await stop.isVisible().catch(() => false);
-        if (running) sawRunning = true;
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
