@@ -1,3 +1,5 @@
+import { zstdDecompressSync } from "node:zlib";
+
 const MAX_ENCODED_REQUEST_BYTES = 64 * 1024 * 1024;
 const MAX_DECODED_REQUEST_BYTES = 128 * 1024 * 1024;
 
@@ -19,7 +21,13 @@ export async function readJsonRequestBody(request: Request): Promise<unknown> {
   if (contentEncoding === "" || contentEncoding === "identity") {
     decoded = encoded;
   } else if (contentEncoding === "zstd") {
-    decoded = await Bun.zstdDecompress(encoded);
+    if (typeof Bun !== "undefined" && typeof Bun.zstdDecompress === "function") {
+      decoded = await Bun.zstdDecompress(encoded);
+    } else {
+      // Node >=22.15 exposes native zstd in node:zlib (the package requires Node >=22.19.0).
+      const inflated = zstdDecompressSync(Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength));
+      decoded = new Uint8Array(inflated.buffer, inflated.byteOffset, inflated.byteLength);
+    }
   } else {
     throw new Error(`Unsupported Content-Encoding: ${contentEncoding}`);
   }

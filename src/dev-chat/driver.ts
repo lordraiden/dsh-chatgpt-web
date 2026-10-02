@@ -365,6 +365,11 @@ function isLunaDevChatModel(model: DevChatModel): boolean {
 }
 
 export function prepareWorkingTreeBrowserHelper(): string | undefined {
+  // The working-tree helper build runs `bun run` on TypeScript sources and relies on
+  // Bun-only module metadata (import.meta.dir). It is a Bun-only development path;
+  // under Node there is no working tree to build from, so fall back to the packaged
+  // helper instead of touching Bun globals.
+  if (typeof Bun === "undefined" || typeof Bun.spawnSync !== "function") return undefined;
   const root = resolve(import.meta.dir, "..", "..");
   const buildScript = join(root, "scripts", "build-browser-helper.ts");
   if (!existsSync(buildScript)) return undefined;

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
