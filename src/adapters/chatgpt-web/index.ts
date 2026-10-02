@@ -20,7 +20,7 @@ import {
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -329,6 +329,18 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
 function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
   if (normalized instanceof ChatGptWebAdapterError) return normalized;
+  if (normalized instanceof ChatGptSurfaceStaleError) {
+    return new ChatGptWebAdapterError(
+      "The ChatGPT Temporary Chat page rehydrated mid-turn and discarded the in-flight generation. The plugin already retried the turn on a fresh page; retry again.",
+      {
+        status: 502,
+        errorType: "server_error",
+        code: "chatgpt_surface_stale",
+        retryable: true,
+        cause: normalized,
+      },
+    );
+  }
   const phase = session.runtime.submission?.phase;
   if (!phase || phase === "prepared") return normalized;
   const ambiguous = phase === "send_activated";

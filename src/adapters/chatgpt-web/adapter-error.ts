@@ -57,3 +57,17 @@ export function chatGptRetainedConversationUnavailableError(): ChatGptWebAdapter
     },
   );
 }
+
+/**
+ * The Temporary Chat surface rehydrated the conversation mid-turn ("Loading chats" / "Loading
+ * profile"), so the already-sent prompt and its in-flight generation were lost to a page reload.
+ * Unlike a terminal adapter failure, this is recoverable: reloading a fresh Temporary Chat
+ * document and resubmitting the same prompt starts a clean turn. The run loop treats this as a
+ * bounded-retry signal rather than a user-facing error.
+ */
+export class ChatGptSurfaceStaleError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "ChatGptSurfaceStaleError";
+  }
+}

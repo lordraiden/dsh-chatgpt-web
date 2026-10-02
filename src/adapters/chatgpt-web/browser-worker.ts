@@ -79,6 +79,7 @@ import {
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
+  ChatGptSurfaceStaleError,
   ChatGptWebAdapterError,
   chatGptBrowserTabClosedError,
   chatGptRetainedConversationUnavailableError,
@@ -134,6 +135,41 @@ export function chatGptResponseDomGraceMs(maxChars: number, tuning: ResolvedChat
  * stale-surface diagnosis instead of a generic missing-assistant-turn error.
  */
 export const CHATGPT_PAGE_REHYDRATION_STALL_MS = 90_000;
+/**
+ * How long ChatGPT may keep its Stop button visible (generation running) without exposing an
+ * assistant turn before the turn is failed. Free accounts run the "Think" reasoning model
+ * noticeably slower than the flat response-dom grace floor, so while the Stop button is present
+ * the assistant-turn deadline is paused. This cap aligns with the provider streamIdleTimeoutMs
+ * (300 s) so a genuinely stuck generator still fails with a clear diagnosis instead of hanging.
+ */
+export const CHATGPT_GENERATION_RUNNING_STALL_MS = 300_000;
+/**
+ * True while the temporary-chat surface shows a visible "Loading chats" / "Loading profile"
+ * rehydration overlay. Free accounts rehydrate the conversation SPA mid-turn unpredictably, so
+ * every stage that inspects the composer or waits for the assistant turn must first rule this out.
+ */
+export async function chatGptPageIsRehydrating(page: Page): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      for (const element of document.querySelectorAll<HTMLElement>('[role="status"]')) {
+        const style = getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+        const rect = element.getBoundingClientRect();
+        // ChatGPT keeps a persistent left-sidebar "Loading chats" spinner (bottom-left, ~318x108)
+        // and a zero-size visually-hidden "Loading profile" node on Free accounts. Only a
+        // substantial overlay in the main content area (right of the sidebar) is a genuine
+        // conversation rehydration, so ignore tiny nodes and anything centred in the sidebar.
+        if (rect.width < 200 || rect.height < 40) continue;
+        if (rect.left + rect.width / 2 < 350) continue;
+        const text = (element.textContent ?? "").trim().toLowerCase();
+        if (text.includes("loading chats") || text.includes("loading profile")) return true;
+      }
+      return false;
+    });
+  } catch {
+    return false;
+  }
+}
 /**
  * How long a staged Bigger Context part may take to produce its assistant turn. A staged part is two
  * orders of magnitude larger than an ordinary prompt and ChatGPT reads all of it before answering.
@@ -2278,6 +2314,11 @@ export class ChatGptBrowserWorker {
     const composerForm = composer.locator("xpath=ancestor::form[1]");
     const uiEffortIndex = mode.uiEffortIndex;
     if (uiEffortIndex === null) {
+      // The Think control is only rendered once the composer finishes hydrating. On Free
+      // accounts the temporary-chat surface keeps its "Loading profile" / "Loading chats"
+      // overlay up after the composer appears, so a Think probe that runs mid-rehydration
+      // sees zero controls and wrongly fails the turn. Wait out the rehydration first.
+      await this.waitForRehydrationSettled(page, 15_000);
       await settleChatGptUi();
       await throwIfChatGptRateLimitDialog(page);
       const visibleControls = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
@@ -2749,18 +2790,14 @@ export class ChatGptBrowserWorker {
 
   /** True while the temporary-chat surface shows its visible "Loading chats" / "Loading profile" rehydration overlays. */
   private async pageIsRehydrating(page: Page): Promise<boolean> {
-    try {
-      return await page.evaluate(() => {
-        for (const element of document.querySelectorAll<HTMLElement>('[role="status"]')) {
-          const style = getComputedStyle(element);
-          if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
-          const text = (element.textContent ?? "").trim().toLowerCase();
-          if (text.includes("loading chats") || text.includes("loading profile")) return true;
-        }
-        return false;
-      });
-    } catch {
-      return false;
+    return chatGptPageIsRehydrating(page);
+  }
+
+  /** Poll until the main-content rehydration overlay is gone or the timeout elapses. */
+  private async waitForRehydrationSettled(page: Page, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (await this.pageIsRehydrating(page) && Date.now() < deadline) {
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
     }
   }
 
@@ -2782,6 +2819,7 @@ export class ChatGptBrowserWorker {
       Date.now() + graceMs,
     );
     let rehydrationSince: number | undefined;
+    let runningSince: number | undefined;
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
@@ -2801,7 +2839,7 @@ export class ChatGptBrowserWorker {
       if (await this.pageIsRehydrating(observationPage)) {
         rehydrationSince ??= Date.now();
         if (Date.now() - rehydrationSince > CHATGPT_PAGE_REHYDRATION_STALL_MS) {
-          throw new Error(
+          throw new ChatGptSurfaceStaleError(
             "ChatGPT is still rehydrating the conversation page (Loading chats); the temporary-chat surface may be stale — retry the turn",
           );
         }
@@ -2855,6 +2893,24 @@ export class ChatGptBrowserWorker {
         continue;
       }
       recoveryAttempts = 0;
+      // While ChatGPT is actively generating (a visible Stop button), the first assistant token
+      // is imminent even on Free accounts, where the "Think" reasoning model can take well over
+      // the flat response-dom grace floor. Pause the deadline while the Stop button is present;
+      // a generator that stays running past the running-stall budget is stuck, not merely slow.
+      if (state.visibleStopButtonCount > 0) {
+        runningSince ??= Date.now();
+        if (Date.now() - runningSince > CHATGPT_GENERATION_RUNNING_STALL_MS) {
+          throw new Error(
+            "ChatGPT kept showing its Stop button (generation running) without exposing an assistant turn",
+          );
+        }
+        responseDeadline = Math.min(
+          deadline ?? Number.POSITIVE_INFINITY,
+          Math.max(responseDeadline, Date.now() + graceMs),
+        );
+      } else {
+        runningSince = undefined;
+      }
       // A tool batch can arrive while the DOM probe is in flight. Read progress again before
       // acknowledging its boundary; the pre-probe snapshot can otherwise leave the broker waiting
       // despite this exact iteration having successfully observed the page.
@@ -4606,40 +4662,142 @@ export class ChatGptBrowserWorker {
       let submissionBaseline = await this.captureSubmissionBaseline(page);
       let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
-      for (;;) {
+      const completionTracker = new ChatGptCompletionTracker();
+      const sendAndWaitForResponse = async (attempt: number): Promise<ChatGptAssistantTurnBinding> => {
+        const stagePrefix = attempt === 1 ? "" : `surface-recovery_${attempt}_`;
+        // The text prompt is re-attached on every attempt: a stale-surface recovery reloads a
+        // fresh Temporary Chat document, so the composer is empty again and the send button has
+        // nothing to submit until the prompt is re-landed.
+        for (;;) {
+          try {
+            await this.runStage(
+              turn.traceId,
+              `${stagePrefix}prompt_attachment`,
+              browserStageTimeouts.promptAttachment,
+              (stageSignal) => {
+                const promptAbortSignal = turn.abortSignal
+                  ? AbortSignal.any([stageSignal, turn.abortSignal])
+                  : stageSignal;
+                return this.attachPromptWithCompactionRetry(
+                  page,
+                  finalPrompt,
+                  mode.localTools,
+                  turn.compaction === true,
+                  submissionBaseline,
+                  checkpoint => diagnostics.capture(page, checkpoint),
+                  promptAbortSignal,
+                  catalogRefreshAvailable,
+                  connectorAttemptBudget,
+                  reuseConversation,
+                );
+              },
+              chatGptSuspensionClock,
+              true,
+            );
+            break;
+          } catch (error) {
+            if (!(error instanceof ChatGptConnectorCatalogStaleError) || !catalogRefreshAvailable) throw error;
+            catalogRefreshAvailable = false;
+            await diagnostics.capture(page, `${stagePrefix}connector-catalog-stale`);
+            await this.runStage(
+              turn.traceId,
+              `${stagePrefix}connector_catalog_refresh`,
+              browserStageTimeouts.temporaryChatPreparation,
+              async () => {
+                await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+                await this.prepareTemporaryChatSurface(
+                  page,
+                  checkpoint => diagnostics.capture(page, checkpoint),
+                );
+                mode = await this.selectModelAndEffort(
+                  page,
+                  turn.modelId,
+                  turn.reasoning,
+                  turn.capabilities,
+                  checkpoint => diagnostics.capture(page, checkpoint),
+                );
+                submissionBaseline = await this.captureSubmissionBaseline(page);
+              },
+            );
+            await diagnostics.capture(page, `${stagePrefix}connector-catalog-refreshed`);
+          }
+        }
+        await diagnostics.capture(page, `${stagePrefix}prompt-attachment-complete`);
+        await this.runStage(
+          turn.traceId,
+          `${stagePrefix}file_attachment`,
+          browserStageTimeouts.fileAttachment,
+          () => this.attachFiles(page, prepared),
+        );
+        await diagnostics.capture(page, `${stagePrefix}file-attachment-complete`);
+        const finalSubmissionEvidence = await this.runStage(
+          turn.traceId,
+          `${stagePrefix}send`,
+          // A multipart commit lands on a conversation already carrying every staged part, so it
+          // needs the same acceptance headroom the stages themselves get.
+          prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
+          (stageSignal) => this.sendAttachedPrompt(
+            page,
+            submissionBaseline,
+            checkpoint => diagnostics.capture(page, checkpoint),
+            turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+            turn.externalProgress,
+            turn,
+            completionTracker,
+            toolTurnObservationRecovery
+              ? async (...args) => {
+                const recovered = await recoverSubmissionObservation(...args);
+                submissionBaseline = recovered.baseline;
+                return recovered;
+              }
+              : undefined,
+          ),
+        );
+        console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
+        const responseTurn = await this.waitForNewAssistantTurn(
+          page,
+          submissionBaseline,
+          deadline,
+          turn.abortSignal,
+          turn.externalProgress,
+          chatGptResponseDomGraceMs(maxMessageChars, this.config.tuning),
+          completionTracker,
+          toolTurnObservationRecovery
+            ? async (...args) => {
+              const recovered = await recoverAssistantObservation(...args);
+              submissionBaseline = recovered.baseline;
+              return recovered;
+            }
+            : undefined,
+        );
+        await diagnostics.capture(page, `${stagePrefix}send-accepted`);
+        return responseTurn;
+      };
+      // Free-plan Temporary Chat rehydrates the conversation SPA unpredictably ("Loading chats" /
+      // "Loading profile"), discarding the in-flight generation. A rehydration that outlives the
+      // stall budget fails the wait with ChatGptSurfaceStaleError; the recovery reloads a fresh
+      // Temporary Chat document and resubmits the same prompt. Retained-conversation turns cannot
+      // be replayed onto a fresh document, so they surface the error instead.
+      const surfaceStaleRecoveryAttempts = 2;
+      let responseTurn: ChatGptAssistantTurnBinding;
+      for (let surfaceStaleAttempt = 1; ; surfaceStaleAttempt++) {
         try {
-          await this.runStage(
-            turn.traceId,
-            "prompt_attachment",
-            browserStageTimeouts.promptAttachment,
-            (stageSignal) => {
-              const promptAbortSignal = turn.abortSignal
-                ? AbortSignal.any([stageSignal, turn.abortSignal])
-                : stageSignal;
-              return this.attachPromptWithCompactionRetry(
-                page,
-                finalPrompt,
-                mode.localTools,
-                turn.compaction === true,
-                submissionBaseline,
-                checkpoint => diagnostics.capture(page, checkpoint),
-                promptAbortSignal,
-                catalogRefreshAvailable,
-                connectorAttemptBudget,
-                reuseConversation,
-              );
-            },
-            chatGptSuspensionClock,
-            true,
-          );
+          responseTurn = await sendAndWaitForResponse(surfaceStaleAttempt);
           break;
         } catch (error) {
-          if (!(error instanceof ChatGptConnectorCatalogStaleError) || !catalogRefreshAvailable) throw error;
-          catalogRefreshAvailable = false;
-          await diagnostics.capture(page, "connector-catalog-stale");
+          if (!(error instanceof ChatGptSurfaceStaleError)
+            || surfaceStaleAttempt >= surfaceStaleRecoveryAttempts
+            || reuseConversation) {
+            throw error;
+          }
+          console.warn(
+            `[chatgpt-web] browser turn ${turn.traceId} recovered from a stale temporary-chat surface`
+            + ` (attempt ${surfaceStaleAttempt}/${surfaceStaleRecoveryAttempts}): ${redactChatGptUiDiagnostic(error.message)}`,
+          );
+          await diagnostics.capture(page, `surface-stale-recovery_${surfaceStaleAttempt}`);
           await this.runStage(
             turn.traceId,
-            "connector_catalog_refresh",
+            `surface_stale_recovery_${surfaceStaleAttempt}`,
             browserStageTimeouts.temporaryChatPreparation,
             async () => {
               await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -4654,59 +4812,16 @@ export class ChatGptBrowserWorker {
                 turn.capabilities,
                 checkpoint => diagnostics.capture(page, checkpoint),
               );
+              // Let the freshly reloaded composer finish hydrating before re-attaching, so the
+              // send button can enable once the prompt lands. Re-sending into a mid-rehydration
+              // composer leaves the button disabled and fails the recovery attempt.
+              await this.waitForRehydrationSettled(page, 15_000);
               submissionBaseline = await this.captureSubmissionBaseline(page);
             },
           );
-          await diagnostics.capture(page, "connector-catalog-refreshed");
+          await diagnostics.capture(page, `surface-stale-recovery-ready_${surfaceStaleAttempt}`);
         }
       }
-      await diagnostics.capture(page, "prompt-attachment-complete");
-      await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
-        this.attachFiles(page, prepared)
-      ));
-      await diagnostics.capture(page, "file-attachment-complete");
-      const completionTracker = new ChatGptCompletionTracker();
-      const finalSubmissionEvidence = await this.runStage(
-        turn.traceId,
-        "send",
-        // A multipart commit lands on a conversation already carrying every staged part, so it
-        // needs the same acceptance headroom the stages themselves get.
-        prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
-        (stageSignal) => this.sendAttachedPrompt(
-          page,
-          submissionBaseline,
-          checkpoint => diagnostics.capture(page, checkpoint),
-          turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-          turn.externalProgress,
-          turn,
-          completionTracker,
-          toolTurnObservationRecovery
-            ? async (...args) => {
-              const recovered = await recoverSubmissionObservation(...args);
-              submissionBaseline = recovered.baseline;
-              return recovered;
-            }
-            : undefined,
-        ),
-      );
-      console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
-      let responseTurn = await this.waitForNewAssistantTurn(
-        page,
-        submissionBaseline,
-        deadline,
-        turn.abortSignal,
-        turn.externalProgress,
-        chatGptResponseDomGraceMs(maxMessageChars, this.config.tuning),
-        completionTracker,
-        toolTurnObservationRecovery
-          ? async (...args) => {
-            const recovered = await recoverAssistantObservation(...args);
-            submissionBaseline = recovered.baseline;
-            return recovered;
-          }
-          : undefined,
-      );
-      await diagnostics.capture(page, "send-accepted");
 
       let lastHeartbeat = 0;
       let finalText = "";
