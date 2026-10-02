@@ -22,7 +22,7 @@
         "typescript": "5.9.3",
       },
       "peerDependencies": {
-        "@deepseek-ai/cordis": "^3.0.0 || workspace:^",
+        "@deepseek-ai/cordis": "^4.0.0 || workspace:^",
         "@deepseek-ai/schemastery": "~3.18.4",
       },
       "optionalPeers": [
