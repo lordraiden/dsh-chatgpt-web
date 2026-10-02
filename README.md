@@ -5,9 +5,8 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](./LICENSE)
 [![tarball smoke](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/tarball-smoke.yml?style=flat&label=tarball%20smoke)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/tarball-smoke.yml)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-Cordis%20Plugin-0078d4?style=flat)](https://github.com/deepseek-ai/deepseek-harness)
-[![Mode](https://img.shields.io/badge/Mode-Pure%20Chat%20%26%20Markdown-success?style=flat)](./README.md#overview)
 
-> **Zero-cost conversational AI model provider for DeepSeek Harness powered by free ChatGPT Web (GPT 5.6 Luna).**
+> **DeepSeek Harness Cordis plugin that bridges an authenticated ChatGPT Web session into DSH.**
 
 <p align="center">
   <img src="./assets/hero-demo.png" alt="dsh-chatgpt-web in DeepSeek Harness" width="100%">
@@ -33,22 +32,28 @@
 
 ## Overview
 
-**dsh-chatgpt-web** turns your local browser session of ChatGPT into a seamless, **$0.00 API-free conversational model provider** directly inside DeepSeek Harness (DSH).
+**dsh-chatgpt-web** bridges an authenticated ChatGPT Web session into DeepSeek Harness (DSH), exposing the browser-backed model through a local provider/compatibility surface.
 
-It connects via headless or visible Chrome/Chromium browser automation to `chatgpt.com`, streaming real-time Markdown responses, code solutions, explanations, and reasoning back to your DSH chats without consuming API credits.
+It uses headless or visible Chrome/Chromium automation against `chatgpt.com` and translates the web session into DSH-compatible model requests, streaming responses, reasoning, usage, errors, and cancellation semantics. The browser is an implementation detail of the provider; it is not an official OpenAI API.
 
-### Why Pure Chat?
+### Architecture and capability boundaries
 
-Small conversational web models (like GPT 5.6 Luna) excel at explanations, dialogue, Q&A, brainstorming, code snippet generation, and side-assistant tasks. By running in **Pure Chat Mode**, the bridge eliminates prompt overhead, tool hallucinations, and syntax errors of autonomous multi-tool execution loops, providing a fast, rock-solid, zero-cost LLM provider.
+The project is designed around a clear ownership boundary:
+
+- **DSH remains the runtime authority** for DSH sessions, tools, skills, approvals, sandbox policy, and provider lifecycle.
+- **ChatGPT remains the model/provider surface** for model reasoning and ChatGPT-native product capabilities.
+- **Browser automation is isolated transport machinery** that handles ChatGPT Web readiness, submission, streaming, completion, cancellation, and recovery.
+- **Compatibility surfaces converge on the same provider execution path** rather than creating separate browser execution implementations.
+
+The repository also contains optional/native integration paths that are intentionally distinct from the browser transport, including the native Codex passthrough and the local Responses compatibility surface.
 
 ### Key Features
 
-- **100% Free ($0.00 Cost):** Uses your existing free ChatGPT Web session. No OpenAI API keys or credit cards needed.
+- **Authenticated ChatGPT Web backend:** Reuses a local browser session instead of requiring an OpenAI API key for the browser-backed route.
 - **Cordis Plugin-First Lifecycle:** Managed by DSH via `ctx.effect`. DeepSeek Harness starts the background sidecar automatically on launch and shuts it down on exit.
-- **Dynamic Model Auto-Detection:** Automatically detects your ChatGPT tier:
-  - **Free Accounts:** Defaults to `chatgpt-web/luna` (`gpt-5-6-luna`).
-  - **Plus / Team Accounts:** Automatically detects and exposes available paid models (such as `gpt-4o`, `o1`).
-- **Full Streaming Markdown & Code Blocks:** Delivers tokens in real time directly to the DSH Web UI or CLI.
+- **Runtime model/account discovery:** Detects the ChatGPT Web account/model surface available to the authenticated session.
+- **Streaming and provider semantics:** Exposes streamed text, reasoning, usage, errors, and cancellation through the DSH-facing transport.
+- **Control and diagnostics surfaces:** Includes setup/login/doctor tooling plus a local control surface for transport status and tuning.
 - **Portable, Validated Artifacts:** The published tarball is validated by CI (clean install, runtime smoke test, dependency resolution, no build-environment path contamination) before it can reach the registries.
 
 ---
@@ -216,8 +221,8 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues: browser execut
 
 1. **Unofficial Bridge:** Operates via local Playwright browser automation on `chatgpt.com`. Not affiliated with or endorsed by OpenAI.
 2. **Single-Session Concurrency:** Runs within a single browser tab. Sequential queries and normal DSH agent chats work seamlessly; avoid launching parallel multi-subagent swarms against the same tab simultaneously.
-3. **Pure Chat Only:** This provider generates pure conversational responses, explanations, reasoning, and code blocks. It does not execute local filesystem, terminal, or autonomous tool loops.
-4. **Standard Free Tier Rate Limits:** Subject to standard OpenAI free-tier hourly usage limits.
+3. **Capability separation:** DSH-owned tools, skills, approvals, and sandbox policy remain under DSH authority; ChatGPT-native product capabilities must not be treated as DSH permissions.
+4. **Browser/session limits:** The browser-backed route is session-bound and subject to ChatGPT Web product behavior and account-specific limits.
 
 ---
 
@@ -226,4 +231,5 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues: browser execut
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development setup and contribution guidelines.
 - [SECURITY.md](./SECURITY.md) — how the plugin handles your session credentials.
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) — diagnosing setup and runtime problems.
+- [doc/architecture.md](./doc/architecture.md) — definitive provider architecture and ownership boundaries.
 - [LICENSE](./LICENSE) — MIT.
