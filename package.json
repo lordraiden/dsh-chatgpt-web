@@ -87,6 +87,7 @@
     "node": ">=22.19.0",
     "dsh": ">=0.2.0-rc.2"
   },
+  "packageManager": "bun@1.4.0",
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",
@@ -97,4 +98,4 @@
     "free-ai"
   ],
   "license": "MIT"
-}
+}\n
