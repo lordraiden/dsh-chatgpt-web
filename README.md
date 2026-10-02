@@ -2,7 +2,6 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-[![npm version](https://img.shields.io/npm/v/@wlv-zedd/dsh-chatgpt-web.svg?style=flat&color=3b82f6)](https://www.npmjs.com/package/@wlv-zedd/dsh-chatgpt-web)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](./LICENSE)
 [![tarball smoke](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/tarball-smoke.yml?style=flat&label=tarball%20smoke)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/tarball-smoke.yml)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-Cordis%20Plugin-0078d4?style=flat)](https://github.com/deepseek-ai/deepseek-harness)
@@ -66,13 +65,7 @@ Small conversational web models (like GPT 5.6 Luna) excel at explanations, dialo
 
 ### 1. Installation
 
-Install the plugin into your DSH profile with the `dsh plugin` command, which forwards the install to pnpm in the profile directory. From npm:
-
-```bash
-dsh plugin --profile <profile> add @wlv-zedd/dsh-chatgpt-web
-```
-
-or directly from this GitHub repository:
+Install the plugin directly from this GitHub repository:
 
 ```bash
 dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
