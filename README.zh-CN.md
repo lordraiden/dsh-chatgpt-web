@@ -2,7 +2,6 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-[![npm version](https://img.shields.io/npm/v/@wlv-zedd/dsh-chatgpt-web.svg?style=flat&color=3b82f6)](https://www.npmjs.com/package/@wlv-zedd/dsh-chatgpt-web)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](./LICENSE)
 [![tarball smoke](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/tarball-smoke.yml?style=flat&label=tarball%20smoke)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/tarball-smoke.yml)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-Cordis%20Plugin-0078d4?style=flat)](https://github.com/deepseek-ai/deepseek-harness)
@@ -66,13 +65,7 @@
 
 ### 1. 安装插件
 
-使用 `dsh plugin` 命令将插件安装到你的 DSH profile（该命令会将安装转发到 profile 目录下的 pnpm）。从 npm 安装：
-
-```bash
-dsh plugin --profile <profile> add @wlv-zedd/dsh-chatgpt-web
-```
-
-或直接从本 GitHub 仓库安装：
+直接从本 GitHub 仓库安装：
 
 ```bash
 dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
