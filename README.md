@@ -43,61 +43,84 @@ Small conversational web models (like GPT 5.6 Luna) excel at explanations, dialo
 
 ### 1. Installation
 
-Install `@wlv-zedd/dsh-chatgpt-web` in your DeepSeek Harness environment or profile:
+Install `@wlv-zedd/dsh-chatgpt-web` into your DSH profile with the `dsh plugin` command, which forwards the install to pnpm in the profile directory. From npm:
 
 ```bash
-pnpm add @wlv-zedd/dsh-chatgpt-web
+dsh plugin --profile <profile> add @wlv-zedd/dsh-chatgpt-web
 ```
+
+or directly from this GitHub repository:
+
+```bash
+dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
+```
+
+This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
 
 ### 2. One-Time Browser Sign-In
 
-Authenticate your ChatGPT account once:
+Authenticate your ChatGPT account once. The plugin binary lives in the profile's `node_modules/.bin`:
 
 ```bash
-npx @wlv-zedd/dsh-chatgpt-web login
+~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup
 ```
 
-A dedicated Chrome window will open. Log into your OpenAI / ChatGPT account. Once the ChatGPT composer is visible, the browser session is safely and securely saved locally to `~/.dsh/storages/chatgpt-web/`.
+A dedicated Chrome window will open. Log into your OpenAI / ChatGPT account. Once the ChatGPT composer is visible, the setup captures the session and writes the config and browser state to the plugin's storage directory (default `~/.dsh/storages/chatgpt-web/`).
+
+If Chrome is not at the default path, pass it explicitly:
+
+```bash
+~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /path/to/chrome
+```
+
+> **Note (snap Chromium):** snap-confined browsers can only write to *non-hidden* paths in `$HOME`. If your browser is a snap (e.g. `/snap/bin/chromium`) and setup fails with `Permission denied` on the profile's `SingletonLock`, point the plugin's storage home at a non-hidden directory before running setup:
+>
+> ```bash
+> DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web" \
+>   ~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web setup --chrome /snap/bin/chromium
+> ```
 
 ### 3. Enable in DeepSeek Harness
 
-Add the provider to your `~/.dsh/settings.yaml`:
+Provider configuration lives in the profile's Cordis patch layer (`~/.dsh/profiles/<profile>/cordis.patch.yml`), not in a global settings file. Add the `chatgpt-web` provider under the existing `providers` map of the `llm-pi-ai` entry:
 
 ```yaml
-providers:
-  chatgpt-web:
-    displayName: "ChatGPT Web (Free)"
-    api: openai-responses
-    baseURL: http://127.0.0.1:17841/v1
-    headers:
-      Authorization: "Bearer chatgpt-web-free"
-    streamIdleTimeoutMs: 300000
-    models:
-      - id: chatgpt-web/luna
-        name: "ChatGPT Web — Luna (Free)"
-        contextWindow: 1050000
-        maxTokens: 32768
-        input:
-          - text
-          - image
-
-agent-default-model:
-  provider: chatgpt-web
-  model: chatgpt-web/luna
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      # ...your existing providers...
+      chatgpt-web:
+        displayName: "ChatGPT Web (Free)"
+        api: openai-responses
+        baseURL: http://127.0.0.1:17841/v1
+        headers:
+          Authorization: "Bearer chatgpt-web-free"
+        streamIdleTimeoutMs: 300000
+        models:
+          - id: chatgpt-web/luna
+            name: "ChatGPT Web — Luna (Free)"
+            contextWindow: 1050000
+            maxTokens: 32768
+            input:
+              - text
+              - image
 ```
 
-And add the sidecar plugin to your profile's `cordis.patch.yml` (or `cordis.yml`):
+Optionally, make it the agent's default model in the `agent-default-model` entry:
 
 ```yaml
-- insert:
-    - id: dsh-chatgpt-web
-      name: '@wlv-zedd/dsh-chatgpt-web'
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: chatgpt-web
+    model: chatgpt-web/luna
 ```
 
-Now start DeepSeek Harness:
+Now start DeepSeek Harness with the profile:
 
 ```bash
-pnpm dsh web
+dsh --profile <profile> web
 ```
 
 DSH will automatically start the background sidecar process, connect to your authenticated ChatGPT session, and accept prompts!
@@ -109,7 +132,7 @@ DSH will automatically start the background sidecar process, connect to your aut
 Verify your setup at any time with the built-in diagnostic doctor:
 
 ```bash
-npx @wlv-zedd/dsh-chatgpt-web doctor
+~/.dsh/profiles/<profile>/node_modules/.bin/dsh-chatgpt-web doctor
 ```
 
 Example healthy output:
@@ -130,18 +153,4 @@ Doctor result: ready
 3. **Pure Chat Only:** This provider generates pure conversational responses, explanations, reasoning, and code blocks. It does not execute local filesystem, terminal, or autonomous tool loops.
 4. **Standard Free Tier Rate Limits:** Subject to standard OpenAI free-tier hourly usage limits.
 
----
 
-## Support & Community Perks
-
-[![Sponsor via PayPal](https://img.shields.io/badge/Sponsor-PayPal-0070ba?style=flat&logo=paypal&logoColor=white)](https://paypal.me/wlvzedd) If you find this plugin helpful, consider sponsoring.
-
-[![Free AI Credits on AgentRouter](https://img.shields.io/badge/Free%20AI%20Credits-%24200-ff6b35?style=flat&logoColor=white)](https://agentrouter.org/register?aff=bIJf) Claim up to **$200 free API credits** on AgentRouter via GitHub.
-
-[![Free AI Credits on Vyce AI](https://img.shields.io/badge/Free%20AI%20Credits-%2450-7c3aed?style=flat&logoColor=white)](https://vyceai.com/signup?ref=VYCE_BL6YAG) Claim **$50 free API credits** on Vyce AI for fast LLM inference.
-
----
-
-## License
-
-MIT License © 2026 [WLV-ZEDD](https://github.com/WLV-ZEDD). DeepSeek Harness is an open-source project by DeepSeek AI.
