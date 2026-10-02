@@ -4,154 +4,120 @@
 
 This repository implements `@lordraiden/dsh-chatgpt-web`, a DeepSeek Harness Cordis plugin that exposes an authenticated ChatGPT Web session as a local model/provider.
 
-Treat this repository as a **browser-backed provider integration**, not as a generic autonomous agent runtime. Preserve the existing separation between DSH/Cordis lifecycle, the local sidecar, browser automation, provider/adapters, and the optional Codex integration.
+Treat it as a **browser-backed provider integration**, not as a generic autonomous-agent runtime. Preserve the separation between DSH/Cordis lifecycle, the sidecar, browser automation, provider/adapters, and the Codex integration.
 
-The project currently targets:
+## Current behavior and project memory
 
-- Node.js `>=22.19.0`
-- Bun `>=1.3.0`
-- DeepSeek Harness `>=0.2.0-rc.2`
+Current code, tests, configuration, and documentation establish current behavior. **Hindsight**, when available through the DSH harness, provides project memory for architectural rationale, past decisions, known constraints, and unresolved context.
 
-## Project context and source of truth
+Use Hindsight before substantial changes, architectural work, relevant test changes, or when historical rationale matters. Treat it as historical evidence, not as authority over verified current behavior. Check memory-derived claims against the implementation before relying on them, and record corrections when stored knowledge is demonstrably stale.
 
-Use the repository code, tests, configuration, and documentation as the current source of truth.
+Do not store credentials, cookies, session state, API keys, or other secrets in Hindsight or repository instruction files.
 
-Do not infer current behavior from old discussions, previous agent output, or memory alone.
-
-When Hindsight is available through the harness, use it as the project's long-term memory and decision history:
-
-1. Recall relevant knowledge before substantial changes, bug fixes involving intended behavior, test changes, architectural changes, or questions about why the code works a certain way.
-2. Treat Hindsight results as historical evidence, not as proof of current behavior.
-3. Verify remembered claims against the current code and tests before relying on them.
-4. When current code disproves a stored memory, prefer the current verified implementation and record a correction in Hindsight when appropriate.
-5. Use Hindsight to recover rationale and settled decisions instead of repeatedly re-litigating them from source code alone.
-6. Do not place credentials, cookies, session data, API keys, or other secrets in Hindsight or repository instruction files.
-
-Hindsight is part of the development workflow, but it is not a substitute for verification.
-
-## How to work on this repository
+## Working rules
 
 Before changing code:
 
 1. Inspect the relevant implementation, tests, configuration, and documentation.
 2. Identify the existing owner of the behavior being changed.
 3. Preserve established boundaries unless the task explicitly changes the architecture.
-4. Prefer the smallest change that fully solves the problem.
-5. Avoid introducing speculative abstractions, compatibility layers, or fallbacks without evidence that they are required.
+4. Prefer the smallest complete change; avoid speculative abstractions, compatibility layers, or fallbacks.
 
 When editing:
 
 - Preserve existing error semantics, lifecycle ownership, timing behavior, and security boundaries.
 - Prefer targeted edits over broad rewrites.
-- Do not duplicate logic when an existing owner can be extended.
+- Extend an existing owner rather than duplicating logic.
 - Do not silently change public defaults or persisted formats.
-- Do not add behavior merely because it would be convenient for an agent.
-- Do not weaken validation or fail-open behavior to make browser automation appear more reliable.
+- Do not weaken validation or fail-open behavior for convenience.
 
 ## Architectural invariants
 
-### Cordis integration
+### Cordis and sidecar
 
-The Cordis plugin owns lifecycle integration and the sidecar process.
+The Cordis plugin integrates the sidecar into the DSH lifecycle and owns cleanup **only for processes it spawned**.
 
-Changes to plugin startup/shutdown must preserve:
+Preserve:
 
 - health-check based startup;
 - explicit `autoStart` semantics;
 - bounded readiness waiting;
-- cleanup on plugin shutdown;
-- useful diagnostics when the sidecar cannot start.
+- cleanup of spawned processes on shutdown;
+- actionable diagnostics when startup fails.
 
-Do not turn the plugin into an independently competing process manager unless the architecture explicitly requires it.
+Do not turn the plugin into a competing or unconditional process manager.
 
 ### ChatGPT Web adapter
 
-The browser-backed adapter is sensitive to ChatGPT Web DOM/session behavior.
+Browser interaction is sensitive to ChatGPT Web session and DOM behavior. Preserve:
 
-When changing browser interaction:
+- authentication/session isolation;
+- bounded retries and timeouts;
+- fail-closed behavior with actionable diagnostics;
+- verified DOM assumptions;
+- the existing single-session/concurrency model.
 
-- preserve authentication/session isolation;
-- preserve bounded retries and timeout behavior;
-- fail closed with actionable diagnostics when the browser state is invalid;
-- avoid hidden infinite waits;
-- avoid assuming DOM structure that is not verified by the implementation;
-- preserve single-session/concurrency constraints.
+Do not introduce parallel browser turns against one ChatGPT session unless the concurrency contract explicitly supports them.
 
-Do not introduce parallel browser turns against the same ChatGPT session unless the concurrency model explicitly supports them.
+### Runtime and capability boundaries
 
-### Pure Chat boundary
+`browser-only` is the pure conversational provider path. `full` explicitly enables the tool/MCP and Codex-related integration surfaces. Do not widen or bypass these capabilities implicitly.
 
-The provider is intended to deliver conversational responses, reasoning, Markdown, and code through the ChatGPT Web session.
+Keep browser-only behavior free of autonomous local execution. Tool-capable behavior must remain behind its explicit runtime and protocol boundaries.
 
-Do not silently convert it into a generic local tool-execution agent.
-
-Changes involving filesystem execution, shell execution, arbitrary MCP tools, autonomous tool loops, or new execution authority are architectural changes and require explicit scope rather than being treated as routine provider work.
+`automatic` and `manual`/Zero Risk browser interaction are distinct capability contracts. Do not mix their identities, connectors, tools, or capability assumptions.
 
 ### Codex integration
 
-Codex-specific integration is a separate boundary from the ordinary browser-backed provider path.
+Codex integration is a separate boundary from the ordinary browser-backed provider path.
 
-When modifying Codex integration, preserve:
+Preserve:
 
 - rollout/session identity validation;
 - parent/child lineage checks;
 - path containment checks;
 - explicit authorization for launcher-controlled operations;
 - cancellation and cleanup semantics;
-- fail-closed behavior when authoritative state cannot validate a requested resource.
+- fail-closed behavior when authoritative state cannot validate a resource.
 
-Do not use weaker filesystem or session heuristics merely as a convenience fallback.
+Do not replace these checks with weaker filesystem or session heuristics merely as a convenience fallback.
 
 ### Compaction
 
-Compaction and browser-turn handoff are stateful lifecycle boundaries.
+Compaction and browser-turn handoff are stateful lifecycle boundaries, not just text transformations.
 
-When changing compaction behavior:
+Preserve transaction ownership, opaque short-lived control tokens, tool-environment isolation, and the distinction between logical cancellation and physical worker cleanup. Do not let a replacement turn race an unfinished cleanup handshake.
 
-- preserve transaction ownership;
-- keep capability/control tokens opaque and short-lived;
-- do not leak tool environments through compaction state;
-- distinguish logical cancellation from physical worker cleanup;
-- do not allow a replacement turn to race an unfinished cleanup handshake.
-
-Compaction changes require focused verification because failures can corrupt session continuity even when ordinary requests still appear to work.
+Treat compaction changes as high-sensitivity changes to session continuity and verify them accordingly.
 
 ## Security and privacy
 
-Never commit:
+Never commit or publish:
 
-- ChatGPT cookies;
-- browser storage state;
+- ChatGPT cookies or browser storage state;
 - browser user-data directories;
-- API keys or session tokens;
-- launcher control credentials;
-- tunnel identifiers that provide access;
+- API keys, session tokens, or launcher credentials;
+- access-bearing tunnel identifiers;
 - raw private prompts or sensitive tool results;
-- private local filesystem paths when publishing diagnostics.
+- private local filesystem paths in public diagnostics.
 
-Do not weaken authorization, path validation, or timing-sensitive comparisons.
+Do not weaken authorization, path validation, or timing-sensitive comparisons. Use sanitized examples in issues and documentation.
 
-Public bug reports and documentation must use sanitized examples.
+## Documentation
 
-## Documentation rules
+Keep one authoritative home for important facts:
 
-Update documentation when user-visible behavior, configuration, installation, diagnostics, security behavior, or operational procedures change.
+- `README.md`: user-facing overview and setup;
+- `TROUBLESHOOTING.md`: operational diagnosis;
+- `SECURITY.md`: security policy;
+- source comments/JSDoc: local implementation contracts;
+- dedicated architecture/decision documents: durable rationale.
 
-Keep one authoritative home for each important fact.
-
-Prefer:
-
-- `README.md` for user-facing overview and setup;
-- `TROUBLESHOOTING.md` for operational diagnosis;
-- `SECURITY.md` for security policy;
-- source comments/JSDoc for local implementation contracts;
-- a dedicated architectural/decision document when rationale needs to persist beyond the implementation.
-
-Do not turn `AGENTS.md` into a second README or a historical changelog. Keep it focused on standing instructions for future agents.
+Update documentation when behavior, configuration, installation, diagnostics, security behavior, or operational procedures change. Keep `AGENTS.md` focused on standing instructions, not a second README or changelog.
 
 ## Verification
 
-Use proportional verification based on the change.
+Use proportional verification.
 
 For normal TypeScript changes:
 
@@ -160,63 +126,44 @@ bun run typecheck
 bun run build
 ```
 
-For changes affecting packaging, installation, or the published artifact:
+For packaging, installation, or published-artifact changes:
 
 ```bash
 bun test
 ```
 
-`bun test` is the repository's tarball/smoke validation path; do not describe it as a comprehensive unit-test suite.
+Here, `bun test` is the tarball/smoke validation path, not a comprehensive unit-test suite.
 
-For browser/session changes, also use the relevant diagnostics such as:
+For browser/session changes, also use the relevant diagnostics, such as:
 
 ```bash
 dsh-chatgpt-web doctor
 ```
 
-When a failure is encountered, investigate the failure itself before changing code. Do not treat an unexplained failing command as successful verification.
+Investigate failures before changing code; never treat an unexplained failure as successful verification. Before handoff, verify the exact acceptance path changed and state any remaining uncertainty.
 
-Before declaring work complete, verify the exact acceptance path that was changed and report any remaining uncertainty.
+## Dependencies and Git hygiene
 
-## Dependency changes
+Do not add dependencies or perform unrelated upgrades without evidence they are required.
 
-Do not add a dependency merely to avoid a small amount of local code.
+When dependencies change, update the lockfile and run the relevant typecheck, build, packaging, and security checks.
 
-When dependencies change:
-
-- update the lockfile;
-- run typecheck/build;
-- run the relevant packaging/security checks;
-- verify that the dependency is actually required by the runtime path.
-
-Avoid dependency upgrades unrelated to the task.
-
-## Git and change hygiene
-
-Keep changes focused and reviewable.
-
-Do not mix unrelated refactors, formatting sweeps, dependency upgrades, or speculative cleanup into a feature or bug fix.
-
-Preserve existing public behavior unless the task explicitly changes it.
+Keep changes focused and reviewable. Do not mix unrelated refactors, formatting sweeps, dependency upgrades, or speculative cleanup into a feature or bug fix.
 
 Before commit or handoff:
 
 - inspect the final diff;
-- ensure no secrets or generated session data are present;
-- confirm documentation and tests match the changed behavior;
-- verify that no unrelated files were modified.
+- check for secrets or generated session data;
+- ensure documentation/tests match the changed behavior;
+- confirm no unrelated files changed.
 
 ## Agent decision discipline
 
-When the user's proposed approach is technically questionable, do not implement it blindly.
+Do not implement a technically questionable user proposal blindly. First determine:
 
-First determine:
-
-1. what behavior is actually required;
+1. the required behavior;
 2. what the current architecture already provides;
-3. whether a simpler existing mechanism can satisfy it;
-4. what invariants or persistence boundaries would be affected.
+3. whether an existing mechanism can satisfy it;
+4. which invariants or persistence boundaries are affected.
 
-State assumptions explicitly when evidence is incomplete.
-
-Prefer verified behavior over plausible behavior, and current code over stale memory.
+State assumptions when evidence is incomplete. Prefer verified behavior and current code over plausible behavior or stale memory.
