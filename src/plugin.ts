@@ -2,34 +2,20 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-export interface CordisContext {
-  effect?: (cb: () => void | Promise<void> | (() => void) | (() => Promise<void>)) => void;
-  logger?: (name: string) => {
-    info(msg: string): void;
-    warn(msg: string): void;
-    error(msg: string): void;
-    debug(msg: string): void;
-  };
-}
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { Volatile } from "@deepseek-ai/cordis";
+import z from "@deepseek-ai/schemastery";
 
 export const name = "dsh-chatgpt-web";
 export const inject = [];
-
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 17841;
 
 export interface Config {
-  /** Host used by the sidecar. Kept as an ordinary runtime setting. */
   host: string;
-  /** Sidecar port exposed as a live DSH setting. */
   port: Volatile<number>;
-  /** Automatically start the sidecar daemon if not running. */
   autoStart: boolean;
-  /** Maximum milliseconds to wait for the sidecar to report ready. */
   readyTimeoutMs: number;
-  /** Explicit path to the bun executable, when required. */
   bunPath?: string;
 }
 
@@ -52,53 +38,32 @@ export interface CordisContext {
   };
 }
 
-type ChatGPTWebPluginConfig = Partial<Omit<Config, "port">> & {
-  port?: number | Volatile<number>;
-};
-
-import { pathToFileURL } from "node:url";
-import type { Volatile } from "@deepseek-ai/cordis";
-import z from "@deepseek-ai/schemastery";
-
+type ChatGPTWebPluginConfig = Partial<Omit<Config, "port">> & { port?: number | Volatile<number> };
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function resolveLauncher(customBunPath?: string): { cmd: string; args: string[] } {
   const libCliPath = resolve(ROOT_DIR, "lib", "cli.js");
-  if (existsSync(libCliPath)) {
-    return {
-      cmd: process.execPath,
-      args: [libCliPath, "serve"],
-    };
-  }
-
-  // Development fallback: check for bun or tsx
-  if (customBunPath && existsSync(customBunPath)) {
-    return { cmd: customBunPath, args: ["run", "src/cli.ts", "serve"] };
-  }
-
+  if (existsSync(libCliPath)) return { cmd: process.execPath, args: [libCliPath, "serve"] };
+  if (customBunPath && existsSync(customBunPath)) return { cmd: customBunPath, args: ["run", "src/cli.ts", "serve"] };
   const winBun = join(homedir(), ".bun", "bin", "bun.exe");
-  if (existsSync(winBun)) {
-    return { cmd: winBun, args: ["run", "src/cli.ts", "serve"] };
-  }
-
+  if (existsSync(winBun)) return { cmd: winBun, args: ["run", "src/cli.ts", "serve"] };
   const tsxPath = resolve(ROOT_DIR, "../deepseek-harness/node_modules/tsx/dist/esm/index.mjs");
-  if (existsSync(tsxPath)) {
-    return {
-      cmd: process.execPath,
-      args: ["--import", pathToFileURL(tsxPath).href, "src/cli.ts", "serve"],
-    };
-  }
-
+  if (existsSync(tsxPath)) return { cmd: process.execPath, args: ["--import", pathToFileURL(tsxPath).href, "src/cli.ts", "serve"] };
   return { cmd: process.execPath, args: ["src/cli.ts", "serve"] };
+}
+
+function readPort(value: number | Volatile<number> | undefined): number {
+  const port = value && typeof value === "object" && "get" in value && typeof value.get === "function"
+    ? value.get()
+    : value ?? DEFAULT_PORT;
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULT_PORT;
 }
 
 async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
-    const res = await fetch(`http://${host}:${port}/healthz`, {
-      signal: controller.signal,
-    });
+    const res = await fetch(`http://${host}:${port}/healthz`, { signal: controller.signal });
     clearTimeout(timer);
     if (!res.ok) return false;
     const body = (await res.json()) as { status?: string };
@@ -106,16 +71,6 @@ async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function readConfigValue<T>(value: T | Volatile<T> | undefined, fallback: T): T {
-  if (value && typeof value === "object" && "get" in value && typeof value.get === "function") return value.get();
-  return value ?? fallback;
-}
-
-function readPort(value: number | Volatile<number> | undefined): number {
-  const port = readConfigValue(value, DEFAULT_PORT);
-  return Number.isSafeInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULT_PORT;
 }
 
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
@@ -137,17 +92,10 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       logger.warn(`[dsh-chatgpt-web] Sidecar is offline and autoStart is false. Start it manually with 'bun run src/cli.ts serve' on http://${host}:${port}`);
       return;
     }
-
     const launcher = resolveLauncher(config.bunPath);
     logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${port}/v1...`);
-    const child = spawn(launcher.cmd, launcher.args, {
-      cwd: ROOT_DIR,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      env: { ...process.env },
-    });
+    const child = spawn(launcher.cmd, launcher.args, { cwd: ROOT_DIR, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: { ...process.env } });
     spawnedProcess = child;
-
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString().trim();
       if (text && typeof logger.debug === "function") logger.debug(`[sidecar] ${text}`);
@@ -156,14 +104,11 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       const text = chunk.toString().trim();
       if (text && typeof logger.debug === "function") logger.debug(`[sidecar:err] ${text}`);
     });
-    child.on("error", (err) => {
-      logger.error(`[dsh-chatgpt-web] Failed to launch sidecar process: ${err.message}`);
-    });
+    child.on("error", (err) => logger.error(`[dsh-chatgpt-web] Failed to launch sidecar process: ${err.message}`));
     child.on("exit", (code, signal) => {
       if (code !== 0 && code !== null) logger.warn(`[dsh-chatgpt-web] Sidecar process exited with code ${code} (signal: ${signal})`);
       spawnedProcess = undefined;
     });
-
     const deadline = Date.now() + readyTimeoutMs;
     while (Date.now() < deadline) {
       if (await isSidecarHealthy(host, port)) {
@@ -183,9 +128,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       const timer = setTimeout(() => controller.abort(), 2000);
       await fetch(`http://${host}:${port}/admin/shutdown`, { method: "POST", signal: controller.signal }).catch(() => {});
       clearTimeout(timer);
-    } catch {
-      // ignore
-    }
+    } catch {}
     if (spawnedProcess && !spawnedProcess.killed) spawnedProcess.kill("SIGTERM");
     spawnedProcess = undefined;
   };
@@ -197,14 +140,9 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
         if (nextPort === port) return;
         await stopDaemon();
         port = nextPort;
-        if (autoStart) {
-          await startDaemon();
-        } else {
-          logger.info(`[dsh-chatgpt-web] Sidecar endpoint reconfigured to http://${host}:${port}/v1; autoStart is false.`);
-        }
-      }).catch((error) => {
-        logger.error(`[dsh-chatgpt-web] Failed to apply live sidecar port change: ${error instanceof Error ? error.message : String(error)}`);
-      });
+        if (autoStart) await startDaemon();
+        else logger.info(`[dsh-chatgpt-web] Sidecar endpoint reconfigured to http://${host}:${port}/v1; autoStart is false.`);
+      }).catch((error) => logger.error(`[dsh-chatgpt-web] Failed to apply live sidecar port change: ${error instanceof Error ? error.message : String(error)}`));
     });
   }
 
@@ -219,8 +157,4 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   }
 }
 
-export default {
-  name,
-  inject,
-  apply,
-};
+export default { name, inject, Config, apply };
