@@ -253,7 +253,7 @@ window.__ModuleLoader__.load({
             }),
           ),
           h('div', { className: 'cwg-row' },
-            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token (config.json controlToken). Stored only in this browser.')),
+            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token. Held only in this page and never persisted in browser storage.')),
           ),
           h('div', { className: 'cwg-row cwg-actions' },
             h('button', {
