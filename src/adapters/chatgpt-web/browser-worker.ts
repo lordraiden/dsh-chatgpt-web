@@ -12,6 +12,8 @@ import {
   isLegacyChatGptConnectorName,
   legacyChatGptConnectorMigrationMessage,
   LEGACY_CHATGPT_CONNECTOR_NAMES,
+  resolveChatGptWebTuning,
+  type ResolvedChatGptWebTuning,
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexProviderConfig } from "../../types";
@@ -113,22 +115,25 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
 
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 /**
- * Upper bound for the size-scaled first-token grace. It stays below the provider's
- * streamIdleTimeoutMs (300 s) so the browser worker, not the HTTP client, owns the failure.
- */
-export const CHATGPT_RESPONSE_DOM_GRACE_MAX_MS = 240_000;
-/**
  * Free accounts take longer to expose the first assistant token the larger the visible prompt is:
- * ChatGPT reads the whole message before generating. A 32k-token prompt regularly exceeds the flat
- * 60 s grace, so the grace scales with the estimated message size (~5 ms per token), never below
- * the flat grace and never above the hard maximum.
+ * ChatGPT reads the whole message before generating. A 34k-character prompt regularly exceeds the
+ * flat 60 s grace, so the grace scales with the visible prompt size (milliseconds per character),
+ * never below the configured floor and never above the configured ceiling (which stays below the
+ * provider streamIdleTimeoutMs of 300 s so the browser worker, not the HTTP client, owns the
+ * failure).
  */
-export function chatGptResponseDomGraceMs(estimatedMessageTokens: number): number {
+export function chatGptResponseDomGraceMs(maxChars: number, tuning: ResolvedChatGptWebTuning): number {
   return Math.min(
-    CHATGPT_RESPONSE_DOM_GRACE_MAX_MS,
-    Math.max(CHATGPT_RESPONSE_DOM_GRACE_MS, estimatedMessageTokens * 5),
+    tuning.responseDomGraceMaxMs,
+    Math.max(tuning.responseDomGraceMs, maxChars * tuning.responseDomGracePerCharMs),
   );
 }
+/**
+ * How long the temporary-chat surface may keep showing its "Loading chats" / "Loading profile"
+ * rehydration overlays after the message was accepted before the turn is failed with a clear
+ * stale-surface diagnosis instead of a generic missing-assistant-turn error.
+ */
+export const CHATGPT_PAGE_REHYDRATION_STALL_MS = 90_000;
 /**
  * How long a staged Bigger Context part may take to produce its assistant turn. A staged part is two
  * orders of magnitude larger than an ordinary prompt and ChatGPT reads all of it before answering.
@@ -150,7 +155,6 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  * editor has taken the previous one. This is headroom for that, not a readiness check.
  */
 export const CHATGPT_UI_SETTLE_MS = 250;
-export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
 
 const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "aria-hidden",
@@ -837,6 +841,7 @@ export function assertChatGptWebInputWithinLimits(
   effort: ChatGptWebModelMode["effort"],
   capabilities: ChatGptWebCapabilities,
   promptChars?: number,
+  composerCharLimitOverride?: number,
 ): void {
   if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error(`ChatGPT web context limit is not defined for model: ${modelId}`);
@@ -856,13 +861,16 @@ export function assertChatGptWebInputWithinLimits(
     effort,
     capabilities,
   );
+  // A user-configured composer limit (config.json tuning) replaces the measured route boundary;
+  // raising it beyond the measured surface is the user's explicit choice.
+  const effectiveComposerCharLimit = composerCharLimitOverride ?? browserComposerCharLimit;
   if (
-    browserComposerCharLimit !== undefined
+    effectiveComposerCharLimit !== undefined
     && promptChars !== undefined
-    && promptChars > browserComposerCharLimit
+    && promptChars > effectiveComposerCharLimit
   ) {
     throw new ChatGptWebAdapterError(
-      `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort. Run /compact, then retry this Web model.`,
+      `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the ${effectiveComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort. Run /compact, then retry this Web model.`,
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
@@ -1230,6 +1238,8 @@ export interface ResolvedBrowserConfig {
   turnTimeoutMs?: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
+  /** User-tunable transport limits with every default applied. */
+  tuning: ResolvedChatGptWebTuning;
 }
 
 export function chatGptTurnIsComplete(state: {
@@ -1858,7 +1868,9 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   const browserDiagnosticsPath = resolve(expandUserPath(
     configured.browserDiagnosticsPath?.trim() || join(getConfigDir(), "diagnostics", "browser-turns"),
   ));
-  const turnTimeoutMs = configured.turnTimeoutMs;
+  // The direct turnTimeoutMs field wins over the tuning block; an absent deadline means no ceiling.
+  const tuning = resolveChatGptWebTuning(configured.tuning);
+  const turnTimeoutMs = configured.turnTimeoutMs ?? tuning.turnTimeoutMs;
   if (browserHost === "launcher" && !browserHostDescriptorPath) {
     throw new Error("Launcher browser host requires chatgptWeb.browserHostDescriptorPath");
   }
@@ -1887,6 +1899,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
+    tuning,
     headed: configured.headed === true,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
   };
@@ -2734,6 +2747,23 @@ export class ChatGptBrowserWorker {
     };
   }
 
+  /** True while the temporary-chat surface shows its visible "Loading chats" / "Loading profile" rehydration overlays. */
+  private async pageIsRehydrating(page: Page): Promise<boolean> {
+    try {
+      return await page.evaluate(() => {
+        for (const element of document.querySelectorAll<HTMLElement>('[role="status"]')) {
+          const style = getComputedStyle(element);
+          if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+          const text = (element.textContent ?? "").trim().toLowerCase();
+          if (text.includes("loading chats") || text.includes("loading profile")) return true;
+        }
+        return false;
+      });
+    } catch {
+      return false;
+    }
+  }
+
   private async waitForNewAssistantTurn(
     page: Page,
     baseline: ChatGptSubmissionBaseline,
@@ -2751,6 +2781,7 @@ export class ChatGptBrowserWorker {
       deadline ?? Number.POSITIVE_INFINITY,
       Date.now() + graceMs,
     );
+    let rehydrationSince: number | undefined;
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
@@ -2763,6 +2794,23 @@ export class ChatGptBrowserWorker {
       }
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT web turn timed out");
+      }
+      // While the temporary-chat surface rehydrates the conversation ("Loading chats"), the
+      // assistant turn cannot appear yet, so the deadline is paused instead of consumed. A
+      // rehydration that outlives the stall budget means the surface is stale, not merely slow.
+      if (await this.pageIsRehydrating(observationPage)) {
+        rehydrationSince ??= Date.now();
+        if (Date.now() - rehydrationSince > CHATGPT_PAGE_REHYDRATION_STALL_MS) {
+          throw new Error(
+            "ChatGPT is still rehydrating the conversation page (Loading chats); the temporary-chat surface may be stale — retry the turn",
+          );
+        }
+        responseDeadline = Math.min(
+          deadline ?? Number.POSITIVE_INFINITY,
+          Math.max(responseDeadline, Date.now() + graceMs),
+        );
+      } else {
+        rehydrationSince = undefined;
       }
       if (Date.now() >= responseDeadline
         && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
@@ -3316,7 +3364,7 @@ export class ChatGptBrowserWorker {
       .first();
     await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
     await settleChatGptUi();
-    const sendEnableDeadline = Date.now() + CHATGPT_SEND_ENABLE_GRACE_MS;
+    const sendEnableDeadline = Date.now() + this.config.tuning.sendEnableGraceMs;
     for (;;) {
       if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
@@ -4303,6 +4351,7 @@ export class ChatGptBrowserWorker {
           requestedMode.effort,
           browserCapabilities,
           maxMessageChars,
+          this.config.tuning.composerCharLimit,
         );
       }
       const deadline = this.config.turnTimeoutMs === undefined
@@ -4647,7 +4696,7 @@ export class ChatGptBrowserWorker {
         deadline,
         turn.abortSignal,
         turn.externalProgress,
-        chatGptResponseDomGraceMs(estimatedMessageTokens),
+        chatGptResponseDomGraceMs(maxMessageChars, this.config.tuning),
         completionTracker,
         toolTurnObservationRecovery
           ? async (...args) => {

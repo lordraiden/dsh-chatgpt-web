@@ -2,7 +2,9 @@ import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-w
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual, createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
@@ -18,7 +20,14 @@ import {
 } from "./adapters/chatgpt-web/environment";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
-import { providerConfig } from "./config";
+import {
+  CHATGPT_WEB_TUNING_DEFAULTS,
+  getConfigDir,
+  providerConfig,
+  resolveChatGptWebTuning,
+  saveConfig,
+  validateChatGptWebTuning,
+} from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
@@ -733,6 +742,77 @@ export async function compactRequest(
   return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(input), summary) });
 }
 
+/** CORS headers for the local DSH Web GUI control surface (127.0.0.1:3080). */
+function controlCorsHeaders(): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": "http://127.0.0.1:3080",
+    "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+interface RecentBrowserTurnSummary {
+  traceId: string;
+  capturedAt: string | null;
+  checkpoint: string | null;
+  error: string | null;
+  userTurns: number;
+  assistantTurns: number;
+}
+
+/** Summarize the newest browser-turn diagnostic directories (last checkpoint of each). */
+function readRecentBrowserTurns(limit: number): RecentBrowserTurnSummary[] {
+  const root = join(getConfigDir(), "diagnostics", "browser-turns");
+  let entries: Array<{ name: string; mtimeMs: number }>;
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => {
+        try {
+          return { name: entry.name, mtimeMs: statSync(join(root, entry.name)).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is { name: string; mtimeMs: number } => entry !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+  return entries.map(entry => {
+    const empty: RecentBrowserTurnSummary = {
+      traceId: entry.name.split("-")[0] ?? entry.name,
+      capturedAt: null,
+      checkpoint: null,
+      error: null,
+      userTurns: 0,
+      assistantTurns: 0,
+    };
+    try {
+      const files = readdirSync(join(root, entry.name)).filter(name => name.endsWith(".json")).sort();
+      if (files.length === 0) return empty;
+      const data = JSON.parse(readFileSync(join(root, entry.name, files[files.length - 1]), "utf8")) as {
+        capturedAt?: string;
+        checkpoint?: string;
+        error?: string;
+        state?: { turns?: { user?: number; assistant?: unknown[] } };
+      };
+      return {
+        traceId: empty.traceId,
+        capturedAt: data.capturedAt ?? null,
+        checkpoint: data.checkpoint ?? null,
+        error: data.error ?? null,
+        userTurns: data.state?.turns?.user ?? 0,
+        assistantTurns: Array.isArray(data.state?.turns?.assistant) ? data.state.turns.assistant.length : 0,
+      };
+    } catch {
+      return empty;
+    }
+  });
+}
+
 function nodeReqToWebRequest(req: IncomingMessage, host: string, port: number): Request {
   const url = `http://${req.headers.host || `${host}:${port}`}${req.url}`;
   const method = req.method || "GET";
@@ -840,6 +920,60 @@ export function startServer(
         last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
         ...activity(),
       });
+    }
+    if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/control/")) {
+      return new Response(null, { status: 204, headers: controlCorsHeaders() });
+    }
+    if (url.pathname.startsWith("/v1/control/") && !controlAuthorized(req)) {
+      return new Response("Unauthorized", { status: 401, headers: controlCorsHeaders() });
+    }
+    if (req.method === "GET" && url.pathname === "/v1/control/status") {
+      return Response.json({
+        status: "ok",
+        service: "dsh-chatgpt-web",
+        version: VERSION,
+        mode: config.mode,
+        pid: process.pid,
+        port: config.port,
+        uptime: (Date.now() - startedAt) / 1_000,
+        accepting_turns: !draining,
+        ...activity(),
+        storageDir: getConfigDir(),
+        storageStatePath: config.storageStatePath,
+        storageStatePresent: existsSync(config.storageStatePath),
+        chromeExecutablePath: config.chromeExecutablePath,
+        headed: config.headed,
+        solAvailable: config.solAvailable,
+        proAvailable: config.proAvailable,
+        tuning: resolveChatGptWebTuning(config.tuning),
+      }, { headers: controlCorsHeaders() });
+    }
+    if (req.method === "GET" && url.pathname === "/v1/control/config") {
+      return Response.json({
+        tuning: config.tuning ?? {},
+        effective: resolveChatGptWebTuning(config.tuning),
+        defaults: { ...CHATGPT_WEB_TUNING_DEFAULTS },
+      }, { headers: controlCorsHeaders() });
+    }
+    if (req.method === "PUT" && url.pathname === "/v1/control/config") {
+      try {
+        const body = await req.json() as { tuning?: unknown };
+        const tuning = validateChatGptWebTuning(body.tuning, "control API");
+        saveConfig({ ...config, tuning });
+        // Mutate the in-memory config so the next turn's providerConfig(config) sees the new
+        // tuning without a sidecar restart (workers are keyed by the serialized provider config).
+        config.tuning = tuning;
+        return Response.json({ status: "ok", tuning }, { headers: controlCorsHeaders() });
+      } catch (error) {
+        return Response.json(
+          { status: "error", error: error instanceof Error ? error.message : String(error) },
+          { status: 400, headers: controlCorsHeaders() },
+        );
+      }
+    }
+    if (req.method === "GET" && url.pathname === "/v1/control/recent-turns") {
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 10) || 10, 1), 25);
+      return Response.json({ turns: readRecentBrowserTurns(limit) }, { headers: controlCorsHeaders() });
     }
     if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
       if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });

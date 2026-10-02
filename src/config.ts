@@ -98,6 +98,70 @@ export interface TunnelConfig {
   alias: string;
 }
 
+export { type ChatGptWebTuning } from "./types";
+import type { ChatGptWebTuning } from "./types";
+
+export const CHATGPT_WEB_TUNING_DEFAULTS: Omit<Required<ChatGptWebTuning>, "turnTimeoutMs"> = {
+  composerCharLimit: 120_000,
+  responseDomGraceMs: 60_000,
+  responseDomGraceMaxMs: 240_000,
+  responseDomGracePerCharMs: 2.5,
+  sendEnableGraceMs: 5_000,
+};
+
+/** Tuning with every default applied; turnTimeoutMs stays optional (absent = no absolute deadline). */
+export interface ResolvedChatGptWebTuning {
+  composerCharLimit: number;
+  responseDomGraceMs: number;
+  responseDomGraceMaxMs: number;
+  responseDomGracePerCharMs: number;
+  sendEnableGraceMs: number;
+  turnTimeoutMs?: number;
+}
+
+/** Merge a partial tuning over the defaults, keeping only finite positive values. */
+export function resolveChatGptWebTuning(tuning?: ChatGptWebTuning): ResolvedChatGptWebTuning {
+  const resolved: ResolvedChatGptWebTuning = { ...CHATGPT_WEB_TUNING_DEFAULTS };
+  if (!tuning) return resolved;
+  const pick = (value: number | undefined, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+  resolved.composerCharLimit = pick(tuning.composerCharLimit, resolved.composerCharLimit);
+  resolved.responseDomGraceMs = pick(tuning.responseDomGraceMs, resolved.responseDomGraceMs);
+  resolved.responseDomGraceMaxMs = pick(tuning.responseDomGraceMaxMs, resolved.responseDomGraceMaxMs);
+  resolved.responseDomGracePerCharMs = pick(tuning.responseDomGracePerCharMs, resolved.responseDomGracePerCharMs);
+  resolved.sendEnableGraceMs = pick(tuning.sendEnableGraceMs, resolved.sendEnableGraceMs);
+  if (typeof tuning.turnTimeoutMs === "number" && Number.isFinite(tuning.turnTimeoutMs) && tuning.turnTimeoutMs > 0) {
+    resolved.turnTimeoutMs = tuning.turnTimeoutMs;
+  }
+  return resolved;
+}
+
+/** Validate a raw tuning object (config file or control API) and return a normalized copy. */
+export function validateChatGptWebTuning(value: unknown, path = "config"): ChatGptWebTuning {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Invalid tuning in ${path}`);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length === 0) throw new Error(`Invalid tuning in ${path}`);
+  const tuning: ChatGptWebTuning = {};
+  for (const key of keys) {
+    if (key !== "turnTimeoutMs" && !Object.keys(CHATGPT_WEB_TUNING_DEFAULTS).includes(key)) {
+      throw new Error(`Unknown tuning key ${key} in ${path}`);
+    }
+    const num = record[key];
+    if (typeof num !== "number" || !Number.isFinite(num) || num <= 0) {
+      throw new Error(`Invalid tuning.${key} in ${path}`);
+    }
+    (tuning as Record<string, number>)[key] = num;
+  }
+  if (tuning.responseDomGraceMaxMs !== undefined
+    && (tuning.responseDomGraceMs ?? CHATGPT_WEB_TUNING_DEFAULTS.responseDomGraceMs) > tuning.responseDomGraceMaxMs) {
+    throw new Error(`Invalid tuning in ${path}: responseDomGraceMs must not exceed responseDomGraceMaxMs`);
+  }
+  return tuning;
+}
+
 export interface AppConfig {
   version: 3;
   purpose?: "dev-harness";
@@ -124,6 +188,8 @@ export interface AppConfig {
   zeroRiskProEnabled: boolean;
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
+  /** Optional browser transport tuning; defaults apply per field when absent. */
+  tuning?: ChatGptWebTuning;
   autoApproveToolCalls: boolean;
   controlToken: string;
   runtimeCommand: string[];
@@ -535,6 +601,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
     throw new Error(`Invalid stallTimeoutSec in ${path}`);
   }
+  if (parsed.tuning !== undefined) {
+    parsed.tuning = validateChatGptWebTuning(parsed.tuning, path);
+  }
   const solAvailable = parsed.solAvailable !== false;
   const proAvailable = parsed.proAvailable === true;
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
@@ -610,6 +679,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       proAvailable: manual ? false : config.proAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
+      ...(config.tuning !== undefined ? { tuning: config.tuning } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,
     },
   };

@@ -246,6 +246,25 @@ export interface CodexUsage {
   estimated?: boolean;
 }
 
+/**
+ * User-tunable browser transport limits. Every field is optional; the sidecar fills the defaults
+ * (see CHATGPT_WEB_TUNING_DEFAULTS in config.ts) when a field is absent.
+ */
+export interface ChatGptWebTuning {
+  /** Hard character boundary for one visible composer message (Luna route). */
+  composerCharLimit?: number;
+  /** Floor for the first-assistant-token grace. */
+  responseDomGraceMs?: number;
+  /** Ceiling for the first-assistant-token grace; stays below the provider streamIdleTimeoutMs. */
+  responseDomGraceMaxMs?: number;
+  /** Grace growth in milliseconds per visible prompt character, clamped to floor/ceiling. */
+  responseDomGracePerCharMs?: number;
+  /** How long the send button may stay disabled after the complete prompt was attached. */
+  sendEnableGraceMs?: number;
+  /** Optional absolute ceiling for one browser turn. */
+  turnTimeoutMs?: number;
+}
+
 /** The only provider configuration supported by this focused runtime. */
 export interface CodexProviderConfig {
   adapter: "chatgpt-web";
@@ -284,6 +303,8 @@ export interface CodexProviderConfig {
     lunaCheckpointStatePath?: string;
     /** Optional explicit safety ceiling. Browser turns have no absolute deadline by default. */
     turnTimeoutMs?: number;
+    /** Optional browser transport tuning; per-field defaults apply when absent. */
+    tuning?: ChatGptWebTuning;
     /**
      * Seconds of adapter silence before the Responses bridge cancels a turn as a hung upstream.
      * The adapter heartbeats every CHATGPT_WEB_ADAPTER_HEARTBEAT_MS for the whole of a turn, so a
