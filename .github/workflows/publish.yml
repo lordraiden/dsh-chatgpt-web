@@ -30,7 +30,7 @@ jobs:
           const tag = process.env.RELEASE_TAG;
           const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
 
-          if (!/^v[0-9]+\\.[0-9]+\\.[0-9]+$/.test(tag)) {
+          if (!/^v[0-9]+[.][0-9]+[.][0-9]+$/.test(tag)) {
             console.error(`Release tag must match vX.Y.Z; received ${tag}`);
             process.exit(1);
           }
@@ -135,7 +135,7 @@ jobs:
           set -euo pipefail
 
           tarball="artifact/${{ needs.validate-tarball.outputs.artifact_name }}"
-          printf '%s\\n' \
+          printf '%s\n' \
   '@lordraiden:registry=https://npm.pkg.github.com/' \
   "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
   > ~/.npmrc
@@ -182,7 +182,7 @@ jobs:
           set -euo pipefail
 
           tarball="artifact/${{ needs.validate-tarball.outputs.artifact_name }}"
-          printf '%s\\n' \
+          printf '%s\n' \
   '@lordraiden:registry=https://registry.npmjs.org/' \
   "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" \
   > ~/.npmrc
