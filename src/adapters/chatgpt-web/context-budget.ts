@@ -88,6 +88,8 @@ export interface ChatGptWebCapacityDecisionOptions {
 export function resolveChatGptWebContextBudget(
   modelId: string,
   effort: ChatGptWebAdapterEffort,
+  // Capability flags are retained for call-site compatibility; paid-account capability state is
+  // intentionally ignored because this provider's supported matrix is ChatGPT Free Web only.
   _capabilities: Pick<{ solAvailable: boolean; proAvailable: boolean; experimentalBiggerContext?: boolean }, "solAvailable" | "proAvailable" | "experimentalBiggerContext">,
 ): ChatGptWebContextBudget {
   // #11-B is intentionally scoped to authenticated ChatGPT Free Web accounts. Paid-account
