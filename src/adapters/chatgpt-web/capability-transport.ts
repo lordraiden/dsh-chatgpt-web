@@ -57,7 +57,7 @@ export interface CapabilityTransport {
 }
 
 function normalizeBinding(binding: CapabilityTransportBinding): CapabilityTransportBinding {
-  if (!binding.bindingId || !/^[A-Za-z0-9_-]{8,256}$/.test(binding.bindingId)) {
+  if (typeof binding.bindingId !== "string" || binding.bindingId.length === 0 || binding.bindingId.length > 256) {
     throw new Error("capability transport binding id is invalid");
   }
   assertCapabilitySnapshotBinding(binding.snapshot, binding);
