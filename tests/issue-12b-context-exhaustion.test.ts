@@ -4,7 +4,7 @@ import {
   type ChatGptContextExhaustionObservation,
 } from "../src/adapters/chatgpt-web/context-exhaustion";
 import { chatGptContextExhaustedError } from "../src/adapters/chatgpt-web/adapter-error";
-import { ChatGptTurnSessions, type ChatGptTurnRuntime } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, type ChatGptTurnRuntime } from "../src/adapters/chatgpt-web/turn-execution";
 import { projectChatGptCapabilities } from "../src/adapters/chatgpt-web/capability-projector";
 
 function observation(overrides: Partial<ChatGptContextExhaustionObservation>): ChatGptContextExhaustionObservation {
@@ -83,19 +83,21 @@ test("context exhaustion is a terminal semantic provider condition", () => {
   expect(error.status).toBe(409);
 });
 
-function runtimeForRetainedConversation(resolvePhysical: () => void, release: () => void): ChatGptTurnRuntime {
+function runtimeForRetainedConversation(physicalSettlement: Promise<void>, release: () => void): ChatGptTurnRuntime {
   const capabilitySnapshot = projectChatGptCapabilities({
     sessionId: "dsh-session-1",
     agentId: "agent-1",
     turnId: "native-turn-1",
     tools: [],
   });
-  const physicalSettlement = new Promise<void>(resolvePhysical);
+
   return {
     mode: "read-only",
     capabilitySnapshot,
     browser: Promise.resolve("terminal"),
     physicalSettlement,
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
     conversationKey: "conversation-1",
     releaseRetainedConversation: async () => release(),
     cancel: () => {},
@@ -106,8 +108,9 @@ test("confirmed exhaustion invalidates the retained conversation immediately but
   const sessions = new ChatGptTurnSessions();
   let resolvePhysical!: () => void;
   let released = false;
+  const physicalSettlement = new Promise<void>(resolve => { resolvePhysical = resolve; });
   const runtime = runtimeForRetainedConversation(
-    resolve => { resolvePhysical = resolve; },
+    physicalSettlement,
     () => { released = true; },
   );
   const session = sessions.getOrCreate(
