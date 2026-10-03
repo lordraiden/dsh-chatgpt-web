@@ -8,7 +8,7 @@
         "@modelcontextprotocol/sdk": "^1.30.0",
         "ajv": "8.20.0",
         "ajv-formats": "3.0.1",
-        "chromium-bidi": "12.1.0",
+        "chromium-bidi": "17.0.2",
         "fflate": "^0.8.2",
         "playwright-core": "^1.62.0",
         "tiktoken": "1.0.22",
@@ -22,7 +22,7 @@
         "typescript": "5.9.3",
       },
       "peerDependencies": {
-        "@deepseek-ai/cordis": "^3.0.0 || workspace:^",
+        "@deepseek-ai/cordis": "^3.0.0",
       },
       "optionalPeers": [
         "@deepseek-ai/cordis",
@@ -58,7 +58,7 @@
 
     "call-bound": ["call-bound@1.0.4", "", { "dependencies": { "call-bind-apply-helpers": "^1.0.2", "get-intrinsic": "^1.3.0" } }, "sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg=="],
 
-    "chromium-bidi": ["chromium-bidi@12.1.0", "", { "dependencies": { "mitt": "^3.0.1", "zod": "^3.24.1" }, "peerDependencies": { "devtools-protocol": "*" } }, "sha512-jJnmyKjAvFYJjt0e16cLlKXlbvYsMKnc/OCZWQNez4BT6cT3MJgPKbCbi4ahAHZAsQ5jUYHqiQlMwZlyYXLKCQ=="],
+    "chromium-bidi": ["chromium-bidi@17.0.2", "", { "dependencies": { "mitt": "^3.0.1", "zod": "^3.24.1" }, "peerDependencies": { "devtools-protocol": "*" } }, "sha512-5v9GQFhTktFvotn/OFNJBmKLKRAb6n9r0bVCwf7sHgWc3/JryK0bj1nn93L3pHFrfgcsu6Be6EWsDi+1XHTGDg=="],
 
     "content-disposition": ["content-disposition@1.1.0", "", {}, "sha512-5jRCH9Z/+DRP7rkvY83B+yGIGX96OYdJmzngqnw2SBSxqCFPd0w2km3s5iawpGX8krnwSGmF0FW5Nhr0Hfai3g=="],
 
