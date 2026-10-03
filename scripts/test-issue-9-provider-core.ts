@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
+import type { GenerateOptions } from "@deepseek-ai/dsh-llm";
 import {
   BrowserAccountLeaseRegistry,
   ChatGptWebProviderCore,
 } from "../src/adapters/chatgpt-web/provider-core";
+import { mapStream } from "../src/adapters/chatgpt-web/llm-adapter";
 import {
   ChatGptToolProtocolError,
   ChatGptToolStreamParser,
