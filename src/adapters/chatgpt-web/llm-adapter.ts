@@ -603,10 +603,10 @@ export function mapStream(
       yield { type: "finish", reason: { kind: "aborted", failure: failureFromEvent("ChatGPT Web turn aborted.", "aborted") } };
       return;
     }
-    let backend: ProviderAdapter;
-    try { backend = resolveBackend(); } catch (error) { yield { type: "finish", reason: toFinishFailure(error, options.signal) }; return; }
     let parsed: CodexParsedRequest;
     try { parsed = toRequest(); } catch (error) { yield { type: "finish", reason: toFinishFailure(error, options.signal) }; return; }
+    let backend: ProviderAdapter;
+    try { backend = resolveBackend(); } catch (error) { yield { type: "finish", reason: toFinishFailure(error, options.signal) }; return; }
 
     const backendAbort = new AbortController();
     const onAbort = () => backendAbort.abort(options.signal?.reason);
