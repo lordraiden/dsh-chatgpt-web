@@ -133,6 +133,7 @@ export class BrowserAccountLease {
 
 export class BrowserAccountLeaseRegistry {
   private readonly leases = new Map<string, BrowserAccountLease>();
+  private readonly physicalResources = new Map<string, BrowserAccountLease>();
 
   acquire(descriptor: BrowserAccountLeaseDescriptor): BrowserAccountLease {
     const lease = new BrowserAccountLease(descriptor);
@@ -144,7 +145,27 @@ export class BrowserAccountLeaseRegistry {
     return lease;
   }
 
+  bindPhysicalResource(
+    lease: BrowserAccountLease,
+    binding: ProviderTurnPhysicalResourceBinding,
+  ): void {
+    if (!lease.isActive() || this.leases.get(lease.leaseId) !== lease) {
+      throw new Error("Cannot bind a physical resource for a lease not owned by the registry");
+    }
+    const existing = this.physicalResources.get(binding.resourceId);
+    if (existing && existing !== lease && existing.isActive()) {
+      throw new Error(
+        `Physical browser resource is already leased by turn ${existing.descriptor.turnId}: ${binding.resourceId}`,
+      );
+    }
+    lease.bindPhysicalResource(binding);
+    this.physicalResources.set(binding.resourceId, lease);
+  }
+
   release(lease: BrowserAccountLease): void {
+    for (const [resourceId, owner] of this.physicalResources) {
+      if (owner === lease) this.physicalResources.delete(resourceId);
+    }
     lease.release();
     if (this.leases.get(lease.leaseId) === lease) this.leases.delete(lease.leaseId);
   }
@@ -156,6 +177,7 @@ export class BrowserAccountLeaseRegistry {
   clear(): void {
     for (const lease of this.leases.values()) lease.release();
     this.leases.clear();
+    this.physicalResources.clear();
   }
 }
 
@@ -201,6 +223,7 @@ export class ProviderTurnLifecycle {
     readonly lease: BrowserAccountLease,
     readonly provenance: ProviderTurnProvenance,
     private readonly retryPolicy: RetryPolicy = "strict",
+    private readonly bindResource: (binding: ProviderTurnPhysicalResourceBinding) => void = binding => lease.bindPhysicalResource(binding),
     private readonly releaseLease: () => void = () => lease.release(),
     private readonly onRetired: () => void = () => {},
   ) {}
@@ -254,7 +277,7 @@ export class ProviderTurnLifecycle {
 
   bindPhysicalResource(binding: ProviderTurnPhysicalResourceBinding): void {
     this.assertMutable();
-    this.lease.bindPhysicalResource(binding);
+    this.bindResource(binding);
   }
 
   markSurfaceReady(): void {
@@ -480,6 +503,7 @@ export class ChatGptWebProviderCore {
         ...(input.nativeThreadId ? { nativeThreadId: input.nativeThreadId } : {}),
       },
       input.retryPolicy,
+      binding => this.leases.bindPhysicalResource(lease, binding),
       () => this.leases.release(lease),
       () => {
         this.turns.delete(input.executionKey);
