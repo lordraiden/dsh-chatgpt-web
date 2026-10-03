@@ -49,6 +49,9 @@ jobs:
       - name: Issue #10-B capability transport tests
         run: bun scripts/test-issue-10b-capability-transport.ts
 
+      - name: Issue #10-C capability identity tests
+        run: bun scripts/test-issue-10c-capability-identity.ts
+
       - name: Issue contract tests
         run: node scripts/test-issue-20-settings.mjs
 
