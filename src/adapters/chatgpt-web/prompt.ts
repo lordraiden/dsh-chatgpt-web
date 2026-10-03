@@ -426,7 +426,9 @@ export function compileChatGptWebPrompt(
       "</dsh_transport_resume>",
     ];
   const build = (sourceMessages: readonly CodexMessage[]): CompiledChatGptWebPrompt => {
-    const canonical = projectCanonicalChatGptWebContext(system, sourceMessages, CHATGPT_MAX_INPUT_IMAGES);
+    // #11-A owns the lossless canonical projection. Image transport limits are applied by #11-B
+    // after this boundary; this path must not silently discard canonical semantic images.
+    const canonical = projectCanonicalChatGptWebContext(system, sourceMessages);
     const images = [...canonical.images];
     const messages = canonical.messages;
     const answerContract = captureLunaCheckpoint
