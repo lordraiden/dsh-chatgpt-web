@@ -30,7 +30,7 @@ function leaseInput(turnId: string) {
   turn.markCapabilityWait();
   assert.equal(turn.snapshot().activity, "capability_wait");
   turn.markRunning();
-  assert.equal(turn.snapshot().state, "SUBMITTED" === "RUNNING" ? "RUNNING" : "RUNNING");
+  assert.equal(turn.snapshot().state, "RUNNING");
   await Promise.resolve();
   console.log("ok lifecycle state machine");
 }
