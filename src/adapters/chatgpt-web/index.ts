@@ -14,6 +14,7 @@ import {
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
   type LauncherManualTurnEnd,
+  type LauncherManualTurnLease,
   type LauncherManualTurnOwner,
   type LauncherManualTurnStart,
 } from "../../launcher-browser-host";
@@ -21,7 +22,7 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
-import { ChatGptBrowserWorker } from "./browser-worker";
+import { ChatGptBrowserWorker, type ChatGptBrowserPhysicalSurface } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -187,7 +188,7 @@ function cancellableBrowserTurn(
 }
 
 export interface ChatGptZeroRiskManualControl {
-  start(descriptorPath: string, activity: LauncherManualTurnStart): Promise<unknown>;
+  start(descriptorPath: string, activity: LauncherManualTurnStart): Promise<LauncherManualTurnLease>;
   waitSent(
     descriptorPath: string,
     owner: LauncherManualTurnOwner,
@@ -576,6 +577,15 @@ export function createChatGptWebAdapter(
         providerTurn?.markRunning();
       },
     };
+    const providerTurnSurfaceHooks: {
+      onPhysicalSurfaceBound: (binding: ChatGptBrowserPhysicalSurface) => void;
+      onSurfaceReady: () => void;
+    } | undefined = providerTurn
+      ? {
+        onPhysicalSurfaceBound: binding => providerTurn.bindPhysicalResource(binding),
+        onSurfaceReady: () => providerTurn.markSurfaceReady(),
+      }
+      : undefined;
     if (manualRequest) {
       if (!environment) throw new Error("ChatGPT Zero Risk requires a trusted Codex environment");
       if (!retainedLauncherDescriptor) throw new Error("ChatGPT Zero Risk requires the Launcher browser host");
@@ -633,12 +643,22 @@ export function createChatGptWebAdapter(
               text: "> **Action required in Zero Risk**\n>\n> Open the launcher, copy and paste the prompt into ChatGPT, add any images yourself because Zero Risk cannot transfer them, select the `Codex Zero Risk` plugin and the model you want, send the prompt, then confirm it was sent in the launcher.",
             });
           }
-          await zeroRiskManualControl.start(retainedLauncherDescriptor, {
+          const manualLease = await zeroRiskManualControl.start(retainedLauncherDescriptor, {
             ...owner,
             prompt: compiled.text,
             ...(resumeCompiled ? { resumePrompt: resumeCompiled.text } : {}),
             ...(conversationKey ? { conversationKey } : {}),
           });
+          if (providerTurn) {
+            providerTurn.bindPhysicalResource({
+              resourceId: manualLease.tabId,
+              browserContextId: `launcher-context:${retainedLauncherDescriptor}`,
+              pageId: `launcher-page:${manualLease.tabId}`,
+              profileId: `launcher-profile:${retainedLauncherDescriptor}`,
+              accountId: `chatgpt-account:${browserAccountLeaseInput(provider, traceId).accountIdentity}`,
+            });
+            providerTurn.markSurfaceReady();
+          }
           launcherStarted = true;
           await zeroRiskManualControl.waitSent(retainedLauncherDescriptor, owner, {
             abortSignal: browserAbort.signal,
@@ -760,6 +780,7 @@ export function createChatGptWebAdapter(
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
+        ...(providerTurnSurfaceHooks ?? {}),
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
@@ -821,6 +842,7 @@ export function createChatGptWebAdapter(
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
+        ...(providerTurnSurfaceHooks ?? {}),
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
@@ -1210,7 +1232,6 @@ export function createChatGptWebAdapter(
           providerTurn.failBeforePhysicalSettlement();
           throw error;
         }
-        providerTurn.markSurfaceReady();
         if (!providerTurn.snapshot().physicalSettlementAttached) {
           providerCore.bindPhysicalSettlement(executionKey, session.physicalSettlement);
         }
@@ -1410,7 +1431,12 @@ export function createChatGptWebAdapter(
                 ? session.runtime.externalProgress
                 : undefined;
               const armNextTools = () => turnToken
-                ? (providerTurn.markCapabilityWait(), broker.nextToolBatch(turnToken, toolWaitAbort.signal)).then(async requests => {
+                ? (
+                  providerTurn.assertCapabilityExecution(),
+                  providerTurn.markCapabilityWait(),
+                  broker.nextToolBatch(turnToken, toolWaitAbort.signal)
+                ).then(async requests => {
+                  providerTurn.assertCapabilityExecution();
                   providerTurn.markRunning();
                   if (!externalProgress) {
                     throw new Error("ChatGPT broker returned tools for a read-only browser turn");
@@ -1596,6 +1622,7 @@ export function createChatGptWebAdapter(
             chatGptWebTurnRetryPolicy.clear(retryKey);
           }
           if (handledError instanceof ChatGptWebAdapterError && !handledError.retryable) {
+            providerTurn.markRecovery("FAILED");
             // A deterministic request failure remains replayable so a native reconnect cannot burn
             // another browser attempt. Every other failure retires the browser session: client
             // disconnects, stage failures, and retryable ChatGPT errors must start a fresh surface
