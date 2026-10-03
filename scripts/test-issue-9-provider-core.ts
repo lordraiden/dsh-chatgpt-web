@@ -3,6 +3,10 @@ import {
   BrowserAccountLeaseRegistry,
   ChatGptWebProviderCore,
 } from "../src/adapters/chatgpt-web/provider-core";
+import {
+  ChatGptToolProtocolError,
+  ChatGptToolStreamParser,
+} from "../src/adapters/chatgpt-web/tool-stream-parser";
 
 function leaseInput(turnId: string) {
   return {
@@ -230,6 +234,33 @@ function leaseInput(turnId: string) {
   assert.equal(turn.snapshot().physicalSettlementOutcome, "not_started");
   assert.equal(turn.lease.isActive(), false);
   console.log("ok pre-browser failure retirement");
+}
+
+{
+  const parser = new ChatGptToolStreamParser("user context");
+  const parsed = parser.feed(
+    'before<dsh_tool_call>{"version":1,"id":"call_12345678","name":"read","arguments":{"file_path":"README.md"}}</dsh_tool_call>after',
+  );
+  assert.equal(parsed.text, "beforeafter");
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.equal(parsed.toolCalls[0]?.id, "call_12345678");
+  assert.equal(parsed.toolCalls[0]?.name, "read");
+  assert.equal(parsed.toolCalls[0]?.arguments.file_path, "README.md");
+
+  assert.throws(
+    () => parser.feed(
+      '<dsh_tool_call>{"version":1,"id":"call_12345678","name":"read","arguments":{}}</dsh_tool_call>',
+    ),
+    ChatGptToolProtocolError,
+  );
+
+  const malformed = new ChatGptToolStreamParser();
+  assert.throws(
+    () => malformed.feed('<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read"}'),
+    ChatGptToolProtocolError,
+  );
+  assert.throws(() => malformed.flush(), ChatGptToolProtocolError);
+  console.log("ok strict tool control protocol");
 }
 
 console.log("Issue #9 ProviderCore contract tests passed.");
