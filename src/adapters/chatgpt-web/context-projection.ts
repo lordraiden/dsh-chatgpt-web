@@ -29,7 +29,6 @@ export function projectCanonicalChatGptWebContext(
 ): CanonicalChatGptWebContext {
   const messages = withoutSupersededModelSwitchContracts(sourceMessages);
   const images: ChatGptWebPromptImage[] = [];
-  const budget: ImageBudget = { seen: 0, dropped: 0 };
   const userContext = messages
     .filter(message => message.role === "user")
     .map(message => {
@@ -39,7 +38,7 @@ export function projectCanonicalChatGptWebContext(
     .join(" ");
 
   const projectedMessages = messages.map(message =>
-    messageEnvelope(message, images, budget, userContext)
+    messageEnvelope(message, images, userContext)
   );
 
   return Object.freeze({
@@ -134,15 +133,9 @@ export function countChatGptContextImages(messages: readonly CodexMessage[]): nu
   return total;
 }
 
-interface ImageBudget {
-  seen: number;
-  dropped: number;
-}
-
 function inputContent(
   content: string | CodexContentPart[],
   images: ChatGptWebPromptImage[],
-  budget: ImageBudget,
 ): unknown {
   if (typeof content === "string") return content;
   const semantic = content.filter(part =>
@@ -153,10 +146,6 @@ function inputContent(
   }
   return semantic.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
-    budget.seen += 1;
-    if (budget.seen <= budget.dropped) {
-      return { type: "text", text: "[older image not attached: ChatGPT accepts at most 10 per message]" };
-    }
     const ref = "codex-input-image-" + (images.length + 1);
     images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
     return {
@@ -246,7 +235,6 @@ export function withoutSupersededModelSwitchContracts(
 function messageEnvelope(
   message: CodexMessage,
   images: ChatGptWebPromptImage[],
-  budget: ImageBudget,
   userContext?: string,
 ): Record<string, unknown> {
   if (message.role === "toolResult") {
@@ -256,7 +244,7 @@ function messageEnvelope(
       tool_name: message.toolName,
       ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
       is_error: message.isError,
-      content: inputContent(message.content, images, budget),
+      content: inputContent(message.content, images),
     };
   }
   if (message.role === "agentMessage") {
@@ -264,7 +252,7 @@ function messageEnvelope(
       role: "agent_message",
       ...(message.author !== undefined ? { author: message.author } : {}),
       ...(message.recipient !== undefined ? { recipient: message.recipient } : {}),
-      content: inputContent(message.content, images, budget),
+      content: inputContent(message.content, images),
     };
   }
   if (message.role === "assistant") {
@@ -274,5 +262,5 @@ function messageEnvelope(
       content: assistantContent(message.content, userContext),
     };
   }
-  return { role: message.role, content: inputContent(message.content, images, budget) };
+  return { role: message.role, content: inputContent(message.content, images) };
 }
