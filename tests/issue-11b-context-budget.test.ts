@@ -97,7 +97,7 @@ test("unrecoverable compaction keeps developer instructions and settled tool res
 
   const selected = selectCompactionMessagesDeterministically(
     messages,
-    candidate => candidate.length <= 5,
+    candidate => candidate.length <= 4,
   );
 
   expect(selected.messages.map(message => message.role)).toEqual([
