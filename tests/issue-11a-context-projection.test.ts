@@ -112,7 +112,6 @@ test("transport handles are sanitized without corrupting semantic tool ids", () 
   expect(sanitized).not.toContain("turn_transport_abcdefghijklmnopqrstuvwxyz");
 });
 
-
 test("superseded model-switch contracts are removed without losing current history", () => {
   const normalized = withoutSupersededModelSwitchContracts(sampleMessages());
   expect(normalized.map(message => typeof message.content === "string" ? message.content : "")).toEqual([
@@ -124,6 +123,7 @@ test("superseded model-switch contracts are removed without losing current histo
     "<skills_instructions>new skill catalog</skills_instructions>",
   ]);
 });
+
 
 test("replay fixture is generated entirely from canonical DSH state", () => {
   const projected = projectCanonicalChatGptWebContext(["system instruction"], sampleMessages());
