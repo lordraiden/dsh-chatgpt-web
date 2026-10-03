@@ -95,6 +95,10 @@ function fakeTransport(
       log.push(`bind:${candidate.conversationHandle}`);
       return binding;
     },
+    async replayCanonicalContext(submission) {
+      log.push(`replay:${submission.canonicalRevision}`);
+      return { replayProof: `replay-accepted:${submission.canonicalRevision}` };
+    },
     ...overrides,
   };
 }
@@ -138,9 +142,11 @@ test("replay replaces the ChatGPT conversation while preserving DSH identity", a
     "create",
     "ready:chatgpt-conversation-2",
     "bind:chatgpt-conversation-2",
+    "replay:dsh-revision-7",
   ]);
   expect(plan.identity).toEqual(identity);
   expect(plan.conversationHandle).toBe("chatgpt-conversation-2");
+  expect(plan.replayProof).toBe("replay-accepted:dsh-revision-7");
   expect(plan.settledToolCallIds).toEqual(["call-settled"]);
   expect(plan.pendingToolCallIds).toEqual(["call-pending"]);
   expect(plan.canonicalJson).toContain("required developer policy");
