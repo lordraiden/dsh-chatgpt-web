@@ -146,17 +146,20 @@ function leaseInput(turnId: string) {
   const first = core.begin(leaseInput("resume"));
   const same = core.begin(leaseInput("resume"));
   assert.equal(first, same);
-  assert.throws(
-    () => first.assertNotSelfReentrant("native-resume"),
-    /re-enter itself/i,
-  );
   assert.equal(first.snapshot().recovery, "NEW");
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("resume-conflict"),
+      nativeThreadId: "thread-1",
+    }),
+    /second provider turn for an active native DSH thread/i,
+  );
+  first.failBeforePhysicalSettlement();
 
   const resumed = core.begin({
-    ...leaseInput("resume"),
-    executionKey: "execution-resume-2",
-    traceId: "trace-resume-2",
-    nativeTurnId: "native-resume-2",
+    ...leaseInput("resume-exact"),
+    accountIdentity: "account-2",
+    nativeThreadId: "thread-2",
     recovery: "EXACT_RESUME",
   });
   assert.equal(resumed.snapshot().recovery, "EXACT_RESUME");
@@ -166,11 +169,12 @@ function leaseInput(turnId: string) {
   );
   assert.equal(resumed.snapshot().recovery, "EXACT_RESUME");
 
+  resumed.failBeforePhysicalSettlement();
+
   const replay = core.begin({
-    ...leaseInput("resume"),
-    executionKey: "execution-replay",
-    traceId: "trace-replay",
-    nativeTurnId: "native-replay",
+    ...leaseInput("resume-replay"),
+    accountIdentity: "account-3",
+    nativeThreadId: "thread-3",
     recovery: "REPLAY",
   });
   replay.markRecovery("FAILED");
@@ -179,7 +183,8 @@ function leaseInput(turnId: string) {
     () => replay.markRecovery("REPLAY"),
     /cannot downgrade/i,
   );
-  console.log("ok monotonic continuity classification and reentrancy guard");
+  replay.failBeforePhysicalSettlement();
+  console.log("ok monotonic continuity classification and native-thread isolation");
 }
 
 {
