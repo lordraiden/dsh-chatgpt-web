@@ -131,6 +131,7 @@ export interface ProviderTurnSnapshot {
   readonly submission: SubmissionPhase;
   readonly logicalSettled: boolean;
   readonly physicalSettled: boolean;
+  readonly physicalSettlementAttached: boolean;
   readonly retryPolicy: RetryPolicy;
   readonly lease: ReturnType<BrowserAccountLease["provenance"]>;
   readonly provenance: ProviderTurnProvenance;
@@ -151,6 +152,7 @@ export class ProviderTurnLifecycle {
     readonly lease: BrowserAccountLease,
     readonly provenance: ProviderTurnProvenance,
     private readonly retryPolicy: RetryPolicy = "strict",
+    private readonly releaseLease: () => void = () => lease.release(),
   ) {}
 
   snapshot(): ProviderTurnSnapshot {
@@ -161,6 +163,7 @@ export class ProviderTurnLifecycle {
       submission: this.submission,
       logicalSettled: this.logicalSettled,
       physicalSettled: this.physicalSettled,
+      physicalSettlementAttached: this.physicalSettlementAttached,
       retryPolicy: this.retryPolicy,
       lease: this.lease.provenance(),
       provenance: this.provenance,
@@ -252,7 +255,7 @@ export class ProviderTurnLifecycle {
       if (this.state !== "SETTLING") this.transition("SETTLING");
       this.transition("RETIRED");
     }
-    this.lease.release();
+    this.releaseLease();
   }
 
   scheduleRetirementAfterPhysicalSettlement(): void {
@@ -303,7 +306,10 @@ export class ChatGptWebProviderCore {
   begin(input: ChatGptWebProviderCoreTurnInput): ProviderTurnLifecycle {
     if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
     const existing = this.turns.get(input.executionKey);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.snapshot().state !== "RETIRED") return existing;
+      this.turns.delete(input.executionKey);
+    }
 
     const lease = this.leases.acquire({
       serviceId: this.serviceId,
@@ -323,6 +329,7 @@ export class ChatGptWebProviderCore {
         ...(input.nativeThreadId ? { nativeThreadId: input.nativeThreadId } : {}),
       },
       input.retryPolicy,
+      () => this.leases.release(lease),
     );
     if (input.recovery && input.recovery !== "NEW") turn.markRecovery(input.recovery);
     turn.markLeased();
