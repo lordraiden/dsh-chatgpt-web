@@ -5,7 +5,9 @@ export type CapabilityLifecycle = "active" | "cancelled" | "retired" | "expired"
 
 export interface CapabilitySnapshot {
   readonly snapshotId: string;
+  /** Canonical DSH session identity; never the provider-private ChatGPT conversation identity. */
   readonly sessionId: string;
+  /** Canonical DSH agent identity represented at this provider boundary. */
   readonly agentId: string;
   readonly turnId: string;
   readonly createdAt: number;
@@ -110,10 +112,11 @@ export function projectChatGptCapabilities(input: {
   const sessionId = input.sessionId.trim();
   const agentId = input.agentId?.trim() || "default";
   const turnId = input.turnId.trim();
+  const createdAt = Date.now();
   if (!sessionId) throw new Error("Capability snapshot requires a DSH session identity");
   if (!agentId) throw new Error("Capability snapshot requires a DSH agent identity");
   if (!turnId) throw new Error("Capability snapshot requires a DSH turn identity");
-  if (input.expiresAt !== undefined && (!Number.isFinite(input.expiresAt) || input.expiresAt <= Date.now())) {
+  if (input.expiresAt !== undefined && (!Number.isFinite(input.expiresAt) || input.expiresAt <= createdAt)) {
     throw new Error("Capability snapshot expiry must be a future finite timestamp");
   }
 
@@ -124,7 +127,7 @@ export function projectChatGptCapabilities(input: {
     sessionId,
     agentId,
     turnId,
-    createdAt: Date.now(),
+    createdAt,
     ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
     lifecycle: "active",
     tools,
