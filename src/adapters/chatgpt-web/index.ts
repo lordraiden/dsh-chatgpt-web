@@ -50,6 +50,10 @@ import {
   chatGptConversationKey,
   retainedConversationResumeRequest,
 } from "./conversation-key";
+import {
+  ChatGptWebProviderCore,
+  type ProviderTurnLifecycle,
+} from "./provider-core";
 
 function extractLatestUserPrompt(parsed: CodexParsedRequest): string {
   const messages = parsed.context.messages ?? [];
@@ -91,6 +95,31 @@ function extractLatestUserPrompt(parsed: CodexParsedRequest): string {
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
+}
+
+function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string): {
+  accountIdentity: string;
+  browserProfile: string;
+  browserContext: string;
+  pageIdentity: string;
+} {
+  const browser = provider.chatgptWeb;
+  const accountIdentity = browser?.storageStatePath
+    ?? browser?.browserHostDescriptorPath
+    ?? "chatgpt-web-default-account";
+  const browserProfile = browser?.chromeExecutablePath
+    ?? browser?.browserHost
+    ?? "managed-chrome";
+  const browserContext = browser?.browserHostDescriptorPath
+    ?? browser?.storageStatePath
+    ?? browser?.browserHost
+    ?? "default-context";
+  return {
+    accountIdentity,
+    browserProfile,
+    browserContext,
+    pageIdentity: traceId,
+  };
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
@@ -391,6 +420,7 @@ export function createChatGptWebAdapter(
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
+  const providerCore = new ChatGptWebProviderCore();
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
   const experimentalBiggerContext = provider.chatgptWeb?.experimentalBiggerContext;
   if (experimentalBiggerContext !== undefined && typeof experimentalBiggerContext !== "boolean") {
@@ -436,6 +466,7 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
+    providerTurn?: ProviderTurnLifecycle,
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -534,9 +565,16 @@ export function createChatGptWebAdapter(
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
     // A canonical compaction request is side-effect free and remains safe to rebuild after an
     // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
-    const submissionLifecycle = parsed._compactionRequest ? {} : {
-      onSendActivated: () => { submission.phase = "send_activated" as const; },
-      onSubmitted: () => { submission.phase = "accepted" as const; },
+    const submissionLifecycle = {
+      onSendActivated: () => {
+        submission.phase = "send_activated" as const;
+        providerTurn?.markSendActivated();
+      },
+      onSubmitted: () => {
+        submission.phase = "accepted" as const;
+        providerTurn?.markSubmitted();
+        providerTurn?.markRunning();
+      },
     };
     if (manualRequest) {
       if (!environment) throw new Error("ChatGPT Zero Risk requires a trusted Codex environment");
@@ -607,6 +645,8 @@ export function createChatGptWebAdapter(
           });
           await broker.confirmSafeTurnSent(activeToken, surfaceNonce);
           submission.phase = "accepted";
+          providerTurn?.markSubmitted();
+          providerTurn?.markRunning();
           if (!parsed._compactionRequest) trace.push({
             kind: "commentary",
             text: "> **Waiting for ChatGPT**\n>\n> The prompt is marked `Sent`. Waiting for `Codex Zero Risk` to bind this turn through the selected ChatGPT connector.",
