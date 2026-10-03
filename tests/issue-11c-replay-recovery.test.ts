@@ -141,11 +141,10 @@ test("replay replaces the ChatGPT conversation while preserving DSH identity", a
   expect(plan.conversationHandle).toBe("chatgpt-conversation-2");
   expect(plan.settledToolCallIds).toEqual(["call-settled"]);
   expect(plan.pendingToolCallIds).toEqual(["call-pending"]);
-  expect(plan.canonicalJson).toBe(
-    coordinator.recover
-      ? plan.canonicalJson
-      : "",
-  );
+  expect(plan.canonicalJson).toContain("required developer policy");
+  expect(plan.canonicalJson).toContain("call-settled");
+  expect(plan.canonicalJson).not.toContain("chatgpt-conversation-1");
+  expect(plan.canonicalJson).not.toContain("chatgpt-conversation-2");
   expect(coordinator.snapshot().continuity).toBe("REPLAY");
   expect(coordinator.snapshot().phase).toBe("RESUMED");
   expect(coordinator.snapshot().conversationHandle).toBe("chatgpt-conversation-2");
