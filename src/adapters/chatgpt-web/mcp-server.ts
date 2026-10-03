@@ -404,7 +404,7 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string, al
     "    has: (_target, name) => registryNames.has(name) || Reflect.has(source, name),",
     "    ownKeys: () => [...registryNames],",
     "    getOwnPropertyDescriptor: (_target, name) =>",
-    "      registryNames.has(name) || Reflect.has(source, name)",
+    "      registryNames.has(name)",
     "        ? { configurable: true, enumerable: true, writable: false, value: expose(name) }",
     "        : undefined,",
     "    set: () => false,",
