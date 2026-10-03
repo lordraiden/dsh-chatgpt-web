@@ -9,6 +9,7 @@ import {
   type ChatGptWebRecoveryTransport,
 } from "../src/adapters/chatgpt-web/replay-recovery";
 import { projectCanonicalChatGptWebContext } from "../src/adapters/chatgpt-web/context-projection";
+import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import type { CodexMessage } from "../src/types";
 
 const identity: ChatGptReplayIdentity = Object.freeze({
@@ -272,4 +273,34 @@ test("same replacement handle as the exhausted conversation is rejected", async 
   ).rejects.toMatchObject({ code: "replacement_handle_invalid" });
 
   expect(coordinator.snapshot().continuity).toBe("FAILED");
+});
+
+test("ProviderCore permits only an explicit context-exhaustion transition from EXACT_RESUME to REPLAY", () => {
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin({
+    executionKey: "execution-1",
+    traceId: "trace-1",
+    nativeTurnId: identity.turnId,
+    nativeThreadId: "thread-1",
+    accountIdentity: "account-1",
+    browserProfile: "profile-1",
+    browserContext: "context-1",
+    pageIdentity: "page-1",
+    capabilitySnapshot: {
+      snapshotId: identity.capabilitySnapshotId,
+      sessionId: identity.dshSessionId,
+      agentId: identity.agentId,
+      turnId: identity.turnId,
+      createdAt: Date.now(),
+      lifecycle: "active",
+      tools: [],
+    },
+    recovery: "EXACT_RESUME",
+  });
+
+  expect(() => turn.markRecovery("REPLAY")).toThrowError(/cannot downgrade exact resume/i);
+  turn.markReplayForContextExhaustion();
+  expect(turn.snapshot().recovery).toBe("REPLAY");
+  expect(turn.snapshot().recoveryReason).toBe("context_exhausted");
+  turn.failBeforePhysicalSettlement();
 });
