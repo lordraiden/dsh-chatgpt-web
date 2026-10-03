@@ -17,6 +17,8 @@ export type ProviderRecovery = "NEW" | "EXACT_RESUME" | "REPLAY" | "FAILED";
 
 export type SubmissionPhase = "prepared" | "send_activated" | "accepted";
 
+export type PhysicalSettlementOutcome = "not_started" | "pending" | "fulfilled" | "rejected";
+
 type RetryPolicy = "strict" | "side_effect_free";
 
 const TRANSITIONS: Record<ProviderTurnState, readonly ProviderTurnState[]> = {
@@ -29,8 +31,19 @@ const TRANSITIONS: Record<ProviderTurnState, readonly ProviderTurnState[]> = {
   RETIRED: [],
 };
 
+const RECOVERY_ORDER: Record<ProviderRecovery, number> = {
+  NEW: 0,
+  EXACT_RESUME: 1,
+  REPLAY: 1,
+  FAILED: 2,
+};
+
 function fingerprint(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function normalizeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export interface BrowserAccountLeaseDescriptor {
@@ -132,6 +145,8 @@ export interface ProviderTurnSnapshot {
   readonly logicalSettled: boolean;
   readonly physicalSettled: boolean;
   readonly physicalSettlementAttached: boolean;
+  readonly physicalSettlementOutcome: PhysicalSettlementOutcome;
+  readonly physicalSettlementError?: string;
   readonly retryPolicy: RetryPolicy;
   readonly lease: ReturnType<BrowserAccountLease["provenance"]>;
   readonly provenance: ProviderTurnProvenance;
@@ -146,6 +161,8 @@ export class ProviderTurnLifecycle {
   private physicalSettled = false;
   private physicalSettlement: Promise<void> = Promise.resolve();
   private physicalSettlementAttached = false;
+  private physicalSettlementOutcome: PhysicalSettlementOutcome = "not_started";
+  private physicalSettlementError?: Error;
   private retirementScheduled = false;
 
   constructor(
@@ -165,6 +182,10 @@ export class ProviderTurnLifecycle {
       logicalSettled: this.logicalSettled,
       physicalSettled: this.physicalSettled,
       physicalSettlementAttached: this.physicalSettlementAttached,
+      physicalSettlementOutcome: this.physicalSettlementOutcome,
+      ...(this.physicalSettlementError
+        ? { physicalSettlementError: this.physicalSettlementError.message }
+        : {}),
       retryPolicy: this.retryPolicy,
       lease: this.lease.provenance(),
       provenance: this.provenance,
@@ -180,16 +201,30 @@ export class ProviderTurnLifecycle {
     if (next === "RETIRED") this.activity = "idle";
   }
 
+  private assertMutable(): void {
+    if (this.state === "SETTLING" || this.state === "RETIRED") {
+      throw new Error(`Provider turn is ${this.state.toLowerCase()} and cannot accept lifecycle mutations`);
+    }
+    if (!this.lease.isActive()) {
+      throw new Error("Provider turn lease is no longer active");
+    }
+  }
+
   markLeased(): void {
-    if (this.state === "PREPARING") this.transition("LEASED");
+    if (this.state !== "PREPARING") return;
+    this.assertMutable();
+    this.transition("LEASED");
   }
 
   markSurfaceReady(): void {
-    if (this.state === "LEASED" || this.state === "PREPARING") this.transition("SURFACE_READY");
+    if (this.state !== "LEASED" && this.state !== "PREPARING") return;
+    this.assertMutable();
+    this.transition("SURFACE_READY");
   }
 
   markSendActivated(): void {
     if (this.submission !== "prepared") return;
+    this.assertMutable();
     this.submission = "send_activated";
     if (this.state === "SURFACE_READY") {
       this.transition("SUBMITTED");
@@ -197,18 +232,20 @@ export class ProviderTurnLifecycle {
   }
 
   markSubmitted(): void {
+    if (this.submission === "accepted") return;
+    this.assertMutable();
     this.submission = "accepted";
-    if (this.state === "SURFACE_READY" || this.state === "SUBMITTED") {
-      if (this.state === "SURFACE_READY") this.transition("SUBMITTED");
-    }
+    if (this.state === "SURFACE_READY") this.transition("SUBMITTED");
   }
 
   markRunning(): void {
+    this.assertMutable();
     if (this.state === "SUBMITTED") this.transition("RUNNING");
     this.activity = "running";
   }
 
   markCapabilityWait(): void {
+    this.assertMutable();
     if (this.state !== "RUNNING") {
       throw new Error(`Capability wait requires a running provider turn, got ${this.state}`);
     }
@@ -216,10 +253,20 @@ export class ProviderTurnLifecycle {
   }
 
   markRecovery(value: Exclude<ProviderRecovery, "NEW">): void {
+    this.assertMutable();
+    const currentOrder = RECOVERY_ORDER[this.recovery];
+    const nextOrder = RECOVERY_ORDER[value];
+    if (nextOrder < currentOrder) {
+      throw new Error(`Provider recovery cannot downgrade: ${this.recovery} -> ${value}`);
+    }
+    if (this.recovery === "EXACT_RESUME" && value === "REPLAY") {
+      throw new Error("Provider recovery cannot downgrade exact resume to replay");
+    }
     this.recovery = value;
   }
 
   markLogicalSettled(): void {
+    this.assertMutable();
     this.logicalSettled = true;
   }
 
@@ -237,11 +284,12 @@ export class ProviderTurnLifecycle {
       throw new Error("Provider turn physical settlement can only be attached once");
     }
     this.physicalSettlementAttached = true;
-    this.physicalSettlement = settlement.then(
-      () => undefined,
-      () => undefined,
+    this.physicalSettlementOutcome = "pending";
+    this.physicalSettlement = settlement;
+    void settlement.then(
+      () => this.finishPhysicalSettlement("fulfilled"),
+      error => this.finishPhysicalSettlement("rejected", error),
     );
-    void this.physicalSettlement.then(() => this.finishPhysicalSettlement());
   }
 
   async waitForPhysicalSettlement(): Promise<void> {
@@ -256,15 +304,21 @@ export class ProviderTurnLifecycle {
     this.markLogicalSettled();
     if (this.state !== "SETTLING") this.transition("SETTLING");
     this.physicalSettled = true;
+    this.physicalSettlementOutcome = "not_started";
     this.activity = "idle";
     this.releaseLease();
     this.transition("RETIRED");
     this.onRetired();
   }
 
-  private finishPhysicalSettlement(): void {
+  private finishPhysicalSettlement(
+    outcome: Extract<PhysicalSettlementOutcome, "fulfilled" | "rejected">,
+    error?: unknown,
+  ): void {
     if (this.physicalSettled) return;
     this.physicalSettled = true;
+    this.physicalSettlementOutcome = outcome;
+    if (outcome === "rejected") this.physicalSettlementError = normalizeError(error);
     this.activity = "idle";
     if (this.state !== "RETIRED") {
       if (this.state !== "SETTLING") this.transition("SETTLING");
@@ -277,12 +331,17 @@ export class ProviderTurnLifecycle {
   scheduleRetirementAfterPhysicalSettlement(): void {
     if (this.retirementScheduled) return;
     this.retirementScheduled = true;
-    void this.waitForPhysicalSettlement();
+    // The settlement handler attached above owns the retirement transition. This method only records
+    // that retirement is intentionally bound to physical settlement and therefore must not be forced
+    // synchronously by a logical response observer.
   }
 
   assertCanAct(): void {
     if (this.state === "SETTLING" || this.state === "RETIRED") {
       throw new Error("Provider turn is retired and cannot accept capability work");
+    }
+    if (!this.lease.isActive()) {
+      throw new Error("Provider turn lease is no longer active");
     }
   }
 
@@ -376,6 +435,7 @@ export class ChatGptWebProviderCore {
     turn.scheduleRetirementAfterPhysicalSettlement();
     return turn;
   }
+
   forget(executionKey: string): void {
     const turn = this.turns.get(executionKey);
     if (!turn) return;
