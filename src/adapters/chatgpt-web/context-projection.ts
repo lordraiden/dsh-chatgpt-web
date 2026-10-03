@@ -96,7 +96,7 @@ export function withoutRetiredTurnHandles(contextJson: string): string {
 
 
 /**
- * Apply the provider's per-message image budget after canonical projection.
+ * Apply the provider's measured Free-Web transport image budget after canonical projection.
  *
  * This is deliberately separate from the canonical projection: canonical DSH context retains every
  * supported semantic image, while the transport projection may replace only the oldest excess
@@ -130,9 +130,9 @@ export function applyChatGptWebImageBudget(
       ) {
         return [{
           type: "text",
-          text: "[older image not attached: ChatGPT accepts at most "
+          text: "[older image not attached: Free ChatGPT Web bridge transport is capped at "
             + String(maxImages)
-            + " input images]",
+            + " images per request]",
         }];
       }
       return [part];
