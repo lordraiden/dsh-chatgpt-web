@@ -64,6 +64,8 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
   private readonly createBackend: (provider: ReturnType<typeof providerConfig>) => ProviderAdapter;
   private providerMemo: ReturnType<typeof providerConfig> | undefined;
   private backendMemo: ProviderAdapter | undefined;
+  private shuttingDown = false;
+  private shutdownPromise?: Promise<void>;
 
   constructor(deps: LlmAdapterDeps = {}) {
     super();
@@ -87,6 +89,9 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
   }
 
   private resolveBackend(): ProviderAdapter {
+    if (this.shuttingDown) {
+      throw new LlmError("ChatGPT Web provider is shutting down.", "PROVIDER_CONFIG");
+    }
     if (!this.backendMemo) {
       this.backendMemo = this.createBackend(this.resolveProvider());
     }
@@ -194,10 +199,14 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 
   /** Dispose the lazily-created browser provider without creating one during shutdown. */
   async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shuttingDown = true;
     const backend = this.backendMemo;
     this.backendMemo = undefined;
-    if (!backend?.shutdown) return;
-    await backend.shutdown();
+    this.shutdownPromise = backend?.shutdown
+      ? Promise.resolve(backend.shutdown())
+      : Promise.resolve();
+    await this.shutdownPromise;
   }
 }
 
