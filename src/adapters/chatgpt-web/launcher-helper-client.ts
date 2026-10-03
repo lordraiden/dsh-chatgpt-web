@@ -103,12 +103,15 @@ function parseHelperMessage(line: string): HelperMessage {
     const continuation = message.continuation;
     if (event === "surface_bound") {
       const binding = message.binding;
-      if (!binding || typeof binding !== "object"
-        || typeof binding.resourceId !== "string" || !binding.resourceId
-        || typeof binding.browserContextId !== "string" || !binding.browserContextId
-        || typeof binding.pageId !== "string" || !binding.pageId
-        || typeof binding.profileId !== "string" || !binding.profileId
-        || typeof binding.accountId !== "string" || !binding.accountId) {
+      if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+        throw new Error("Launcher browser helper physical surface binding is invalid");
+      }
+      const record = binding as Record<string, unknown>;
+      if (typeof record.resourceId !== "string" || !record.resourceId
+        || typeof record.browserContextId !== "string" || !record.browserContextId
+        || typeof record.pageId !== "string" || !record.pageId
+        || typeof record.profileId !== "string" || !record.profileId
+        || typeof record.accountId !== "string" || !record.accountId) {
         throw new Error("Launcher browser helper physical surface binding is invalid");
       }
       return {
@@ -116,11 +119,11 @@ function parseHelperMessage(line: string): HelperMessage {
         id: message.id,
         event,
         binding: {
-          resourceId: binding.resourceId,
-          browserContextId: binding.browserContextId,
-          pageId: binding.pageId,
-          profileId: binding.profileId,
-          accountId: binding.accountId,
+          resourceId: record.resourceId,
+          browserContextId: record.browserContextId,
+          pageId: record.pageId,
+          profileId: record.profileId,
+          accountId: record.accountId,
         },
       };
     }
