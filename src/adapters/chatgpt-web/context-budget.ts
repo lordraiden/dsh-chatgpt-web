@@ -153,27 +153,16 @@ export function decideChatGptWebContextCapacity(
   if (options.unsupportedContent) return { ...base, outcome: "unsupported_content", nextAction: "fail" };
 
   if (measurement.imageCount !== undefined && measurement.imageCount > budget.imageLimit) {
-    return {
-      ...base,
-      outcome: options.compactionAvailable ? "compaction_required" : "budget_exceeded",
-      nextAction: options.compactionAvailable ? "compact" : "fail",
-    };
+    return { ...base, outcome: "budget_exceeded", nextAction: "fail" };
   }
+  // An atomic composer/message boundary cannot be repaired by removing older history.
   if (budget.browserComposerCharLimit !== undefined
     && measurement.promptChars !== undefined
     && measurement.promptChars > budget.browserComposerCharLimit) {
-    return {
-      ...base,
-      outcome: options.compactionAvailable ? "compaction_required" : "budget_exceeded",
-      nextAction: options.compactionAvailable ? "compact" : "fail",
-    };
+    return { ...base, outcome: "budget_exceeded", nextAction: "fail" };
   }
   if (effectiveMessageTokenBudget !== undefined && measurement.estimatedMessageTokens > effectiveMessageTokenBudget) {
-    return {
-      ...base,
-      outcome: options.compactionAvailable ? "compaction_required" : "budget_exceeded",
-      nextAction: options.compactionAvailable ? "compact" : "fail",
-    };
+    return { ...base, outcome: "budget_exceeded", nextAction: "fail" };
   }
   if (measurement.estimatedInputTokens <= effectiveInputTokenBudget) {
     return { ...base, outcome: "fits", nextAction: "none" };
@@ -244,4 +233,3 @@ export const CONTEXT_COMPACTION_REQUIRED_CODE = "context_compaction_required";
 export const CONTEXT_UNSUPPORTED_CONTENT_CODE = "context_unsupported_content";
 export const CONTEXT_CANONICAL_STATE_MISSING_CODE = "context_canonical_state_missing";
 
-void CHATGPT_WEB_LUNA_MODEL_ID;
