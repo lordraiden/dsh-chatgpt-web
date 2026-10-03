@@ -8,8 +8,8 @@ import {
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
-import type { CapabilityToolResult } from "./capability-transport";
-import { assertCapabilitySnapshotBinding, capabilitySnapshotForEnvironment, type CapabilitySnapshot } from "./capability-projector";
+import type { CapabilityBinding, CapabilityToolResult } from "./capability-contract";
+import { capabilitySnapshotForEnvironment, type CapabilitySnapshot } from "./capability-projector";
 
 export interface BrokerToolRequest {
   callId: string;
@@ -665,6 +665,17 @@ export class TurnBroker implements TurnBrokerOwner {
     this.acceptingExternalOwners = accepted;
   }
 
+  private capabilityBinding(channel: TurnChannel): CapabilityBinding {
+    if (!channel.bindingId) throw new Error("turn capability binding is not established");
+    return {
+      bindingId: channel.bindingId,
+      snapshotId: channel.capabilitySnapshot.snapshotId,
+      sessionId: channel.capabilitySnapshot.sessionId,
+      agentId: channel.capabilitySnapshot.agentId,
+      turnId: channel.capabilitySnapshot.turnId,
+    };
+  }
+
   private retire(history: Map<string, string>, handle: string, traceId: string): void {
     history.delete(handle);
     history.set(handle, traceId);
@@ -1068,13 +1079,23 @@ export class TurnBroker implements TurnBrokerOwner {
         if (!existing || existing.token !== token || existing.channel !== activeChannel) {
           throw new Error("turn token binding state is inconsistent");
         }
-        return { bindingId: activeChannel.bindingId, activityId, environment: materializeEnvironment(activeChannel) };
+        return {
+          bindingId: activeChannel.bindingId,
+          activityId,
+          capabilityBinding: this.capabilityBinding(activeChannel),
+          environment: materializeEnvironment(activeChannel),
+        };
       }
       this.pending.delete(token);
       const bindingId = opaqueId("binding");
       activeChannel.bindingId = bindingId;
       this.bindings.set(bindingId, { token, channel: activeChannel });
-      return { bindingId, activityId, environment: materializeEnvironment(activeChannel) };
+      return {
+        bindingId,
+        activityId,
+        capabilityBinding: this.capabilityBinding(activeChannel),
+        environment: materializeEnvironment(activeChannel),
+      };
     }
 
     const bindingId = request.bindingId;
