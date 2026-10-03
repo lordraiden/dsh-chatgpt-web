@@ -437,6 +437,10 @@ export function createChatGptWebAdapter(
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
   const providerCore = new ChatGptWebProviderCore();
+  const shutdownController = new AbortController();
+  const activeRuns = new Set<Promise<void>>();
+  let shutdownPromise: Promise<void> | undefined;
+  let shuttingDown = false;
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
   const experimentalBiggerContext = provider.chatgptWeb?.experimentalBiggerContext;
   if (experimentalBiggerContext !== undefined && typeof experimentalBiggerContext !== "boolean") {
@@ -905,8 +909,27 @@ export function createChatGptWebAdapter(
 
   return {
     name: "chatgpt-web",
-    shutdown: () => providerCore.shutdown(),
+    shutdown: () => {
+      if (shutdownPromise) return shutdownPromise;
+      shuttingDown = true;
+      shutdownController.abort(new Error("ChatGPT Web provider is shutting down"));
+      chatGptTurnSessions.clear();
+      shutdownPromise = (async () => {
+        await Promise.allSettled([...activeRuns]);
+        await providerCore.shutdown();
+      })();
+      return shutdownPromise;
+    },
     async runTurn(parsed, incoming, emit) {
+      if (shuttingDown) {
+        throw new Error("ChatGPT Web provider is shutting down");
+      }
+      incoming = {
+        ...incoming,
+        abortSignal: incoming.abortSignal
+          ? AbortSignal.any([incoming.abortSignal, shutdownController.signal])
+          : shutdownController.signal,
+      };
       const runChatGptWebTurn = async (): Promise<void> => {
         const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
         if (manualRequest !== manualInteraction) {
@@ -1684,11 +1707,19 @@ export function createChatGptWebAdapter(
         () => emit({ type: "heartbeat" }),
         CHATGPT_WEB_ADAPTER_HEARTBEAT_MS,
       );
+      const runPromise = (async () => {
+        try {
+          emit({ type: "heartbeat" });
+          await runChatGptWebTurn();
+        } finally {
+          clearInterval(heartbeat);
+        }
+      })();
+      activeRuns.add(runPromise);
       try {
-        emit({ type: "heartbeat" });
-        await runChatGptWebTurn();
+        await runPromise;
       } finally {
-        clearInterval(heartbeat);
+        activeRuns.delete(runPromise);
       }
     },
   };
