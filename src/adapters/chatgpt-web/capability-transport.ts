@@ -76,6 +76,9 @@ function normalizeBinding(binding: CapabilityTransportBinding): CapabilityTransp
   if (binding.snapshot.lifecycle !== "active") {
     throw new Error("capability transport binding snapshot is not active");
   }
+  if (binding.snapshot.expiresAt !== undefined && binding.snapshot.expiresAt <= Date.now()) {
+    throw new Error("capability transport binding snapshot is expired");
+  }
   return Object.freeze({ ...binding });
 }
 
@@ -127,6 +130,7 @@ export class BrokerCapabilityTransport implements CapabilityTransport {
             `capability transport invocation mode does not match the authorized tool: ${capabilityRequest.wireName}`,
           );
         }
+        assertLive();
         return this.dispatcher.invoke(binding, {
           ...request,
           wireName: capabilityRequest.wireName,
