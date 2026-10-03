@@ -101,8 +101,15 @@ test("context exhaustion is a terminal semantic provider condition", () => {
   expect(error.retryable).toBe(false);
   expect(error.status).toBe(409);
 });
+test("the semantic exhaustion error does not leak ChatGPT UI prose", () => {
+  const error = chatGptContextExhaustedError();
+  expect(error.message).toBe(
+    "The current ChatGPT Web conversation has reached its product context limit and must be replaced before the DSH turn can continue.",
+  );
+  expect(error.message).not.toContain("maximum length");
+});
 
-function runtimeForRetainedConversation(physicalSettlement: Promise<void>, release: () => void): ChatGptTurnRuntime {
+function runtimeForRetainedConversation(physicalSettlement: Promise<void>, release: () => void, conversationKey = "conversation-1"): ChatGptTurnRuntime {
   const capabilitySnapshot = projectChatGptCapabilities({
     sessionId: "dsh-session-1",
     agentId: "agent-1",
@@ -117,12 +124,75 @@ function runtimeForRetainedConversation(physicalSettlement: Promise<void>, relea
     physicalSettlement,
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
-    conversationKey: "conversation-1",
+    conversationKey,
     releaseRetainedConversation: async () => release(),
     cancel: () => {},
   };
 }
 
+test("conversation retirement preserves DSH identity while invalidating only the ChatGPT handle", async () => {
+  const sessions = new ChatGptTurnSessions();
+  let resolvePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { resolvePhysical = resolve; });
+  const runtime = runtimeForRetainedConversation(physicalSettlement, () => {});
+  const session = sessions.getOrCreate(
+    "execution-identity",
+    () => runtime,
+    "trace-identity",
+    "owner-identity",
+    "native-turn-identity",
+    "thread-identity",
+  );
+  const capabilitySnapshot = session.runtime.capabilitySnapshot;
+
+  const retirement = sessions.retireConversationAndWait("conversation-1");
+  expect(session.conversationKey()).toBeUndefined();
+  expect(session.ownerKey).toBe("owner-identity");
+  expect(session.nativeTurnId).toBe("native-turn-identity");
+  expect(session.nativeThreadId).toBe("thread-identity");
+  expect(session.runtime.capabilitySnapshot).toBe(capabilitySnapshot);
+  expect(sessions.find("execution-identity")).toBeUndefined();
+
+  resolvePhysical();
+  await retirement;
+});
+
+test("late state from an exhausted execution cannot become state of a replacement execution", async () => {
+  const sessions = new ChatGptTurnSessions();
+  let resolvePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { resolvePhysical = resolve; });
+  const oldRuntime = runtimeForRetainedConversation(physicalSettlement, () => {});
+  const oldSession = sessions.getOrCreate(
+    "execution-stale",
+    () => oldRuntime,
+    "trace-old",
+    "owner-old",
+    "native-turn-old",
+    "thread-old",
+  );
+
+  const retirement = sessions.retireConversationAndWait("conversation-1");
+  expect(sessions.find("execution-stale")).toBeUndefined();
+  expect(sessions.findConversationHead("conversation-1")).toBeUndefined();
+
+  // Simulate an already-queued browser callback arriving after logical invalidation.
+  oldSession.appendRoundReasoning("stale-round", ["stale browser event"]);
+
+  resolvePhysical();
+  await retirement;
+
+  const replacement = sessions.getOrCreate(
+    "execution-stale",
+    () => runtimeForRetainedConversation(Promise.resolve(), () => {}, "conversation-2"),
+    "trace-new",
+    "owner-new",
+    "native-turn-new",
+    "thread-new",
+  );
+  expect(sessions.find("execution-stale")).toBe(replacement);
+  expect(replacement.roundReasoning("stale-round")).toEqual([]);
+  expect(oldSession.roundReasoning("stale-round")).toEqual(["stale browser event"]);
+});
 test("confirmed exhaustion invalidates the retained conversation immediately but releases it only after physical settlement", async () => {
   const sessions = new ChatGptTurnSessions();
   let resolvePhysical!: () => void;
