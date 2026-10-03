@@ -1,4 +1,5 @@
 import { CHATGPT_WEB_PLATFORM_RESERVE_TOKENS } from "../../chatgpt-web-models";
+export { CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET } from "./context-budget";
 import { estimateTokens } from "../../lib/token-estimate";
 import {
   formatChatGptWebMultipartCommit,
@@ -16,8 +17,6 @@ const CHATGPT_ORIGINAL_IMAGE_RESERVE_TOKENS = 8_192;
  * but rejected the same shape at 32,283 before producing a response. This is a ChatGPT browser
  * transport boundary, not Luna's model context window, and applies to normal and checkpoint turns.
  */
-export const CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET = 128_000;
-
 const TOKEN_ESTIMATE_TRANSACTION = `ctx_${"0".repeat(32)}`;
 
 export function compiledChatGptWebMessages(compiled: CompiledChatGptWebPrompt): string[] {

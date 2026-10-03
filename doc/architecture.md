@@ -4,13 +4,27 @@
 **Implementation status:** Target architecture; implementation follows the phased backlog below  
 **Document role:** Single architectural source of truth for issues #8–#14  
 **Repository:** lordraiden/dsh-chatgpt-web  
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-03
 
 > API-like outside, product-native inside.
 
 This project makes an authenticated ChatGPT Web session available to DeepSeek Harness (DSH) as a native LLM provider. The public boundary is a normal DSH provider contract. The Phase 1 implementation is ChatGPT-Web-specific, while the browser execution seams are intentionally service-neutral enough to support future browser-backed providers without creating a generic provider framework. Browser interaction, product-side tool looping, account state, and UI recovery remain provider/service internals.
 
 The architecture is intentionally conservative. Phase 1 contains only the boundaries and invariants required for a solid first pilot. Phase 2 contains compatibility convergence, cleanup, and optional hardening that does not need to block the first native provider.
+
+### 1.3 Supported account matrix: ChatGPT Free Web only
+
+The supported product target for this plugin is an authenticated **ChatGPT Free account using the ChatGPT Web surface at chatgpt.com**. Paid ChatGPT plans and the OpenAI API are not part of the supported account matrix for this pilot.
+
+This distinction is architectural, not cosmetic:
+
+- OpenAI API model cards, API context windows, API token limits, and API pricing are **not authoritative** for this provider's browser transport budget.
+- Official ChatGPT Free documentation is authoritative for current Free-plan product availability and plan-level limits, but those limits can change independently of the API.
+- ChatGPT Web transport limits used by this adapter are provider measurements/guardrails for the Free Web surface. They must be documented as such and must not be presented as official API or model limits.
+- Any paid-account compatibility code retained elsewhere in the repository is outside the supported #11-A/#11-B contract and must not influence the Free-account context policy.
+
+The current OpenAI Free-plan documentation confirms that Free users have access to ChatGPT features through the product UI and that usage limits are plan/model dependent and mutable. The image-input documentation likewise states that the number of images that can be added depends on image size and accompanying text; therefore this provider may impose a conservative transport cap without treating that number as an OpenAI product maximum.
+
 
 ---
 
@@ -827,7 +841,7 @@ DSH session history remains canonical.
 
 Provider-specific compaction, rolling checkpoints, and replay handoff are optimization/transport state.
 
-They may reduce the amount of material physically re-submitted to ChatGPT Web, but they do not become a second DSH session log.
+They may reduce the amount of material physically re-submitted to ChatGPT Web, but they do not become a second DSH session log. For #11-B's deterministic transport reduction, required developer instructions, the latest user/agent/assistant continuity, and settled tool-call/result pairs are protected; older ordinary conversation may be omitted from the transport projection without mutating DSH's canonical history.
 
 If provider-private continuity is lost, replay comes from DSH state, not from a provider-owned substitute history.
 
@@ -862,6 +876,18 @@ Before submit:
 6. otherwise return a deterministic context error.
 
 Never rely on browser/editor truncation as context management.
+### 16.1 Free Web guardrails are empirical transport policy
+
+The current #11-B Free Web policy uses conservative measurements from the ChatGPT Web surface, not OpenAI API limits:
+
+- the visible browser input token ceiling is `128,000`;
+- the Luna composer boundary is `120,000` characters;
+- the transport image guardrail is `10` images per request;
+- the compaction-control envelope is capped at `110,000` JSON bytes.
+
+These values are adapter guardrails, not claims about the ChatGPT product's universal limits. OpenAI documents that Free-plan limits are mutable and that the number of image inputs depends on image size and accompanying text. When the Web surface changes, these measurements must be revalidated independently of API model documentation.
+
+The underlying model-context field used in diagnostics is informational only. It must never be used to admit a Free Web request beyond the measured browser transport budget.
 
 ---
 
@@ -1443,12 +1469,14 @@ These references were used to verify the architecture's external contracts and c
 
 - ChatGPT Free Tier FAQ:  
   https://help.openai.com/en/articles/9275245-chatgpt-free-tier-faq
+- ChatGPT image input FAQ:  
+  https://help.openai.com/en/articles/8400551-chatgpt-image-inputs-faq
 - Developer mode and MCP apps in ChatGPT:  
   https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt
 - ChatGPT Search:  
   https://help.openai.com/en/articles/9237897-chatgpt-search
 
-These pages describe mutable product behavior. They are not provider API contracts and must be re-checked when the supported account matrix changes.
+These pages describe mutable ChatGPT product behavior for the supported Free Web account matrix. They are not OpenAI API contracts. API model documentation, even when it describes the same underlying model family, MUST NOT be used to derive this browser adapter's Free Web transport budget. The supported account matrix and measured browser limits must be re-checked when ChatGPT Free product behavior changes.
 
 ### Model Context Protocol
 
