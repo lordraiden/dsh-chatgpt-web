@@ -703,7 +703,7 @@ export class ChatGptTurnSessions {
       this.conversationHeads.clear();
     } else {
       for (const [key, session] of this.conversationHeads) {
-        if (session.executionNamespace === executionNamespace) this.conversationHeads.delete(key);
+        if (session.ownerKey?.startsWith(`${executionNamespace}:`)) this.conversationHeads.delete(key);
       }
     }
     return matches.length;
