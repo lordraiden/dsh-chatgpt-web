@@ -9,6 +9,7 @@ import type {
   CapabilityBinding,
   CapabilityToolResult,
 } from "./capability-contract";
+export type { CapabilityToolResult } from "./capability-contract";
 
 export interface CapabilityTransportBinding extends CapabilityBinding {
   readonly snapshot: CapabilitySnapshot;
