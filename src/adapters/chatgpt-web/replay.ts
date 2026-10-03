@@ -261,7 +261,7 @@ export function createChatGptReplayBoundary(
     canonicalMessageCount: context.messages.length,
     settledToolCallIds: Object.freeze([...settledToolCallIds]),
     pendingToolCallIds: Object.freeze([...pendingToolCallIds]),
-    [CHATGPT_REPLAY_BOUNDARY_BRAND]: true,
+    [CHATGPT_REPLAY_BOUNDARY_BRAND]: true as const,
   });
 }
 
