@@ -80,6 +80,7 @@ function canonicalIdentity(
   sessionId: string,
   agentId: string,
   turnId: string,
+  createdAt: number,
   tools: readonly CodexTool[],
   expiresAt?: number,
 ): string {
@@ -87,6 +88,7 @@ function canonicalIdentity(
     sessionId,
     agentId,
     turnId,
+    createdAt,
     tools: canonicalToolSet(tools),
     expiresAt: expiresAt ?? null,
   })).digest("hex");
@@ -125,7 +127,7 @@ export function projectChatGptCapabilities(input: {
   const tools = cloneTools(input.tools);
   assertUniqueWireNames(tools);
   const snapshot: CapabilitySnapshot = {
-    snapshotId: canonicalIdentity(sessionId, agentId, turnId, tools, input.expiresAt),
+    snapshotId: canonicalIdentity(sessionId, agentId, turnId, createdAt, tools, input.expiresAt),
     sessionId,
     agentId,
     turnId,
@@ -162,7 +164,7 @@ export function assertCapabilitySnapshotIntegrity(snapshot: CapabilitySnapshot):
   ) {
     throw new Error("Capability snapshot identity is invalid");
   }
-  if (!Number.isFinite(snapshot.createdAt)) {
+  if (!Number.isSafeInteger(snapshot.createdAt) || snapshot.createdAt < 0) {
     throw new Error("Capability snapshot creation time is invalid");
   }
   if (
@@ -179,6 +181,7 @@ export function assertCapabilitySnapshotIntegrity(snapshot: CapabilitySnapshot):
     snapshot.sessionId,
     snapshot.agentId,
     snapshot.turnId,
+    snapshot.createdAt,
     snapshot.tools,
     snapshot.expiresAt,
   );
