@@ -133,10 +133,10 @@ assert.equal(identity.threadId, "dsh-session-parent");
     /already bound to a different capability snapshot/i,
   );
 
-  turn.failBeforePhysicalSettlement();
   assert.throws(
     () => core.begin({
       ...leaseInput("different-native-turn", firstSnapshot),
+      nativeThreadId: "provider-thread-2",
       executionKey: "execution-10c-different-turn",
     }),
     /capability snapshot is already bound to a different provider execution/i,
@@ -146,7 +146,7 @@ assert.equal(identity.threadId, "dsh-session-parent");
     ...parsed,
     context: {
       ...parsed.context,
-      tools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
+      tools: [{ name: "write", description: "Write", parameters: { type: "object" } }],
     },
   };
   assert.throws(
@@ -163,6 +163,7 @@ assert.equal(identity.threadId, "dsh-session-parent");
     ),
     /DSH identity changed during an active provider turn/i,
   );
+  turn.failBeforePhysicalSettlement();
 }
 
 {
