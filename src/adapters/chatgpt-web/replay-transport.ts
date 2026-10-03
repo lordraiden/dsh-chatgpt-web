@@ -58,10 +58,20 @@ function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
   });
 }
 
-function conversationHandleId(conversationKey: string, generation: number): string {
-  return createHash("sha256")
-    .update(JSON.stringify({ provider: "chatgpt-web", conversationKey, generation }))
-    .digest("hex");
+export function chatGptConversationHandleForEpoch(
+  conversationKey: string,
+  generation: number,
+): ChatGptConversationHandle {
+  if (!conversationKey.trim()) throw new Error("ChatGPT conversation handle requires a conversation key");
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error("ChatGPT conversation handle requires a positive safe generation");
+  }
+  return Object.freeze({
+    id: createHash("sha256")
+      .update(JSON.stringify({ provider: "chatgpt-web", conversationKey, generation }))
+      .digest("hex"),
+    generation,
+  });
 }
 
 function assertHandle(handle: ChatGptConversationHandle, expected: ChatGptConversationHandle, label: string): void {
@@ -78,10 +88,10 @@ export function createChatGptWebReplayTransport(
     throw new Error("ChatGPT replay replacement conversation generation overflowed");
   }
 
-  const replacement: ChatGptConversationHandle = Object.freeze({
-    id: conversationHandleId(dependencies.conversationKey, replacementGeneration),
-    generation: replacementGeneration,
-  });
+  const replacement = chatGptConversationHandleForEpoch(
+    dependencies.conversationKey,
+    replacementGeneration,
+  );
 
   let session: ChatGptTurnSession | undefined;
   let surfaceReady = false;
