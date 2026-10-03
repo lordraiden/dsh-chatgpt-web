@@ -28,6 +28,8 @@ import {
   type StreamChunk,
   type TokenUsage,
   type ToolSchema,
+  type ResolvedRetryPolicy,
+  resolveRetryPolicy,
 } from "@deepseek-ai/dsh-llm";
 import {
   availableChatGptWebModelRoutes,
@@ -93,6 +95,21 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: "ChatGPT Web" };
+  }
+
+  /**
+   * ChatGPT Web owns browser submission/recovery authority. Disable the optional
+   * DSH provider retry executor so a browser turn cannot be retried by two
+   * independent authorities.
+   */
+  override providerRetryPolicy(provider: string): ResolvedRetryPolicy {
+    return resolveRetryPolicy(
+      {
+        mode: "normal",
+        maxRetries: 0,
+      },
+      `llm.provider.${provider}.retryPolicy`,
+    );
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
