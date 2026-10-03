@@ -63,6 +63,7 @@ type InputMessage = RunMessage
   | MaintenanceMessage
   | { type: "prepared_selected_ack"; id: string; prepared: CompiledChatGptWebPrompt }
   | { type: "send_activation_ack"; id: string }
+  | { type: "surface_ready_ack"; id: string }
   | { type: "completion_fence_begin_ack"; id: string; requestId: number; revision: number | null }
   | { type: "completion_fence_commit_ack"; id: string; requestId: number; committed: boolean }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
@@ -91,6 +92,10 @@ const abortControllers = new Map<string, AbortController>();
 const turnProgress = new Map<string, ChatGptMirroredTurnProgress>();
 const preparedSelections = new Map<string, ReturnType<typeof createBrowserHelperPromptSelection>>();
 const sendActivationWaiters = new Map<string, {
+  resolve: () => void;
+  reject: (error: Error) => void;
+}>();
+const surfaceReadyWaiters = new Map<string, {
   resolve: () => void;
   reject: (error: Error) => void;
 }>();
@@ -124,6 +129,10 @@ function requestShutdown(): Promise<void> {
     waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
   }
   sendActivationWaiters.clear();
+  for (const waiter of surfaceReadyWaiters.values()) {
+    waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
+  }
+  surfaceReadyWaiters.clear();
   for (const waiter of completionFenceBeginWaiters.values()) {
     waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
   }
@@ -251,6 +260,22 @@ async function run(message: RunMessage): Promise<void> {
       },
     } : {}),
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
+    onPhysicalSurfaceBound: binding => {
+      if (!writeProtocol({ type: "event", id: message.id, event: "surface_bound", binding })) {
+        throw new Error("Browser helper could not persist physical surface binding");
+      }
+    },
+    onSurfaceReady: () => new Promise<void>((resolve, reject) => {
+      if (surfaceReadyWaiters.has(message.id)) {
+        reject(new Error("Browser helper surface readiness already awaits acknowledgement"));
+        return;
+      }
+      surfaceReadyWaiters.set(message.id, { resolve, reject });
+      if (!writeProtocol({ type: "event", id: message.id, event: "surface_ready" })) {
+        surfaceReadyWaiters.delete(message.id);
+        reject(new Error("Browser helper could not request surface readiness acknowledgement"));
+      }
+    }),
     onPreparedSelected: reused => {
       if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused })) {
         throw new Error("Browser helper could not request prompt selection");
@@ -314,6 +339,9 @@ async function run(message: RunMessage): Promise<void> {
     const sendWaiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);
     sendWaiter?.reject(new DOMException("Browser helper turn ended before Send acknowledgement", "AbortError"));
+    const surfaceReadyWaiter = surfaceReadyWaiters.get(message.id);
+    surfaceReadyWaiters.delete(message.id);
+    surfaceReadyWaiter?.reject(new DOMException("Browser helper turn ended before surface readiness acknowledgement", "AbortError"));
     const beginWaiter = completionFenceBeginWaiters.get(message.id);
     completionFenceBeginWaiters.delete(message.id);
     beginWaiter?.reject(new DOMException("Browser helper turn ended before completion-fence begin", "AbortError"));
@@ -418,6 +446,14 @@ input.on("line", line => {
       return;
     }
     sendActivationWaiters.delete(message.id);
+    waiter.resolve();
+  } else if (message.type === "surface_ready_ack") {
+    const waiter = surfaceReadyWaiters.get(message.id);
+    if (!waiter) {
+      writeProtocol({ type: "error", id: message.id, message: "Browser helper has no pending surface readiness" });
+      return;
+    }
+    surfaceReadyWaiters.delete(message.id);
     waiter.resolve();
   } else if (message.type === "completion_fence_begin_ack") {
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
