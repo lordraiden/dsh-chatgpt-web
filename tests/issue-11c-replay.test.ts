@@ -125,6 +125,7 @@ test("replacement must be a fresh conversation identity", async () => {
   const coordinator = new ChatGptReplayCoordinator();
 
   await expect(coordinator.replay({
+    trigger,
     exhaustedConversation: { id: "conversation-1", generation: 1 },
     identity,
     context,
@@ -142,6 +143,7 @@ test("ambiguous replay boundary fails closed before browser replacement", async 
   const coordinator = new ChatGptReplayCoordinator();
 
   await expect(coordinator.replay({
+    trigger,
     exhaustedConversation: { id: "conversation-1", generation: 1 },
     identity,
     context,
@@ -161,6 +163,7 @@ test("settled tool ids may not be duplicated", async () => {
   const coordinator = new ChatGptReplayCoordinator();
 
   await expect(coordinator.replay({
+    trigger,
     exhaustedConversation: { id: "conversation-1", generation: 1 },
     identity,
     context,
@@ -188,6 +191,7 @@ test("replacement readiness is a hard gate", async () => {
   const coordinator = new ChatGptReplayCoordinator();
 
   await expect(coordinator.replay({
+    trigger,
     exhaustedConversation: { id: "conversation-1", generation: 1 },
     identity,
     context,
@@ -205,6 +209,7 @@ test("a late callback from the old conversation stays rejected after replay comp
   const coordinator = new ChatGptReplayCoordinator();
 
   await coordinator.replay({
+    trigger,
     exhaustedConversation: { id: "conversation-1", generation: 1 },
     identity,
     context,
@@ -278,6 +283,7 @@ test("replacement binding cannot change DSH session, agent, turn, snapshot, or c
   const coordinator = new ChatGptReplayCoordinator();
 
   await expect(coordinator.replay({
+    trigger,
     exhaustedConversation: { id: "conversation-1", generation: 1 },
     identity,
     context,
