@@ -78,7 +78,10 @@ import {
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
   notifyLauncherTurn,
 } from "../../launcher-browser-host";
-import { resolveChatGptWebTransportLimits } from "../../chatgpt-web-models";
+import {
+  resolveChatGptWebContextLimits,
+  resolveChatGptWebTransportLimits,
+} from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import {
