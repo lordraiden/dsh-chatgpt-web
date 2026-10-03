@@ -22,7 +22,6 @@ test("detects the canonical maximum-conversation-length surface", () => {
     kind: "context_exhausted",
     variant: "maximum-conversation-length",
     source: "surface-structure",
-    text: "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat.",
   });
 });
 
