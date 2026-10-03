@@ -1074,7 +1074,7 @@ export class TurnBroker implements TurnBrokerOwner {
       const bindingId = opaqueId("binding");
       activeChannel.bindingId = bindingId;
       this.bindings.set(bindingId, { token, channel: activeChannel });
-      return { bindingId, activityId, environment: activeChannel.environment };
+      return { bindingId, activityId, environment: materializeEnvironment(activeChannel) };
     }
 
     const bindingId = request.bindingId;
