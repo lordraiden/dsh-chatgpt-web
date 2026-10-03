@@ -87,21 +87,31 @@ test("canonical projection is deterministic and does not mutate source state", (
   expect(serializeCanonicalChatGptWebContext(first)).toBe(serializeCanonicalChatGptWebContext(second));
 });
 
-test("stale browser/broker handles are sanitized from transport serialization", () => {
+test("transport handles are sanitized without corrupting semantic tool ids", () => {
   const raw = JSON.stringify({
     version: 3,
     system: ["system"],
     messages: [
       { role: "tool_result", tool_call_id: "turn_abcdefghijklmnopqrstuvwxyz", content: "x" },
-      { role: "assistant", content: [{ type: "tool_call", id: "binding_abcdefghijklmnopqrstuvwxyz", name: "x", arguments: {} }] },
+      {
+        role: "assistant",
+        content: [{
+          type: "tool_call",
+          id: "binding_abcdefghijklmnopqrstuvwxyz",
+          name: "x",
+          arguments: {},
+        }],
+      },
     ],
+    __transport_handle: "turn_transport_abcdefghijklmnopqrstuvwxyz",
   });
   const sanitized = withoutRetiredTurnHandles(raw);
-  expect(sanitized).toContain("[retired turn handle]");
-  expect(sanitized).toContain("[retired binding handle]");
-  expect(sanitized).not.toContain("turn_abcdefghijklmnopqrstuvwxyz");
-  expect(sanitized).not.toContain("binding_abcdefghijklmnopqrstuvwxyz");
+  expect(sanitized).toContain("turn_abcdefghijklmnopqrstuvwxyz");
+  expect(sanitized).toContain("binding_abcdefghijklmnopqrstuvwxyz");
+  expect(sanitized).toContain("[retired transport handle]");
+  expect(sanitized).not.toContain("turn_transport_abcdefghijklmnopqrstuvwxyz");
 });
+
 
 test("superseded model-switch contracts are removed without losing current history", () => {
   const normalized = withoutSupersededModelSwitchContracts(sampleMessages());
@@ -113,4 +123,15 @@ test("superseded model-switch contracts are removed without losing current histo
     "<model_switch>new</model_switch>",
     "<skills_instructions>new skill catalog</skills_instructions>",
   ]);
+});
+
+test("replay fixture is generated entirely from canonical DSH state", () => {
+  const projected = projectCanonicalChatGptWebContext(["system instruction"], sampleMessages());
+  const replayFixture = serializeCanonicalChatGptWebContext(projected);
+  expect(replayFixture).toContain("<model_switch>new</model_switch>");
+  expect(replayFixture).toContain("call-1");
+  expect(replayFixture).toContain("file contents");
+  expect(replayFixture).not.toContain("chatgpt.com");
+  expect(replayFixture).not.toContain("conversationId");
+  expect(replayFixture).not.toContain("threadId");
 });
