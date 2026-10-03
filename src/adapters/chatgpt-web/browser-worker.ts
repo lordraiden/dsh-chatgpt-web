@@ -93,6 +93,10 @@ import {
   chatGptStoppedThinkingError,
 } from "./adapter-error";
 import {
+  detectChatGptContextExhaustion,
+  type ChatGptContextExhaustionObservation,
+} from "./context-exhaustion";
+import {
   ChatGptLunaCheckpointStream,
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
@@ -843,6 +847,77 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   throw new ChatGptWebAdapterError(
     "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
     { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
+  );
+}
+
+const chatGptContextExhaustionActionHint = /new chat|new conversation|start(?:ing)? a new (?:chat|conversation|one)|nuevo chat|nueva conversaci|nouveau chat|nouvelle conversation|neuer chat|neue unterhaltung|nuova chat|nuova conversazione|novo chat|nova conversa|新聊天|新对话|新對話|新しいチャット|新しい会話|새 채팅|새 대화/i;
+
+async function throwIfChatGptContextExhausted(page: Page): Promise<void> {
+  const observations = await page.evaluate(() => {
+    const visible = (element: Element): boolean => {
+      const candidate = element as HTMLElement;
+      const style = getComputedStyle(candidate);
+      return candidate.isConnected
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+        && style.opacity !== "0";
+    };
+    const compact = (value: string | null | undefined): string => (
+      (value ?? "").replace(/\s+/g, " ").trim().slice(0, 4_000)
+    );
+    const output: ChatGptContextExhaustionObservation[] = [];
+    const seen = new Set<Element>();
+    const add = (element: Element): void => {
+      if (seen.has(element) || !visible(element)) return;
+      seen.add(element);
+      const candidate = element as HTMLElement;
+      const actionLabels = [...candidate.querySelectorAll<HTMLElement>('button, a, [role="button"]')]
+        .filter(visible)
+        .map(action => compact(action.innerText || action.textContent || action.getAttribute("aria-label")))
+        .filter(Boolean)
+        .slice(-12);
+      output.push({
+        role: candidate.getAttribute("role"),
+        testId: candidate.getAttribute("data-testid"),
+        ariaLabel: candidate.getAttribute("aria-label"),
+        text: compact(candidate.innerText || candidate.textContent),
+        actionLabels,
+        withinAssistantTurn: Boolean(
+          candidate.closest('[data-message-author-role="assistant"], [data-turn="assistant"]'),
+        ),
+      });
+    };
+
+    for (const element of document.querySelectorAll<HTMLElement>(
+      '[role="alert"], [role="dialog"], [role="status"]',
+    )) {
+      add(element);
+    }
+    for (const action of document.querySelectorAll<HTMLElement>('button, a, [role="button"]')) {
+      if (!visible(action)) continue;
+      const label = compact(action.innerText || action.textContent || action.getAttribute("aria-label"));
+      if (!chatGptContextExhaustionActionHint.test(label)) continue;
+      let ancestor: Element | null = action;
+      for (let depth = 0; depth < 5 && ancestor; depth += 1) {
+        add(ancestor);
+        ancestor = ancestor.parentElement;
+      }
+    }
+    return output;
+  });
+
+  const signal = observations.find(observation => detectChatGptContextExhaustion(observation));
+  if (!signal) return;
+  throw new ChatGptWebAdapterError(
+    signal.text
+      ? `ChatGPT reported a terminal conversation-length limit: ${signal.text}`
+      : "ChatGPT reported a terminal conversation-length limit.",
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: "context_exhausted",
+      retryable: false,
+    },
   );
 }
 
@@ -2899,6 +2974,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(observationPage);
       await throwIfChatGptRateLimitDialog(observationPage);
+      await throwIfChatGptContextExhausted(observationPage);
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.submissionDomState(
@@ -3525,6 +3601,7 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
       await throwIfChatGptSessionFailureAlert(page);
+      await throwIfChatGptContextExhausted(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
@@ -4898,6 +4975,7 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
+        await throwIfChatGptContextExhausted(page);
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(

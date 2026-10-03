@@ -21,7 +21,7 @@ import {
 import { type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
+import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
 import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
@@ -1634,6 +1634,19 @@ export function createChatGptWebAdapter(
             throw error;
           }
           const turnError = submittedTurnFailure(session, error);
+          if (
+            turnError instanceof ChatGptWebAdapterError
+            && turnError.code === CHATGPT_CONTEXT_EXHAUSTED_CODE
+          ) {
+            const exhaustedConversationKey = session.conversationKey();
+            if (exhaustedConversationKey) {
+              void chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey).catch(retirementError => {
+                console.error(
+                  `[chatgpt-web] failed to invalidate exhausted conversation: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
+                );
+              });
+            }
+          }
           const retryAllowed = providerTurn.canAutomaticallyRetry();
           const retryCandidate = turnError instanceof ChatGptWebAdapterError && turnError.retryable
             ? (
