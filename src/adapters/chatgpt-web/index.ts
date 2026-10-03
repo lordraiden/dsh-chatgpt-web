@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import Ajv from "ajv";
 import { resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
@@ -399,10 +400,24 @@ function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSess
 }
 
 function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequest[]): void {
-  const available = new Set((parsed.context.tools ?? []).map(tool => namespacedToolName(tool.namespace, tool.name)));
+  const advertised = new Map(
+    (parsed.context.tools ?? []).map(tool => [namespacedToolName(tool.namespace, tool.name), tool]),
+  );
+  const ajv = new Ajv({ allErrors: true, strict: false });
+
   for (const request of requests) {
-    if (!available.has(request.wireName)) {
+    const tool = advertised.get(request.wireName);
+    if (!tool) {
       throw new Error(`ChatGPT requested a tool that the active Codex round did not advertise: ${request.wireName}`);
+    }
+    if (request.freeform || tool.freeform === true || tool.toolSearch === true) {
+      throw new Error(`ChatGPT Web local capability does not support freeform/tool-search tool semantics: ${request.wireName}`);
+    }
+    const validate = ajv.compile(tool.parameters);
+    if (!validate(request.arguments ?? {})) {
+      throw new Error(
+        `ChatGPT requested invalid arguments for tool ${request.wireName}: ${ajv.errorsText(validate.errors)}`,
+      );
     }
   }
 }
@@ -1232,6 +1247,7 @@ export function createChatGptWebAdapter(
           providerTurn.failBeforePhysicalSettlement();
           throw error;
         }
+        providerTurn.attachCancellation(reason => session.cancel(reason));
         if (!providerTurn.snapshot().physicalSettlementAttached) {
           providerCore.bindPhysicalSettlement(executionKey, session.physicalSettlement);
         }
@@ -1586,6 +1602,9 @@ export function createChatGptWebAdapter(
           });
         } catch (error) {
           if (incoming.abortSignal?.aborted && error instanceof DOMException && error.name === "AbortError") {
+            if (!providerTurn.snapshot().logicalSettled) {
+              providerTurn.markLogicalSettled("cancelled");
+            }
             if (session.runtime.manualControl) {
               // Zero Risk is user-driven and has no DOM observer that can distinguish continued
               // work from a stopped native turn. A closed Responses stream is therefore terminal:
@@ -1638,7 +1657,7 @@ export function createChatGptWebAdapter(
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
           if (handledError instanceof ChatGptWebAdapterError) {
-            providerTurn.markLogicalSettled();
+            providerTurn.markLogicalSettled("failed");
             emitRoundEvent({
               type: "error",
               message: handledError.message,
@@ -1651,7 +1670,7 @@ export function createChatGptWebAdapter(
             return;
           }
           providerTurn.markRecovery("FAILED");
-          providerTurn.markLogicalSettled();
+          providerTurn.markLogicalSettled("failed");
           session.failRound(roundKey, turnError);
           chatGptWebTurnRetryPolicy.clear(retryKey);
           throw turnError;
