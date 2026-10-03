@@ -26,6 +26,8 @@ assert(plugin.includes("loader/volatile-update"), "runtime must react to live po
 assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
 assert(plugin.includes("resolveLauncher(config.bunPath, port)"), "launcher must use the effective configured port");
 assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
+assert(plugin.includes("let startGeneration = 0"), "live reconfiguration must invalidate an in-flight start");
+assert(plugin.includes("if (spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
 assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
 assert(cli.includes('takeOption(args, "--host")'), "serve must accept a host override");
 assert(cli.includes('takeOption(args, "--port")'), "serve must accept a port override");
