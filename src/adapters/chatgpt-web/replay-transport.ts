@@ -27,6 +27,7 @@ export interface ChatGptWebReplayTransportDependencies {
   readonly exhaustedConversation: ChatGptConversationHandle;
   readonly capabilitySnapshot: CapabilitySnapshot;
   readonly startRuntime: (options: ChatGptWebReplayRuntimeOptions) => ChatGptTurnRuntime;
+  readonly onSessionCreated?: (session: ChatGptTurnSession) => void;
   readonly signal?: AbortSignal;
 }
 
@@ -150,6 +151,7 @@ export function createChatGptWebReplayTransport(
       if (session.runtime.conversationKey?.trim() !== dependencies.conversationKey) {
         throw new Error("ChatGPT replay replacement runtime is not attached to the retained conversation");
       }
+      dependencies.onSessionCreated?.(session);
 
       void session.browserOutcome.then(outcome => {
         if (!surfaceReady) {
