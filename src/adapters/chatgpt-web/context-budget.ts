@@ -1,10 +1,9 @@
 import {
-  CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
-  resolveChatGptWebContextLimits,
-  resolveChatGptWebTransportLimits,
+  CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT,
+  CHATGPT_WEB_LUNA_CONTEXT_WINDOW,
+  CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
   type ChatGptWebAdapterEffort,
-  type ChatGptWebBackendModel,
 } from "../../chatgpt-web-models";
 import type { CodexMessage } from "../../types";
 
@@ -84,27 +83,32 @@ export interface ChatGptWebCapacityDecisionOptions {
 export function resolveChatGptWebContextBudget(
   modelId: string,
   effort: ChatGptWebAdapterEffort,
-  capabilities: Pick<{ solAvailable: boolean; proAvailable: boolean; experimentalBiggerContext?: boolean }, "solAvailable" | "proAvailable" | "experimentalBiggerContext">,
+  _capabilities: Pick<{ solAvailable: boolean; proAvailable: boolean; experimentalBiggerContext?: boolean }, "solAvailable" | "proAvailable" | "experimentalBiggerContext">,
 ): ChatGptWebContextBudget {
-  const backendModel = modelId as ChatGptWebBackendModel;
-  const limits = resolveChatGptWebContextLimits(backendModel, effort, capabilities);
-  const transport = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
-  const browserMessageTokenLimit = modelId === CHATGPT_WEB_LUNA_BACKEND_MODEL
-    ? CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET
-    : transport.browserMessageTokenLimit;
-  const outputHeadroomTokens = Math.max(0, limits.contextWindow - limits.autoCompactTokenLimit);
+  // #11-B is intentionally scoped to authenticated ChatGPT Free Web accounts. Paid-account
+  // context windows and API model cards are not authoritative here. Current Free Web access is
+  // represented by the Luna route; product/transport limits are measured on the browser surface.
+  if (modelId !== CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+    throw new Error(
+      "ChatGPT Web context budgeting is defined only for the supported Free-account Luna route",
+    );
+  }
+
+  const preCompactionInputBudget = CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET;
+  const outputHeadroomTokens = Math.max(
+    0,
+    CHATGPT_WEB_LUNA_CONTEXT_WINDOW - preCompactionInputBudget,
+  );
 
   return {
     modelId,
     effort,
-    theoreticalContextWindow: limits.contextWindow,
-    preCompactionInputBudget: limits.autoCompactTokenLimit,
+    theoreticalContextWindow: CHATGPT_WEB_LUNA_CONTEXT_WINDOW,
+    preCompactionInputBudget,
     outputHeadroomTokens,
     platformReserveTokens: CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
-    ...(browserMessageTokenLimit !== undefined ? { browserMessageTokenLimit } : {}),
-    ...(transport.browserComposerCharLimit !== undefined
-      ? { browserComposerCharLimit: transport.browserComposerCharLimit }
-      : {}),
+    browserMessageTokenLimit: CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET,
+    browserComposerCharLimit: CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT,
     imageLimit: CHATGPT_WEB_DEFAULT_IMAGE_LIMIT,
   };
 }
@@ -127,7 +131,12 @@ export function decideChatGptWebContextCapacity(
   }
 
   const partCount = options.partCount ?? 1;
-  const effectiveInputTokenBudget = budget.preCompactionInputBudget * partCount;
+  // The effective context budget cannot exceed either the provider pre-compaction threshold or the
+  // browser's atomic single-message token boundary.
+  const effectiveInputTokenBudget = Math.min(
+    budget.preCompactionInputBudget,
+    budget.browserMessageTokenLimit ?? Number.POSITIVE_INFINITY,
+  ) * partCount;
   const effectiveMessageTokenBudget = budget.browserMessageTokenLimit;
   const diagnostics = {
     estimatedInputTokens: measurement.estimatedInputTokens,
@@ -137,7 +146,10 @@ export function decideChatGptWebContextCapacity(
     ...(measurement.serializedInputBytes !== undefined ? { serializedInputBytes: measurement.serializedInputBytes } : {}),
     partCount,
     theoreticalContextWindow: budget.theoreticalContextWindow * partCount,
-    preCompactionInputBudget: budget.preCompactionInputBudget * partCount,
+    preCompactionInputBudget: Math.min(
+      budget.preCompactionInputBudget,
+      budget.browserMessageTokenLimit ?? Number.POSITIVE_INFINITY,
+    ) * partCount,
     outputHeadroomTokens: budget.outputHeadroomTokens * partCount,
     platformReserveTokens: budget.platformReserveTokens,
   };
