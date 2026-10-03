@@ -117,6 +117,21 @@ assert.equal(identity.threadId, "dsh-session-parent");
     await broker.close();
   }
 
+  const changedSnapshot = projectChatGptCapabilities({
+    sessionId: firstSnapshot.sessionId,
+    agentId: firstSnapshot.agentId,
+    turnId: firstSnapshot.turnId,
+    tools: [],
+  });
+  assert.notEqual(changedSnapshot.snapshotId, firstSnapshot.snapshotId);
+  assert.throws(
+    () => core.begin({
+      ...leaseInput(identity.turnId!, changedSnapshot),
+      executionKey,
+    }),
+    /already bound to a different capability snapshot/i,
+  );
+
   const changedToolsParsed = {
     ...parsed,
     context: {
@@ -151,6 +166,20 @@ assert.equal(identity.threadId, "dsh-session-parent");
   assert.notEqual(childIdentity.dshSessionId, identity.dshSessionId);
   assert.notEqual(childSnapshot.snapshotId, parentSnapshot.snapshotId);
   assert.notEqual(childSnapshot.agentId, parentSnapshot.agentId);
+
+  const parentTurn = core.begin({
+    ...leaseInput(identity.turnId!, parentSnapshot),
+    executionKey: "execution-parent",
+  });
+  assert.equal(parentTurn.snapshot().capabilitySnapshot, parentSnapshot);
+  parentTurn.failBeforePhysicalSettlement();
+  const childTurn = core.begin({
+    ...leaseInput(childIdentity.turnId!, childSnapshot),
+    executionKey: "execution-child",
+  });
+  assert.equal(childTurn.snapshot().capabilitySnapshot, childSnapshot);
+  assert.notEqual(childTurn.snapshot().capabilitySnapshot, parentTurn.snapshot().capabilitySnapshot);
+  childTurn.failBeforePhysicalSettlement();
 }
 
 for (const [label, toolArguments] of [
