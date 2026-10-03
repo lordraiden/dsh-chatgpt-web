@@ -9,6 +9,7 @@ import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgp
 
 export interface CordisContext {
   effect?: (cb: () => void | Promise<void> | (() => void) | (() => Promise<void>)) => void;
+  on?: (event: string, callback: () => void | Promise<void>) => unknown;
   logger?: (name: string) => {
     info(msg: string): void;
     warn(msg: string): void;
