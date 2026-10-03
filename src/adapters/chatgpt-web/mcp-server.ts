@@ -7,6 +7,7 @@ import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { BrokerCapabilityTransport, type BoundCapabilityTransport } from "./capability-transport";
+import type { CapabilityBinding } from "./capability-contract";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
 
 interface ClaimedTurn {
@@ -473,6 +474,8 @@ export async function runChatGptMcpServer(options: {
     try {
       const claimed = await callTurnBroker<{
         bindingId: string;
+        activityId: string;
+        capabilityBinding: CapabilityBinding;
         environment: ChatGptTurnEnvironment & { expiresAt?: number };
       }>(
         options.brokerSocketPath,
@@ -482,6 +485,9 @@ export async function runChatGptMcpServer(options: {
       );
       const snapshot = claimed.environment.capabilitySnapshot;
       if (!snapshot) throw new Error("Codex turn claim did not include an immutable capability snapshot");
+      if (claimed.capabilityBinding.bindingId !== claimed.bindingId) {
+        throw new Error("Codex turn claim returned inconsistent capability binding");
+      }
       const transport = new BrokerCapabilityTransport({
         invoke: (binding, invocation, signal) => callTurnBroker<BrokerToolResult>(
           options.brokerSocketPath,
@@ -503,12 +509,8 @@ export async function runChatGptMcpServer(options: {
           bindingId: binding.bindingId,
         }),
       }).bind({
-        bindingId: claimed.bindingId,
+        ...claimed.capabilityBinding,
         snapshot,
-        snapshotId: snapshot.snapshotId,
-        sessionId: snapshot.sessionId,
-        agentId: snapshot.agentId,
-        turnId: snapshot.turnId,
       });
       return { ...claimed, activityId, transport };
     } catch (error) {
