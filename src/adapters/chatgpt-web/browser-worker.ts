@@ -101,6 +101,16 @@ import type {
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+const physicalObjectIds = new WeakMap<object, string>();
+let nextPhysicalObjectId = 0;
+
+function physicalObjectId(value: object, prefix: string): string {
+  const existing = physicalObjectIds.get(value);
+  if (existing) return existing;
+  const id = `${prefix}:${(++nextPhysicalObjectId).toString(36)}`;
+  physicalObjectIds.set(value, id);
+  return id;
+}
 
 export async function closeChatGptBrowserWorkers(): Promise<void> {
   const active = [...workers.values()];
@@ -4452,13 +4462,13 @@ export class ChatGptBrowserWorker {
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
-      const physicalResourceId = launcherSurfaceId ?? `managed-surface:${randomUUID().replaceAll("-", "")}`;
-      const physicalContextId = `${physicalResourceId}:context`;
+      const physicalResourceId = launcherSurfaceId ?? physicalObjectId(page, "managed-surface");
       const physicalProfileId = this.config.browserHost === "launcher"
         ? `launcher-profile:${this.config.browserHostDescriptorPath ?? "unknown"}`
         : `chrome-profile:${this.config.chromeExecutablePath}`;
       const physicalAccountId = `chatgpt-account:${this.config.storageStatePath}`;
-      let physicalPageId = `${physicalResourceId}:page`;
+      let physicalPageId = physicalObjectId(page, "page");
+      let physicalContextId = physicalObjectId(page.context(), "context");
       const bindPhysicalSurface = async (): Promise<void> => {
         await turn.onPhysicalSurfaceBound?.({
           resourceId: physicalResourceId,
@@ -4519,7 +4529,8 @@ export class ChatGptBrowserWorker {
         turnConnection = connection.browser;
         page = connection.page;
         diagnosticPage = page;
-        physicalPageId = `${physicalResourceId}:page:${randomUUID().replaceAll("-", "")}`;
+        physicalPageId = physicalObjectId(page, "page");
+        physicalContextId = physicalObjectId(page.context(), "context");
         await bindPhysicalSurface();
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
