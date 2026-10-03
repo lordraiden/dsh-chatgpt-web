@@ -24,7 +24,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin main
-          git merge --no-ff -Xtheirs origin/main -m "chore: sync merged 11-A and 11-B into staging"
+          if ! git merge --no-ff -Xtheirs origin/main -m "chore: sync merged 11-A and 11-B into staging"; then
+            echo "Resolving remaining conflicts in favor of main for overlapping hunks/files."
+            git status --short
+            git diff --name-only --diff-filter=U | while IFS= read -r path; do
+              git checkout --theirs -- "$path"
+              git add -- "$path"
+            done
+            git add -A
+            git commit -m "chore: resolve 11-A and 11-B staging sync conflicts"
+          fi
           git rm .github/workflows/tmp-sync-11ab.yml
           git commit -m "chore: remove temporary sync workflow"
           git push origin HEAD:sync-11ab-into-staging
