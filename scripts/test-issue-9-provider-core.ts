@@ -80,6 +80,8 @@ function leaseInput(turnId: string) {
   assert.equal(turn.snapshot().physicalSettlementOutcome, "pending");
   assert.equal(turn.snapshot().physicalSettled, false);
   assert.equal(turn.lease.isActive(), true);
+  turn.markLogicalSettled("completed");
+  assert.equal(turn.snapshot().logicalOutcome, "completed");
 
   resolveSettlement();
   await turn.waitForPhysicalSettlement();
