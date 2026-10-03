@@ -181,7 +181,7 @@ function environmentIdentity(environment: ChatGptTurnEnvironment): string {
 function materializeEnvironment(channel: TurnChannel): ChatGptTurnEnvironment & { expiresAt?: number } {
   return {
     ...channel.environment,
-    tools: structuredClone(channel.capabilitySnapshot.tools),
+    tools: structuredClone([...channel.capabilitySnapshot.tools]),
     capabilitySnapshot: channel.capabilitySnapshot,
     ...(channel.expiresAt !== undefined ? { expiresAt: channel.expiresAt } : {}),
   };
