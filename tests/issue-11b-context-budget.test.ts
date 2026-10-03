@@ -34,7 +34,7 @@ test("Free Web budget separates theoretical window from measured browser transpo
 test("capacity decision is deterministic and prefers compaction before multipart", () => {
   const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low", capabilities);
   const input = {
-    estimatedInputTokens: 40_000,
+    estimatedInputTokens: 140_000,
     estimatedMessageTokens: 20_000,
     partCount: 1 as const,
   };
@@ -51,7 +51,7 @@ test("capacity decision is deterministic and prefers compaction before multipart
 
   expect(decideChatGptWebContextCapacity(budget, {
     ...input,
-    estimatedInputTokens: 30_000,
+    estimatedInputTokens: 100_000,
   }, {
     compactionAvailable: true,
     multipartAvailable: true,
