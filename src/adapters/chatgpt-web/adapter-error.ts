@@ -46,17 +46,6 @@ export function chatGptStoppedThinkingError(): ChatGptWebAdapterError {
   );
 }
 
-export const CHATGPT_CONTEXT_EXHAUSTED_CODE = "context_exhausted";
-
-export function chatGptContextExhaustedError(message = "The current ChatGPT Web conversation has reached its product context limit and must be replaced before the DSH turn can continue."): ChatGptWebAdapterError {
-  return new ChatGptWebAdapterError(message, {
-    status: 409,
-    errorType: "invalid_request_error",
-    code: CHATGPT_CONTEXT_EXHAUSTED_CODE,
-    retryable: false,
-  });
-}
-
 export function chatGptRetainedConversationUnavailableError(): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     "The retained ChatGPT conversation is no longer available.",
