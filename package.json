@@ -54,7 +54,7 @@
     "setup": "node lib/cli.js setup",
     "login": "node lib/cli.js login",
     "doctor": "node lib/cli.js doctor",
-    "test": "node scripts/smoke-tarball.mjs",
+    "test": "node scripts/test-issue-20-settings.mjs && node scripts/smoke-tarball.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -77,7 +77,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-llm": "~0.2.0-rc.2"
+    "@deepseek-ai/dsh-llm": "~0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
