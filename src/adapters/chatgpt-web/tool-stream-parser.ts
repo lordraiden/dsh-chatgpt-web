@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 export interface ParsedToolCall {
   id: string;
   name: string;
@@ -14,8 +12,23 @@ export interface StreamParseChunk {
 
 const THINKING_OPEN = "<thinking>";
 const THINKING_CLOSE = "</thinking>";
-const TOOL_OPEN_TAGS = ["<tool_call>", "<tool\\_call>", "<toolcall>", "<tool-call>"] as const;
-const TOOL_CLOSE_TAGS = ["</tool_call>", "</tool\\_call>", "</toolcall>", "</tool-call>"] as const;
+const TOOL_OPEN_TAGS = ["<dsh_tool_call>", "<tool_call>"] as const;
+const TOOL_CLOSE_TAGS = ["</dsh_tool_call>", "</tool_call>"] as const;
+const TOOL_PROTOCOL_VERSION = 1 as const;
+const MAX_TOOL_FRAME_CHARS = 128 * 1024;
+const MAX_TOOL_ID_CHARS = 96;
+const MAX_TOOL_NAME_CHARS = 128;
+const TOOL_ID_PATTERN = /^call_[A-Za-z0-9_-]{8,96}$/;
+const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+export class ChatGptToolProtocolError extends Error {
+  readonly code = "chatgpt_tool_protocol_violation";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatGptToolProtocolError";
+  }
+}
 
 function findEarliestTag(str: string, tags: readonly string[]): { tag: string; index: number } | null {
   let earliestTag: string | null = null;
@@ -316,13 +329,14 @@ export class ChatGptToolStreamParser {
   private buffer = "";
   private mode: "text" | "thinking" | "tool_call" = "text";
   private currentTagContent = "";
+  private readonly seenToolCallIds = new Set<string>();
 
   constructor(private readonly userContext?: string) {}
 
-  /**
-   * Process a text delta chunk from the browser Markdown feed.
-   */
   feed(delta: string): StreamParseChunk {
+    if (typeof delta !== "string") {
+      throw new ChatGptToolProtocolError("ChatGPT tool protocol received a non-string text delta");
+    }
     this.buffer += delta;
     let outputText = "";
     let outputThinking = "";
@@ -356,7 +370,6 @@ export class ChatGptToolStreamParser {
         }
 
         if (nextTag === null) {
-          // Check for partial tag prefixes
           const partialThinking = findPartialTagPrefix(this.buffer, THINKING_OPEN);
           const partialTool = findMaxPartialPrefix(this.buffer, TOOL_OPEN_TAGS);
           const partialLen = Math.max(partialThinking, partialTool);
@@ -370,13 +383,12 @@ export class ChatGptToolStreamParser {
           outputText += this.buffer;
           this.buffer = "";
           break;
-        } else {
-          // Output text before the tag
-          outputText += this.buffer.slice(0, nextIdx);
-          this.buffer = this.buffer.slice(nextIdx + nextTag.length);
-          this.mode = isThinking ? "thinking" : "tool_call";
-          this.currentTagContent = "";
         }
+
+        outputText += this.buffer.slice(0, nextIdx);
+        this.buffer = this.buffer.slice(nextIdx + nextTag.length);
+        this.mode = isThinking ? "thinking" : "tool_call";
+        this.currentTagContent = "";
       } else if (this.mode === "thinking") {
         const endIdx = this.buffer.indexOf(THINKING_CLOSE);
         if (endIdx === -1) {
@@ -388,16 +400,13 @@ export class ChatGptToolStreamParser {
             break;
           }
           outputThinking += this.buffer;
-          this.currentTagContent += this.buffer;
           this.buffer = "";
           break;
-        } else {
-          outputThinking += this.buffer.slice(0, endIdx);
-          this.buffer = this.buffer.slice(endIdx + THINKING_CLOSE.length);
-          this.mode = "text";
-          this.currentTagContent = "";
         }
-      } else if (this.mode === "tool_call") {
+        outputThinking += this.buffer.slice(0, endIdx);
+        this.buffer = this.buffer.slice(endIdx + THINKING_CLOSE.length);
+        this.mode = "text";
+      } else {
         const endTag = findEarliestTag(this.buffer, TOOL_CLOSE_TAGS);
         if (endTag === null) {
           const partialEnd = findMaxPartialPrefix(this.buffer, TOOL_CLOSE_TAGS);
@@ -408,194 +417,110 @@ export class ChatGptToolStreamParser {
           }
           this.currentTagContent += this.buffer;
           this.buffer = "";
-          break;
-        } else {
-          this.currentTagContent += this.buffer.slice(0, endTag.index);
-          this.buffer = this.buffer.slice(endTag.index + endTag.tag.length);
-          this.mode = "text";
-
-          const parsedCall = this.parseToolCallJson(this.currentTagContent);
-          if (parsedCall) {
-            toolCalls.push(parsedCall);
-          } else {
-            outputText += `<tool_call>${this.currentTagContent}</tool_call>`;
+          if (this.currentTagContent.length > MAX_TOOL_FRAME_CHARS) {
+            throw new ChatGptToolProtocolError(
+              `ChatGPT tool control frame exceeded the ${MAX_TOOL_FRAME_CHARS} character limit`,
+            );
           }
-          this.currentTagContent = "";
+          break;
         }
+
+        this.currentTagContent += this.buffer.slice(0, endTag.index);
+        this.buffer = this.buffer.slice(endTag.index + endTag.tag.length);
+        this.mode = "text";
+
+        if (this.currentTagContent.length > MAX_TOOL_FRAME_CHARS) {
+          throw new ChatGptToolProtocolError(
+            `ChatGPT tool control frame exceeded the ${MAX_TOOL_FRAME_CHARS} character limit`,
+          );
+        }
+        toolCalls.push(this.parseToolCallFrame(this.currentTagContent));
+        this.currentTagContent = "";
       }
+    }
+
+    if (this.mode === "tool_call" && this.currentTagContent.length > MAX_TOOL_FRAME_CHARS) {
+      throw new ChatGptToolProtocolError(
+        `ChatGPT tool control frame exceeded the ${MAX_TOOL_FRAME_CHARS} character limit`,
+      );
     }
 
     return { text: outputText, thinking: outputThinking, toolCalls };
   }
 
-  /**
-   * Flush any remaining buffered content at end of stream.
-   */
   flush(): StreamParseChunk {
+    if (this.mode === "tool_call") {
+      throw new ChatGptToolProtocolError(
+        "ChatGPT stream ended with an incomplete tool control frame",
+      );
+    }
+
     const remaining = this.buffer;
     this.buffer = "";
-    let outputText = "";
-    let outputThinking = "";
-    const toolCalls: ParsedToolCall[] = [];
-
     if (this.mode === "thinking") {
-      outputThinking = remaining;
       this.mode = "text";
-    } else if (this.mode === "tool_call") {
-      this.currentTagContent += remaining;
-      const parsedCall = this.parseToolCallJson(this.currentTagContent);
-      if (parsedCall) {
-        toolCalls.push(parsedCall);
-      } else {
-        outputText = `<tool_call>${this.currentTagContent}`;
-      }
-      this.mode = "text";
-      this.currentTagContent = "";
-    } else {
-      outputText = remaining;
+      return { text: "", thinking: remaining, toolCalls: [] };
     }
-
-    return { text: outputText, thinking: outputThinking, toolCalls };
+    return { text: remaining, thinking: "", toolCalls: [] };
   }
 
-  private parseToolCallJson(rawContent: string): ParsedToolCall | null {
+  private parseToolCallFrame(rawContent: string): ParsedToolCall {
     const raw = rawContent.trim();
-    let cleaned = raw.replace(/^```(?:json|xml)?\s*/i, "").replace(/\s*```$/, "").trim();
-    // Unescape markdown-escaped characters (e.g. math\_test.py -> math_test.py, \*.py -> *.py)
-    cleaned = cleaned.replace(/\\([_*[\]])/g, "$1");
+    if (!raw) throw new ChatGptToolProtocolError("ChatGPT tool control frame is empty");
+
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(cleaned);
-      if (parsed && typeof parsed === "object" && typeof parsed.name === "string") {
-        const id = typeof parsed.id === "string" && parsed.id.trim()
-          ? parsed.id.trim()
-          : `call_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-        let args: Record<string, unknown> = {};
-        if (parsed.arguments && typeof parsed.arguments === "object" && !Array.isArray(parsed.arguments)) {
-          args = parsed.arguments as Record<string, unknown>;
-        } else if (typeof parsed.parameters === "object" && parsed.parameters !== null && !Array.isArray(parsed.parameters)) {
-          args = parsed.parameters as Record<string, unknown>;
-        } else {
-          args = { ...(parsed as Record<string, unknown>) };
-          delete args.id;
-          delete args.name;
-        }
-        const name = parsed.name.trim();
-        const normalized = normalizeToolArguments(name, args, this.userContext);
-        console.info(`[chatgpt-web] parseToolCallJson parsed tool=${name}, id=${id}, args=${JSON.stringify(normalized)}`);
-        return {
-          id,
-          name,
-          arguments: normalized,
-        };
-      }
-    } catch {
-      // Fallback to resilient regex parsing for unescaped quotes or invalid escapes
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new ChatGptToolProtocolError(
+        `ChatGPT tool control frame is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
-    // Resilient fallback for unescaped quotes, Windows backslashes, etc.
-    const nameMatch = cleaned.match(/"name"\s*:\s*"([^"]+)"/);
-    if (nameMatch) {
-      const name = nameMatch[1]!.trim();
-      const idMatch = cleaned.match(/"id"\s*:\s*"([^"]+)"/);
-      const id = idMatch && idMatch[1]!.trim()
-        ? idMatch[1]!.trim()
-        : `call_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-
-      const argsMatch = cleaned.match(/"(?:arguments|parameters)"\s*:\s*\{([\s\S]*)\}\s*\}?$/);
-      let args: Record<string, unknown> = {};
-      if (argsMatch && argsMatch[1]) {
-        args = this.extractRobustArguments(argsMatch[1]);
-      } else {
-        args = this.extractRobustArguments(cleaned);
-        delete args.name;
-        delete args.id;
-      }
-      const normalized = normalizeToolArguments(name, args, this.userContext);
-      return { id, name, arguments: normalized };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new ChatGptToolProtocolError("ChatGPT tool control frame must be a JSON object");
     }
 
-    // XML Tag format support (e.g. <name>write</name><file_path>hello.txt</file_path><content>...</content> or <invoke name="write">)
-    const xmlNameMatch = cleaned.match(/<name>([\s\S]*?)<\/name>/i)
-      || cleaned.match(/<tool_name>([\s\S]*?)<\/tool_name>/i)
-      || cleaned.match(/<invoke\s+name=["']([^"']+)["']/i);
-    if (xmlNameMatch) {
-      const name = (xmlNameMatch[1] || "").trim();
-      const id = `call_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-      const args: Record<string, unknown> = {};
-
-      const tagRegex = /<([a-zA-Z0-9_-]+)>([\s\S]*?)<\/\1>/g;
-      let tm: RegExpExecArray | null;
-      while ((tm = tagRegex.exec(cleaned)) !== null) {
-        const key = tm[1]!;
-        if (key !== "name" && key !== "tool_name" && key !== "id") {
-          args[key] = tm[2]!.trim();
-        }
-      }
-
-      const paramRegex = /<parameter\s+name=["']([a-zA-Z0-9_-]+)["']>([\s\S]*?)<\/parameter>/gi;
-      let pm: RegExpExecArray | null;
-      while ((pm = paramRegex.exec(cleaned)) !== null) {
-        args[pm[1]!] = pm[2]!.trim();
-      }
-
-      if (name) {
-        const normalized = normalizeToolArguments(name, args, this.userContext);
-        console.info(`[chatgpt-web] parseToolCallJson (xml) parsed tool=${name}, id=${id}, args=${JSON.stringify(normalized)}`);
-        return { id, name, arguments: normalized };
-      }
+    const record = parsed as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const expectedKeys = ["arguments", "id", "name", "version"];
+    if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+      throw new ChatGptToolProtocolError(
+        `ChatGPT tool control frame fields must be exactly: ${expectedKeys.join(", ")}`,
+      );
+    }
+    if (record.version !== TOOL_PROTOCOL_VERSION) {
+      throw new ChatGptToolProtocolError(
+        `Unsupported ChatGPT tool control protocol version: ${String(record.version)}`,
+      );
+    }
+    if (typeof record.id !== "string" || record.id.length > MAX_TOOL_ID_CHARS || !TOOL_ID_PATTERN.test(record.id)) {
+      throw new ChatGptToolProtocolError(
+        "ChatGPT tool control frame id is invalid; expected opaque call_<token> correlation",
+      );
+    }
+    if (this.seenToolCallIds.has(record.id)) {
+      throw new ChatGptToolProtocolError(
+        `Duplicate ChatGPT tool control frame id: ${record.id}`,
+      );
+    }
+    if (typeof record.name !== "string" || record.name.length > MAX_TOOL_NAME_CHARS || !TOOL_NAME_PATTERN.test(record.name)) {
+      throw new ChatGptToolProtocolError("ChatGPT tool control frame name is invalid");
+    }
+    if (!record.arguments || typeof record.arguments !== "object" || Array.isArray(record.arguments)) {
+      throw new ChatGptToolProtocolError("ChatGPT tool control frame arguments must be an object");
     }
 
-    return null;
-  }
-
-  private extractRobustArguments(innerArgs: string): Record<string, unknown> {
-    const trimmed = innerArgs.replace(/\}\s*$/, "").trim();
-    const args: Record<string, unknown> = {};
-
-    const keyRegex = /(?:^|,)\s*(?:"([a-zA-Z0-9_]+)"|([a-zA-Z0-9_]+))\s*:\s*/g;
-    const matches: Array<{ key: string; valueStart: number; keyStart: number }> = [];
-    let m: RegExpExecArray | null;
-    while ((m = keyRegex.exec(trimmed)) !== null) {
-      const key = m[1] || m[2];
-      if (key) {
-        matches.push({
-          key,
-          keyStart: m.index,
-          valueStart: m.index + m[0].length,
-        });
-      }
-    }
-
-    if (matches.length === 0) return args;
-
-    for (let i = 0; i < matches.length; i++) {
-      const current = matches[i]!;
-      const next = matches[i + 1];
-      let rawValue = next
-        ? trimmed.slice(current.valueStart, next.keyStart).trim()
-        : trimmed.slice(current.valueStart).trim();
-
-      rawValue = rawValue.replace(/,\s*$/, "").trim();
-
-      if ((rawValue.startsWith('"') && rawValue.endsWith('"')) || (rawValue.startsWith("'") && rawValue.endsWith("'"))) {
-        args[current.key] = rawValue.slice(1, -1);
-      } else if (rawValue === "true") {
-        args[current.key] = true;
-      } else if (rawValue === "false") {
-        args[current.key] = false;
-      } else if (rawValue === "null") {
-        args[current.key] = null;
-      } else if (!Number.isNaN(Number(rawValue)) && rawValue !== "") {
-        args[current.key] = Number(rawValue);
-      } else {
-        try {
-          args[current.key] = JSON.parse(rawValue);
-        } catch {
-          args[current.key] = rawValue;
-        }
-      }
-    }
-
-    return args;
+    const normalized = normalizeToolArguments(
+      record.name,
+      record.arguments as Record<string, unknown>,
+      this.userContext,
+    );
+    this.seenToolCallIds.add(record.id);
+    return {
+      id: record.id,
+      name: record.name,
+      arguments: normalized,
+    };
   }
 }
