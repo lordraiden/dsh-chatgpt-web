@@ -7,6 +7,7 @@ import {
   type ChatGptReplayTransport,
 } from "../src/adapters/chatgpt-web/replay";
 import { projectCanonicalChatGptWebContext } from "../src/adapters/chatgpt-web/context-projection";
+import { BrowserAccountLease, ProviderTurnLifecycle } from "../src/adapters/chatgpt-web/provider-core";
 
 const identity: ChatGptReplayIdentity = {
   sessionId: "dsh-session-1",
@@ -15,6 +16,8 @@ const identity: ChatGptReplayIdentity = {
   capabilitySnapshotId: "snapshot-1",
   capabilityBindingId: "binding-1",
 };
+
+const trigger = { code: "context_exhausted" as const };
 
 const boundary: ChatGptReplayBoundary = {
   settledToolCallIds: ["call-settled"],
@@ -92,6 +95,7 @@ test("deterministic replay replaces the conversation without changing trusted DS
   const coordinator = new ChatGptReplayCoordinator();
 
   const result = await coordinator.replay({
+    trigger,
     exhaustedConversation: { id: "conversation-1", generation: 1 },
     identity,
     context,
@@ -102,13 +106,13 @@ test("deterministic replay replaces the conversation without changing trusted DS
   expect(result.phase).toBe("COMPLETED");
   expect(result.oldConversation?.id).toBe("conversation-1");
   expect(result.activeConversation?.id).toBe("conversation-2");
-  expect(result.generation).toBe(1);
+  expect(result.generation).toBe(2);
   expect(result.staleConversationIds).toEqual(["conversation-1"]);
   expect(calls).toEqual([
     "create",
     "ready:conversation-2",
-    "invalidate:conversation-1",
     "bind:conversation-1->conversation-2",
+    "invalidate:conversation-1",
     "replay:conversation-2:3:call-settled:call-pending:turn-1",
     "resume:conversation-2",
   ]);
@@ -211,9 +215,52 @@ test("a late callback from the old conversation stays rejected after replay comp
   expect(coordinator.acceptsConversationEvent({ id: "conversation-2", generation: 2 })).toBe(true);
 });
 
-test("EXACT_RESUME is never represented as replay", () => {
+test("replay requires the explicit context_exhausted semantic condition", async () => {
+  const { transport, calls } = transportSpy();
   const coordinator = new ChatGptReplayCoordinator();
-  expect(coordinator.recoveryOutcome()).toBe("NEW");
+
+  await expect(coordinator.replay({
+    trigger: { code: "unexpected_recovery" as never },
+    exhaustedConversation: { id: "conversation-1", generation: 1 },
+    identity,
+    context,
+    boundary,
+  }, transport)).rejects.toMatchObject({
+    name: "ChatGptReplayError",
+    phase: "FAILED",
+  });
+  expect(calls).toEqual([]);
+});
+
+test("EXACT_RESUME cannot be silently reclassified as REPLAY", () => {
+  const lease = new BrowserAccountLease({
+    serviceId: "chatgpt-web",
+    accountIdentity: "account-1",
+    browserProfile: "profile-1",
+    browserContext: "context-1",
+    pageIdentity: "page-1",
+    turnId: identity.turnId,
+  });
+  const capabilitySnapshot = {
+    snapshotId: "snapshot-1",
+    sessionId: identity.sessionId,
+    agentId: identity.agentId,
+    turnId: identity.turnId,
+    createdAt: Date.now(),
+    lifecycle: "active" as const,
+    tools: [],
+  };
+  const lifecycle = new ProviderTurnLifecycle(
+    lease,
+    { serviceId: "chatgpt-web", traceId: "trace-1", executionKey: "exec-1", nativeTurnId: identity.turnId },
+    capabilitySnapshot,
+  );
+
+  lifecycle.markRecovery("EXACT_RESUME");
+  expect(() => lifecycle.markRecovery("REPLAY")).toThrow(
+    "Provider recovery cannot downgrade exact resume to replay",
+  );
+  expect(lifecycle.snapshot().recovery).toBe("EXACT_RESUME");
 });
 
 
