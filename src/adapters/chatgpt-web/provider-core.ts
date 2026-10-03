@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { assertCapabilitySnapshotBinding, type CapabilitySnapshot } from "./capability-projector";
+import type { CapabilitySnapshot } from "./capability-projector";
 
 export const CHATGPT_WEB_PROVIDER_CORE_SERVICE = "chatgpt-web" as const;
 
@@ -554,12 +554,14 @@ export class ChatGptWebProviderCore {
     if (existing) {
       const existingSnapshot = existing.snapshot();
       const provenance = existingSnapshot.provenance;
-      assertCapabilitySnapshotBinding(existingSnapshot.capabilitySnapshot, {
-        sessionId: input.capabilitySnapshot.sessionId,
-        agentId: input.capabilitySnapshot.agentId,
-        turnId: input.capabilitySnapshot.turnId,
-        snapshotId: input.capabilitySnapshot.snapshotId,
-      });
+      if (
+        existingSnapshot.capabilitySnapshot.snapshotId !== input.capabilitySnapshot.snapshotId
+        || existingSnapshot.capabilitySnapshot.sessionId !== input.capabilitySnapshot.sessionId
+        || existingSnapshot.capabilitySnapshot.agentId !== input.capabilitySnapshot.agentId
+        || existingSnapshot.capabilitySnapshot.turnId !== input.capabilitySnapshot.turnId
+      ) {
+        throw new Error("Provider execution key is already bound to a different capability snapshot");
+      }
       if (input.nativeTurnId && provenance.nativeTurnId !== input.nativeTurnId) {
         throw new Error("Provider execution key is already bound to a different native DSH turn");
       }
