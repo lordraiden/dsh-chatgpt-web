@@ -405,4 +405,33 @@ function leaseInput(turnId: string) {
   console.log("ok strict tool control protocol");
 }
 
+{
+  const fakeBackend = {
+    name: "fake",
+    async runTurn(
+      _parsed: unknown,
+      _incoming: unknown,
+      emit: (event: Record<string, unknown>) => void,
+    ): Promise<void> {
+      emit({
+        type: "done",
+        stopReason: "stop",
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+      });
+    },
+  };
+  const chunks = [];
+  for await (const chunk of mapStream(
+    () => fakeBackend as never,
+    {} as GenerateOptions,
+    () => ({ modelId: "fake", context: { messages: [] }, stream: true, options: {} }),
+    { usageMode: "omit" },
+  )) {
+    chunks.push(chunk);
+  }
+  assert.equal(chunks.some(chunk => chunk.type === "usage"), false);
+  assert.equal(chunks.some(chunk => chunk.type === "finish"), true);
+  console.log("ok estimated usage is not emitted across native provider boundary");
+}
+
 console.log("Issue #9 ProviderCore contract tests passed.");
