@@ -337,7 +337,8 @@ const environment = capabilitySnapshotForEnvironment({
       freeform: false,
       arguments: { value: "cancelled" },
     });
-    await new Promise(resolve => setImmediate(resolve));
+    const cancellationBatch = await broker.nextToolBatch(currentToken);
+    assert.equal(cancellationBatch.length, 1);
     await broker.revoke(currentToken, new Error("cancelled turn"));
     await assert.rejects(cancelledInvocation, /cancelled turn|revoked|turn binding/i);
 
@@ -368,7 +369,8 @@ const environment = capabilitySnapshotForEnvironment({
       freeform: false,
       arguments: { value: "shutdown" },
     });
-    await new Promise(resolve => setImmediate(resolve));
+    const shutdownBatch = await broker.nextToolBatch(shutdownToken);
+    assert.equal(shutdownBatch.length, 1);
     await broker.close();
     await assert.rejects(shutdownInvocation, /broker|turn|socket/i);
     currentToken = undefined;
