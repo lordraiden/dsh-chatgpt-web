@@ -905,6 +905,7 @@ export function createChatGptWebAdapter(
 
   return {
     name: "chatgpt-web",
+    shutdown: () => providerCore.shutdown(),
     async runTurn(parsed, incoming, emit) {
       const runChatGptWebTurn = async (): Promise<void> => {
         const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
