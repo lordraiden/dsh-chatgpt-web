@@ -153,7 +153,10 @@ test("canonical images survive intact until the explicit transport budget", () =
 
 
 test("atomic message overflow remains unrecoverable even when compaction is available", () => {
-  const budget = resolveChatGptWebContextBudget("gpt-5.6-sol", "low", capabilities);
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-sol", "max", {
+    ...capabilities,
+    proAvailable: true,
+  });
   const decision = decideChatGptWebContextCapacity(
     budget,
     {
