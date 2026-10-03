@@ -59,13 +59,39 @@ export function serializeCanonicalChatGptWebContext(
   }));
 }
 
-const RETIRED_TURN_HANDLE = /\b(turn|request|binding)_[A-Za-z0-9_-]{24,}/g;
+const RETIRED_TRANSPORT_HANDLE_KEYS = new Set([
+  "__transport_handle",
+  "__turn_handle",
+  "__request_handle",
+  "__binding_handle",
+  "__activity_handle",
+  "__surface_handle",
+]);
+
+function sanitizeRetiredTransportFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeRetiredTransportFields);
+  if (!value || typeof value !== "object") return value;
+
+  const record = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) {
+    if (RETIRED_TRANSPORT_HANDLE_KEYS.has(key)) {
+      result[key] = "[retired transport handle]";
+    } else {
+      result[key] = sanitizeRetiredTransportFields(child);
+    }
+  }
+  return result;
+}
 
 export function withoutRetiredTurnHandles(contextJson: string): string {
-  return contextJson.replace(
-    RETIRED_TURN_HANDLE,
-    (_handle, kind: string) => "[retired " + kind + " handle]",
-  );
+  try {
+    return JSON.stringify(sanitizeRetiredTransportFields(JSON.parse(contextJson)));
+  } catch {
+    // The canonical serializer emits JSON. Preserve non-JSON caller input rather than mutating
+    // arbitrary user-authored text that merely resembles an opaque browser handle.
+    return contextJson;
+  }
 }
 
 
