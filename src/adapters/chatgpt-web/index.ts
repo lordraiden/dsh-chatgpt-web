@@ -1743,6 +1743,12 @@ export function createChatGptWebAdapter(
           ) {
             const exhaustedConversationKey = session.conversationKey();
             if (exhaustedConversationKey) {
+              const generation = session.runtime.conversationGeneration
+                ?? chatGptTurnSessions.conversationGeneration(exhaustedConversationKey);
+              chatGptTurnSessions.rememberContextExhaustion(executionKey, {
+                conversationKey: exhaustedConversationKey,
+                handle: chatGptConversationHandleForEpoch(exhaustedConversationKey, generation),
+              });
               void chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey).catch(retirementError => {
                 console.error(
                   `[chatgpt-web] failed to invalidate exhausted conversation: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
