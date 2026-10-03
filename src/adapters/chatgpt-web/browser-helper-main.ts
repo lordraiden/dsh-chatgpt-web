@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
-import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
+import { closeChatGptWebSurfaceTransports, chatGptWebSurfaceTransportForProvider, type WebSurfaceTurn, type ChatGptWebSurfaceTransport } from "./web-surface-transport";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
@@ -133,7 +133,7 @@ function requestShutdown(): Promise<void> {
   }
   completionFenceCommitWaiters.clear();
   input.close();
-  void closeChatGptBrowserWorkers().then(
+  void closeChatGptWebSurfaceTransports().then(
     () => {
       completeShutdown();
       process.exit(0);
@@ -206,7 +206,7 @@ async function run(message: RunMessage): Promise<void> {
   const promptSelection = createBrowserHelperPromptSelection();
   preparedSelections.set(message.id, promptSelection);
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
-  const turn: BrowserTurn = {
+  const turn: WebSurfaceTurn = {
     traceId: message.turn.traceId,
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
@@ -293,7 +293,7 @@ async function run(message: RunMessage): Promise<void> {
     } : {}),
   };
   try {
-    const text = await ChatGptBrowserWorker.forProvider(provider).run(turn);
+    const text = await chatGptWebSurfaceTransportForProvider(provider).run(turn);
     writeProtocol({ type: "result", id: message.id, text });
   } catch (error) {
     writeProtocol({
@@ -339,7 +339,7 @@ async function verify(message: VerifyMessage): Promise<void> {
   }
 }
 
-function maintenanceWorker(message: MaintenanceMessage): ChatGptBrowserWorker {
+function maintenanceWorker(message: MaintenanceMessage): ChatGptWebSurfaceTransport {
   if (!/^[A-Za-z0-9_-]{6,128}$/.test(message.id)) {
     throw new Error("Browser helper maintenance identity is invalid");
   }
@@ -353,7 +353,7 @@ function maintenanceWorker(message: MaintenanceMessage): ChatGptBrowserWorker {
     baseUrl: "https://chatgpt.com",
     chatgptWeb: { appName, browserHost: "launcher", browserHostDescriptorPath },
   };
-  return ChatGptBrowserWorker.forProvider(provider);
+  return chatGptWebSurfaceTransportForProvider(provider);
 }
 
 async function maintain(message: InspectMessage | SmokeMessage): Promise<void> {
