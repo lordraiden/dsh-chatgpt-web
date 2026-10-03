@@ -148,7 +148,7 @@ test("canonical images survive intact until the explicit transport budget", () =
   expect(transport.images).toHaveLength(CHATGPT_WEB_MAX_INPUT_IMAGES);
   expect(JSON.stringify(transport.messages)).toContain("older image not attached");
   expect(JSON.stringify(transport.messages)).not.toContain("https://example.com/0.png");
-  expect(JSON.stringify(transport.messages)).toContain("https://example.com/11.png");
+  expect(transport.images.at(-1)!.imageUrl).toBe("https://example.com/11.png");
 });
 
 
@@ -161,8 +161,8 @@ test("atomic message overflow remains unrecoverable even when compaction is avai
     budget,
     {
       estimatedInputTokens: 1_000,
-      estimatedMessageTokens: budget.browserMessageTokenLimit! + 1,
-      promptChars: 1_000,
+      estimatedMessageTokens: 1_000,
+      promptChars: budget.browserComposerCharLimit! + 1,
     },
     { compactionAvailable: true, multipartAvailable: true },
   );
