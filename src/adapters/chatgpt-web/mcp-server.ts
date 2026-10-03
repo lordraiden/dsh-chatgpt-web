@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import * as z from "zod/v4";
+import * as z from "zod";
 import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
