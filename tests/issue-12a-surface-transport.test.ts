@@ -152,6 +152,11 @@ test("upper provider layers import the transport boundary, never the browser wor
     "src/adapters/chatgpt-web/index.ts",
     "src/adapters/chatgpt-web/browser-helper-main.ts",
     "src/adapters/chatgpt-web/compaction-handoff.ts",
+    "src/adapters/chatgpt-web/provider-core.ts",
+    "src/adapters/chatgpt-web/turn-execution.ts",
+    "src/adapters/chatgpt-web/replay.ts",
+    "src/adapters/chatgpt-web/retry-policy.ts",
+    "src/adapters/chatgpt-web/turn-broker.ts",
   ]) {
     const source = readFileSync(join(ROOT, path), "utf8");
     expect(source).not.toMatch(/from ["']\.\/browser-worker["']/);
