@@ -523,6 +523,9 @@ export interface ChatGptWebProviderCoreTurnInput {
 
 export class ChatGptWebProviderCore {
   private readonly turns = new Map<string, ProviderTurnLifecycle>();
+  // A snapshot is a capability binding for one logical provider execution, not a reusable tool-set token.
+  // Keep the ownership record after retirement so an old immutable snapshot cannot be attached to a new turn.
+  private readonly capabilitySnapshotOwners = new Map<string, string>();
   private readonly retiredExecutions = new Map<string, number>();
   private closed = false;
 
@@ -571,6 +574,11 @@ export class ChatGptWebProviderCore {
       return existing;
     }
 
+    const capabilityOwner = this.capabilitySnapshotOwners.get(input.capabilitySnapshot.snapshotId);
+    if (capabilityOwner !== undefined && capabilityOwner !== input.executionKey) {
+      throw new Error("Capability snapshot is already bound to a different provider execution");
+    }
+
     if (input.nativeThreadId) {
       for (const [executionKey, activeTurn] of this.turns) {
         if (executionKey === input.executionKey) continue;
@@ -613,6 +621,7 @@ export class ChatGptWebProviderCore {
     const recovery = input.recovery ?? (this.wasRetired(input.executionKey) ? "REPLAY" : "NEW");
     if (recovery !== "NEW") turn.markRecovery(recovery);
     turn.markLeased();
+    this.capabilitySnapshotOwners.set(input.capabilitySnapshot.snapshotId, input.executionKey);
     this.turns.set(input.executionKey, turn);
     return turn;
   }
@@ -647,6 +656,7 @@ export class ChatGptWebProviderCore {
     }));
     this.leases.clear();
     this.turns.clear();
+    this.capabilitySnapshotOwners.clear();
     this.retiredExecutions.clear();
   }
 }
