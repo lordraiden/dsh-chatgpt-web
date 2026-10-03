@@ -499,6 +499,9 @@ input.on("line", line => {
     const waiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);
     waiter?.reject(new DOMException("Browser helper turn aborted before Send acknowledgement", "AbortError"));
+    const surfaceReadyWaiter = surfaceReadyWaiters.get(message.id);
+    surfaceReadyWaiters.delete(message.id);
+    surfaceReadyWaiter?.reject(new DOMException("Browser helper turn aborted before surface readiness acknowledgement", "AbortError"));
     const beginWaiter = completionFenceBeginWaiters.get(message.id);
     completionFenceBeginWaiters.delete(message.id);
     beginWaiter?.reject(new DOMException("Browser helper turn aborted before completion-fence begin", "AbortError"));
@@ -546,4 +549,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "surface-lifecycle"] });
