@@ -23,6 +23,17 @@ function leaseInput(turnId: string) {
 
 {
   const core = new ChatGptWebProviderCore();
+  const unbound = core.begin(leaseInput("surface-before-bind"));
+  assert.throws(
+    () => unbound.markSurfaceReady(),
+    /physical browser resource is bound/i,
+  );
+  unbound.failBeforePhysicalSettlement();
+  console.log("ok surface readiness requires physical resource");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("state"));
   assert.equal(turn.snapshot().state, "LEASED");
   turn.bindPhysicalResource({
@@ -236,6 +247,27 @@ function leaseInput(turnId: string) {
   console.log("ok pre-browser failure retirement");
 }
 
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin({
+    ...leaseInput("side-effect-free"),
+    retryPolicy: "side_effect_free",
+  });
+  turn.bindPhysicalResource({
+    resourceId: "surface-side-effect-free",
+    browserContextId: "ctx-side-effect-free",
+    pageId: "page-side-effect-free",
+    profileId: "profile-side-effect-free",
+    accountId: "account-side-effect-free",
+  });
+  turn.markSurfaceReady();
+  turn.markSendActivated();
+  assert.equal(turn.canAutomaticallyRetry(), false);
+  assert.throws(() => turn.authorizeSurfaceReplay(), /replay is forbidden/i);
+  console.log("ok side-effect-free retry remains blocked after send activation");
+}
+
 {
   const parser = new ChatGptToolStreamParser("user context");
   const parsed = parser.feed(
@@ -254,12 +286,35 @@ function leaseInput(turnId: string) {
     ChatGptToolProtocolError,
   );
 
-  const malformed = new ChatGptToolStreamParser();
+  const malformedClosed = new ChatGptToolStreamParser();
   assert.throws(
-    () => malformed.feed('<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read"}'),
+    () => malformedClosed.feed(
+      '<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read"}</dsh_tool_call>',
+    ),
     ChatGptToolProtocolError,
   );
-  assert.throws(() => malformed.flush(), ChatGptToolProtocolError);
+
+  const incomplete = new ChatGptToolStreamParser();
+  incomplete.feed('<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read","arguments":{}}');
+  assert.throws(() => incomplete.flush(), ChatGptToolProtocolError);
+
+  const wrongVersion = new ChatGptToolStreamParser();
+  assert.throws(
+    () => wrongVersion.feed(
+      '<dsh_tool_call>{"version":2,"id":"call_abcdefgh","name":"read","arguments":{}}</dsh_tool_call>',
+    ),
+    ChatGptToolProtocolError,
+  );
+
+  const oversized = new ChatGptToolStreamParser();
+  assert.throws(
+    () => oversized.feed(
+      '<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read","arguments":{"value":"'
+      + "x".repeat(128 * 1024)
+      + '"}}</dsh_tool_call>',
+    ),
+    ChatGptToolProtocolError,
+  );
   console.log("ok strict tool control protocol");
 }
 
