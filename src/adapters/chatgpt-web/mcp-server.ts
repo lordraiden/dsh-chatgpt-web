@@ -121,6 +121,11 @@ function gatewayToolNameIsValid(name: string): boolean {
   return /^[A-Za-z0-9_$]+$/.test(name);
 }
 
+/**
+ * Contract-level visibility is a narrowing presentation policy only. It must never be treated as
+ * capability authority: every actual invocation re-authorizes against the immutable #10-A snapshot
+ * through CapabilityTransport.
+ */
 function safeVisibleTools(snapshot: NonNullable<ChatGptTurnEnvironment["capabilitySnapshot"]>, contract: ChatGptMcpContract): CodexTool[] {
   if (contract === "native") return [...snapshot.tools];
   const bridgeNamespaces = new Set(snapshot.tools
