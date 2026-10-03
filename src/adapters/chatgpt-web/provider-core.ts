@@ -327,22 +327,16 @@ export class ChatGptWebProviderCore {
     if (input.recovery && input.recovery !== "NEW") turn.markRecovery(input.recovery);
     turn.markLeased();
     this.turns.set(input.executionKey, turn);
-    turn.attachPhysicalSettlement(
-      Promise.resolve().then(async () => {
-        // The concrete browser session replaces this placeholder immediately after acquisition.
-      }),
-    );
     return turn;
   }
 
   bindPhysicalSettlement(executionKey: string, settlement: Promise<void>): ProviderTurnLifecycle {
     const turn = this.turns.get(executionKey);
     if (!turn) throw new Error(`Provider turn does not exist: ${executionKey}`);
-    // Replace the initial placeholder only before it settles.
-    if (turn.snapshot().physicalSettled) throw new Error(`Provider turn is already physically settled: ${executionKey}`);
-    throw new Error("ProviderCore physical settlement must be supplied at begin() time");
+    turn.attachPhysicalSettlement(settlement);
+    turn.scheduleRetirementAfterPhysicalSettlement();
+    return turn;
   }
-
   forget(executionKey: string): void {
     const turn = this.turns.get(executionKey);
     if (!turn) return;
