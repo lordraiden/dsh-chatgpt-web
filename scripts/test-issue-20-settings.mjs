@@ -22,8 +22,9 @@ assert(plugin.includes("port: Volatile<number>"), "port must be declared volatil
 assert(plugin.includes(".volatile()"), "port schema must be live");
 assert(plugin.includes("loader/volatile-update"), "runtime must react to live port changes");
 assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
-assert(plugin.includes("resolveLauncher(config.bunPath, host, port)"), "launcher must use the effective configured port");
-assert(plugin.includes('"--host", host, "--port", String(port)'), "launcher must pass host and port explicitly");
+assert(plugin.includes("resolveLauncher(config.bunPath, port)"), "launcher must use the effective configured port");
+assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
+assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
 assert(cli.includes('takeOption(args, "--host")'), "serve must accept a host override");
 assert(cli.includes('takeOption(args, "--port")'), "serve must accept a port override");
 assert(cli.includes("The sidecar is loopback-only"), "serve must preserve loopback-only access");
