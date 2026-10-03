@@ -190,7 +190,9 @@ export class BrowserAccountLeaseRegistry {
   }
 
   clear(): void {
-    for (const lease of this.leases.values()) lease.release();
+    if (this.activeCount() > 0) {
+      throw new Error("Cannot clear active browser leases before physical settlement");
+    }
     this.leases.clear();
     this.physicalResources.clear();
     this.accountLeases.clear();
@@ -440,7 +442,9 @@ export class ProviderTurnLifecycle {
       throw new Error("Cannot force provider turn retirement after physical execution has started");
     }
     if (this.state === "RETIRED") return;
-    this.markLogicalSettled("failed");
+    if (!this.logicalSettled) {
+      this.markLogicalSettled("failed");
+    }
     if (this.state !== "SETTLING") this.transition("SETTLING");
     this.physicalSettled = true;
     this.physicalSettlementOutcome = "not_started";
