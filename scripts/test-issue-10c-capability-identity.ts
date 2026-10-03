@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { LlmError, type GenerateOptions } from "@deepseek-ai/dsh-llm";
 import { ChatGptWebLlmAdapter, toCodexParsedRequest } from "../src/adapters/chatgpt-web/llm-adapter";
 import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
-import { capabilitySnapshotForEnvironment, type CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
+import { capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import { resolveChatGptCapabilitySnapshotForTurn } from "../src/adapters/chatgpt-web/index";
 import { TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
