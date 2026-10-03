@@ -1278,6 +1278,12 @@ Surface:
 
 ---
 
+## WebSurfaceTransport boundary
+
+ChatGPT browser and DOM mechanics are isolated behind the `WebSurfaceTransport` boundary. ProviderCore consumes only semantic turn operations and lifecycle callbacks such as physical-surface binding, surface readiness, send activation, and submission acceptance. Playwright objects, selectors, DOM traversal, and ChatGPT-specific UI structures remain implementation details of the concrete browser worker behind the boundary.
+
+This boundary is not a second lifecycle or authorization authority: DSH/ProviderCore continue to own session, turn, capability, tool, retry, and settlement semantics. The surface transport only reports and performs provider-specific browser mechanics needed by those owners.
+
 ## 26. Architecture invariants
 
 The following are non-negotiable.
