@@ -90,6 +90,8 @@ assert.equal(identity.threadId, "dsh-session-parent");
   assert.notEqual(firstSnapshot.agentId, "provider-thread-A");
   assert.notEqual(firstSnapshot.agentId, "/root/provider-name");
 
+  const turn = core.begin({ ...leaseInput(identity.turnId!, firstSnapshot) });
+
   const sameSnapshot = resolveChatGptCapabilitySnapshotForTurn(
     core,
     executionKey,
@@ -98,7 +100,6 @@ assert.equal(identity.threadId, "dsh-session-parent");
   );
   assert.equal(sameSnapshot, firstSnapshot);
 
-  const turn = core.begin({ ...leaseInput(identity.turnId!, firstSnapshot) });
   const broker = TurnBroker.forSocket("/tmp/dsh-chatgpt-10c-test.sock");
   try {
     const environment = capabilitySnapshotForEnvironment({
