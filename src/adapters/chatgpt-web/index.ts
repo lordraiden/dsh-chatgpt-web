@@ -1120,7 +1120,7 @@ export function createChatGptWebAdapter(
                       );
                       preserveFinalResponse = !settlement.compactionInstructionDelivered;
                       rawSummary = await requestRetainedCompactionHandoff(
-                        worker,
+                        transport,
                         parsed,
                         source,
                         structuredBroker!,
@@ -1137,7 +1137,7 @@ export function createChatGptWebAdapter(
                         preserveFinalResponse = true;
                       }
                       rawSummary = await requestRetainedCompactionHandoff(
-                        worker,
+                        transport,
                         parsed,
                         source,
                         structuredBroker!,
