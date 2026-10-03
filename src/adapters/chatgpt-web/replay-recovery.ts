@@ -44,6 +44,7 @@ export interface ChatGptReplayPlan {
   readonly canonicalJson: string;
   readonly canonicalRevision: string;
   readonly conversationHandle: string;
+  readonly replayProof: string;
   readonly settledToolCallIds: readonly string[];
   readonly pendingToolCallIds: readonly string[];
 }
@@ -61,6 +62,19 @@ export interface ChatGptReplacementBinding extends ChatGptReplacementReady {
   readonly identityProof: ChatGptReplayIdentity;
 }
 
+export interface ChatGptReplaySubmission {
+  readonly canonicalContext: CanonicalChatGptWebContext;
+  readonly canonicalJson: string;
+  readonly canonicalRevision: string;
+  readonly settledToolCallIds: readonly string[];
+  readonly pendingToolCallIds: readonly string[];
+  readonly replacement: ChatGptReplacementBinding;
+}
+
+export interface ChatGptReplaySubmissionProof {
+  readonly replayProof: string;
+}
+
 export interface ChatGptWebRecoveryTransport {
   invalidateConversation(conversationHandle: string, signal?: AbortSignal): Promise<void>;
   createReplacementConversation(
@@ -76,6 +90,14 @@ export interface ChatGptWebRecoveryTransport {
     identity: ChatGptReplayIdentity,
     signal?: AbortSignal,
   ): Promise<ChatGptReplacementBinding>;
+  /**
+   * Submit the already-projected canonical DSH context to the ready replacement. The transport may
+   * serialize or attach browser-side content, but it cannot alter DSH semantics or execution state.
+   */
+  replayCanonicalContext(
+    submission: ChatGptReplaySubmission,
+    signal?: AbortSignal,
+  ): Promise<ChatGptReplaySubmissionProof>;
 }
 
 export class ChatGptReplayRecoveryError extends Error {
@@ -416,6 +438,24 @@ export class ChatGptWebReplayCoordinator {
         );
       }
 
+      const replayProof = await transport.replayCanonicalContext(
+        {
+          canonicalContext: input.canonicalContext,
+          canonicalJson,
+          canonicalRevision: boundary.canonicalRevision,
+          settledToolCallIds: boundary.settledToolCallIds,
+          pendingToolCallIds: boundary.pendingToolCallIds,
+          replacement: binding,
+        },
+        input.signal,
+      );
+      if (typeof replayProof.replayProof !== "string" || replayProof.replayProof.trim().length === 0) {
+        throw new ChatGptReplayRecoveryError(
+          "Canonical replay was submitted without an explicit acceptance proof",
+          "replacement_failed",
+        );
+      }
+
       this.currentConversationHandle = boundHandle;
       this.currentIdentity = identity;
       this.phase = "RESUMED";
@@ -426,6 +466,7 @@ export class ChatGptWebReplayCoordinator {
         canonicalJson,
         canonicalRevision: boundary.canonicalRevision,
         conversationHandle: boundHandle,
+        replayProof: replayProof.replayProof,
         settledToolCallIds: boundary.settledToolCallIds,
         pendingToolCallIds: boundary.pendingToolCallIds,
       });
