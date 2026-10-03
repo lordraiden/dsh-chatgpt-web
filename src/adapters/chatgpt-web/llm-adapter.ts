@@ -241,6 +241,31 @@ export function toCodexParsedRequest(
       "UNSUPPORTED_OPTION",
     );
   }
+
+  const nativeOptions = options as GenerateOptions & Record<string, unknown>;
+  const unsupportedOptions: string[] = [];
+  for (const key of [
+    "maxTokens",
+    "temperature",
+    "stop",
+    "topP",
+    "presencePenalty",
+    "frequencyPenalty",
+    "seed",
+    "toolChoice",
+    "parallelToolCalls",
+    "verbosity",
+    "responseFormat",
+  ]) {
+    if (nativeOptions[key] !== undefined) unsupportedOptions.push(key);
+  }
+  if (unsupportedOptions.length > 0) {
+    throw new LlmError(
+      `ChatGPT Web browser transport cannot faithfully apply GenerateOptions: ${unsupportedOptions.join(", ")}. Refusing to silently discard unsupported options.`,
+      "UNSUPPORTED_OPTION",
+    );
+  }
+
   if (options.toolHistory?.updates.length) {
     throw new LlmError(
       "ChatGPT Web native provider does not support dynamic tool updates in this phase; refusing to discard tool history.",
@@ -318,9 +343,6 @@ export function toCodexParsedRequest(
     },
     stream: true,
     options: {
-      ...(options.maxTokens !== undefined ? { maxOutputTokens: options.maxTokens } : {}),
-      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-      ...(options.stop?.length ? { stopSequences: options.stop } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
       ...(purpose === "session-title" || purpose === "compaction" ? { hideThinkingSummary: true } : {}),
     },
@@ -527,6 +549,7 @@ function toTokenUsage(usage: CodexUsage | undefined): TokenUsage | undefined {
     ...(cacheRead ? { cacheReadTokens: cacheRead } : {}),
     ...(cacheWrite ? { cacheWriteTokens: cacheWrite } : {}),
     ...(usage.reasoningOutputTokens ? { reasoningTokens: usage.reasoningOutputTokens } : {}),
+    ...(usage.estimated ? { estimated: true } : {}),
   };
 }
 
