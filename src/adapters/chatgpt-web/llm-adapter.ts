@@ -672,7 +672,7 @@ export function mapStream(
           }
           case "tool_call_delta": {
             if (!openBlock || openBlock.kind !== "tool") {
-              yield { type: "tool-call-delta", index: blockIndex++, id: ToolCallId("unknown"), argumentsDelta: event.arguments };
+              throw new LlmError("ChatGPT Web emitted tool arguments without an active tool-call block.", "PROTOCOL_ERROR");
               break;
             }
             openBlock.arguments += event.arguments;
