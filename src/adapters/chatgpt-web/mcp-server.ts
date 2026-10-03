@@ -136,6 +136,15 @@ function safeVisibleTools(snapshot: NonNullable<ChatGptTurnEnvironment["capabili
   ));
 }
 
+export function chatGptGatewayAllowedToolNames(
+  snapshot: NonNullable<ChatGptTurnEnvironment["capabilitySnapshot"]>,
+  contract: ChatGptMcpContract,
+): string[] {
+  return safeVisibleTools(snapshot, contract)
+    .filter(tool => !tool.namespace && gatewayToolNameIsValid(tool.name))
+    .map(tool => tool.name);
+}
+
 function isAgentWaitTool(tool: CodexTool): boolean {
   return tool.name === "wait_agent"
     && (tool.namespace === "multi_agent_v1" || tool.namespace === "multi_agent_v2");
@@ -683,7 +692,11 @@ export async function runChatGptMcpServer(options: {
           throw new Error("This Codex turn did not advertise a native command tool or the native exec gateway");
         }
         return invoke(claimed.transport, bound, gateway, {
-          input: execCommandGatewayProgram(execCommandArguments, shellCommandArguments),
+          input: execCommandGatewayProgram(
+            execCommandArguments,
+            shellCommandArguments,
+            chatGptGatewayAllowedToolNames(bound.capabilitySnapshot!, contract),
+          ),
         }, extra.signal);
       },
     ),
@@ -921,16 +934,20 @@ export async function runChatGptMcpServer(options: {
           return invoke(claimed.transport, bound, gateway, {
             input: execGatewayProgram(wire_name, input !== undefined, {
               ...(input !== undefined ? { input } : { arguments: invocationArguments }),
-            }, safeVisibleTools(bound.capabilitySnapshot!, contract)
-              .filter(candidate => !candidate.namespace && gatewayToolNameIsValid(candidate.name))
-              .map(candidate => candidate.name)),
+            }, chatGptGatewayAllowedToolNames(bound.capabilitySnapshot!, contract)),
           }, extra.signal);
         }
         if (tool.freeform) {
           if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
           if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
           return invoke(claimed.transport, bound, tool, {
-            input: tool === execGateway(bound.capabilitySnapshot!) ? transportBoundRawExecProgram(input, wireName(tool)) : input,
+            input: tool === execGateway(bound.capabilitySnapshot!)
+              ? transportBoundRawExecProgram(
+                input,
+                wireName(tool),
+                chatGptGatewayAllowedToolNames(bound.capabilitySnapshot!, contract),
+              )
+              : input,
           }, extra.signal);
         }
         if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
