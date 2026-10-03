@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
+import type { CapabilitySnapshot } from "./capability-projector";
 import type { BrokerToolRequest } from "./turn-broker";
 import { chatGptBrowserTabClosedError } from "./adapter-error";
 import {
@@ -139,6 +140,7 @@ export class ChatGptTextFeed {
 }
 
 interface ChatGptTurnRuntimeBase {
+  readonly capabilitySnapshot: CapabilitySnapshot;
   browser: Promise<string>;
   /** Physical helper/Playwright settlement, including the launcher end/release acknowledgement. */
   physicalSettlement: Promise<void>;

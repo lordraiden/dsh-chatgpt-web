@@ -940,9 +940,9 @@ export function createChatGptWebAdapter(
         }
         const nativeIdentity = extractChatGptTurnIdentity(parsed);
         const capabilitySnapshot = projectChatGptCapabilities({
-          sessionId: nativeIdentity.threadId ?? executionKey,
+          sessionId: nativeIdentity.threadId ?? chatGptTurnExecutionKey(parsed),
           agentId: nativeIdentity.agentName ?? "default",
-          turnId: nativeIdentity.turnId ?? executionKey,
+          turnId: nativeIdentity.turnId ?? chatGptTurnExecutionKey(parsed),
           tools: parsed.context.tools ?? [],
         });
         if (environment) environment = capabilitySnapshotForEnvironment(environment, capabilitySnapshot);
@@ -1020,6 +1020,7 @@ export function createChatGptWebAdapter(
                     const fallbackRuntime = startRuntime(
                       parsed,
                       manualRequest ? environment : undefined,
+                      capabilitySnapshot,
                       `${handoffTraceId}_fallback`,
                       turnCapabilities,
                     );
@@ -1199,7 +1200,6 @@ export function createChatGptWebAdapter(
         }
         const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
         const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
-        const nativeIdentity = extractChatGptTurnIdentity(parsed);
         const nativeTurnId = nativeIdentity.turnId;
         if (!nativeTurnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser ownership");
         const abortedTurnIds = manualRequest ? new Set(priorChatGptAbortedTurnIds(parsed)) : undefined;

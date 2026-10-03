@@ -9,6 +9,7 @@ const tool = {
 };
 const secondTool = {
   name: "view_image",
+  namespace: "",
   description: "View an image",
   parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
 };
