@@ -80,6 +80,7 @@ function canonicalIdentity(
   sessionId: string,
   agentId: string,
   turnId: string,
+  createdAt: number,
   tools: readonly CodexTool[],
   expiresAt?: number,
 ): string {
@@ -87,6 +88,7 @@ function canonicalIdentity(
     sessionId,
     agentId,
     turnId,
+    createdAt,
     tools: canonicalToolSet(tools),
     expiresAt: expiresAt ?? null,
   })).digest("hex");
@@ -110,11 +112,16 @@ export function projectChatGptCapabilities(input: {
   turnId: string;
   tools: readonly CodexTool[];
   expiresAt?: number;
+  /** Optional deterministic creation timestamp for trusted fixtures/tests. */
+  createdAt?: number;
 }): CapabilitySnapshot {
   const sessionId = input.sessionId.trim();
   const agentId = input.agentId?.trim() || "default";
   const turnId = input.turnId.trim();
-  const createdAt = Date.now();
+  const createdAt = input.createdAt ?? Date.now();
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
+    throw new Error("Capability snapshot creation time is invalid");
+  }
   if (!sessionId) throw new Error("Capability snapshot requires a DSH session identity");
   if (!agentId) throw new Error("Capability snapshot requires a DSH agent identity");
   if (!turnId) throw new Error("Capability snapshot requires a DSH turn identity");
@@ -125,7 +132,7 @@ export function projectChatGptCapabilities(input: {
   const tools = cloneTools(input.tools);
   assertUniqueWireNames(tools);
   const snapshot: CapabilitySnapshot = {
-    snapshotId: canonicalIdentity(sessionId, agentId, turnId, tools, input.expiresAt),
+    snapshotId: canonicalIdentity(sessionId, agentId, turnId, createdAt, tools, input.expiresAt),
     sessionId,
     agentId,
     turnId,
@@ -179,6 +186,7 @@ export function assertCapabilitySnapshotIntegrity(snapshot: CapabilitySnapshot):
     snapshot.sessionId,
     snapshot.agentId,
     snapshot.turnId,
+    snapshot.createdAt,
     snapshot.tools,
     snapshot.expiresAt,
   );
