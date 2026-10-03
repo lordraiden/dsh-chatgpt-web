@@ -8,6 +8,7 @@ import {
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
+import { assertCapabilitySnapshotBinding, type CapabilitySnapshot } from "./capability-projector";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
   expiresAt?: number;
@@ -175,6 +176,7 @@ function environmentIdentity(environment: ChatGptTurnEnvironment): string {
     roots: environment.roots,
     writableRoots: environment.writableRoots,
     sandboxPolicy: environment.sandboxPolicy,
+    capabilitySnapshotId: environment.capabilitySnapshot?.snapshotId ?? null,
   });
 }
 
@@ -193,11 +195,19 @@ function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
     })
     || !environment.sandboxPolicy || !["dangerFullAccess", "workspaceWrite", "readOnly"].includes(environment.sandboxPolicy.type)
     || !Array.isArray(environment.tools)
+    || !environment.capabilitySnapshot
+    || typeof environment.capabilitySnapshot.snapshotId !== "string"
+    || typeof environment.capabilitySnapshot.sessionId !== "string"
+    || typeof environment.capabilitySnapshot.agentId !== "string"
+    || typeof environment.capabilitySnapshot.turnId !== "string"
+    || environment.capabilitySnapshot.lifecycle !== "active"
     || environment.tools.some(tool => !tool || typeof tool.name !== "string" || typeof tool.description !== "string"
       || !tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters))) {
     throw new Error("turn owner environment is invalid");
   }
-  return structuredClone(environment as ChatGptTurnEnvironment);
+  const cloned = structuredClone(environment as ChatGptTurnEnvironment & { capabilitySnapshot: CapabilitySnapshot });
+  assertCapabilitySnapshotBinding(cloned.capabilitySnapshot, { sessionId: cloned.capabilitySnapshot.sessionId, agentId: cloned.capabilitySnapshot.agentId, turnId: cloned.capabilitySnapshot.turnId, snapshotId: cloned.capabilitySnapshot.snapshotId });
+  return cloned;
 }
 
 function assertSurfaceNonce(value: unknown): asserts value is string {
@@ -361,19 +371,19 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    if (environmentIdentity(channel.environment) !== environmentIdentity(environment)) {
-      throw new Error("Codex turn environment changed during an active ChatGPT tool loop");
+    if (!environment.capabilitySnapshot || !channel.environment.capabilitySnapshot) throw new Error("Codex turn capability snapshot is missing");
+    if (environmentIdentity(channel.environment) !== environmentIdentity(environment)
+      || channel.environment.capabilitySnapshot.snapshotId !== environment.capabilitySnapshot.snapshotId) {
+      throw new Error("Codex turn capability snapshot or trusted environment changed during an active ChatGPT tool loop");
     }
+    assertCapabilitySnapshotBinding(channel.environment.capabilitySnapshot, {
+      sessionId: channel.environment.capabilitySnapshot.sessionId,
+      agentId: channel.environment.capabilitySnapshot.agentId,
+      turnId: channel.environment.capabilitySnapshot.turnId,
+      snapshotId: environment.capabilitySnapshot.snapshotId,
+    });
     if (channel.safe?.state === "revoked") throw new Error("Zero Risk turn is already terminal");
-    // A no-tool Zero Risk answer can complete before its outer Responses observer reaches this owner
-    // readback. The environment is already proven identical, so completion makes this a no-op.
     if (channel.safe?.state === "completed") return;
-    channel.environment = {
-      ...environment,
-      ...(channel.environment.expiresAt !== undefined
-        ? { expiresAt: channel.environment.expiresAt }
-        : {}),
-    };
   }
 
   async nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> {

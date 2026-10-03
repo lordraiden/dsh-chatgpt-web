@@ -19,12 +19,13 @@ import {
   type LauncherManualTurnOwner,
   type LauncherManualTurnStart,
 } from "../../launcher-browser-host";
-import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
+import { type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker, type ChatGptBrowserPhysicalSurface } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
+import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
@@ -362,25 +363,16 @@ function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSess
   return [...byId.values()];
 }
 
-function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequest[]): void {
-  const advertised = new Map(
-    (parsed.context.tools ?? []).map(tool => [namespacedToolName(tool.namespace, tool.name), tool]),
-  );
+function validateBatchTools(requests: BrokerToolRequest[], snapshot: CapabilitySnapshot): void {
   const ajv = new Ajv({ allErrors: true, strict: false });
-
   for (const request of requests) {
-    const tool = advertised.get(request.wireName);
-    if (!tool) {
-      throw new Error(`ChatGPT requested a tool that the active Codex round did not advertise: ${request.wireName}`);
-    }
+    const tool = authorizeCapability(snapshot, { wireName: request.wireName });
     if (request.freeform || tool.freeform === true || tool.toolSearch === true) {
       throw new Error(`ChatGPT Web local capability does not support freeform/tool-search tool semantics: ${request.wireName}`);
     }
     const validate = ajv.compile(tool.parameters);
     if (!validate(request.arguments ?? {})) {
-      throw new Error(
-        `ChatGPT requested invalid arguments for tool ${request.wireName}: ${ajv.errorsText(validate.errors)}`,
-      );
+      throw new Error(`ChatGPT requested invalid arguments for tool ${request.wireName}: ${ajv.errorsText(validate.errors)}`);
     }
   }
 }
@@ -447,6 +439,7 @@ export function createChatGptWebAdapter(
   const startRuntime = (
     parsed: CodexParsedRequest,
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
+    capabilitySnapshot: CapabilitySnapshot,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
     providerTurn?: ProviderTurnLifecycle,
@@ -463,6 +456,7 @@ export function createChatGptWebAdapter(
       ? { localTools: true }
       : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const identity = extractChatGptTurnIdentity(parsed);
+    if (capabilitySnapshot.turnId !== identity.turnId) throw new Error("ChatGPT Web capability snapshot is bound to a different native turn");
     const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
       && !parsed._compactionRequest
       && Boolean(identity.threadId && identity.turnId);
@@ -720,6 +714,7 @@ export function createChatGptWebAdapter(
       });
       return {
         mode: "tools",
+        capabilitySnapshot,
         token: token.promise,
         externalProgress,
         browser: browserTurn.browser,
@@ -773,6 +768,7 @@ export function createChatGptWebAdapter(
       })), browserAbort);
       return {
         mode: "read-only",
+        capabilitySnapshot,
         browser: browserTurn.browser,
         physicalSettlement: browserTurn.physicalSettlement,
         trace,
@@ -846,6 +842,7 @@ export function createChatGptWebAdapter(
     });
     return {
       mode: "tools",
+      capabilitySnapshot,
       token: token.promise,
       externalProgress,
       browser: browserTurn.browser,
@@ -943,6 +940,14 @@ export function createChatGptWebAdapter(
             throw error;
           }
         }
+        const nativeIdentity = extractChatGptTurnIdentity(parsed);
+        const capabilitySnapshot = projectChatGptCapabilities({
+          sessionId: nativeIdentity.threadId ?? chatGptTurnExecutionKey(parsed),
+          agentId: nativeIdentity.agentName ?? "default",
+          turnId: nativeIdentity.turnId ?? chatGptTurnExecutionKey(parsed),
+          tools: parsed.context.tools ?? [],
+        });
+        if (environment) environment = capabilitySnapshotForEnvironment(environment, capabilitySnapshot);
         if (parsed._compactionRequest) {
           const structuredCompactionRequired = parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
             && configuredCapabilities.localToolsEnabled;
@@ -1017,6 +1022,7 @@ export function createChatGptWebAdapter(
                     const fallbackRuntime = startRuntime(
                       parsed,
                       manualRequest ? environment : undefined,
+                      capabilitySnapshot,
                       `${handoffTraceId}_fallback`,
                       turnCapabilities,
                     );
@@ -1196,7 +1202,6 @@ export function createChatGptWebAdapter(
         }
         const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
         const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
-        const nativeIdentity = extractChatGptTurnIdentity(parsed);
         const nativeTurnId = nativeIdentity.turnId;
         if (!nativeTurnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser ownership");
         const abortedTurnIds = manualRequest ? new Set(priorChatGptAbortedTurnIds(parsed)) : undefined;
@@ -1224,7 +1229,7 @@ export function createChatGptWebAdapter(
           session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
             executionKey,
             ownerKey,
-            () => startRuntime(parsed, environment, traceId, turnCapabilities, providerTurn),
+            () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn),
             traceId,
             incoming.abortSignal,
             nativeTurnId,
@@ -1497,7 +1502,7 @@ export function createChatGptWebAdapter(
                     freeform: false,
                     arguments: tc.arguments,
                   }));
-                  validateBatchTools(parsed, requests);
+                  validateBatchTools(requests, session.runtime.capabilitySnapshot);
                   session.setOutstanding(requests, roundReasoning, session.roundEvents(roundKey));
                   emitRoundBatch(buffer => emitToolBatch(
                     requests,
@@ -1572,7 +1577,7 @@ export function createChatGptWebAdapter(
                   await finishBrowserOutcome(await session.browserOutcome);
                   return;
                 }
-                validateBatchTools(parsed, next.requests);
+                validateBatchTools(next.requests, session.runtime.capabilitySnapshot);
                 session.setOutstanding(next.requests, roundReasoning, session.roundEvents(roundKey));
                 emitRoundBatch(buffer => emitToolBatch(
                   next.requests,
