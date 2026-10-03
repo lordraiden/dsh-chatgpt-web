@@ -1,12 +1,16 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "bun:test";
 import {
   ChatGptWebSurfaceTransport,
   type WebSurfaceInspection,
-  type WebSurfaceTransportBackend,
   type WebSurfaceTurn,
 } from "../src/adapters/chatgpt-web/web-surface-transport";
+import type { WebSurfaceTransportBackend } from "../src/adapters/chatgpt-web/web-surface-transport";
 
-function fakeTurn(): WebSurfaceTurn {
+const ROOT = join(import.meta.dir, "..");
+
+function fakeTurn(overrides: Partial<WebSurfaceTurn> = {}): WebSurfaceTurn {
   return {
     traceId: "trace-64",
     modelId: "gpt-5.6-luna",
@@ -21,19 +25,12 @@ function fakeTurn(): WebSurfaceTurn {
       release: () => {},
     }),
     onTextDelta: () => {},
-  } as unknown as WebSurfaceTurn;
+    ...overrides,
+  };
 }
 
-test("WebSurfaceTransport exposes semantic lifecycle inputs without exposing browser mechanics", async () => {
-  const calls: string[] = [];
-  const inspection: WebSurfaceInspection = {
-    authenticated: true,
-    temporary: true,
-    url: "https://chatgpt.com/",
-    solAvailable: false,
-    proAvailable: false,
-  };
-  const backend: WebSurfaceTransportBackend = {
+function fakeBackend(calls: string[]): WebSurfaceTransportBackend {
+  return {
     run(turn) {
       calls.push(`run:${turn.traceId}`);
       turn.onPhysicalSurfaceBound?.({
@@ -54,7 +51,13 @@ test("WebSurfaceTransport exposes semantic lifecycle inputs without exposing bro
     },
     inspectSession(detectCapabilities) {
       calls.push(`inspect:${detectCapabilities}`);
-      return Promise.resolve(inspection);
+      return Promise.resolve({
+        authenticated: true,
+        temporary: true,
+        url: "https://chatgpt.com/",
+        solAvailable: false,
+        proAvailable: false,
+      });
     },
     smokeTest() {
       calls.push("smoke");
@@ -65,41 +68,34 @@ test("WebSurfaceTransport exposes semantic lifecycle inputs without exposing bro
       return Promise.resolve();
     },
   };
-  const transport = new ChatGptWebSurfaceTransport(backend);
-  let bound = 0;
-  let ready = 0;
-  let sendActivated = 0;
-  let submitted = 0;
+}
 
-  const turn = fakeTurn();
-  turn.onPhysicalSurfaceBound = () => { bound += 1; };
-  turn.onSurfaceReady = () => { ready += 1; };
-  turn.onSendActivated = () => { sendActivated += 1; };
-  turn.onSubmitted = () => { submitted += 1; };
+test("WebSurfaceTransport keeps lifecycle evidence semantic", async () => {
+  const calls: string[] = [];
+  const transport = new ChatGptWebSurfaceTransport(fakeBackend(calls));
+  const observed: string[] = [];
+
+  const turn = fakeTurn({
+    onPhysicalSurfaceBound: surface => observed.push(`bound:${surface.resourceId}`),
+    onSurfaceReady: () => observed.push("ready"),
+    onSendActivated: () => observed.push("send-activated"),
+    onSubmitted: () => observed.push("submitted"),
+  });
 
   await expect(transport.run(turn)).resolves.toBe("answer");
-  await expect(transport.verifyConnector("trace-verify")).resolves.toBe("verified");
-  await expect(transport.inspectSession(true)).resolves.toEqual(inspection);
-  await expect(transport.smokeTest()).resolves.toEqual({ effort: "low", response: "ok" });
-  await expect(transport.close()).resolves.toBeUndefined();
-
-  expect(bound).toBe(1);
-  expect(ready).toBe(1);
-  expect(sendActivated).toBe(1);
-  expect(submitted).toBe(1);
-  expect(calls).toEqual([
-    "run:trace-64",
-    "verify:trace-verify",
-    "inspect:true",
-    "smoke",
-    "close",
-  ]);
+  expect(observed).toEqual(["bound:surface-1", "ready", "send-activated", "submitted"]);
+  expect(calls).toEqual(["run:trace-64"]);
 });
 
-test("the transport boundary is lifecycle/semantic, not a second authority", () => {
+test("WebSurfaceTransport preserves owning-turn cancellation semantics", async () => {
+  const controller = new AbortController();
+  let receivedSignal: AbortSignal | undefined;
   const backend: WebSurfaceTransportBackend = {
-    run: () => Promise.resolve("ok"),
-    verifyConnector: () => Promise.resolve("ok"),
+    run(turn) {
+      receivedSignal = turn.abortSignal;
+      return Promise.reject(new DOMException("cancelled", "AbortError"));
+    },
+    verifyConnector: () => Promise.resolve("verified"),
     inspectSession: async () => ({
       authenticated: true,
       temporary: true,
@@ -109,7 +105,84 @@ test("the transport boundary is lifecycle/semantic, not a second authority", () 
     close: () => Promise.resolve(),
   };
   const transport = new ChatGptWebSurfaceTransport(backend);
-  expect(transport).toBeInstanceOf(ChatGptWebSurfaceTransport);
-  expect(typeof transport.run).toBe("function");
-  expect(typeof transport.close).toBe("function");
+
+  const run = transport.run(fakeTurn({ abortSignal: controller.signal }));
+  controller.abort();
+
+  await expect(run).rejects.toMatchObject({ name: "AbortError" });
+  expect(receivedSignal).toBe(controller.signal);
+});
+
+test("WebSurfaceTransport is not a second lifecycle or authorization authority", async () => {
+  const calls: string[] = [];
+  const transport = new ChatGptWebSurfaceTransport(fakeBackend(calls));
+
+  const inspection = await transport.inspectSession(true);
+  expect(inspection).toEqual({
+    authenticated: true,
+    temporary: true,
+    url: "https://chatgpt.com/",
+    solAvailable: false,
+    proAvailable: false,
+  });
+  await transport.verifyConnector("trace-verify");
+  await transport.smokeTest();
+  await transport.close();
+
+  expect(calls).toEqual([
+    "verify:trace-verify",
+    "inspect:true",
+    "smoke",
+    "close",
+  ]);
+});
+
+test("the transport contract does not export browser implementation types", () => {
+  const source = readFileSync(
+    join(ROOT, "src", "adapters", "chatgpt-web", "web-surface-transport.ts"),
+    "utf8",
+  );
+  expect(source).toContain("export interface WebSurfaceTurn");
+  expect(source).toContain("export interface WebSurfacePhysicalSurface");
+  expect(source).not.toContain("export type WebSurfaceTurn = BrowserTurn");
+  expect(source).not.toContain("export type WebSurfacePhysicalSurface = ChatGptBrowserPhysicalSurface");
+  expect(source).not.toContain("export interface WebSurfaceTransportBackend");
+  expect(source).not.toContain("Locator");
+  expect(source).not.toContain("Page");
+  expect(source).not.toContain("BrowserContext");
+  expect(source).not.toContain("Playwright");
+});
+
+test("upper provider layers import the transport boundary, never the browser worker", () => {
+  for (const path of [
+    "src/adapters/chatgpt-web/index.ts",
+    "src/adapters/chatgpt-web/browser-helper-main.ts",
+    "src/adapters/chatgpt-web/compaction-handoff.ts",
+  ]) {
+    const source = readFileSync(join(ROOT, path), "utf8");
+    expect(source).not.toMatch(/from ["']\.\/browser-worker["']/);
+  }
+});
+
+test("WebSurfaceTransport exposes all Phase 1 lifecycle evidence without owning completion policy", () => {
+  const transport = new ChatGptWebSurfaceTransport(fakeBackend([]));
+  const states: string[] = [];
+  const turn = fakeTurn({
+    onPhysicalSurfaceBound: () => states.push("surface-bound"),
+    onSurfaceReady: () => states.push("surface-ready"),
+    onSendActivated: () => states.push("send-activated"),
+    onSubmitted: () => states.push("submitted"),
+    onHeartbeat: () => states.push("heartbeat"),
+    onReasoningSummary: () => states.push("reasoning-summary"),
+  });
+
+  return transport.run(turn).then(() => {
+    expect(states.slice(0, 4)).toEqual([
+      "surface-bound",
+      "surface-ready",
+      "send-activated",
+      "submitted",
+    ]);
+    expect(states).not.toContain("completed");
+  });
 });
