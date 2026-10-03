@@ -136,6 +136,12 @@ assert.throws(
   ),
   /expired/,
 );
+const expiryTampered = structuredClone(expiring) as typeof expiring;
+expiryTampered.expiresAt = expiring.expiresAt! + 60_000;
+assert.throws(
+  () => assertCapabilitySnapshotIntegrity(expiryTampered),
+  /integrity check failed/,
+);
 
 const tampered = structuredClone(snapshot) as typeof snapshot;
 (tampered.tools[0]!.parameters as Record<string, unknown>).tampered = true;

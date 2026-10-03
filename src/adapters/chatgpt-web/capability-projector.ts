@@ -81,12 +81,14 @@ function canonicalIdentity(
   agentId: string,
   turnId: string,
   tools: readonly CodexTool[],
+  expiresAt?: number,
 ): string {
   return createHash("sha256").update(canonicalJson({
     sessionId,
     agentId,
     turnId,
     tools: canonicalToolSet(tools),
+    expiresAt: expiresAt ?? null,
   })).digest("hex");
 }
 
@@ -123,7 +125,7 @@ export function projectChatGptCapabilities(input: {
   const tools = cloneTools(input.tools);
   assertUniqueWireNames(tools);
   const snapshot: CapabilitySnapshot = {
-    snapshotId: canonicalIdentity(sessionId, agentId, turnId, tools),
+    snapshotId: canonicalIdentity(sessionId, agentId, turnId, tools, input.expiresAt),
     sessionId,
     agentId,
     turnId,
@@ -173,7 +175,13 @@ export function assertCapabilitySnapshotIntegrity(snapshot: CapabilitySnapshot):
     throw new Error("Capability snapshot lifecycle or tool set is invalid");
   }
   assertUniqueWireNames(snapshot.tools);
-  const expected = canonicalIdentity(snapshot.sessionId, snapshot.agentId, snapshot.turnId, snapshot.tools);
+  const expected = canonicalIdentity(
+    snapshot.sessionId,
+    snapshot.agentId,
+    snapshot.turnId,
+    snapshot.tools,
+    snapshot.expiresAt,
+  );
   if (snapshot.snapshotId !== expected) {
     throw new Error("Capability snapshot integrity check failed");
   }
