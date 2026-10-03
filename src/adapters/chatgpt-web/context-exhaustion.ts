@@ -15,7 +15,6 @@ export interface ChatGptContextExhaustionSignal {
   kind: "context_exhausted";
   variant: ChatGptContextExhaustionVariant;
   source: "surface-structure";
-  text: string;
 }
 
 const CONVERSATION_TERMS = [
@@ -128,6 +127,5 @@ export function detectChatGptContextExhaustion(
     kind: "context_exhausted",
     variant,
     source: "surface-structure",
-    text,
   };
 }
