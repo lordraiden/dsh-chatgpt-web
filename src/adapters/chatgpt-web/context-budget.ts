@@ -8,6 +8,11 @@ import {
 import type { CodexMessage } from "../../types";
 
 export const CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET = 128_000;
+/**
+ * Conservative Free-Web transport guardrail measured for this bridge. OpenAI's public ChatGPT image
+ * documentation does not define a universal image-count maximum; it says the count depends on
+ * image size and accompanying text. This value is therefore NOT an OpenAI product limit.
+ */
 export const CHATGPT_WEB_DEFAULT_IMAGE_LIMIT = 10;
 
 /** Conservative JSON-encoded ceiling for a single compaction-control request. */
@@ -210,9 +215,16 @@ export function selectCompactionMessagesDeterministically(
   const isProtected = (message: CodexMessage, index: number, state: readonly CodexMessage[]): boolean => {
     if (message.role === "developer" || message.role === "toolResult") return true;
     if (message.role === "assistant") {
-      return message.content.some(
+      if (message.content.some(
         part => part.type === "toolCall" && settledToolCallIds.has(part.id),
-      );
+      )) return true;
+      // Preserve the latest assistant state, including a reasoning summary, as part of deterministic
+      // continuation. Older ordinary assistant history remains eligible for reduction.
+      return state.slice(index + 1).every(candidate => candidate.role !== "assistant");
+    }
+    if (message.role === "agentMessage") {
+      // Preserve the latest inter-agent message so compaction cannot erase the active handoff.
+      return state.slice(index + 1).every(candidate => candidate.role !== "agentMessage");
     }
     if (message.role === "user") {
       return index === state.length - 1
