@@ -361,7 +361,7 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
   if (normalized instanceof ChatGptWebAdapterError) return normalized;
   if (normalized instanceof ChatGptSurfaceStaleError) {
     return new ChatGptWebAdapterError(
-      "The ChatGPT Temporary Chat page rehydrated mid-turn and discarded the in-flight generation. The plugin already retried the turn on a fresh page; retry again.",
+      "The ChatGPT Temporary Chat page rehydrated mid-turn and discarded the in-flight generation. The browser bridge does not replay a submitted prompt on a fresh page; inspect the ChatGPT tab and explicitly retry only after confirming the original turn did not complete.",
       {
         status: 502,
         errorType: "server_error",
@@ -1621,8 +1621,11 @@ export function createChatGptWebAdapter(
           if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
             chatGptWebTurnRetryPolicy.clear(retryKey);
           }
+          // Every terminal browser-attempt failure must be classified as FAILED before the
+          // session is retired. A later explicit retry starts a new physical attempt and is therefore
+          // a replay, never an implicit downgrade of this failed execution.
+          providerTurn.markRecovery("FAILED");
           if (handledError instanceof ChatGptWebAdapterError && !handledError.retryable) {
-            providerTurn.markRecovery("FAILED");
             // A deterministic request failure remains replayable so a native reconnect cannot burn
             // another browser attempt. Every other failure retires the browser session: client
             // disconnects, stage failures, and retryable ChatGPT errors must start a fresh surface
