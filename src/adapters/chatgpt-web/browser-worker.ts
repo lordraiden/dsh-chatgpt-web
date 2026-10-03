@@ -4817,7 +4817,7 @@ export class ChatGptBrowserWorker {
         await diagnostics.capture(page, `${stagePrefix}send-accepted`);
         return responseTurn;
       };
-      const responseTurn = await sendAndWaitForResponse(1);
+      let responseTurn = await sendAndWaitForResponse(1);
 
       let lastHeartbeat = 0;
       let finalText = "";
