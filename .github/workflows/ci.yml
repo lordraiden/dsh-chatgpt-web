@@ -62,7 +62,7 @@ jobs:
           echo "SHA-256: $checksum"
 
       - name: Smoke test the exact validated artifact
-        run: node scripts/smoke-tarball.mjs "artifact/${{ steps.package.outputs.artifact_name }}"
+        run: node scripts/smoke-tarball.mjs "$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
 
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
