@@ -44,7 +44,6 @@ import {
   ChatGptReplayCoordinator,
   createChatGptReplayBoundary,
   deriveChatGptReplayExecutionState,
-  type ChatGptConversationHandle,
   type ChatGptReplayIdentity,
 } from "./replay";
 import {
