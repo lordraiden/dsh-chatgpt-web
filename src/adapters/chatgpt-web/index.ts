@@ -40,6 +40,17 @@ import {
 } from "./rolling-checkpoint";
 import { ChatGptExternalTurnProgress } from "./turn-progress";
 import {
+  ChatGptReplayCoordinator,
+  createChatGptReplayBoundary,
+  deriveChatGptReplayExecutionState,
+  type ChatGptConversationHandle,
+  type ChatGptReplayIdentity,
+} from "./replay";
+import {
+  createChatGptWebReplayTransport,
+} from "./replay-transport";
+import { capabilityBindingIdForExecution } from "./provider-core";
+import {
   canonicalizeCompactionHandoff,
   existingStructuredCompactionRun,
   MAX_COMPACTION_HANDOFF_TIMEOUT_MS,
@@ -469,6 +480,10 @@ export function createChatGptWebAdapter(
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
     providerTurn?: ProviderTurnLifecycle,
+    replayOptions?: {
+      conversationGeneration?: number;
+      onSurfaceReady?: () => void | Promise<void>;
+    },
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -499,6 +514,9 @@ export function createChatGptWebAdapter(
       ? retainedConversationResumeRequest(checkpointInput.parsed)
       : undefined;
     const retainConversation = conversationKey !== undefined;
+    const conversationGeneration = conversationKey
+      ? replayOptions?.conversationGeneration ?? chatGptTurnSessions.conversationGeneration(conversationKey)
+      : undefined;
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
       ? async () => {
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
@@ -581,11 +599,14 @@ export function createChatGptWebAdapter(
     };
     const providerTurnSurfaceHooks: {
       onPhysicalSurfaceBound: (binding: WebSurfacePhysicalSurface) => void;
-      onSurfaceReady: () => void;
+      onSurfaceReady: () => void | Promise<void>;
     } | undefined = providerTurn
       ? {
         onPhysicalSurfaceBound: binding => providerTurn.bindPhysicalResource(binding),
-        onSurfaceReady: () => providerTurn.markSurfaceReady(),
+        onSurfaceReady: async () => {
+          providerTurn.markSurfaceReady();
+          await replayOptions?.onSurfaceReady?.();
+        },
       }
       : undefined;
     if (manualRequest) {
@@ -750,6 +771,7 @@ export function createChatGptWebAdapter(
         usageInput: checkpointInput.parsed,
         manualControl: { surfaceNonce },
         ...(conversationKey ? { conversationKey } : {}),
+        ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
         ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
         retireCapability: async () => {
           if (activeToken) await broker.revoke(activeToken);
@@ -800,6 +822,7 @@ export function createChatGptWebAdapter(
         trace,
         text,
         usageInput: checkpointInput.parsed,
+        ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
         submission,
         cancel: browserTurn.cancel,
       };
@@ -877,6 +900,7 @@ export function createChatGptWebAdapter(
       text,
       usageInput: checkpointInput.parsed,
       ...(conversationKey ? { conversationKey } : {}),
+      ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
       ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
       retireCapability: async () => {
         if (activeToken) await broker.revoke(activeToken);
