@@ -238,14 +238,14 @@ function leaseInput(turnId: string) {
   const lease = registry.acquire(descriptor);
   assert.equal(registry.activeCount(), 1);
   assert.throws(() => registry.acquire(descriptor), /already leased/i);
-  lease.bindPhysicalResource({
+  registry.bindPhysicalResource(lease, {
     resourceId: "surface-1",
     browserContextId: "ctx-1",
     pageId: "page-1",
     profileId: "profile-1",
     accountId: "account-1",
   });
-  lease.bindPhysicalResource({
+  registry.bindPhysicalResource(lease, {
     resourceId: "surface-1",
     browserContextId: "ctx-1",
     pageId: "page-2",
