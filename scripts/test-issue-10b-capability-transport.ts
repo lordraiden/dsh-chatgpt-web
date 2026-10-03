@@ -50,11 +50,22 @@ const execTool: CodexTool = {
 };
 
 const hiddenTool: CodexTool = {
-  name: "internal_control",
-  namespace: "bridge",
-  description: "An internal bridge capability that must never be discovered through the gateway.",
+  name: "codex_tool_call",
+  namespace: "",
+  description: "Internal bridge capability that must never be exposed by the Zero Risk transport contract.",
   parameters: {
     type: "object",
+    additionalProperties: false,
+  },
+};
+const nestedTool: CodexTool = {
+  name: "read_file",
+  namespace: "",
+  description: "Read a file through the native DSH tool registry.",
+  parameters: {
+    type: "object",
+    properties: { path: { type: "string" } },
+    required: ["path"],
     additionalProperties: false,
   },
 };
@@ -63,7 +74,7 @@ const snapshot = projectChatGptCapabilities({
   sessionId: "session-10b",
   agentId: "agent-10b",
   turnId: "turn-10b",
-  tools: [echoTool, execTool, hiddenTool],
+  tools: [echoTool, execTool, hiddenTool, nestedTool],
 });
 
 const environment = capabilitySnapshotForEnvironment({
@@ -207,16 +218,16 @@ const environment = capabilitySnapshotForEnvironment({
 
 {
   const nativeAllowed = chatGptGatewayAllowedToolNames(snapshot, "native");
-  assert.deepEqual(nativeAllowed, ["echo", "internal_control"]);
+  assert.deepEqual(nativeAllowed.sort(), ["codex_tool_call", "exec", "read_file"].sort());
   assert.equal(nativeAllowed.includes("forged_tool"), false);
 
   const safeAllowed = chatGptGatewayAllowedToolNames(snapshot, "safe");
+  assert.deepEqual(safeAllowed, ["read_file"]);
   assert.equal(safeAllowed.includes("forged_tool"), false);
-  assert.equal(safeAllowed.includes("internal_control"), true === false || !safeAllowed.includes("internal_control"));
-  assert.equal(safeAllowed.includes("echo"), true);
+  assert.equal(safeAllowed.includes("codex_tool_call"), false);
   assert.equal(safeAllowed.includes("exec"), false);
   assert.equal(safeAllowed.includes("native__echo"), false);
-  console.log("ok gateway allowlist is derived from the immutable snapshot");
+  console.log("ok gateway allowlist is derived from the immutable snapshot and contract policy");
 }
 
 {
