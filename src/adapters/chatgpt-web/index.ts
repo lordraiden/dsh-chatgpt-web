@@ -57,43 +57,6 @@ import {
   type ProviderTurnLifecycle,
 } from "./provider-core";
 
-function extractLatestUserPrompt(parsed: CodexParsedRequest): string {
-  const messages = parsed.context.messages ?? [];
-  const userTexts: string[] = [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg && msg.role === "user") {
-      let text = "";
-      if (typeof msg.content === "string") {
-        text = msg.content;
-      } else if (Array.isArray(msg.content)) {
-        text = msg.content
-          .map(part => {
-            if (typeof part === "string") return part;
-            if (part && "text" in part && typeof (part as { text?: string }).text === "string") return (part as { text: string }).text;
-            return "";
-          })
-          .join(" ");
-      }
-      text = text.trim();
-      if (!text) continue;
-      // Skip operational or system-injected messages
-      if (
-        text.startsWith("Time sampled") ||
-        text.includes("<environment_context>") ||
-        text.includes("<system-reminder>") ||
-        text.includes("Context injection") ||
-        text.startsWith("Turn checkpoint")
-      ) {
-        continue;
-      }
-      userTexts.push(text);
-      if (userTexts.length >= 5) break;
-    }
-  }
-  return userTexts.join(" ");
-}
-
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
@@ -1432,7 +1395,6 @@ export function createChatGptWebAdapter(
             const toolWaitAbort = new AbortController();
             try {
               const roundReasoning = session.roundReasoning(roundKey);
-              const userPrompt = extractLatestUserPrompt(parsed);
               const streamParser = new ChatGptToolStreamParser();
               const collectedToolCalls: ParsedToolCall[] = [];
 
