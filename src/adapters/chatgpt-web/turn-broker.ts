@@ -1134,6 +1134,10 @@ export class TurnBroker implements TurnBrokerOwner {
       || request.capabilitySnapshotId !== binding.channel.capabilitySnapshot.snapshotId) {
       throw new Error("capability transport binding does not match the active immutable capability snapshot");
     }
+    if (binding.channel.capabilitySnapshot.expiresAt !== undefined
+      && binding.channel.capabilitySnapshot.expiresAt <= Date.now()) {
+      throw new Error("capability transport binding snapshot is expired");
+    }
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
     const callId = opaqueId("call");
