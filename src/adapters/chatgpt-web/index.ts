@@ -1339,18 +1339,19 @@ export function createChatGptWebAdapter(
               boundary: replayBoundary,
             }, replayRuntime.transport);
           } catch (error) {
-            session = replaySession ?? replayRuntime.getSession() as ChatGptTurnSession;
-            if (!replaySession) {
+            session = replaySession ?? replayRuntime.getSession();
+            if (!session) {
               providerTurn.failBeforePhysicalSettlement();
             } else {
               if (providerTurn.snapshot().state !== "RETIRED") {
                 providerTurn.markRecovery("FAILED");
               }
-              replaySession.cancel(error instanceof Error ? error : new Error(String(error)));
+              session.cancel(error instanceof Error ? error : new Error(String(error)));
             }
             throw error;
           }
-          session = replayRuntime.getSession()!;
+          session = replayRuntime.getSession();
+          if (!session) throw new Error("ChatGPT replay completed without a replacement session");
           chatGptTurnSessions.clearContextExhaustion(executionKey);
         } else {
           try {
