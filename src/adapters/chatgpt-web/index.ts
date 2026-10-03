@@ -381,13 +381,14 @@ export function resolveChatGptCapabilitySnapshotForTurn(
   const tools = parsed.context.tools ?? [];
   const dshSessionId = identity.dshSessionId ?? executionKey;
   const existing = providerCore.get(executionKey);
-  if (existing) {
-    const snapshot = existing.snapshot().capabilitySnapshot;
+  const snapshot = existing?.snapshot().capabilitySnapshot
+    ?? providerCore.getRetiredCapabilitySnapshot(executionKey);
+  if (snapshot) {
     if (snapshot.sessionId !== dshSessionId || snapshot.agentId !== dshSessionId) {
-      throw new Error("ChatGPT Web DSH identity changed during an active provider turn");
+      throw new Error("ChatGPT Web DSH identity changed during provider replay");
     }
     if (identity.turnId !== undefined && snapshot.turnId !== identity.turnId) {
-      throw new Error("ChatGPT Web native turn identity changed during an active provider turn");
+      throw new Error("ChatGPT Web native turn identity changed during provider replay");
     }
     capabilitySnapshotForEnvironment({ tools }, snapshot);
     return snapshot;
