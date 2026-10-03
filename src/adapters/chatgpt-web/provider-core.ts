@@ -53,6 +53,15 @@ function fingerprint(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
+export function capabilityBindingIdForExecution(
+  executionKey: string,
+  capabilitySnapshotId: string,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ executionKey, capabilitySnapshotId }))
+    .digest("hex");
+}
+
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -527,6 +536,7 @@ export class ChatGptWebProviderCore {
   // Keep the ownership record after retirement so an old immutable snapshot cannot be attached to a new turn.
   private readonly capabilitySnapshotOwners = new Map<string, string>();
   private readonly retiredExecutions = new Map<string, number>();
+  private readonly retiredCapabilitySnapshots = new Map<string, CapabilitySnapshot>();
   private closed = false;
 
   private rememberRetired(executionKey: string): void {
@@ -540,6 +550,10 @@ export class ChatGptWebProviderCore {
 
   wasRetired(executionKey: string): boolean {
     return this.retiredExecutions.has(executionKey);
+  }
+
+  getRetiredCapabilitySnapshot(executionKey: string): CapabilitySnapshot | undefined {
+    return this.retiredCapabilitySnapshots.get(executionKey);
   }
 
   constructor(
@@ -616,6 +630,12 @@ export class ChatGptWebProviderCore {
       () => {
         this.turns.delete(input.executionKey);
         this.rememberRetired(input.executionKey);
+        this.retiredCapabilitySnapshots.set(input.executionKey, input.capabilitySnapshot);
+        while (this.retiredCapabilitySnapshots.size > 1024) {
+          const oldest = this.retiredCapabilitySnapshots.keys().next().value as string | undefined;
+          if (oldest === undefined) break;
+          this.retiredCapabilitySnapshots.delete(oldest);
+        }
       },
     );
     const recovery = input.recovery ?? (this.wasRetired(input.executionKey) ? "REPLAY" : "NEW");
@@ -658,5 +678,6 @@ export class ChatGptWebProviderCore {
     this.turns.clear();
     this.capabilitySnapshotOwners.clear();
     this.retiredExecutions.clear();
+    this.retiredCapabilitySnapshots.clear();
   }
 }
