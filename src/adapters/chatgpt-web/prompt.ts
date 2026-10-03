@@ -9,6 +9,8 @@ import {
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
 } from "./rolling-checkpoint";
 
+export type { ChatGptWebPromptImage } from "./context-projection";
+
 export interface CompiledChatGptWebPrompt {
   text: string;
   images: ChatGptWebPromptImage[];
