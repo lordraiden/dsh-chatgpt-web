@@ -4385,6 +4385,8 @@ export class ChatGptBrowserWorker {
         : undefined;
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
       const estimatedMessageTokens = estimateCompiledChatGptWebMessageTokens(prepared, turn.modelId);
+      const compiledMessages = compiledChatGptWebMessages(prepared);
+      const serializedInputBytes = compiledMessages.reduce((total, message) => total + Buffer.byteLength(message, "utf8"), 0);
       const maxMessageChars = compiledChatGptWebMaxMessageChars(prepared);
       const maxStageMessageTokens = multipartStages
         ? Math.max(...multipartStages.map(stage => estimateTokens(stage.text, turn.modelId)))
@@ -4420,6 +4422,9 @@ export class ChatGptBrowserWorker {
             finalMessageTokens: estimateTokens(multipartFinalPrompt, turn.modelId),
             finalMessageChars: multipartFinalPrompt.length,
           } : undefined,
+          serializedInputBytes,
+          prepared.images.length,
+          turn.compaction === true,
         );
       } else {
         assertChatGptWebInputWithinLimits(
@@ -4430,6 +4435,9 @@ export class ChatGptBrowserWorker {
           browserCapabilities,
           maxMessageChars,
           this.config.tuning.composerCharLimit,
+          serializedInputBytes,
+          prepared.images.length,
+          turn.compaction === true,
         );
       }
       const deadline = this.config.turnTimeoutMs === undefined
