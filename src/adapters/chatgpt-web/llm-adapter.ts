@@ -570,6 +570,7 @@ export function mapStream(
   resolveBackend: () => ProviderAdapter,
   options: GenerateOptions,
   toRequest: () => CodexParsedRequest,
+  settings: { usageMode?: "emit" | "omit" } = {},
 ): AsyncIterable<StreamChunk> {
   return (async function* (): AsyncGenerator<StreamChunk> {
     if (options.signal?.aborted) {
@@ -596,6 +597,7 @@ export function mapStream(
       }
     })();
 
+    const emitUsage = settings.usageMode !== "omit";
     let blockIndex = 0;
     let openBlock: { index: number; kind: "text" | "reasoning"; text: string } | { index: number; kind: "tool"; id: string; name?: string; arguments: string } | undefined;
     let usageEmitted = false;
@@ -662,7 +664,7 @@ export function mapStream(
             break;
           case "done": {
             const end = closeBlock(); if (end) yield end;
-            const tokenUsage = toTokenUsage(event.usage);
+            const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             const kind = event.stopReason === "tool_use" ? "tool-calls" : event.stopReason === "max_tokens" ? "max-tokens" : "stop";
             yield { type: "finish", reason: { kind } };
@@ -671,7 +673,7 @@ export function mapStream(
           }
           case "incomplete": {
             const end = closeBlock(); if (end) yield end;
-            const tokenUsage = toTokenUsage(event.usage);
+            const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             yield { type: "finish", reason: { kind: "error", failure: failureFromEvent(event.message ?? event.reason, "PROVIDER_ERROR") } };
             finishYielded = true;
@@ -679,7 +681,7 @@ export function mapStream(
           }
           case "error": {
             const end = closeBlock(); if (end) yield end;
-            const tokenUsage = toTokenUsage(event.usage);
+            const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             const kind = isAbortError(event) && (options.signal?.aborted || backendAbort.signal.aborted) ? "aborted" : "error";
             yield { type: "finish", reason: { kind, failure: failureFromEvent(event.message, event.code ?? (kind === "aborted" ? "aborted" : "PROVIDER_ERROR"), event.status) } };
