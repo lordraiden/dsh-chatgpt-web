@@ -1,5 +1,4 @@
 import { createHash, randomBytes } from "node:crypto";
-import Ajv from "ajv";
 import { resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
@@ -364,15 +363,10 @@ function currentToolResults(parsed: CodexParsedRequest, session: ChatGptTurnSess
 }
 
 function validateBatchTools(requests: BrokerToolRequest[], snapshot: CapabilitySnapshot): void {
-  const ajv = new Ajv({ allErrors: true, strict: false });
   for (const request of requests) {
     const tool = authorizeCapability(snapshot, { wireName: request.wireName });
     if (request.freeform || tool.freeform === true || tool.toolSearch === true) {
       throw new Error(`ChatGPT Web local capability does not support freeform/tool-search tool semantics: ${request.wireName}`);
-    }
-    const validate = ajv.compile(tool.parameters);
-    if (!validate(request.arguments ?? {})) {
-      throw new Error(`ChatGPT requested invalid arguments for tool ${request.wireName}: ${ajv.errorsText(validate.errors)}`);
     }
   }
 }
