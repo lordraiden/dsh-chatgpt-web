@@ -24,7 +24,7 @@ assert(plugin.includes("port: Volatile<number>"), "port must be declared volatil
 assert(plugin.includes(".volatile()"), "port schema must be live");
 assert(plugin.includes("loader/volatile-update"), "runtime must react to live port changes");
 assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
-assert(plugin.includes("resolveLauncher(config.bunPath, port)"), "launcher must use the effective configured port");
+assert(plugin.includes("resolveLauncher(config.bunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
 assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
 assert(plugin.includes("let startGeneration = 0"), "live reconfiguration must invalidate an in-flight start");
 assert(plugin.includes("if (spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
