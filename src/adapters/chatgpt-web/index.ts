@@ -942,6 +942,7 @@ export function createChatGptWebAdapter(
           ? AbortSignal.any([incoming.abortSignal, shutdownController.signal])
           : shutdownController.signal,
       };
+      let contextReplayAttempts = 0;
       const runChatGptWebTurn = async (): Promise<void> => {
         const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
         if (manualRequest !== manualInteraction) {
@@ -1750,6 +1751,15 @@ export function createChatGptWebAdapter(
                 conversationKey: exhaustedConversationKey,
                 handle: chatGptConversationHandleForEpoch(exhaustedConversationKey, generation),
               });
+
+              if (contextReplayAttempts < 1) {
+                contextReplayAttempts += 1;
+                await chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey);
+                await providerCore.waitForRetirement(executionKey);
+                await runChatGptWebTurn();
+                return;
+              }
+
               void chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey).catch(retirementError => {
                 console.error(
                   `[chatgpt-web] failed to invalidate exhausted conversation: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
