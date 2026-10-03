@@ -1,0 +1,190 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import vm from "node:vm";
+
+const root = resolve(import.meta.dirname, "..");
+const client = readFileSync(resolve(root, "client.js"), "utf8");
+const plugin = readFileSync(resolve(root, "src", "plugin.ts"), "utf8");
+const cli = readFileSync(resolve(root, "src", "cli.ts"), "utf8");
+
+assert(!client.includes("localStorage.getItem"), "client must not read a persisted control token");
+assert(!client.includes("localStorage.setItem"), "client must not write a persisted control token");
+assert(client.includes("localStorage.removeItem(LEGACY_TOKEN_KEY)"), "migration must remove the legacy persisted token key");
+assert(!client.includes("sessionStorage"), "control token must not use sessionStorage");
+assert(!client.includes("127.0.0.1:17841"), "client must not hard-code the default sidecar port");
+assert(client.includes("configForms.get(CONFIG_ID)"), "client must consume the DSH config form");
+assert(client.includes("inject: ['slots', 'locale', 'configForms']"), "client must inject configForms");
+assert(client.includes("const LOOPBACK_HOST = '127.0.0.1'"), "client must retain the loopback-only boundary");
+assert(client.includes("React.useState('')"), "control token must start empty in each page session");
+assert(client.includes("configForm.subscribe"), "client must follow live port updates");
+assert(client.includes("api(base, token, path, options)"), "API helper must use the effective endpoint");
+
+assert(plugin.includes("port: Volatile<number>"), "port must be declared volatile");
+assert(plugin.includes(".volatile()"), "port schema must be live");
+assert(plugin.includes("loader/volatile-update"), "runtime must react to live port changes");
+assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
+assert(plugin.includes("resolveLauncher(config.bunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
+assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
+assert(plugin.includes("let startGeneration = 0"), "live reconfiguration must invalidate an in-flight start");
+assert(plugin.includes("if (spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
+assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
+assert(cli.includes('takeOption(args, "--host")'), "serve must accept a host override");
+assert(cli.includes('takeOption(args, "--port")'), "serve must accept a port override");
+assert(cli.includes("--host must be 127.0.0.1; the sidecar is loopback-only"), "serve must preserve loopback-only access");
+
+async function exerciseClient(port) {
+  const state = [];
+  let cursor = 0;
+  let page;
+  const listeners = new Set();
+  const requests = [];
+  const storage = { removed: [] };
+
+  const React = {
+    createElement(type, props, ...children) {
+      return { type, props: props || {}, children };
+    },
+    useState(initial) {
+      const index = cursor++;
+      if (!(index in state)) {
+        state[index] = typeof initial === "function" ? initial() : initial;
+      }
+      return [
+        state[index],
+        value => {
+          state[index] = typeof value === "function" ? value(state[index]) : value;
+        },
+      ];
+    },
+    useEffect(effect) {
+      const cleanup = effect();
+      return cleanup;
+    },
+  };
+
+  const form = {
+    value: { port },
+    getSnapshot() {
+      return { status: "ready", value: this.value };
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+
+  const sandbox = {
+    console,
+    Promise,
+    Number,
+    setTimeout,
+    clearTimeout,
+    setImmediate,
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  sandbox.localStorage = {
+    removeItem(key) {
+      storage.removed.push(key);
+    },
+  };
+  sandbox.fetch = async url => {
+    const text = String(url);
+    requests.push(text);
+    const payload = text.includes("/recent-turns")
+      ? { turns: [] }
+      : text.endsWith("/v1/control/config")
+        ? { tuning: {}, defaults: {} }
+        : {
+            version: "1.0.3",
+            pid: 1,
+            uptime: 1,
+            accepting_turns: true,
+            active_http_turns: 0,
+            active_browser_turns: 0,
+            storageStatePresent: true,
+            storageDir: "/tmp",
+            chromeExecutablePath: "/usr/bin/google-chrome",
+            headed: false,
+            solAvailable: true,
+            proAvailable: false,
+          };
+    return { ok: true, status: 200, json: async () => payload };
+  };
+  sandbox.__ModuleLoader__ = {
+    load(payload) {
+      sandbox.plugin = payload;
+    },
+  };
+
+  vm.runInNewContext(client, sandbox, { filename: "client.js" });
+
+  const require = specifier => {
+    if (specifier === "react") return React;
+    throw new Error("unexpected client dependency: " + specifier);
+  };
+
+  const context = {
+    locale: {
+      register() { return () => {}; },
+      bind() { return undefined; },
+    },
+    configForms: {
+      get(id) {
+        assert.equal(id, "dsh-chatgpt-web");
+        return form;
+      },
+    },
+    slots: {
+      inject(_slot, register) {
+        return register();
+      },
+      register(_definition, Component) {
+        page = Component;
+        return {};
+      },
+    },
+    effect(effect) {
+      effect();
+    },
+  };
+
+  sandbox.plugin.factory(require).apply(context);
+
+  cursor = 0;
+  const firstTree = page();
+  const tokenInput = findNode(firstTree, node => node.type === "input");
+  assert(tokenInput, "control-token input must render");
+  assert.equal(tokenInput.props.value, "");
+
+  tokenInput.props.onChange({ target: { value: "ephemeral-token" } });
+  cursor = 0;
+  page();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert(requests.includes("http://127.0.0.1:" + port + "/v1/control/status"));
+  assert(requests.includes("http://127.0.0.1:" + port + "/v1/control/config"));
+  assert(requests.includes("http://127.0.0.1:" + port + "/v1/control/recent-turns?limit=10"));
+  assert(storage.removed.includes("dsh-chatgpt-web.controlToken"));
+
+  form.value = { port: 19001 };
+  for (const listener of listeners) listener();
+  cursor = 0;
+  page();
+  await new Promise(resolve => setImmediate(resolve));
+  assert(requests.includes("http://127.0.0.1:19001/v1/control/status"));
+}
+
+function findNode(node, predicate) {
+  if (!node || typeof node !== "object") return undefined;
+  if (predicate(node)) return node;
+  for (const child of node.children || []) {
+    const result = findNode(child, predicate);
+    if (result) return result;
+  }
+  return undefined;
+}
+
+await exerciseClient(17841);
+console.log("issue #20 settings invariants passed");

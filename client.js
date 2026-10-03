@@ -13,18 +13,19 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    const TOKEN_KEY = 'dsh-chatgpt-web.controlToken';
-    const BASE = 'http://127.0.0.1:17841';
+    const CONFIG_ID = 'dsh-chatgpt-web';
+    const LEGACY_TOKEN_KEY = 'dsh-chatgpt-web.controlToken';
+    const LOOPBACK_HOST = '127.0.0.1';
 
     const DICT_EN = {
       'section.title': 'ChatGPT Web',
       'conn.title': 'Connection',
       'conn.token': 'Control token',
-      'conn.tokenHint': 'The sidecar control token (config.json controlToken). Stored only in this browser.',
+      'conn.tokenHint': 'The sidecar control token. Held only in this page and never persisted in browser storage.',
       'conn.reload': 'Reload',
       'status.title': 'Sidecar status',
       'status.offline': 'Sidecar offline',
-      'status.offlineHint': 'No chatgpt-web sidecar answered on 127.0.0.1:17841. Start it with "dsh-chatgpt-web serve" and reload this page.',
+      'status.offlineHint': 'No chatgpt-web sidecar answered on the configured local endpoint.',
       'tuning.title': 'Transport limits',
       'tuning.hint': 'Applied from the next browser turn; no sidecar restart needed. Blank = default.',
       'tuning.save': 'Save',
@@ -90,17 +91,32 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function readToken() {
-      try { return window.localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
-    }
-    function writeToken(value) {
-      try { window.localStorage.setItem(TOKEN_KEY, value); } catch { /* private mode */ }
+    function getConfiguredPort(configForm) {
+      try {
+        const value = configForm && typeof configForm.getSnapshot === 'function'
+          ? configForm.getSnapshot().value
+          : undefined;
+        const port = value && value.port;
+        return Number.isSafeInteger(port) && port >= 1 && port <= 65535 ? port : null;
+      } catch {
+        return null;
+      }
     }
 
-    async function api(token, path, options) {
+    function resolveSidecarBase(configForm) {
+      const port = getConfiguredPort(configForm);
+      return port === null ? null : `http://${LOOPBACK_HOST}:${port}`;
+    }
+
+    function formatEndpoint(base) {
+      return base ? base.replace(/^https?:\/\//, '') : 'configured local endpoint';
+    }
+
+    async function api(base, token, path, options) {
+      if (!base) throw new Error('Sidecar endpoint configuration is unavailable.');
       const headers = { Authorization: `Bearer ${token}` };
       if (options && options.body) headers['Content-Type'] = 'application/json';
-      const res = await fetch(BASE + path, { ...options, headers });
+      const res = await fetch(base + path, { ...options, headers });
       if (!res.ok) {
         let message = `HTTP ${res.status}`;
         try {
@@ -122,8 +138,9 @@ window.__ModuleLoader__.load({
       ['turnTimeoutMs', 'tuning.turnTimeoutMs'],
     ];
 
-    function ChatGptWebSettings(t) {
-      const [token, setToken] = React.useState(readToken);
+    function ChatGptWebSettings(t, configForm) {
+      const [token, setToken] = React.useState('');
+      const [base, setBase] = React.useState(() => resolveSidecarBase(configForm));
       const [status, setStatus] = React.useState(null);
       const [configInfo, setConfigInfo] = React.useState(null);
       const [turns, setTurns] = React.useState([]);
@@ -131,14 +148,32 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
 
-      async function loadAll(currentToken) {
+      React.useEffect(() => {
+        try {
+          window.localStorage.removeItem(LEGACY_TOKEN_KEY);
+        } catch {
+          // Browser storage may be unavailable; the token remains page-local.
+        }
+
+        const refreshEndpoint = () => setBase(resolveSidecarBase(configForm));
+        refreshEndpoint();
+        if (!configForm || typeof configForm.subscribe !== 'function') return undefined;
+        return configForm.subscribe(refreshEndpoint);
+      }, [configForm]);
+
+      async function loadAll(currentToken, currentBase) {
         if (!currentToken) { setStatus(null); return; }
+        if (!currentBase) {
+          setStatus(null);
+          setNotice({ kind: 'err', text: 'Sidecar endpoint configuration is unavailable.' });
+          return;
+        }
         setBusy(true);
         try {
           const [st, cfg, rt] = await Promise.all([
-            api(currentToken, '/v1/control/status'),
-            api(currentToken, '/v1/control/config'),
-            api(currentToken, '/v1/control/recent-turns?limit=10'),
+            api(currentBase, currentToken, '/v1/control/status'),
+            api(currentBase, currentToken, '/v1/control/config'),
+            api(currentBase, currentToken, '/v1/control/recent-turns?limit=10'),
           ]);
           setStatus(st);
           setConfigInfo(cfg);
@@ -156,14 +191,14 @@ window.__ModuleLoader__.load({
         }
       }
 
-      React.useEffect(() => { loadAll(token); }, [token]);
+      React.useEffect(() => { loadAll(token, base); }, [token, base]);
 
       async function save(tuning) {
         setBusy(true);
         try {
-          await api(token, '/v1/control/config', { method: 'PUT', body: JSON.stringify({ tuning }) });
+          await api(base, token, '/v1/control/config', { method: 'PUT', body: JSON.stringify({ tuning }) });
           setNotice({ kind: 'ok', text: t('notice.saved', 'Saved. New limits apply from the next turn.') });
-          await loadAll(token);
+          await loadAll(token, base);
         } catch (error) {
           setNotice({ kind: 'err', text: error instanceof Error ? error.message : String(error) });
         } finally {
@@ -221,17 +256,17 @@ window.__ModuleLoader__.load({
               type: 'password',
               value: token,
               placeholder: 'FJ86_…',
-              onChange: (e) => { setToken(e.target.value); writeToken(e.target.value); },
+              onChange: (e) => { setToken(e.target.value); },
             }),
           ),
           h('div', { className: 'cwg-row' },
-            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token (config.json controlToken). Stored only in this browser.')),
+            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token. Held only in this page and never persisted in browser storage.')),
           ),
           h('div', { className: 'cwg-row cwg-actions' },
             h('button', {
               className: 'cwg-btn',
               disabled: busy || !token,
-              onClick: () => { loadAll(token); setNotice({ kind: 'ok', text: t('notice.reloaded', 'Reloaded.') }); },
+              onClick: () => { loadAll(token, base); setNotice({ kind: 'ok', text: t('notice.reloaded', 'Reloaded.') }); },
             }, t('conn.reload', 'Reload')),
             notice ? h('span', { className: `cwg-notice cwg-${notice.kind}` }, notice.text) : null,
           ),
@@ -249,7 +284,10 @@ window.__ModuleLoader__.load({
             )
           : h('section', { className: 'cwg-card cwg-offline' },
               h('h3', null, t('status.offline', 'Sidecar offline')),
-              h('p', { className: 'cwg-muted' }, t('status.offlineHint', 'No chatgpt-web sidecar answered on 127.0.0.1:17841. Start it with "dsh-chatgpt-web serve" and reload this page.')),
+              h('p', { className: 'cwg-muted' },
+                t('status.offlineHint', 'No chatgpt-web sidecar answered on the configured local endpoint.'),
+                ` (${formatEndpoint(base)})`,
+              ),
             ),
 
         configInfo
@@ -303,7 +341,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'configForms'],
       apply(ctx) {
         // Register this plugin's English dictionary; the locale service owns the active locale.
         ctx.effect(() => {
@@ -320,7 +358,8 @@ window.__ModuleLoader__.load({
           translate = undefined;
         }
         const t = makeT(translate);
-        const Page = () => ChatGptWebSettings(t);
+        const configForm = ctx.configForms.get(CONFIG_ID);
+        const Page = () => ChatGptWebSettings(t, configForm);
         return ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section',
           id: 'chatgpt-web',
