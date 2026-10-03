@@ -75,10 +75,10 @@ test("WebSurfaceTransport keeps lifecycle evidence semantic", async () => {
   const observed: string[] = [];
 
   const turn = fakeTurn({
-    onPhysicalSurfaceBound: surface => observed.push(`bound:${surface.resourceId}`),
-    onSurfaceReady: () => observed.push("ready"),
-    onSendActivated: () => observed.push("send-activated"),
-    onSubmitted: () => observed.push("submitted"),
+    onPhysicalSurfaceBound: surface => { observed.push(`bound:${surface.resourceId}`); },
+    onSurfaceReady: () => { observed.push("ready"); },
+    onSendActivated: () => { observed.push("send-activated"); },
+    onSubmitted: () => { observed.push("submitted"); },
   });
 
   await expect(transport.run(turn)).resolves.toBe("answer");
@@ -166,12 +166,12 @@ test("WebSurfaceTransport exposes all Phase 1 lifecycle evidence without owning 
   const transport = new ChatGptWebSurfaceTransport(fakeBackend([]));
   const states: string[] = [];
   const turn = fakeTurn({
-    onPhysicalSurfaceBound: () => states.push("surface-bound"),
-    onSurfaceReady: () => states.push("surface-ready"),
-    onSendActivated: () => states.push("send-activated"),
-    onSubmitted: () => states.push("submitted"),
-    onHeartbeat: () => states.push("heartbeat"),
-    onReasoningSummary: () => states.push("reasoning-summary"),
+    onPhysicalSurfaceBound: () => { states.push("surface-bound"); },
+    onSurfaceReady: () => { states.push("surface-ready"); },
+    onSendActivated: () => { states.push("send-activated"); },
+    onSubmitted: () => { states.push("submitted"); },
+    onHeartbeat: () => { states.push("heartbeat"); },
+    onReasoningSummary: () => { states.push("reasoning-summary"); },
   });
 
   return transport.run(turn).then(() => {
