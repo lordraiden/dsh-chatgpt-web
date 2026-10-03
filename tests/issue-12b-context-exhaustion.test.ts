@@ -67,6 +67,16 @@ test("does not classify a generic ChatGPT error", () => {
   expect(signal).toBeUndefined();
 });
 
+test("does not let a New Chat button turn a generic maximum-attempt error into exhaustion", () => {
+  const signal = detectChatGptContextExhaustion(observation({
+    role: "alert",
+    testId: "request-error",
+    text: "Maximum retry attempts reached. Please try again later.",
+    actionLabels: ["New chat"],
+  }));
+  expect(signal).toBeUndefined();
+});
+
 test("does not classify a loading/readiness surface", () => {
   const signal = detectChatGptContextExhaustion(observation({
     role: "status",

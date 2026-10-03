@@ -102,7 +102,8 @@ export function detectChatGptContextExhaustion(
   const ariaLabel = normalizedText(observation.ariaLabel);
   const text = normalizedText(observation.text);
   const actions = observation.actionLabels.map(normalizedText).filter(Boolean);
-  const combined = [ariaLabel, text, ...actions].filter(Boolean).join(" ");
+  const semanticSurfaceText = [ariaLabel, text, testId].filter(Boolean).join(" ");
+  const combined = [semanticSurfaceText, ...actions].filter(Boolean).join(" ");
   if (!combined) return undefined;
 
   const structuralSurface = role === "alert"
@@ -111,14 +112,15 @@ export function detectChatGptContextExhaustion(
     || /(?:error|context|length|limit|conversation)/i.test(testId);
 
   if (!structuralSurface) return undefined;
-  if (!hasAny(combined, CONVERSATION_TERMS)) return undefined;
-  if (!hasAny(combined, MAX_LENGTH_TERMS)) return undefined;
+  // Conversation evidence must come from the error surface itself, not from a "New chat" button.
+  if (!hasAny(semanticSurfaceText, CONVERSATION_TERMS)) return undefined;
+  if (!hasAny(semanticSurfaceText, MAX_LENGTH_TERMS)) return undefined;
   if (!hasAny(actions.join(" "), NEW_CHAT_ACTION_TERMS)
-    && !hasAny(combined, NEW_CHAT_ACTION_TERMS)) {
+    && !hasAny(semanticSurfaceText, NEW_CHAT_ACTION_TERMS)) {
     return undefined;
   }
 
-  const variant = variantFor(combined);
+  const variant = variantFor(semanticSurfaceText);
   if (!variant) return undefined;
 
   return {
