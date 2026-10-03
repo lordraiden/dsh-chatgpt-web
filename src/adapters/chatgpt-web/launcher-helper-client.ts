@@ -230,6 +230,11 @@ export class LauncherBrowserHelperClient {
   async run(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await this.ensureChild();
+    if (!this.helperFeatures.has("surface-lifecycle")) {
+      throw new Error(
+        "Launcher browser helper does not support semantic surface lifecycle acknowledgements; update or restart the launcher",
+      );
+    }
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (turn.externalProgress && !this.helperFeatures.has("tool-boundary-ack")) {
       throw new Error(
