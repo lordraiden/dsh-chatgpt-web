@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
+import type { CapabilitySnapshot } from "./capability-projector";
 
 export type ChatGptSandboxPolicy =
   | { type: "dangerFullAccess" }
@@ -16,6 +17,8 @@ export interface ChatGptTurnEnvironment {
   writableRoots: string[];
   sandboxPolicy: ChatGptSandboxPolicy;
   tools: CodexTool[];
+  /** Compatibility projection; authority lives in the immutable per-turn capability snapshot. */
+  capabilitySnapshot?: CapabilitySnapshot;
 }
 
 export interface ChatGptTurnIdentity {
