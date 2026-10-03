@@ -19,6 +19,14 @@ export type SubmissionPhase = "prepared" | "send_activated" | "accepted";
 
 export type PhysicalSettlementOutcome = "not_started" | "pending" | "fulfilled" | "rejected";
 
+export interface ProviderTurnPhysicalResourceBinding {
+  resourceId: string;
+  browserContextId: string;
+  pageId: string;
+  profileId: string;
+  accountId: string;
+}
+
 type RetryPolicy = "strict" | "side_effect_free";
 
 const TRANSITIONS: Record<ProviderTurnState, readonly ProviderTurnState[]> = {
@@ -59,6 +67,7 @@ export class BrowserAccountLease {
   readonly leaseId: string;
   readonly acquiredAt = Date.now();
   private released = false;
+  private physicalResource?: ProviderTurnPhysicalResourceBinding;
 
   constructor(readonly descriptor: BrowserAccountLeaseDescriptor) {
     this.leaseId = [
@@ -80,6 +89,25 @@ export class BrowserAccountLease {
     this.released = true;
   }
 
+  bindPhysicalResource(binding: ProviderTurnPhysicalResourceBinding): void {
+    if (!this.isActive()) throw new Error("Cannot bind a physical resource to an inactive browser lease");
+    for (const [name, value] of Object.entries(binding)) {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw new Error(`Browser lease physical resource ${name} must be a non-empty string`);
+      }
+    }
+    if (this.physicalResource && this.physicalResource.resourceId !== binding.resourceId) {
+      throw new Error(
+        `Browser lease cannot move to a different physical resource: ${this.physicalResource.resourceId} -> ${binding.resourceId}`,
+      );
+    }
+    this.physicalResource = { ...binding };
+  }
+
+  physicalResourceBinding(): ProviderTurnPhysicalResourceBinding | undefined {
+    return this.physicalResource ? { ...this.physicalResource } : undefined;
+  }
+
   provenance(): {
     serviceId: string;
     account: string;
@@ -88,6 +116,7 @@ export class BrowserAccountLease {
     page: string;
     turnId: string;
     leaseId: string;
+    physicalResourceBound: boolean;
   } {
     return {
       serviceId: this.descriptor.serviceId,
@@ -97,6 +126,7 @@ export class BrowserAccountLease {
       page: fingerprint(this.descriptor.pageIdentity),
       turnId: this.descriptor.turnId,
       leaseId: this.leaseId,
+      physicalResourceBound: this.physicalResource !== undefined,
     };
   }
 }
@@ -173,7 +203,6 @@ export class ProviderTurnLifecycle {
   private physicalSettlementAttached = false;
   private physicalSettlementOutcome: PhysicalSettlementOutcome = "not_started";
   private physicalSettlementError?: Error;
-  private physicalResource?: ProviderTurnPhysicalResourceBinding;
   private retirementScheduled = false;
 
   constructor(
@@ -197,8 +226,10 @@ export class ProviderTurnLifecycle {
       ...(this.physicalSettlementError
         ? { physicalSettlementError: this.physicalSettlementError.message }
         : {}),
-      physicalResourceBound: this.physicalResource !== undefined,
-      ...(this.physicalResource ? { physicalResource: this.physicalResource } : {}),
+      physicalResourceBound: this.lease.physicalResourceBinding() !== undefined,
+      ...(this.lease.physicalResourceBinding()
+        ? { physicalResource: this.lease.physicalResourceBinding() }
+        : {}),
       retryPolicy: this.retryPolicy,
       lease: this.lease.provenance(),
       provenance: this.provenance,
@@ -231,27 +262,13 @@ export class ProviderTurnLifecycle {
 
   bindPhysicalResource(binding: ProviderTurnPhysicalResourceBinding): void {
     this.assertMutable();
-    for (const [name, value] of Object.entries(binding)) {
-      if (typeof value !== "string" || value.trim().length === 0) {
-        throw new Error(`Provider turn physical resource ${name} must be a non-empty string`);
-      }
-    }
-    if (this.physicalResource) {
-      if (this.physicalResource.resourceId !== binding.resourceId) {
-        throw new Error(
-          `Provider turn cannot rebind to a different physical resource: ${this.physicalResource.resourceId} -> ${binding.resourceId}`,
-        );
-      }
-      this.physicalResource = { ...binding };
-      return;
-    }
-    this.physicalResource = { ...binding };
+    this.lease.bindPhysicalResource(binding);
   }
 
   markSurfaceReady(): void {
     if (this.state !== "LEASED" && this.state !== "PREPARING") return;
     this.assertMutable();
-    if (!this.physicalResource) {
+    if (!this.lease.physicalResourceBinding()) {
       throw new Error("Provider turn surface cannot become ready before a physical browser resource is bound");
     }
     this.transition("SURFACE_READY");
@@ -321,7 +338,7 @@ export class ProviderTurnLifecycle {
         `Automatic browser surface replay is forbidden after physical submission has started (submission=${this.submission}, state=${this.state})`,
       );
     }
-    if (!this.physicalResource) {
+    if (!this.lease.physicalResourceBinding()) {
       throw new Error("Automatic browser surface replay requires a bound physical resource");
     }
   }
@@ -357,6 +374,7 @@ export class ProviderTurnLifecycle {
     if (this.state !== "SETTLING") this.transition("SETTLING");
     this.physicalSettled = true;
     this.physicalSettlementOutcome = "not_started";
+    this.recovery = "FAILED";
     this.activity = "idle";
     this.releaseLease();
     this.transition("RETIRED");
@@ -370,7 +388,10 @@ export class ProviderTurnLifecycle {
     if (this.physicalSettled) return;
     this.physicalSettled = true;
     this.physicalSettlementOutcome = outcome;
-    if (outcome === "rejected") this.physicalSettlementError = normalizeError(error);
+    if (outcome === "rejected") {
+      this.physicalSettlementError = normalizeError(error);
+      this.recovery = "FAILED";
+    }
     this.activity = "idle";
     if (this.state !== "RETIRED") {
       if (this.state !== "SETTLING") this.transition("SETTLING");
