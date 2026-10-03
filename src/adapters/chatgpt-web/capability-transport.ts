@@ -5,14 +5,13 @@ import {
   type CapabilitySnapshot,
 } from "./capability-projector";
 import type { CodexTool } from "../../types";
+import type {
+  CapabilityBinding,
+  CapabilityToolResult,
+} from "./capability-contract";
 
-export interface CapabilityTransportBinding {
-  readonly bindingId: string;
+export interface CapabilityTransportBinding extends CapabilityBinding {
   readonly snapshot: CapabilitySnapshot;
-  readonly snapshotId: string;
-  readonly sessionId: string;
-  readonly agentId: string;
-  readonly turnId: string;
 }
 
 export interface CapabilityTransportInvocation {
@@ -25,13 +24,6 @@ export interface CapabilityTransportInvocation {
 export interface AuthorizedCapabilityInvocation extends CapabilityTransportInvocation {
   readonly tool: CodexTool;
   readonly snapshotId: string;
-}
-
-export interface CapabilityToolResult {
-  content: unknown[];
-  structuredContent?: unknown;
-  isError?: boolean;
-  _meta?: unknown;
 }
 
 /**
@@ -67,12 +59,7 @@ function normalizeBinding(binding: CapabilityTransportBinding): CapabilityTransp
   if (!binding.bindingId || !/^[A-Za-z0-9_-]{8,256}$/.test(binding.bindingId)) {
     throw new Error("capability transport binding id is invalid");
   }
-  assertCapabilitySnapshotBinding(binding.snapshot, {
-    sessionId: binding.sessionId,
-    agentId: binding.agentId,
-    turnId: binding.turnId,
-    snapshotId: binding.snapshotId,
-  });
+  assertCapabilitySnapshotBinding(binding.snapshot, binding);
   if (binding.snapshot.lifecycle !== "active") {
     throw new Error("capability transport binding snapshot is not active");
   }
