@@ -137,6 +137,14 @@ export interface ProviderTurnProvenance {
   nativeThreadId?: string;
 }
 
+export interface ProviderTurnPhysicalResourceBinding {
+  resourceId: string;
+  browserContextId: string;
+  pageId: string;
+  profileId: string;
+  accountId: string;
+}
+
 export interface ProviderTurnSnapshot {
   readonly state: ProviderTurnState;
   readonly activity: ProviderTurnActivity;
@@ -147,6 +155,8 @@ export interface ProviderTurnSnapshot {
   readonly physicalSettlementAttached: boolean;
   readonly physicalSettlementOutcome: PhysicalSettlementOutcome;
   readonly physicalSettlementError?: string;
+  readonly physicalResourceBound: boolean;
+  readonly physicalResource?: ProviderTurnPhysicalResourceBinding;
   readonly retryPolicy: RetryPolicy;
   readonly lease: ReturnType<BrowserAccountLease["provenance"]>;
   readonly provenance: ProviderTurnProvenance;
@@ -163,6 +173,7 @@ export class ProviderTurnLifecycle {
   private physicalSettlementAttached = false;
   private physicalSettlementOutcome: PhysicalSettlementOutcome = "not_started";
   private physicalSettlementError?: Error;
+  private physicalResource?: ProviderTurnPhysicalResourceBinding;
   private retirementScheduled = false;
 
   constructor(
@@ -186,6 +197,8 @@ export class ProviderTurnLifecycle {
       ...(this.physicalSettlementError
         ? { physicalSettlementError: this.physicalSettlementError.message }
         : {}),
+      physicalResourceBound: this.physicalResource !== undefined,
+      ...(this.physicalResource ? { physicalResource: this.physicalResource } : {}),
       retryPolicy: this.retryPolicy,
       lease: this.lease.provenance(),
       provenance: this.provenance,
@@ -216,9 +229,31 @@ export class ProviderTurnLifecycle {
     this.transition("LEASED");
   }
 
+  bindPhysicalResource(binding: ProviderTurnPhysicalResourceBinding): void {
+    this.assertMutable();
+    for (const [name, value] of Object.entries(binding)) {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw new Error(`Provider turn physical resource ${name} must be a non-empty string`);
+      }
+    }
+    if (this.physicalResource) {
+      if (this.physicalResource.resourceId !== binding.resourceId) {
+        throw new Error(
+          `Provider turn cannot rebind to a different physical resource: ${this.physicalResource.resourceId} -> ${binding.resourceId}`,
+        );
+      }
+      this.physicalResource = { ...binding };
+      return;
+    }
+    this.physicalResource = { ...binding };
+  }
+
   markSurfaceReady(): void {
     if (this.state !== "LEASED" && this.state !== "PREPARING") return;
     this.assertMutable();
+    if (!this.physicalResource) {
+      throw new Error("Provider turn surface cannot become ready before a physical browser resource is bound");
+    }
     this.transition("SURFACE_READY");
   }
 
@@ -271,12 +306,29 @@ export class ProviderTurnLifecycle {
   }
 
   canAutomaticallyRetry(): boolean {
-    if (this.retryPolicy === "side_effect_free") return true;
-    return this.submission === "prepared"
-      && this.state !== "SUBMITTED"
+    if (this.submission !== "prepared") return false;
+    return this.state !== "SUBMITTED"
       && this.state !== "RUNNING"
       && this.state !== "SETTLING"
-      && this.state !== "RETIRED";
+      && this.state !== "RETIRED"
+      && (this.retryPolicy === "strict" || this.retryPolicy === "side_effect_free");
+  }
+
+  authorizeSurfaceReplay(): void {
+    this.assertMutable();
+    if (!this.canAutomaticallyRetry()) {
+      throw new Error(
+        `Automatic browser surface replay is forbidden after physical submission has started (submission=${this.submission}, state=${this.state})`,
+      );
+    }
+    if (!this.physicalResource) {
+      throw new Error("Automatic browser surface replay requires a bound physical resource");
+    }
+  }
+
+  assertCapabilityExecution(requestTurnId?: string): void {
+    this.assertCanAct();
+    if (requestTurnId !== undefined) this.assertNotSelfReentrant(requestTurnId);
   }
 
   attachPhysicalSettlement(settlement: Promise<void>): void {
