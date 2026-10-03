@@ -191,41 +191,42 @@ export function selectCompactionMessagesDeterministically(
   let current = [...messages];
   if (fits(current)) return { messages: current, removed: 0 };
 
-  const protectedIndices = new Set<number>();
   const settledToolCallIds = new Set(
     current.filter(message => message.role === "toolResult").map(message => message.toolCallId),
   );
-  for (let index = 0; index < current.length; index += 1) {
-    const message = current[index]!;
-    if (message.role === "developer" || message.role === "toolResult") {
-      protectedIndices.add(index);
-      continue;
-    }
+
+  const isProtected = (message: CodexMessage, index: number, state: readonly CodexMessage[]): boolean => {
+    if (message.role === "developer" || message.role === "toolResult") return true;
     if (message.role === "assistant") {
-      const hasProtectedToolCall = message.content.some(
+      return message.content.some(
         part => part.type === "toolCall" && settledToolCallIds.has(part.id),
       );
-      if (hasProtectedToolCall) protectedIndices.add(index);
     }
-  }
-  const latestUserIndex = [...current]
-    .map((message, index) => message.role === "user" ? index : -1)
-    .filter(index => index >= 0)
-    .at(-1);
-  if (latestUserIndex !== undefined) protectedIndices.add(latestUserIndex);
+    if (message.role === "user") {
+      return index === state.length - 1
+        || state.slice(index + 1).every(candidate => candidate.role !== "user");
+    }
+    return false;
+  };
 
-  const removableIndices = current
-    .map((_message, index) => index)
-    .filter(index => !protectedIndices.has(index));
-  for (const index of removableIndices) {
-    const next = current.filter((_message, candidateIndex) => candidateIndex !== index);
-    if (fits(next)) return { messages: next, removed: messages.length - next.length };
+  while (true) {
+    const removableIndex = current.findIndex(
+      (message, index, state) => !isProtected(message, index, state),
+    );
+    if (removableIndex < 0) {
+      throw new Error(
+        "ChatGPT Web compaction transport budget cannot fit while preserving required instructions and settled tool results",
+      );
+    }
+
+    const next = current.filter((_message, candidateIndex) => candidateIndex !== removableIndex);
+    if (fits(next)) {
+      return { messages: next, removed: messages.length - next.length };
+    }
     current = next;
   }
-  throw new Error(
-    "ChatGPT Web compaction transport budget cannot fit while preserving required instructions and settled tool results",
-  );
 }
+
 
 export const CONTEXT_EXHAUSTED_CODE = "context_exhausted";
 export const CONTEXT_BUDGET_EXCEEDED_CODE = "context_budget_exceeded";
