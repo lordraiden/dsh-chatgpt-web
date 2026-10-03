@@ -153,6 +153,7 @@ export class ProviderTurnLifecycle {
     readonly provenance: ProviderTurnProvenance,
     private readonly retryPolicy: RetryPolicy = "strict",
     private readonly releaseLease: () => void = () => lease.release(),
+    private readonly onRetired: () => void = () => {},
   ) {}
 
   snapshot(): ProviderTurnSnapshot {
@@ -258,6 +259,7 @@ export class ProviderTurnLifecycle {
     this.activity = "idle";
     this.releaseLease();
     this.transition("RETIRED");
+    this.onRetired();
   }
 
   private finishPhysicalSettlement(): void {
@@ -269,6 +271,7 @@ export class ProviderTurnLifecycle {
       this.transition("RETIRED");
     }
     this.releaseLease();
+    this.onRetired();
   }
 
   scheduleRetirementAfterPhysicalSettlement(): void {
@@ -305,7 +308,12 @@ export interface ChatGptWebProviderCoreTurnInput {
 
 export class ChatGptWebProviderCore {
   private readonly turns = new Map<string, ProviderTurnLifecycle>();
+  private readonly retiredExecutions = new Set<string>();
   private closed = false;
+
+  wasRetired(executionKey: string): boolean {
+    return this.retiredExecutions.has(executionKey);
+  }
 
   constructor(
     readonly serviceId = CHATGPT_WEB_PROVIDER_CORE_SERVICE,
@@ -319,10 +327,7 @@ export class ChatGptWebProviderCore {
   begin(input: ChatGptWebProviderCoreTurnInput): ProviderTurnLifecycle {
     if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
     const existing = this.turns.get(input.executionKey);
-    if (existing) {
-      if (existing.snapshot().state !== "RETIRED") return existing;
-      this.turns.delete(input.executionKey);
-    }
+    if (existing) return existing;
 
     const lease = this.leases.acquire({
       serviceId: this.serviceId,
@@ -343,6 +348,10 @@ export class ChatGptWebProviderCore {
       },
       input.retryPolicy,
       () => this.leases.release(lease),
+      () => {
+        this.turns.delete(input.executionKey);
+        this.retiredExecutions.add(input.executionKey);
+      },
     );
     if (input.recovery && input.recovery !== "NEW") turn.markRecovery(input.recovery);
     turn.markLeased();
