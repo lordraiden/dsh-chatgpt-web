@@ -895,7 +895,7 @@ REPLAY
    +--> create/select replacement conversation
    +--> prove replacement readiness
    +--> bind replacement while preserving DSH identity
-   +--> replay canonical DSH projection
+   +--> submit canonical DSH projection and prove acceptance
    v
 RESUME
 ~~~
@@ -922,7 +922,10 @@ The abstract replacement seam exposed to #12 is responsible only for browser-sid
 - retire/invalidate the exhausted handle;
 - create/select the replacement;
 - prove readiness;
-- bind the replacement and echo the unchanged trusted DSH identity.
+- bind the replacement and echo the unchanged trusted DSH identity;
+- submit the already-projected canonical DSH context and return an explicit acceptance proof.
+
+The transport receives canonical replay data from #11-C; it may perform service-specific serialization/attachment, but it must not rewrite history, re-authorize tools, or infer execution state.
 
 No DOM selector, Playwright object, ChatGPT transcript, or browser-local history is visible to the replay state machine.
 
