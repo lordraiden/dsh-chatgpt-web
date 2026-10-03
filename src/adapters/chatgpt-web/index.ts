@@ -1319,6 +1319,7 @@ export function createChatGptWebAdapter(
                 estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities),
                 buffer,
               ));
+              providerTurn.markLogicalSettled();
               session.completeRound(roundKey);
               chatGptWebTurnRetryPolicy.clear(retryKey);
               return;
@@ -1407,7 +1408,8 @@ export function createChatGptWebAdapter(
                 ? session.runtime.externalProgress
                 : undefined;
               const armNextTools = () => turnToken
-                ? broker.nextToolBatch(turnToken, toolWaitAbort.signal).then(async requests => {
+                ? (providerTurn.markCapabilityWait(), broker.nextToolBatch(turnToken, toolWaitAbort.signal)).then(async requests => {
+                  providerTurn.markRunning();
                   if (!externalProgress) {
                     throw new Error("ChatGPT broker returned tools for a read-only browser turn");
                   }
@@ -1488,6 +1490,7 @@ export function createChatGptWebAdapter(
                   estimateChatGptWebUsage(currentUsageInput(parsed), { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   buffer,
                 ));
+                providerTurn.markLogicalSettled();
                 session.completeRound(roundKey);
                 chatGptWebTurnRetryPolicy.clear(retryKey);
               };
@@ -1567,9 +1570,26 @@ export function createChatGptWebAdapter(
             throw error;
           }
           const turnError = submittedTurnFailure(session, error);
-          const handledError = turnError instanceof ChatGptWebAdapterError && turnError.retryable
-            ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, turnError)
+          const retryAllowed = providerTurn.canAutomaticallyRetry();
+          const retryCandidate = turnError instanceof ChatGptWebAdapterError && turnError.retryable
+            ? (
+              retryAllowed
+                ? turnError
+                : new ChatGptWebAdapterError(
+                  turnError.message,
+                  {
+                    status: turnError.status,
+                    errorType: turnError.errorType,
+                    code: turnError.code,
+                    retryable: false,
+                    cause: turnError,
+                  },
+                )
+            )
             : turnError;
+          const handledError = retryCandidate instanceof ChatGptWebAdapterError && retryCandidate.retryable
+            ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, retryCandidate)
+            : retryCandidate;
           if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
             chatGptWebTurnRetryPolicy.clear(retryKey);
           }
@@ -1586,6 +1606,7 @@ export function createChatGptWebAdapter(
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
           if (handledError instanceof ChatGptWebAdapterError) {
+            providerTurn.markLogicalSettled();
             emitRoundEvent({
               type: "error",
               message: handledError.message,
@@ -1597,6 +1618,8 @@ export function createChatGptWebAdapter(
             session.completeRound(roundKey);
             return;
           }
+          providerTurn.markRecovery("FAILED");
+          providerTurn.markLogicalSettled();
           session.failRound(roundKey, turnError);
           chatGptWebTurnRetryPolicy.clear(retryKey);
           throw turnError;
