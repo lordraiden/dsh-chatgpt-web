@@ -19,6 +19,7 @@ interface PendingTurn {
   sent?: boolean;
   prepared?: CompiledChatGptWebPrompt & { release: () => void };
   localFailure?: Error;
+  surfaceBinding?: Promise<void>;
   progressForwarding?: AbortController;
 }
 
@@ -421,14 +422,20 @@ export class LauncherBrowserHelperClient {
     if (!pending) return;
     if (message.type === "event") {
       if (message.event === "surface_bound") {
-        void Promise.resolve().then(() => pending.turn.onPhysicalSurfaceBound?.(message.binding!)).catch(error => this.abortWithLocalFailure(
-          message.id,
-          error instanceof Error ? error : new Error(String(error)),
-          pending,
-        ));
+        pending.surfaceBinding = Promise.resolve()
+          .then(() => pending.turn.onPhysicalSurfaceBound?.(message.binding!))
+          .catch(error => {
+            this.abortWithLocalFailure(
+              message.id,
+              error instanceof Error ? error : new Error(String(error)),
+              pending,
+            );
+            throw error;
+          });
       }
       else if (message.event === "surface_ready") {
         void Promise.resolve()
+          .then(() => pending.surfaceBinding)
           .then(() => pending.turn.onSurfaceReady?.())
           .then(() => {
             if (this.pending.get(message.id) !== pending || pending.localFailure || pending.turn.abortSignal?.aborted) return;
