@@ -51,7 +51,6 @@ import { estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import {
   CONTEXT_BUDGET_EXCEEDED_CODE,
   CONTEXT_COMPACTION_REQUIRED_CODE,
-  CONTEXT_EXHAUSTED_CODE,
   decideChatGptWebContextCapacity,
   resolveChatGptWebContextBudget,
 } from "./context-budget";
