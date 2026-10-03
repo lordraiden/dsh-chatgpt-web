@@ -850,10 +850,9 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
-const chatGptContextExhaustionActionHint = /new chat|new conversation|start(?:ing)? a new (?:chat|conversation|one)|nuevo chat|nueva conversaci|nouveau chat|nouvelle conversation|neuer chat|neue unterhaltung|nuova chat|nuova conversazione|novo chat|nova conversa|新聊天|新对话|新對話|新しいチャット|新しい会話|새 채팅|새 대화/i;
-
 async function throwIfChatGptContextExhausted(page: Page): Promise<void> {
   const observations = await page.evaluate(() => {
+    const chatGptContextExhaustionActionHint = /new chat|new conversation|start(?:ing)? a new (?:chat|conversation|one)|nuevo chat|nueva conversaci|nouveau chat|nouvelle conversation|neuer chat|neue unterhaltung|nuova chat|nuova conversazione|novo chat|nova conversa|新聊天|新对话|新對話|新しいチャット|新しい会話|새 채팅|새 대화/i;
     const visible = (element: Element): boolean => {
       const candidate = element as HTMLElement;
       const style = getComputedStyle(candidate);
