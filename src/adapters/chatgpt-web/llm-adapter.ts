@@ -191,6 +191,14 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
       { usageMode: "omit" },
     );
   }
+
+  /** Dispose the lazily-created browser provider without creating one during shutdown. */
+  async shutdown(): Promise<void> {
+    const backend = this.backendMemo;
+    this.backendMemo = undefined;
+    if (!backend?.shutdown) return;
+    await backend.shutdown();
+  }
 }
 
 /** Resolve the resolvable model routes for a provider configuration. */
