@@ -4,7 +4,7 @@
 **Implementation status:** Target architecture; implementation follows the phased backlog below  
 **Document role:** Single architectural source of truth for issues #8–#14  
 **Repository:** lordraiden/dsh-chatgpt-web  
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-03
 
 > API-like outside, product-native inside.
 
@@ -876,6 +876,18 @@ Before submit:
 6. otherwise return a deterministic context error.
 
 Never rely on browser/editor truncation as context management.
+### 16.1 Free Web guardrails are empirical transport policy
+
+The current #11-B Free Web policy uses conservative measurements from the ChatGPT Web surface, not OpenAI API limits:
+
+- the visible browser input token ceiling is `128,000`;
+- the Luna composer boundary is `120,000` characters;
+- the transport image guardrail is `10` images per request;
+- the compaction-control envelope is capped at `110,000` JSON bytes.
+
+These values are adapter guardrails, not claims about the ChatGPT product's universal limits. OpenAI documents that Free-plan limits are mutable and that the number of image inputs depends on image size and accompanying text. When the Web surface changes, these measurements must be revalidated independently of API model documentation.
+
+The underlying model-context field used in diagnostics is informational only. It must never be used to admit a Free Web request beyond the measured browser transport budget.
 
 ---
 
