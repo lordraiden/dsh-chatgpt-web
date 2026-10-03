@@ -151,6 +151,83 @@ test("canonical images survive intact until the explicit transport budget", () =
   expect(JSON.stringify(transport.messages)).toContain("https://example.com/11.png");
 });
 
+
+test("atomic message overflow remains unrecoverable even when compaction is available", () => {
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-sol", "low", capabilities);
+  const decision = decideChatGptWebContextCapacity(
+    budget,
+    {
+      estimatedInputTokens: 1_000,
+      estimatedMessageTokens: budget.browserMessageTokenLimit! + 1,
+      promptChars: 1_000,
+    },
+    { compactionAvailable: true, multipartAvailable: true },
+  );
+  expect(decision.outcome).toBe("budget_exceeded");
+  expect(decision.nextAction).toBe("fail");
+});
+
+test("long-session reduction is oldest-first and leaves protected state intact", () => {
+  const messages: CodexMessage[] = [];
+  for (let i = 0; i < 40; i += 1) {
+    messages.push({ role: "user", content: "historical-" + i, timestamp: i });
+    messages.push({
+      role: "assistant",
+      content: [{ type: "text", text: "answer-" + i }],
+      timestamp: i + 100,
+    });
+  }
+  messages.push({ role: "developer", content: "must keep", timestamp: 10_000 });
+  messages.push({
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: "settled-call",
+      name: "read_file",
+      arguments: { path: "important.txt" },
+    }],
+    timestamp: 10_001,
+  });
+  messages.push({
+    role: "toolResult",
+    toolCallId: "settled-call",
+    toolName: "read_file",
+    content: "settled result",
+    isError: false,
+    timestamp: 10_002,
+  });
+  messages.push({ role: "user", content: "latest request", timestamp: 10_003 });
+
+  const selected = selectCompactionMessagesDeterministically(
+    messages,
+    candidate => candidate.length <= 5,
+  );
+
+  expect(selected.messages.at(-1)).toEqual(messages.at(-1));
+  expect(selected.messages.some(message => message.role === "developer")).toBe(true);
+  expect(selected.messages.some(message => message.role === "toolResult")).toBe(true);
+  expect(selected.messages.some(message =>
+    message.role === "assistant"
+    && message.content.some(part => part.type === "toolCall" && part.id === "settled-call")
+  )).toBe(true);
+  expect(selected.removed).toBe(messages.length - 5);
+});
+
+test("budget diagnostics include serialized input bytes", () => {
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-sol", "low", capabilities);
+  const decision = decideChatGptWebContextCapacity(
+    budget,
+    {
+      estimatedInputTokens: 100,
+      estimatedMessageTokens: 100,
+      serializedInputBytes: 42_424,
+    },
+    { compactionAvailable: true, multipartAvailable: true },
+  );
+  expect(decision.diagnostics.serializedInputBytes).toBe(42_424);
+  expect(decision.diagnostics.partCount).toBe(1);
+});
+
 test("compaction byte budget is explicit and positive", () => {
   expect(CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET).toBe(110_000);
   expect(CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET).toBeGreaterThan(0);
