@@ -1,6 +1,5 @@
 import {
   CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
-  CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   resolveChatGptWebContextLimits,
   resolveChatGptWebTransportLimits,
@@ -179,11 +178,12 @@ export function decideChatGptWebContextCapacity(
   if (measurement.estimatedInputTokens <= effectiveInputTokenBudget) {
     return { ...base, outcome: "fits", nextAction: "none" };
   }
-  if (partCount === 1 && options.multipartAvailable) {
-    return { ...base, outcome: "multipart_required", nextAction: "multipart" };
-  }
+  // Deterministic reduction order: supported compaction/handoff first, multipart second.
   if (options.compactionAvailable) {
     return { ...base, outcome: "compaction_required", nextAction: "compact" };
+  }
+  if (partCount === 1 && options.multipartAvailable) {
+    return { ...base, outcome: "multipart_required", nextAction: "multipart" };
   }
   return { ...base, outcome: "budget_exceeded", nextAction: "fail" };
 }
@@ -244,5 +244,4 @@ export const CONTEXT_COMPACTION_REQUIRED_CODE = "context_compaction_required";
 export const CONTEXT_UNSUPPORTED_CONTENT_CODE = "context_unsupported_content";
 export const CONTEXT_CANONICAL_STATE_MISSING_CODE = "context_canonical_state_missing";
 
-void CHATGPT_WEB_BACKEND_MODEL;
 void CHATGPT_WEB_LUNA_MODEL_ID;
