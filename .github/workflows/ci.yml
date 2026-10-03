@@ -64,7 +64,7 @@ jobs:
           echo "artifact_sha256=$checksum" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test the exact validated artifact
-        run: node scripts/smoke-tarball.mjs "artifact/${{ steps.package.outputs.artifact_name }}"
+        run: node scripts/smoke-tarball.mjs "$GITHUB_WORKSPACE/artifact/${{ steps.package.outputs.artifact_name }}"
 
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
