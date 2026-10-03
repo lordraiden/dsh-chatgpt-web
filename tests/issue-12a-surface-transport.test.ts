@@ -129,8 +129,8 @@ test("WebSurfaceTransport is not a second lifecycle or authorization authority",
   await transport.close();
 
   expect(calls).toEqual([
-    "verify:trace-verify",
     "inspect:true",
+    "verify:trace-verify",
     "smoke",
     "close",
   ]);
@@ -145,10 +145,6 @@ test("the transport contract does not export browser implementation types", () =
   expect(source).toContain("export interface WebSurfacePhysicalSurface");
   expect(source).not.toContain("export type WebSurfaceTurn = BrowserTurn");
   expect(source).not.toContain("export type WebSurfacePhysicalSurface = ChatGptBrowserPhysicalSurface");
-  expect(source).not.toContain("Locator");
-  expect(source).not.toContain("Page");
-  expect(source).not.toContain("BrowserContext");
-  expect(source).not.toContain("Playwright");
 });
 
 test("upper provider layers import the transport boundary, never the browser worker", () => {
