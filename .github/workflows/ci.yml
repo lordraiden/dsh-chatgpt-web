@@ -46,6 +46,9 @@ jobs:
       - name: Issue #10-A capability projection tests
         run: bun scripts/test-issue-10a-capabilities.ts
 
+      - name: Issue #10-B capability transport tests
+        run: bun scripts/test-issue-10b-capability-transport.ts
+
       - name: Issue contract tests
         run: node scripts/test-issue-20-settings.mjs
 
