@@ -876,7 +876,7 @@ export function createChatGptWebAdapter(
       if (shutdownPromise) return shutdownPromise;
       shuttingDown = true;
       shutdownController.abort(new Error("ChatGPT Web provider is shutting down"));
-      chatGptTurnSessions.clear();
+      chatGptTurnSessions.clear(executionNamespace);
       shutdownPromise = (async () => {
         await Promise.allSettled([...activeRuns]);
         await providerCore.shutdown();
