@@ -179,11 +179,14 @@ function environmentIdentity(environment: ChatGptTurnEnvironment): string {
 }
 
 function materializeEnvironment(channel: TurnChannel): ChatGptTurnEnvironment & { expiresAt?: number } {
+  const environmentExpiry = channel.expiresAt ?? Number.POSITIVE_INFINITY;
+  const capabilityExpiry = channel.capabilitySnapshot.expiresAt ?? Number.POSITIVE_INFINITY;
+  const expiresAt = Math.min(environmentExpiry, capabilityExpiry);
   return {
     ...channel.environment,
     tools: structuredClone([...channel.capabilitySnapshot.tools]),
     capabilitySnapshot: channel.capabilitySnapshot,
-    ...(channel.expiresAt !== undefined ? { expiresAt: channel.expiresAt } : {}),
+    ...(Number.isFinite(expiresAt) ? { expiresAt } : {}),
   };
 }
 
@@ -1235,7 +1238,9 @@ export class TurnBroker implements TurnBrokerOwner {
   private prune(): void {
     const now = Date.now();
     for (const [token, channel] of this.channels) {
-      if (channel.expiresAt === undefined || channel.expiresAt > now) continue;
+      const environmentExpiry = channel.expiresAt ?? Number.POSITIVE_INFINITY;
+      const capabilityExpiry = channel.capabilitySnapshot.expiresAt ?? Number.POSITIVE_INFINITY;
+      if (Math.min(environmentExpiry, capabilityExpiry) > now) continue;
       this.revoke(token);
     }
   }
