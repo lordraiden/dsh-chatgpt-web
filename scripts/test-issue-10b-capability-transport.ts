@@ -358,7 +358,7 @@ const environment = capabilitySnapshotForEnvironment({
     const shutdownClaim = await callTurnBroker<{ bindingId: string }>(socketPath, {
       method: "claim",
       token: shutdownToken,
-      activityId: "activity_10b_shutdown",
+      activityId: "activity_10b_shutdown_delivery",
       contract: "native",
     });
     const shutdownInvocation = callTurnBroker<BrokerToolResult>(socketPath, {
