@@ -225,26 +225,12 @@ function assistantContent(content: CodexAssistantContentPart[], userContext?: st
       }
       return { type: "thinking_summary", text: part.thinking };
     }
-    let args = part.arguments;
-    if (part.name === "write" && args && typeof args === "object") {
-      const rec = { ...(args as Record<string, unknown>) };
-      if ((typeof rec.file_path !== "string" || !rec.file_path.trim()) && userContext) {
-        const cleaned = userContext
-          .replace(/https?:\/\/[^\s]+/g, "")
-          .replace(/\b(?:AGENTS|CLAUDE)\.md\b/gi, "");
-        const match = cleaned.match(/\b([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]{1,10})\b/);
-        if (match && match[1]) {
-          rec.file_path = match[1];
-          args = rec;
-        }
-      }
-    }
     return {
       type: "tool_call",
       id: part.id,
       name: part.name,
       ...(part.namespace ? { namespace: part.namespace } : {}),
-      arguments: args,
+      arguments: part.arguments,
     };
   }).filter(Boolean);
 }
