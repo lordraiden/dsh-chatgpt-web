@@ -27,6 +27,6 @@ assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launc
 assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
 assert(cli.includes('takeOption(args, "--host")'), "serve must accept a host override");
 assert(cli.includes('takeOption(args, "--port")'), "serve must accept a port override");
-assert(cli.includes("The sidecar is loopback-only"), "serve must preserve loopback-only access");
+assert(cli.includes("--host must be 127.0.0.1; the sidecar is loopback-only"), "serve must preserve loopback-only access");
 
 console.log("issue #20 settings invariants passed");
