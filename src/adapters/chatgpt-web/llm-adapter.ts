@@ -188,6 +188,7 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
           );
         }
       },
+      { usageMode: "omit" },
     );
   }
 }
@@ -549,7 +550,6 @@ function toTokenUsage(usage: CodexUsage | undefined): TokenUsage | undefined {
     ...(cacheRead ? { cacheReadTokens: cacheRead } : {}),
     ...(cacheWrite ? { cacheWriteTokens: cacheWrite } : {}),
     ...(usage.reasoningOutputTokens ? { reasoningTokens: usage.reasoningOutputTokens } : {}),
-    ...(usage.estimated ? { estimated: true } : {}),
   };
 }
 
