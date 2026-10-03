@@ -46,7 +46,9 @@ function leaseInput(turnId: string) {
   turn.markSurfaceReady();
   turn.markSendActivated();
   assert.equal(turn.snapshot().state, "SUBMITTED");
+  assert.equal(turn.snapshot().submission, "send_activated");
   assert.equal(turn.canAutomaticallyRetry(), false);
+  assert.throws(() => turn.markRunning(), /before submission is accepted/i);
   turn.markSubmitted();
   turn.markRunning();
   turn.markCapabilityWait();
