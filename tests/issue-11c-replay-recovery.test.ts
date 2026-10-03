@@ -223,6 +223,25 @@ test("replacement readiness failure becomes deterministic FAILED recovery", asyn
   expect(coordinator.snapshot().continuity).toBe("FAILED");
 });
 
+test("replay acceptance failure never reports RESUMED", async () => {
+  const coordinator = new ChatGptWebReplayCoordinator(identity, "old");
+  coordinator.reportContextExhausted("old");
+
+  await expect(
+    coordinator.recover(
+      { canonicalContext, replayBoundary },
+      fakeTransport({
+        async replayCanonicalContext() {
+          return { replayProof: "" };
+        },
+      }),
+    ),
+  ).rejects.toMatchObject({ code: "replacement_failed" });
+
+  expect(coordinator.snapshot().phase).toBe("FAILED");
+  expect(coordinator.snapshot().continuity).toBe("FAILED");
+});
+
 test("replacement creation failure never falls back to the exhausted conversation", async () => {
   const coordinator = new ChatGptWebReplayCoordinator(identity, "old");
   coordinator.reportContextExhausted("old");
