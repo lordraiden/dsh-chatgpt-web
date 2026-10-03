@@ -21,7 +21,6 @@ import {
 } from "../src/adapters/chatgpt-web/turn-broker";
 import {
   chatGptGatewayAllowedToolNames,
-  type ChatGptMcpContract,
 } from "../src/adapters/chatgpt-web/mcp-server";
 
 const echoTool: CodexTool = {
@@ -81,7 +80,7 @@ const environment = capabilitySnapshotForEnvironment({
   cwd: "/workspace",
   roots: ["/workspace"],
   writableRoots: ["/workspace"],
-  sandboxPolicy: { type: "workspaceWrite", writableRoots: ["/workspace"], networkAccess: true },
+  sandboxPolicy: { type: "workspaceWrite" as const, writableRoots: ["/workspace"], networkAccess: true },
   tools: [echoTool, execTool, hiddenTool, nestedTool],
 }, snapshot);
 
