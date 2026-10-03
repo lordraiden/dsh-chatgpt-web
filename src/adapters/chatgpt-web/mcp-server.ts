@@ -131,7 +131,7 @@ function safeVisibleTools(snapshot: NonNullable<ChatGptTurnEnvironment["capabili
     && !BRIDGE_TOOL_NAMES.has(tool.name)
     // Zero Risk does not expose model-authored JavaScript. Automatic Full mode keeps the native
     // Codex exec surface and applies its transport guard at invocation time below.
-    && (tool.namespace !== undefined || tool.name !== "exec")
+    && !(tool.name === "exec" && !tool.namespace)
     && (!tool.namespace || !bridgeNamespaces.has(tool.namespace))
   ));
 }
