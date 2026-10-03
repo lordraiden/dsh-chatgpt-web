@@ -140,6 +140,7 @@ export function formatChatGptWebMultipartCommit(
   ].join("\n");
 }
 
+/** Free-Web bridge transport cap; measured conservatively and not an OpenAI/ChatGPT product maximum. */
 export const CHATGPT_MAX_INPUT_IMAGES = CHATGPT_WEB_MAX_INPUT_IMAGES;
 
 type MultipartContextRecord =
