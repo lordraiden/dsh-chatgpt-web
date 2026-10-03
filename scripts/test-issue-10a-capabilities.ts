@@ -67,10 +67,12 @@ assert.equal(
 );
 assert.throws(() => authorizeCapability(isolated, { wireName: "view_image" }), /not authorized/);
 
+const deterministicCreatedAt = 1_700_000_000_000;
 const reordered = projectChatGptCapabilities({
   sessionId: "session-2",
   agentId: "agent-2",
   turnId: "turn-2",
+  createdAt: deterministicCreatedAt,
   tools: [{
     ...canonicalEnvironmentTool,
     parameters: {
@@ -85,6 +87,7 @@ const reorderedEquivalent = projectChatGptCapabilities({
   sessionId: "session-2",
   agentId: "agent-2",
   turnId: "turn-2",
+  createdAt: deterministicCreatedAt,
   tools: [{
     ...canonicalEnvironmentTool,
     parameters: {
