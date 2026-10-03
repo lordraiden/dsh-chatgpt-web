@@ -307,7 +307,39 @@ const environment = capabilitySnapshotForEnvironment({
     await broker.revoke(currentToken, new Error("cancelled turn"));
     await assert.rejects(cancelledInvocation, /cancelled turn|revoked|turn binding/i);
 
-    console.log("ok broker duplicate/reconnect identity, snapshot binding and cancellation");
+    const staleToken = await broker.register(environment, 25, "trace-10b-stale");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await assert.rejects(
+      () => callTurnBroker(socketPath, {
+        method: "claim",
+        token: staleToken,
+        activityId: "activity_10b_stale_binding",
+        contract: "native",
+      }),
+      /invalid, expired, or revoked|already finished/i,
+    );
+
+    const shutdownToken = await broker.register(environment, 5_000, "trace-10b-shutdown");
+    const shutdownClaim = await callTurnBroker<{ bindingId: string }>(socketPath, {
+      method: "claim",
+      token: shutdownToken,
+      activityId: "activity_10b_shutdown",
+      contract: "native",
+    });
+    const shutdownInvocation = callTurnBroker<BrokerToolResult>(socketPath, {
+      method: "invoke",
+      bindingId: shutdownClaim.bindingId,
+      capabilitySnapshotId: snapshot.snapshotId,
+      wireName: "native__echo",
+      freeform: false,
+      arguments: { value: "shutdown" },
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    await broker.close();
+    await assert.rejects(shutdownInvocation, /broker|turn|socket/i);
+    currentToken = undefined;
+
+    console.log("ok broker duplicate/reconnect identity, stale binding, cancellation and shutdown");
   } finally {
     if (currentToken) {
       try { broker.revoke(currentToken); } catch {}
