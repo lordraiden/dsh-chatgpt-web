@@ -8,7 +8,7 @@ import {
   selectCompactionMessagesDeterministically,
 } from "./context-budget";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { applyChatGptWebImageBudget, projectCanonicalChatGptWebContext, serializeCanonicalChatGptWebContext, withoutRetiredTurnHandles, withoutSupersededModelSwitchContracts, type ChatGptWebPromptImage } from "./context-projection";
+import { applyChatGptWebImageBudget, CHATGPT_WEB_MAX_INPUT_IMAGES, projectCanonicalChatGptWebContext, serializeCanonicalChatGptWebContext, withoutRetiredTurnHandles, withoutSupersededModelSwitchContracts, type ChatGptWebPromptImage } from "./context-projection";
 import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
@@ -140,7 +140,7 @@ export function formatChatGptWebMultipartCommit(
   ].join("\n");
 }
 
-export { CHATGPT_WEB_MAX_INPUT_IMAGES as CHATGPT_MAX_INPUT_IMAGES } from "./context-projection";
+export const CHATGPT_MAX_INPUT_IMAGES = CHATGPT_WEB_MAX_INPUT_IMAGES;
 
 type MultipartContextRecord =
   | { kind: "system"; system_index: number; content: string }
