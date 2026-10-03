@@ -6,12 +6,14 @@ import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
+import { BrokerCapabilityTransport, type BoundCapabilityTransport } from "./capability-transport";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
 
 interface ClaimedTurn {
   bindingId: string;
   activityId: string;
   environment: ChatGptTurnEnvironment & { expiresAt?: number };
+  transport: BoundCapabilityTransport;
 }
 
 export type ChatGptMcpContract = "native" | "safe";
@@ -111,20 +113,20 @@ function wireName(tool: CodexTool): string {
   return namespacedToolName(tool.namespace, tool.name);
 }
 
-function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool | undefined {
-  return environment.tools.find(tool => !tool.namespace && tool.name === name);
+function exactTool(snapshot: ChatGptTurnEnvironment["capabilitySnapshot"], name: string): CodexTool | undefined {
+  return snapshot?.tools.find(tool => !tool.namespace && tool.name === name);
 }
 
 function gatewayToolNameIsValid(name: string): boolean {
   return /^[A-Za-z0-9_$]+$/.test(name);
 }
 
-function safeVisibleTools(environment: ChatGptTurnEnvironment, contract: ChatGptMcpContract): CodexTool[] {
-  if (contract === "native") return environment.tools;
-  const bridgeNamespaces = new Set(environment.tools
+function safeVisibleTools(snapshot: NonNullable<ChatGptTurnEnvironment["capabilitySnapshot"]>, contract: ChatGptMcpContract): CodexTool[] {
+  if (contract === "native") return [...snapshot.tools];
+  const bridgeNamespaces = new Set(snapshot.tools
     .filter(tool => tool.namespace && BRIDGE_TOOL_NAMES.has(tool.name))
     .map(tool => tool.namespace!));
-  return environment.tools.filter(tool => (
+  return snapshot.tools.filter(tool => (
     wireName(tool) !== CODEX_COMPACTION_CONTROL_WIRE_NAME
     && !BRIDGE_TOOL_NAMES.has(tool.name)
     // Zero Risk does not expose model-authored JavaScript. Automatic Full mode keeps the native
@@ -224,8 +226,8 @@ function asMcpResult(value: BrokerToolResult) {
   };
 }
 
-function execGateway(environment: ChatGptTurnEnvironment): CodexTool | undefined {
-  const tool = exactTool(environment, "exec");
+function execGateway(snapshot: NonNullable<ChatGptTurnEnvironment["capabilitySnapshot"]>): CodexTool | undefined {
+  const tool = exactTool(snapshot, "exec");
   return tool?.freeform ? tool : undefined;
 }
 
@@ -252,20 +254,15 @@ function gatewayToolCatalogProgram(options: {
   query?: string;
   offset: number;
   limit: number;
-  excludedNames: string[];
+  tools: GatewayToolDescriptor[];
 }): string {
   const needle = options.query?.trim().toLowerCase() ?? "";
   return [
     "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native nested tool registry is unavailable\");",
-    `const excludedNames = new Set(${JSON.stringify(options.excludedNames)});`,
+    `const allowedTools = ${JSON.stringify(options.tools)};`,
     `const needle = ${JSON.stringify(needle)};`,
-    "const visibleName = name => {",
-    "  return typeof name === \"string\" && /^[A-Za-z0-9_$]+$/.test(name) && !excludedNames.has(name);",
-    "};",
-    "const matches = ALL_TOOLS",
-    "  .filter(tool => visibleName(tool?.name))",
-    "  .map(tool => ({ name: tool.name, description: typeof tool.description === \"string\" ? tool.description : \"\" }))",
-    "  .filter(tool => !needle || (tool.name + \"\\n\" + tool.description).toLowerCase().includes(needle));",
+    "const available = allowedTools.filter(tool => ALL_TOOLS.some(candidate => candidate?.name === tool.name));",
+    "const matches = available.filter(tool => !needle || (tool.name + \"\\n\" + tool.description).toLowerCase().includes(needle));",
     `const page = matches.slice(${options.offset}, ${options.offset + options.limit});`,
     "text(JSON.stringify({ tools: page, total: matches.length }));",
   ].join("\n");
@@ -340,10 +337,10 @@ function execGatewayProgram(
   nestedToolName: string,
   freeform: boolean,
   payload: { arguments?: Record<string, unknown>; input?: string },
-  excludedNames: string[],
+  allowedNames: string[],
 ): string {
-  if (!gatewayToolNameIsValid(nestedToolName) || excludedNames.includes(nestedToolName)) {
-    throw new Error(`Codex nested tool is not available in this turn: ${nestedToolName}`);
+  if (!gatewayToolNameIsValid(nestedToolName) || !allowedNames.includes(nestedToolName)) {
+    throw new Error(`Codex nested tool is not authorized for this turn: ${nestedToolName}`);
   }
   const gatewayName = gatewayNestedToolName(nestedToolName);
   if (gatewayName !== nestedToolName) {
@@ -353,8 +350,8 @@ function execGatewayProgram(
   return execGatewayResultProgram([
     "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native nested tool registry is unavailable\");",
     `const nestedToolName = ${JSON.stringify(gatewayName)};`,
-    `const excludedNames = new Set(${JSON.stringify(excludedNames)});`,
-    "if (excludedNames.has(nestedToolName)) throw new Error(\"Native nested tool is not callable through the structured gateway\");",
+    `const allowedNames = new Set(${JSON.stringify(allowedNames)});`,
+    "if (!allowedNames.has(nestedToolName)) throw new Error(\"Native nested tool is not authorized for this turn\");",
     "if (!ALL_TOOLS.some(tool => tool?.name === nestedToolName)) throw new Error(\"Native nested tool is not listed in this turn\");",
     "const nestedTool = tools[nestedToolName];",
     "if (typeof nestedTool !== \"function\") throw new Error(\"Native nested tool is listed but unavailable\");",
@@ -367,21 +364,23 @@ function execGatewayProgram(
  * as direct calls. The model still owns its JavaScript; only the tool registry it receives is a
  * transparent proxy whose two wait functions validate their transport-bound argument before dispatch.
  */
-function transportBoundRawExecProgram(input: string, blockedExecName: string): string {
+function transportBoundRawExecProgram(input: string, blockedExecName: string, allowedNames: string[]): string {
   return [
     "await (async (tools) => {",
     input,
     "})((() => {",
     "  const source = tools;",
+    `  const allowedNames = new Set(${JSON.stringify(allowedNames)});`,
     `  const waitNames = new Set(${JSON.stringify([...GATEWAY_AGENT_WAIT_TOOL_NAMES])});`,
     `  const blockedExecName = ${JSON.stringify(blockedExecName)};`,
     `  const pollMs = ${CHATGPT_WEB_AGENT_WAIT_POLL_MS};`,
-    "  const registryNames = new Set(Reflect.ownKeys(source));",
+    "  const registryNames = new Set([...Reflect.ownKeys(source)].filter(name => allowedNames.has(name)));",
     "  if (typeof ALL_TOOLS !== \"undefined\" && Array.isArray(ALL_TOOLS)) {",
-    "    for (const tool of ALL_TOOLS) if (typeof tool?.name === \"string\") registryNames.add(tool.name);",
+    "    for (const tool of ALL_TOOLS) if (typeof tool?.name === \"string\" && allowedNames.has(tool.name)) registryNames.add(tool.name);",
     "  }",
     "  const wrappers = new Map();",
     "  const expose = name => {",
+    "    if (!registryNames.has(name)) return undefined;",
     "    if (wrappers.has(name)) return wrappers.get(name);",
     "    const value = Reflect.get(source, name, source);",
     "    let exposed = value;",
@@ -422,13 +421,15 @@ function transportBoundRawExecProgram(input: string, blockedExecName: string): s
 function execCommandGatewayProgram(
   execCommandArguments: Record<string, unknown>,
   shellCommandArguments: Record<string, unknown>,
+  allowedNames: string[],
 ): string {
   const execCommandName = gatewayNestedToolName("exec_command");
   const shellCommandName = gatewayNestedToolName("shell_command");
   return execGatewayResultProgram([
     "if (typeof ALL_TOOLS === \"undefined\" || !Array.isArray(ALL_TOOLS)) throw new Error(\"Native command tool registry is unavailable\");",
     "const nativeCommandNames = new Set(ALL_TOOLS.map(tool => tool?.name));",
-    `const nativeCommandCandidates = ${JSON.stringify([execCommandName, shellCommandName])}.filter(name => nativeCommandNames.has(name));`,
+    `const allowedNames = new Set(${JSON.stringify(allowedNames)});`,
+    `const nativeCommandCandidates = ${JSON.stringify([execCommandName, shellCommandName])}.filter(name => allowedNames.has(name) && nativeCommandNames.has(name));`,
     "if (nativeCommandCandidates.length !== 1) throw new Error(\"Expected exactly one native command tool; found \" + (nativeCommandCandidates.join(\", \") || \"none\"));",
     "const nativeCommandName = nativeCommandCandidates[0];",
     "const nativeCommand = tools[nativeCommandName];",
