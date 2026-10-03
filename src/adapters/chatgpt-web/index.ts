@@ -27,6 +27,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGpt
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { projectCanonicalChatGptWebContext } from "./context-projection";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
@@ -47,6 +48,7 @@ import {
   type ChatGptReplayIdentity,
 } from "./replay";
 import {
+  chatGptConversationHandleForEpoch,
   createChatGptWebReplayTransport,
 } from "./replay-transport";
 import { capabilityBindingIdForExecution } from "./provider-core";
