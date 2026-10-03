@@ -1,0 +1,30 @@
+name: Temporary sync 11A 11B into staging
+
+on:
+  push:
+    branches:
+      - sync-11ab-into-staging
+
+permissions:
+  contents: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sync branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Merge main with main-side conflict preference
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-ff -Xtheirs origin/main -m "chore: sync merged 11-A and 11-B into staging"
+          git rm .github/workflows/tmp-sync-11ab.yml
+          git commit -m "chore: remove temporary sync workflow"
+          git push origin HEAD:sync-11ab-into-staging
