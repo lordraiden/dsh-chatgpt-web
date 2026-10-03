@@ -263,6 +263,23 @@ function leaseInput(turnId: string) {
     /cannot move to a different physical resource/i,
   );
   assert.equal(lease.provenance().physicalResourceBound, true);
+
+  const second = registry.acquire({
+    ...descriptor,
+    pageIdentity: "page-2",
+    turnId: "trace-2",
+  });
+  assert.throws(
+    () => registry.bindPhysicalResource(second, {
+      resourceId: "surface-1",
+      browserContextId: "ctx-1",
+      pageId: "page-2",
+      profileId: "profile-1",
+      accountId: "account-1",
+    }),
+    /already leased by turn trace-1/i,
+  );
+  registry.release(second);
   registry.release(lease);
   assert.equal(registry.activeCount(), 0);
   console.log("ok browser/account lease physical ownership");
