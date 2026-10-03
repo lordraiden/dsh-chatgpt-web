@@ -234,27 +234,32 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
         });
     });
   }
-  const registerAdapter = (): (() => void) => {
-    const disposeAdapter = ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], new ChatGptWebLlmAdapter());
+  const registerAdapter = (): { adapter: ChatGptWebLlmAdapter; dispose: () => void } => {
+    const adapter = new ChatGptWebLlmAdapter();
+    const dispose = ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], adapter);
     logger.info(`[dsh-chatgpt-web] Registered native DSH provider "${CHATGPT_WEB_PROVIDER_ID}"`);
-    return disposeAdapter;
+    return { adapter, dispose };
   };
 
   if (typeof ctx.effect === "function") {
     ctx.effect(() => {
-      const disposeAdapter = registerAdapter();
+      const { adapter, dispose } = registerAdapter();
       void startDaemon();
-      return () => {
-        void stopDaemon();
-        disposeAdapter();
+      return async () => {
+        await adapter.shutdown();
+        await stopDaemon();
+        dispose();
       };
     });
   } else {
-    const disposeAdapter = registerAdapter();
+    const { adapter, dispose } = registerAdapter();
     void startDaemon();
     process.once("beforeExit", () => {
-      void stopDaemon();
-      disposeAdapter();
+      void (async () => {
+        await adapter.shutdown();
+        await stopDaemon();
+        dispose();
+      })();
     });
   }
 }
