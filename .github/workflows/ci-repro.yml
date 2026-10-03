@@ -1,0 +1,46 @@
+name: CI Repro
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.event_name != 'push' || github.ref_type == 'tag' || github.ref_name == 'main' || github.ref_name == 'integration/staging' || startsWith(github.ref_name, 'feat/') }}
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      artifact_sha256: ${{ steps.package.outputs.artifact_sha256 }}
+    steps:
+      - id: package
+        run: |
+          echo "artifact_name=test.tgz" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=test" >> "$GITHUB_OUTPUT"
+
+  publish-gpr:
+    name: Publish to GitHub Packages
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - run: echo "gpr"
+
+  publish-npm:
+    name: Publish to npmjs.com
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "npm"
