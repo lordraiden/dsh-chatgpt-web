@@ -196,6 +196,23 @@ function collectCanonicalToolState(context: CanonicalChatGptWebContext): {
 }
 
 /**
+ * Derive the trusted settled/pending execution split from canonical DSH state.
+ * A tool call with a canonical result is settled; a tool call without a result is pending.
+ * Browser state is intentionally never consulted.
+ */
+export function deriveChatGptReplayExecutionState(
+  context: CanonicalChatGptWebContext,
+): ChatGptReplayExecutionState {
+  const { calls, results } = collectCanonicalToolState(context);
+  const settledToolCallIds = [...results];
+  const pendingToolCallIds = [...calls].filter(id => !results.has(id));
+  return {
+    settledToolCallIds: Object.freeze(settledToolCallIds),
+    pendingToolCallIds: Object.freeze(pendingToolCallIds),
+  };
+}
+
+/**
  * Build an immutable replay boundary from canonical DSH projection + trusted DSH/provider execution
  * state. The browser transcript is never consulted.
  */
