@@ -275,6 +275,40 @@ const environment = capabilitySnapshotForEnvironment({
     assert.equal(replay[0]!.callId, first[0]!.callId);
     assert.equal(replay[0]!.wireName, first[0]!.wireName);
 
+    const expiredSnapshot = projectChatGptCapabilities({
+      sessionId: "session-broker-expiry",
+      agentId: "agent-broker-expiry",
+      turnId: "turn-broker-expiry",
+      tools: [echoTool],
+      expiresAt: Date.now() + 50,
+    });
+    const expiredEnvironment = capabilitySnapshotForEnvironment({
+      cwd: "/workspace",
+      roots: ["/workspace"],
+      writableRoots: ["/workspace"],
+      sandboxPolicy: { type: "workspaceWrite" as const, writableRoots: ["/workspace"], networkAccess: true },
+      tools: [echoTool],
+    }, expiredSnapshot);
+    const expiredToken = await broker.register(expiredEnvironment, 5_000, "trace-10b-expired-snapshot");
+    await new Promise(resolve => setTimeout(resolve, 75));
+    const expiredClaim = await callTurnBroker<{ bindingId: string }>(socketPath, {
+      method: "claim",
+      token: expiredToken,
+      activityId: "activity_10b_expired_snapshot",
+      contract: "native",
+    });
+    await assert.rejects(
+      () => callTurnBroker(socketPath, {
+        method: "invoke",
+        bindingId: expiredClaim.bindingId,
+        capabilitySnapshotId: expiredSnapshot.snapshotId,
+        wireName: "native__echo",
+        freeform: false,
+        arguments: { value: "expired" },
+      }),
+      /snapshot is expired/i,
+    );
+
     const result: BrokerToolResult = {
       content: [{ type: "text", text: "done" }],
       structuredContent: { ok: true },
