@@ -167,14 +167,6 @@ export interface ProviderTurnProvenance {
   nativeThreadId?: string;
 }
 
-export interface ProviderTurnPhysicalResourceBinding {
-  resourceId: string;
-  browserContextId: string;
-  pageId: string;
-  profileId: string;
-  accountId: string;
-}
-
 export interface ProviderTurnSnapshot {
   readonly state: ProviderTurnState;
   readonly activity: ProviderTurnActivity;
