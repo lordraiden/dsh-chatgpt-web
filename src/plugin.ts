@@ -38,14 +38,19 @@ export interface Config {
   bunPath?: string;
 }
 
-export const Config: z<Config> = z.object({
+export const Config = z.object({
   port: z.number().step(1).min(1).max(65535).default(DEFAULT_PORT).description("Local ChatGPT Web sidecar port.").volatile(),
   autoStart: z.boolean().default(true),
   readyTimeoutMs: z.number().step(1).min(0).default(30_000),
-  bunPath: z.string().optional(),
+  bunPath: z.string().default(undefined as unknown as string),
 });
 
-type ChatGPTWebPluginConfig = Partial<Omit<Config, "port">> & { port?: number | Volatile<number> };
+type ChatGPTWebPluginConfig = {
+  port?: number | Volatile<number>;
+  autoStart?: boolean;
+  readyTimeoutMs?: number;
+  bunPath?: string;
+};
 
 import { pathToFileURL } from "node:url";
 
@@ -83,10 +88,8 @@ function resolveLauncher(customBunPath: string | undefined, port: number): { cmd
 }
 
 function readPort(value: number | Volatile<number> | undefined): number {
-  const port = value && typeof value === "object" && "get" in value && typeof value.get === "function"
-    ? value.get()
-    : value ?? DEFAULT_PORT;
-  return Number.isSafeInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULT_PORT;
+  const raw = typeof value === "number" ? value : value?.get() ?? DEFAULT_PORT;
+  return Number.isSafeInteger(raw) && raw >= 1 && raw <= 65535 ? raw : DEFAULT_PORT;
 }
 
 async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
