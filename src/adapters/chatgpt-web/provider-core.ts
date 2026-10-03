@@ -362,6 +362,9 @@ export class ProviderTurnLifecycle {
     if (this.recovery === "EXACT_RESUME" && value === "REPLAY") {
       throw new Error("Provider recovery cannot downgrade exact resume to replay");
     }
+    if (this.recovery === "REPLAY" && value === "EXACT_RESUME") {
+      throw new Error("Provider recovery cannot reclassify a replay as exact resume");
+    }
     this.recovery = value;
   }
 
@@ -543,7 +546,16 @@ export class ChatGptWebProviderCore {
   begin(input: ChatGptWebProviderCoreTurnInput): ProviderTurnLifecycle {
     if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
     const existing = this.turns.get(input.executionKey);
-    if (existing) return existing;
+    if (existing) {
+      const provenance = existing.snapshot().provenance;
+      if (input.nativeTurnId && provenance.nativeTurnId !== input.nativeTurnId) {
+        throw new Error("Provider execution key is already bound to a different native DSH turn");
+      }
+      if (input.nativeThreadId && provenance.nativeThreadId !== input.nativeThreadId) {
+        throw new Error("Provider execution key is already bound to a different native DSH thread");
+      }
+      return existing;
+    }
 
     if (input.nativeThreadId) {
       for (const [executionKey, activeTurn] of this.turns) {
