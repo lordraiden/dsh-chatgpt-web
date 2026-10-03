@@ -108,6 +108,7 @@ function leaseInput(turnId: string) {
   assert.equal(turn.snapshot().physicalSettled, true);
   assert.equal(turn.snapshot().physicalSettlementOutcome, "rejected");
   assert.equal(turn.snapshot().physicalSettlementError, settlementError.message);
+  assert.equal(turn.snapshot().recovery, "FAILED");
   assert.equal(turn.snapshot().state, "RETIRED");
   assert.equal(turn.lease.isActive(), false);
   console.log("ok rejected physical settlement remains observable");
@@ -223,9 +224,34 @@ function leaseInput(turnId: string) {
   const lease = registry.acquire(descriptor);
   assert.equal(registry.activeCount(), 1);
   assert.throws(() => registry.acquire(descriptor), /already leased/i);
+  lease.bindPhysicalResource({
+    resourceId: "surface-1",
+    browserContextId: "ctx-1",
+    pageId: "page-1",
+    profileId: "profile-1",
+    accountId: "account-1",
+  });
+  lease.bindPhysicalResource({
+    resourceId: "surface-1",
+    browserContextId: "ctx-1",
+    pageId: "page-2",
+    profileId: "profile-1",
+    accountId: "account-1",
+  });
+  assert.throws(
+    () => lease.bindPhysicalResource({
+      resourceId: "surface-2",
+      browserContextId: "ctx-2",
+      pageId: "page-3",
+      profileId: "profile-2",
+      accountId: "account-2",
+    }),
+    /cannot move to a different physical resource/i,
+  );
+  assert.equal(lease.provenance().physicalResourceBound, true);
   registry.release(lease);
   assert.equal(registry.activeCount(), 0);
-  console.log("ok browser/account lease ownership");
+  console.log("ok browser/account lease physical ownership");
 }
 
 {
@@ -243,6 +269,7 @@ function leaseInput(turnId: string) {
   assert.equal(turn.snapshot().state, "RETIRED");
   assert.equal(turn.snapshot().physicalSettled, true);
   assert.equal(turn.snapshot().physicalSettlementOutcome, "not_started");
+  assert.equal(turn.snapshot().recovery, "FAILED");
   assert.equal(turn.lease.isActive(), false);
   console.log("ok pre-browser failure retirement");
 }
