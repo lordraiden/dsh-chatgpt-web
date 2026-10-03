@@ -1182,8 +1182,10 @@ export function createChatGptWebAdapter(
         const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
         const previousProviderTurn = providerCore.get(executionKey);
         const recovery = previousProviderTurn
-          ? (previousProviderTurn.snapshot().state === "RETIRED" ? "REPLAY" as const : "EXACT_RESUME" as const)
-          : "NEW" as const;
+          ? "EXACT_RESUME" as const
+          : providerCore.wasRetired(executionKey)
+            ? "REPLAY" as const
+            : "NEW" as const;
         const providerTurn = providerCore.begin({
           executionKey,
           traceId,
