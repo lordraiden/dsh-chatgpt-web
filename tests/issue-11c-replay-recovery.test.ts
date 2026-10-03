@@ -40,6 +40,7 @@ const canonicalContext = projectCanonicalChatGptWebContext(
       toolCallId: "call-settled",
       toolName: "read",
       content: "README contents",
+      isError: false,
       timestamp: 4,
     },
     {
