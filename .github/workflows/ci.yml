@@ -43,6 +43,9 @@ jobs:
       - name: Issue #9 ProviderCore lifecycle tests
         run: bun scripts/test-issue-9-provider-core.ts
 
+      - name: Issue #10-A capability projection tests
+        run: bun scripts/test-issue-10a-capabilities.ts
+
       - name: Issue contract tests
         run: node scripts/test-issue-20-settings.mjs
 
