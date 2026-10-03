@@ -12,6 +12,20 @@ This project makes an authenticated ChatGPT Web session available to DeepSeek Ha
 
 The architecture is intentionally conservative. Phase 1 contains only the boundaries and invariants required for a solid first pilot. Phase 2 contains compatibility convergence, cleanup, and optional hardening that does not need to block the first native provider.
 
+### 1.3 Supported account matrix: ChatGPT Free Web only
+
+The supported product target for this plugin is an authenticated **ChatGPT Free account using the ChatGPT Web surface at chatgpt.com**. Paid ChatGPT plans and the OpenAI API are not part of the supported account matrix for this pilot.
+
+This distinction is architectural, not cosmetic:
+
+- OpenAI API model cards, API context windows, API token limits, and API pricing are **not authoritative** for this provider's browser transport budget.
+- Official ChatGPT Free documentation is authoritative for current Free-plan product availability and plan-level limits, but those limits can change independently of the API.
+- ChatGPT Web transport limits used by this adapter are provider measurements/guardrails for the Free Web surface. They must be documented as such and must not be presented as official API or model limits.
+- Any paid-account compatibility code retained elsewhere in the repository is outside the supported #11-A/#11-B contract and must not influence the Free-account context policy.
+
+The current OpenAI Free-plan documentation confirms that Free users have access to ChatGPT features through the product UI and that usage limits are plan/model dependent and mutable. The image-input documentation likewise states that the number of images that can be added depends on image size and accompanying text; therefore this provider may impose a conservative transport cap without treating that number as an OpenAI product maximum.
+
+
 ---
 
 ## 1. Goals and non-goals
@@ -1443,12 +1457,14 @@ These references were used to verify the architecture's external contracts and c
 
 - ChatGPT Free Tier FAQ:  
   https://help.openai.com/en/articles/9275245-chatgpt-free-tier-faq
+- ChatGPT image input FAQ:  
+  https://help.openai.com/en/articles/8400551-chatgpt-image-inputs-faq
 - Developer mode and MCP apps in ChatGPT:  
   https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt
 - ChatGPT Search:  
   https://help.openai.com/en/articles/9237897-chatgpt-search
 
-These pages describe mutable product behavior. They are not provider API contracts and must be re-checked when the supported account matrix changes.
+These pages describe mutable ChatGPT product behavior for the supported Free Web account matrix. They are not OpenAI API contracts. API model documentation, even when it describes the same underlying model family, MUST NOT be used to derive this browser adapter's Free Web transport budget. The supported account matrix and measured browser limits must be re-checked when ChatGPT Free product behavior changes.
 
 ### Model Context Protocol
 
