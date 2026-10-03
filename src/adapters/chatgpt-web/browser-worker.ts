@@ -907,17 +907,7 @@ async function throwIfChatGptContextExhausted(page: Page): Promise<void> {
 
   const signal = observations.find(observation => detectChatGptContextExhaustion(observation));
   if (!signal) return;
-  throw new ChatGptWebAdapterError(
-    signal.text
-      ? `ChatGPT reported a terminal conversation-length limit: ${signal.text}`
-      : "ChatGPT reported a terminal conversation-length limit.",
-    {
-      status: 409,
-      errorType: "invalid_request_error",
-      code: "context_exhausted",
-      retryable: false,
-    },
-  );
+  throw chatGptContextExhaustedError();
 }
 
 export async function resolveChatGptToolConfirmation(
