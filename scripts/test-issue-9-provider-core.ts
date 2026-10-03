@@ -406,6 +406,26 @@ function leaseInput(turnId: string) {
 }
 
 {
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("shutdown"));
+  let release!: () => void;
+  const settlement = new Promise<void>(resolve => { release = resolve; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+  let cancelled = false;
+  turn.attachCancellation(() => {
+    cancelled = true;
+    release();
+  });
+  await core.shutdown();
+  assert.equal(cancelled, true);
+  assert.equal(turn.snapshot().logicalOutcome, "cancelled");
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.lease.isActive(), false);
+  console.log("ok ProviderCore shutdown drains physical settlement");
+}
+
+{
   const fakeBackend = {
     name: "fake",
     async runTurn(
