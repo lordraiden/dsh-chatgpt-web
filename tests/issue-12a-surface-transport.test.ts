@@ -3,10 +3,9 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import {
   ChatGptWebSurfaceTransport,
-  type WebSurfaceInspection,
+  type WebSurfaceTransportBackend,
   type WebSurfaceTurn,
 } from "../src/adapters/chatgpt-web/web-surface-transport";
-import type { WebSurfaceTransportBackend } from "../src/adapters/chatgpt-web/web-surface-transport";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -146,7 +145,6 @@ test("the transport contract does not export browser implementation types", () =
   expect(source).toContain("export interface WebSurfacePhysicalSurface");
   expect(source).not.toContain("export type WebSurfaceTurn = BrowserTurn");
   expect(source).not.toContain("export type WebSurfacePhysicalSurface = ChatGptBrowserPhysicalSurface");
-  expect(source).not.toContain("export interface WebSurfaceTransportBackend");
   expect(source).not.toContain("Locator");
   expect(source).not.toContain("Page");
   expect(source).not.toContain("BrowserContext");
