@@ -356,6 +356,14 @@ function leaseInput(turnId: string) {
   assert.equal(parsed.toolCalls[0]?.name, "read");
   assert.equal(parsed.toolCalls[0]?.arguments.file_path, "README.md");
 
+  const exactArguments = new ChatGptToolStreamParser().feed(
+    '<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read","arguments":{"path":"README.md","justification":"read the file"}}</dsh_tool_call>',
+  );
+  assert.deepEqual(exactArguments.toolCalls[0]?.arguments, {
+    path: "README.md",
+    justification: "read the file",
+  });
+
   assert.throws(
     () => parser.feed(
       '<dsh_tool_call>{"version":1,"id":"call_12345678","name":"read","arguments":{}}</dsh_tool_call>',
