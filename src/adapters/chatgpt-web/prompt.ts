@@ -140,8 +140,7 @@ export function formatChatGptWebMultipartCommit(
   ].join("\n");
 }
 
-/** ChatGPT accepts at most this many attachments on one message. */
-export const CHATGPT_MAX_INPUT_IMAGES = 10;
+export { CHATGPT_WEB_MAX_INPUT_IMAGES as CHATGPT_MAX_INPUT_IMAGES } from "./context-projection";
 
 type MultipartContextRecord =
   | { kind: "system"; system_index: number; content: string }
