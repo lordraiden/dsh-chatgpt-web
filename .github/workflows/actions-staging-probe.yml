@@ -1,0 +1,13 @@
+name: Staging Actions Probe
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "staging push dispatch works"
