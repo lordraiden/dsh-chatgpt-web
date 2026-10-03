@@ -20,11 +20,6 @@ const identity: ChatGptReplayIdentity = {
 
 const trigger = { code: "context_exhausted" as const };
 
-const boundary = createChatGptReplayBoundary(context, {
-  settledToolCallIds: ["call-settled"],
-  pendingToolCallIds: ["call-pending"],
-});
-
 const context = projectCanonicalChatGptWebContext([], [
   { role: "user", content: "continue the task", timestamp: 1 },
   {
@@ -56,6 +51,11 @@ const context = projectCanonicalChatGptWebContext([], [
     timestamp: 4,
   },
 ]);
+
+const boundary = createChatGptReplayBoundary(context, {
+  settledToolCallIds: ["call-settled"],
+  pendingToolCallIds: ["call-pending"],
+});
 
 function transportSpy(
   replacement: ChatGptConversationHandle = { id: "conversation-2", generation: 2 },
