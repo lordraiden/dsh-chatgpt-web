@@ -9,7 +9,11 @@ import {
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
 import type { CapabilityBinding, CapabilityToolResult } from "./capability-contract";
-import { capabilitySnapshotForEnvironment, type CapabilitySnapshot } from "./capability-projector";
+import {
+  assertCapabilitySnapshotBinding,
+  capabilitySnapshotForEnvironment,
+  type CapabilitySnapshot,
+} from "./capability-projector";
 
 export interface BrokerToolRequest {
   callId: string;
