@@ -284,7 +284,10 @@ export function toCodexParsedRequest(
     );
   }
 
-  if (options.tools?.some(tool => tool.freeform === true || tool.toolSearch === true)) {
+  if (options.tools?.some(tool => {
+    const extended = tool as ToolSchema & { freeform?: boolean; toolSearch?: boolean };
+    return extended.freeform === true || extended.toolSearch === true;
+  })) {
     throw new LlmError(
       "ChatGPT Web native provider does not support freeform or tool-search tool semantics in this phase.",
       "UNSUPPORTED_OPTION",
