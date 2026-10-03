@@ -109,7 +109,8 @@ export function detectChatGptContextExhaustion(
   const structuralSurface = role === "alert"
     || role === "dialog"
     || role === "status"
-    || /(?:error|context|length|limit|conversation)/i.test(testId);
+    || /(?:error|context|length|limit|conversation)/i.test(testId)
+    || hasAny(actions.join(" "), NEW_CHAT_ACTION_TERMS);
 
   if (!structuralSurface) return undefined;
   // Conversation evidence must come from the error surface itself, not from a "New chat" button.

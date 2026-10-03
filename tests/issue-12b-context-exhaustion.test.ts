@@ -50,6 +50,15 @@ test("detects localized structural equivalents without relying on English copy",
   }
 });
 
+test("detects a plain structural wrapper when the exhaustion surface exposes a New Chat action", () => {
+  const signal = detectChatGptContextExhaustion({
+    text: "This conversation is too long, please start a new one.",
+    actionLabels: ["New chat"],
+  });
+  expect(signal?.kind).toBe("context_exhausted");
+  expect(signal?.variant).toBe("conversation-too-long");
+});
+
 test("does not classify an ordinary assistant message", () => {
   const signal = detectChatGptContextExhaustion(observation({
     role: "assistant",
