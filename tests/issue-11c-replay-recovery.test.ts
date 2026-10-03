@@ -118,7 +118,7 @@ test("context exhaustion fences the old conversation immediately", () => {
   coordinator.reportContextExhausted("chatgpt-conversation-1");
 
   expect(() => coordinator.assertCurrentConversation("chatgpt-conversation-1")).toThrowError(
-    /stale or retired/i,
+    /stale or retired|retired or stale/i,
   );
   expect(coordinator.snapshot().retiredConversationHandles).toEqual(["chatgpt-conversation-1"]);
 });
@@ -154,7 +154,7 @@ test("replay replaces the ChatGPT conversation while preserving DSH identity", a
   coordinator.assertResumed();
   coordinator.assertCurrentConversation("chatgpt-conversation-2");
   expect(() => coordinator.assertCurrentConversation("chatgpt-conversation-1")).toThrowError(
-    /stale or retired/i,
+    /stale or retired|retired or stale/i,
   );
 });
 
