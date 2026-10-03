@@ -273,8 +273,18 @@ function leaseInput(turnId: string) {
   );
   assert.equal(lease.provenance().physicalResourceBound, true);
 
+  assert.throws(
+    () => registry.acquire({
+      ...descriptor,
+      pageIdentity: "page-account-conflict",
+      turnId: "trace-account-conflict",
+    }),
+    /authenticated ChatGPT account is already leased/i,
+  );
+
   const second = registry.acquire({
     ...descriptor,
+    accountIdentity: "account-2",
     pageIdentity: "page-2",
     turnId: "trace-2",
   });
