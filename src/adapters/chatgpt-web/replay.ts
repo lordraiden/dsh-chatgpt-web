@@ -46,6 +46,11 @@ export interface ChatGptReplaySnapshot {
   readonly staleConversationIds: readonly string[];
 }
 
+export interface ChatGptReplayBinding {
+  readonly conversation: ChatGptConversationHandle;
+  readonly identity: ChatGptReplayIdentity;
+}
+
 export interface ChatGptReplayTransport {
   invalidateConversation(
     conversation: ChatGptConversationHandle,
@@ -65,7 +70,7 @@ export interface ChatGptReplayTransport {
     previous: ChatGptConversationHandle,
     replacement: ChatGptConversationHandle,
     identity: ChatGptReplayIdentity,
-  ): Promise<void>;
+  ): Promise<ChatGptReplayBinding>;
 
   replayCanonicalContext(
     conversation: ChatGptConversationHandle,
@@ -111,6 +116,14 @@ function validateHandle(handle: ChatGptConversationHandle, name: string): void {
   if (!Number.isSafeInteger(handle.generation) || handle.generation < 0) {
     throw new Error("ChatGPT replay requires a valid " + name + " conversation generation");
   }
+}
+
+function sameReplayIdentity(left: ChatGptReplayIdentity, right: ChatGptReplayIdentity): boolean {
+  return left.sessionId === right.sessionId
+    && left.agentId === right.agentId
+    && left.turnId === right.turnId
+    && left.capabilitySnapshotId === right.capabilitySnapshotId
+    && left.capabilityBindingId === right.capabilityBindingId;
 }
 
 function validateBoundary(boundary: ChatGptReplayBoundary): void {
@@ -210,12 +223,21 @@ export class ChatGptReplayCoordinator {
       await transport.invalidateConversation(request.exhaustedConversation, request.identity);
       this.staleConversationIds.add(request.exhaustedConversation.id);
 
-      await transport.bindReplacementConversation(
+      const binding = await transport.bindReplacementConversation(
         request.exhaustedConversation,
         replacement,
         request.identity,
       );
-      this.activeConversation = { ...replacement };
+      if (!sameReplayIdentity(binding.identity, request.identity)) {
+        throw new Error("ChatGPT replay replacement changed the trusted DSH identity");
+      }
+      if (
+        binding.conversation.id !== replacement.id
+        || binding.conversation.generation !== replacement.generation
+      ) {
+        throw new Error("ChatGPT replay replacement binding does not match the replacement conversation");
+      }
+      this.activeConversation = { ...binding.conversation };
 
       this.phase = "REPLAYING_CANONICAL_CONTEXT";
       await transport.replayCanonicalContext(
