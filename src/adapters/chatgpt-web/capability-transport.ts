@@ -42,9 +42,10 @@ export interface CapabilityTransportDispatcher {
 }
 
 export interface BoundCapabilityTransport {
-  readonly binding: CapabilityTransportBinding;
-  readonly snapshot: CapabilitySnapshot;
-  authorize(request: CapabilityRequest): CodexTool;
+  /**
+   * Public transport surface deliberately exposes only invocation/revocation. Snapshot authority and
+   * binding internals stay private to the transport implementation.
+   */
   invoke(
     request: CapabilityTransportInvocation,
     signal?: AbortSignal,
@@ -107,9 +108,6 @@ export class BrokerCapabilityTransport implements CapabilityTransport {
     };
 
     return {
-      binding,
-      snapshot: binding.snapshot,
-      authorize,
       invoke: async (request, signal) => {
         const capabilityRequest = invocationRequest(request);
         const tool = authorize(capabilityRequest);
