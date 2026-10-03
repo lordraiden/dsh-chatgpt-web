@@ -8,11 +8,7 @@ import {
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
-import { assertCapabilitySnapshotBinding, type CapabilitySnapshot } from "./capability-projector";
-
-interface PendingTurn extends ChatGptTurnEnvironment {
-  expiresAt?: number;
-}
+import { assertCapabilitySnapshotBinding, capabilitySnapshotForEnvironment, type CapabilitySnapshot } from "./capability-projector";
 
 export interface BrokerToolRequest {
   callId: string;
@@ -65,7 +61,9 @@ interface SafeTurnControl {
 interface TurnChannel {
   traceId: string;
   externalOwner: boolean;
-  environment: PendingTurn;
+  environment: Omit<ChatGptTurnEnvironment, "tools" | "capabilitySnapshot">;
+  capabilitySnapshot: CapabilitySnapshot;
+  expiresAt?: number;
   bindingId?: string;
   queuedCallIds: string[];
   deliveredCallIds: Set<string>;
@@ -116,6 +114,7 @@ interface BrokerRequest {
   token?: string;
   bindingId?: string;
   wireName?: string;
+  capabilitySnapshotId?: string;
   freeform?: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
@@ -176,8 +175,16 @@ function environmentIdentity(environment: ChatGptTurnEnvironment): string {
     roots: environment.roots,
     writableRoots: environment.writableRoots,
     sandboxPolicy: environment.sandboxPolicy,
-    capabilitySnapshotId: environment.capabilitySnapshot?.snapshotId ?? null,
   });
+}
+
+function materializeEnvironment(channel: TurnChannel): ChatGptTurnEnvironment & { expiresAt?: number } {
+  return {
+    ...channel.environment,
+    tools: structuredClone(channel.capabilitySnapshot.tools),
+    capabilitySnapshot: channel.capabilitySnapshot,
+    ...(channel.expiresAt !== undefined ? { expiresAt: channel.expiresAt } : {}),
+  };
 }
 
 function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
@@ -298,14 +305,19 @@ export class TurnBroker implements TurnBrokerOwner {
     if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
       throw new Error("ChatGPT web turn broker TTL must be a positive finite number");
     }
+    if (!environment.capabilitySnapshot) {
+      throw new Error("ChatGPT web turn broker registration requires an immutable capability snapshot");
+    }
+    const normalizedEnvironment = capabilitySnapshotForEnvironment(environment, environment.capabilitySnapshot);
+    const { tools: _tools, capabilitySnapshot: _capabilitySnapshot, ...runtimeEnvironment } = normalizedEnvironment;
+    const capabilitySnapshot = normalizedEnvironment.capabilitySnapshot!;
     const token = opaqueId(handlePrefix);
     const channel: TurnChannel = {
       traceId,
       externalOwner,
-      environment: {
-        ...environment,
-        ...(ttlMs !== undefined ? { expiresAt: Date.now() + ttlMs } : {}),
-      },
+      environment: runtimeEnvironment,
+      capabilitySnapshot,
+      ...(ttlMs !== undefined ? { expiresAt: Date.now() + ttlMs } : {}),
       queuedCallIds: [],
       deliveredCallIds: new Set(),
       invocations: new Map(),
@@ -371,16 +383,17 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
-    if (!environment.capabilitySnapshot || !channel.environment.capabilitySnapshot) throw new Error("Codex turn capability snapshot is missing");
-    if (environmentIdentity(channel.environment) !== environmentIdentity(environment)
-      || channel.environment.capabilitySnapshot.snapshotId !== environment.capabilitySnapshot.snapshotId) {
+    if (!environment.capabilitySnapshot) throw new Error("Codex turn capability snapshot is missing");
+    const normalized = capabilitySnapshotForEnvironment(environment, environment.capabilitySnapshot);
+    if (environmentIdentity(materializeEnvironment(channel)) !== environmentIdentity(normalized)
+      || channel.capabilitySnapshot.snapshotId !== normalized.capabilitySnapshot!.snapshotId) {
       throw new Error("Codex turn capability snapshot or trusted environment changed during an active ChatGPT tool loop");
     }
-    assertCapabilitySnapshotBinding(channel.environment.capabilitySnapshot, {
-      sessionId: channel.environment.capabilitySnapshot.sessionId,
-      agentId: channel.environment.capabilitySnapshot.agentId,
-      turnId: channel.environment.capabilitySnapshot.turnId,
-      snapshotId: environment.capabilitySnapshot.snapshotId,
+    assertCapabilitySnapshotBinding(channel.capabilitySnapshot, {
+      sessionId: normalized.capabilitySnapshot!.sessionId,
+      agentId: normalized.capabilitySnapshot!.agentId,
+      turnId: normalized.capabilitySnapshot!.turnId,
+      snapshotId: normalized.capabilitySnapshot!.snapshotId,
     });
     if (channel.safe?.state === "revoked") throw new Error("Zero Risk turn is already terminal");
     if (channel.safe?.state === "completed") return;
@@ -676,7 +689,7 @@ export class TurnBroker implements TurnBrokerOwner {
     safe.state = "running";
     // The setup window may be bounded, but a turn authorized by the user and bound by the
     // Zero Risk connector remains live until completion, cancellation, or runtime shutdown.
-    delete channel.environment.expiresAt;
+    delete channel.expiresAt;
     this.resolveSafeWaiters(safe.startWaiters, undefined);
   }
 
@@ -1060,7 +1073,7 @@ export class TurnBroker implements TurnBrokerOwner {
         if (!existing || existing.token !== token || existing.channel !== activeChannel) {
           throw new Error("turn token binding state is inconsistent");
         }
-        return { bindingId: activeChannel.bindingId, activityId, environment: activeChannel.environment };
+        return { bindingId: activeChannel.bindingId, activityId, environment: materializeEnvironment(activeChannel) };
       }
       this.pending.delete(token);
       const bindingId = opaqueId("binding");
@@ -1110,7 +1123,7 @@ export class TurnBroker implements TurnBrokerOwner {
       this.revoke(binding.token);
       return { released: true };
     }
-    if (request.method === "resolve") return { environment: binding.channel.environment };
+    if (request.method === "resolve") return { environment: materializeEnvironment(binding.channel) };
     this.assertSafeHarnessRunning(binding.channel);
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;
@@ -1122,6 +1135,10 @@ export class TurnBroker implements TurnBrokerOwner {
       return structuredClone(result);
     }
 
+    if (typeof request.capabilitySnapshotId !== "string"
+      || request.capabilitySnapshotId !== binding.channel.capabilitySnapshot.snapshotId) {
+      throw new Error("capability transport binding does not match the active immutable capability snapshot");
+    }
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
     const callId = opaqueId("call");
@@ -1194,7 +1211,7 @@ export class TurnBroker implements TurnBrokerOwner {
   private prune(): void {
     const now = Date.now();
     for (const [token, channel] of this.channels) {
-      if (channel.environment.expiresAt === undefined || channel.environment.expiresAt > now) continue;
+      if (channel.expiresAt === undefined || channel.expiresAt > now) continue;
       this.revoke(token);
     }
   }
