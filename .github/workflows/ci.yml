@@ -60,9 +60,11 @@ jobs:
           checksum="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
           echo "Validated artifact: $tarball"
           echo "SHA-256: $checksum"
+          echo "artifact_name=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$checksum" >> "$GITHUB_OUTPUT"
 
       - name: Smoke test the exact validated artifact
-        run: node scripts/smoke-tarball.mjs "$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+        run: node scripts/smoke-tarball.mjs "artifact/${{ steps.package.outputs.artifact_name }}"
 
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
