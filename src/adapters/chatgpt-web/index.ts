@@ -1323,7 +1323,7 @@ export function createChatGptWebAdapter(
                 if (turnCapabilities.localToolsEnabled && collectedToolCalls.length > 0) {
                   console.info(`[chatgpt-web] collectedToolCalls:`, JSON.stringify(collectedToolCalls));
                   const requests: BrokerToolRequest[] = collectedToolCalls.map(tc => ({
-                    callId: tc.id,
+                    callId: `dsh_${randomBytes(18).toString("base64url")}`,
                     wireName: tc.name,
                     freeform: false,
                     arguments: tc.arguments,
@@ -1512,6 +1512,7 @@ export function createChatGptWebAdapter(
                     freeform: false,
                     arguments: tc.arguments,
                   }));
+                  validateBatchTools(parsed, requests);
                   session.setOutstanding(requests, roundReasoning, session.roundEvents(roundKey));
                   emitRoundBatch(buffer => emitToolBatch(
                     requests,
