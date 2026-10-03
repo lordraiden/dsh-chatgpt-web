@@ -106,6 +106,11 @@ test("stale browser/broker handles are sanitized from transport serialization", 
 test("superseded model-switch contracts are removed without losing current history", () => {
   const normalized = withoutSupersededModelSwitchContracts(sampleMessages());
   expect(normalized.map(message => typeof message.content === "string" ? message.content : "")).toEqual([
-    "Build the feature.", "", "file contents", "<model_switch>new</model_switch>", "<skills_instructions>new skill catalog</skills_instructions>",
+    "",
+    "Review the implementation.",
+    "",
+    "file contents",
+    "<model_switch>new</model_switch>",
+    "<skills_instructions>new skill catalog</skills_instructions>",
   ]);
 });
