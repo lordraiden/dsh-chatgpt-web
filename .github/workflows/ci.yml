@@ -2,15 +2,12 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - integration/staging
-      - "feat/**"
-    tags:
-      - "v*"
   pull_request:
   workflow_dispatch:
 
+# GitHub currently has cases where filtered push workflows in private repositories
+# are materialized as 0-job startup failures. Keep push unfiltered and gate actual
+# execution at job level so non-target branches are cleanly skipped.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -20,6 +17,7 @@ permissions:
 
 jobs:
   verify:
+    if: ${{ github.event_name != 'push' || github.ref_type == 'tag' || github.ref_name == 'main' || github.ref_name == 'integration/staging' || startsWith(github.ref_name, 'feat/') }}
     name: Typecheck, build, contract tests and tarball smoke test
     runs-on: ubuntu-latest
     outputs:
@@ -78,7 +76,7 @@ jobs:
         run: node scripts/smoke-tarball.mjs "artifact/${{ steps.package.outputs.artifact_name }}"
 
       - name: Upload release artifact
-        if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-tarball
@@ -87,7 +85,7 @@ jobs:
 
   publish-gpr:
     name: Publish to GitHub Packages
-    if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
     needs: verify
     runs-on: ubuntu-latest
     permissions:
@@ -150,7 +148,7 @@ jobs:
 
   publish-npm:
     name: Publish to npmjs.com
-    if: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
     needs: verify
     runs-on: ubuntu-latest
     steps:
