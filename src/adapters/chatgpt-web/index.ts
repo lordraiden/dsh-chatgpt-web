@@ -366,7 +366,7 @@ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Erro
         status: 502,
         errorType: "server_error",
         code: "chatgpt_surface_stale",
-        retryable: true,
+        retryable: false,
         cause: normalized,
       },
     );
