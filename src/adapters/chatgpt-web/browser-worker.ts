@@ -2019,7 +2019,8 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
     && selection.anchorNode !== null
     && element.contains(selection.anchorNode);
   if (!alreadyPlaced) {
-    const range = document.createRange();    range.selectNodeContents(element);
+    const range = document.createRange();
+    range.selectNodeContents(element);
     range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
@@ -4018,7 +4019,8 @@ export class ChatGptBrowserWorker {
           }
           if (node instanceof HTMLElement && blockMarkdownTags.has(node.tagName.toLowerCase())) {
             flushInlineRun();
-            appendBlockSegment(node);            return;
+            appendBlockSegment(node);
+            return;
           }
           inlineRun.push(node);
         });
