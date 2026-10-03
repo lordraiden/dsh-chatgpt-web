@@ -24,18 +24,9 @@ export interface CanonicalChatGptWebContext {
 export function projectCanonicalChatGptWebContext(
   system: readonly string[],
   sourceMessages: readonly CodexMessage[],
-  maxInputImages = 10,
 ): CanonicalChatGptWebContext {
-  if (!Number.isSafeInteger(maxInputImages) || maxInputImages < 0) {
-    throw new Error("ChatGPT canonical context image budget is invalid");
-  }
-
   const messages = withoutSupersededModelSwitchContracts(sourceMessages);
   const images: ChatGptWebPromptImage[] = [];
-  const budget: ImageBudget = {
-    seen: 0,
-    dropped: Math.max(0, countChatGptContextImages(messages) - maxInputImages),
-  };
   const userContext = messages
     .filter(message => message.role === "user")
     .map(message => {
@@ -44,8 +35,10 @@ export function projectCanonicalChatGptWebContext(
     })
     .join(" ");
 
+  // Canonical projection is intentionally lossless for supported semantic images. Any per-request
+  // attachment cap is a transport concern and belongs after this projection (#11-B).
   const projectedMessages = messages.map(message =>
-    messageEnvelope(message, images, budget, userContext)
+    messageEnvelope(message, images, userContext)
   );
 
   return Object.freeze({
@@ -66,13 +59,39 @@ export function serializeCanonicalChatGptWebContext(
   }));
 }
 
-const RETIRED_TURN_HANDLE = /\b(turn|request|binding)_[A-Za-z0-9_-]{24,}/g;
+const RETIRED_TRANSPORT_HANDLE_KEYS = new Set([
+  "__transport_handle",
+  "__turn_handle",
+  "__request_handle",
+  "__binding_handle",
+  "__activity_handle",
+  "__surface_handle",
+]);
+
+function sanitizeRetiredTransportFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeRetiredTransportFields);
+  if (!value || typeof value !== "object") return value;
+
+  const record = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) {
+    if (RETIRED_TRANSPORT_HANDLE_KEYS.has(key)) {
+      result[key] = "[retired transport handle]";
+    } else {
+      result[key] = sanitizeRetiredTransportFields(child);
+    }
+  }
+  return result;
+}
 
 export function withoutRetiredTurnHandles(contextJson: string): string {
-  return contextJson.replace(
-    RETIRED_TURN_HANDLE,
-    (_handle, kind: string) => "[retired " + kind + " handle]",
-  );
+  try {
+    return JSON.stringify(sanitizeRetiredTransportFields(JSON.parse(contextJson)));
+  } catch {
+    // The canonical serializer always emits valid JSON; preserve caller input when this helper is
+    // used independently on a non-JSON string rather than mutating arbitrary user text.
+    return contextJson;
+  }
 }
 
 export function countChatGptContextImages(messages: readonly CodexMessage[]): number {
@@ -86,15 +105,9 @@ export function countChatGptContextImages(messages: readonly CodexMessage[]): nu
   return total;
 }
 
-interface ImageBudget {
-  seen: number;
-  dropped: number;
-}
-
 function inputContent(
   content: string | CodexContentPart[],
   images: ChatGptWebPromptImage[],
-  budget: ImageBudget,
 ): unknown {
   if (typeof content === "string") return content;
   const semantic = content.filter(part =>
@@ -105,10 +118,6 @@ function inputContent(
   }
   return semantic.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
-    budget.seen += 1;
-    if (budget.seen <= budget.dropped) {
-      return { type: "text", text: "[older image not attached: ChatGPT accepts at most 10 per message]" };
-    }
     const ref = "codex-input-image-" + (images.length + 1);
     images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
     return {
@@ -198,7 +207,6 @@ export function withoutSupersededModelSwitchContracts(
 function messageEnvelope(
   message: CodexMessage,
   images: ChatGptWebPromptImage[],
-  budget: ImageBudget,
   userContext?: string,
 ): Record<string, unknown> {
   if (message.role === "toolResult") {
@@ -208,7 +216,7 @@ function messageEnvelope(
       tool_name: message.toolName,
       ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
       is_error: message.isError,
-      content: inputContent(message.content, images, budget),
+      content: inputContent(message.content, images),
     };
   }
   if (message.role === "agentMessage") {
@@ -216,7 +224,7 @@ function messageEnvelope(
       role: "agent_message",
       ...(message.author !== undefined ? { author: message.author } : {}),
       ...(message.recipient !== undefined ? { recipient: message.recipient } : {}),
-      content: inputContent(message.content, images, budget),
+      content: inputContent(message.content, images),
     };
   }
   if (message.role === "assistant") {
@@ -226,5 +234,5 @@ function messageEnvelope(
       content: assistantContent(message.content, userContext),
     };
   }
-  return { role: message.role, content: inputContent(message.content, images, budget) };
+  return { role: message.role, content: inputContent(message.content, images) };
 }
