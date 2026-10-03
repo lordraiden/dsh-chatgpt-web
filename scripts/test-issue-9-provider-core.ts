@@ -5,16 +5,25 @@ import {
   ChatGptWebProviderCore,
 } from "../src/adapters/chatgpt-web/provider-core";
 import { mapStream } from "../src/adapters/chatgpt-web/llm-adapter";
+import { projectChatGptCapabilities, type CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 import {
   ChatGptToolProtocolError,
   ChatGptToolStreamParser,
 } from "../src/adapters/chatgpt-web/tool-stream-parser";
 
 function leaseInput(turnId: string) {
+  const nativeTurnId = `native-${turnId}`;
+  const capabilitySnapshot: CapabilitySnapshot = projectChatGptCapabilities({
+    sessionId: `session-${turnId}`,
+    agentId: `agent-${turnId}`,
+    turnId: nativeTurnId,
+    tools: [],
+  });
   return {
     executionKey: `execution-${turnId}`,
     traceId: `trace-${turnId}`,
-    nativeTurnId: `native-${turnId}`,
+    nativeTurnId,
+    capabilitySnapshot,
     nativeThreadId: "thread-1",
     accountIdentity: "account-1",
     browserProfile: "managed-chrome",
@@ -148,8 +157,12 @@ function leaseInput(turnId: string) {
 {
   const core = new ChatGptWebProviderCore();
   const first = core.begin(leaseInput("resume"));
-  const same = core.begin(leaseInput("resume"));
+  const same = core.begin({
+    ...leaseInput("resume"),
+    capabilitySnapshot: first.snapshot().capabilitySnapshot,
+  });
   assert.equal(first, same);
+  assert.equal(first.snapshot().capabilitySnapshot, same.snapshot().capabilitySnapshot);
   assert.equal(first.snapshot().recovery, "NEW");
   assert.throws(
     () => core.begin({

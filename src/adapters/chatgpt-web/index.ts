@@ -371,6 +371,37 @@ function validateBatchTools(requests: BrokerToolRequest[], snapshot: CapabilityS
   }
 }
 
+/** Resolve the one immutable capability snapshot owned by a logical provider turn. */
+export function resolveChatGptCapabilitySnapshotForTurn(
+  providerCore: ChatGptWebProviderCore,
+  executionKey: string,
+  parsed: CodexParsedRequest,
+  identity: ReturnType<typeof extractChatGptTurnIdentity>,
+): CapabilitySnapshot {
+  const tools = parsed.context.tools ?? [];
+  const dshSessionId = identity.dshSessionId ?? executionKey;
+  const existing = providerCore.get(executionKey);
+  if (existing) {
+    const snapshot = existing.snapshot().capabilitySnapshot;
+    if (snapshot.sessionId !== dshSessionId || snapshot.agentId !== dshSessionId) {
+      throw new Error("ChatGPT Web DSH identity changed during an active provider turn");
+    }
+    if (identity.turnId !== undefined && snapshot.turnId !== identity.turnId) {
+      throw new Error("ChatGPT Web native turn identity changed during an active provider turn");
+    }
+    capabilitySnapshotForEnvironment({ tools }, snapshot);
+    return snapshot;
+  }
+  // GenerateOptions.sessionId is the canonical DSH identity available at this adapter boundary.
+  // ChatGPT thread continuity is provider-private and never becomes capability authorization identity.
+  return projectChatGptCapabilities({
+    sessionId: dshSessionId,
+    agentId: dshSessionId,
+    turnId: identity.turnId ?? executionKey,
+    tools,
+  });
+}
+
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
 
@@ -935,12 +966,13 @@ export function createChatGptWebAdapter(
           }
         }
         const nativeIdentity = extractChatGptTurnIdentity(parsed);
-        const capabilitySnapshot = projectChatGptCapabilities({
-          sessionId: nativeIdentity.threadId ?? chatGptTurnExecutionKey(parsed),
-          agentId: nativeIdentity.agentName ?? "default",
-          turnId: nativeIdentity.turnId ?? chatGptTurnExecutionKey(parsed),
-          tools: parsed.context.tools ?? [],
-        });
+        const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+        const capabilitySnapshot = resolveChatGptCapabilitySnapshotForTurn(
+          providerCore,
+          executionKey,
+          parsed,
+          nativeIdentity,
+        );
         if (environment) environment = capabilitySnapshotForEnvironment(environment, capabilitySnapshot);
         if (parsed._compactionRequest) {
           const structuredCompactionRequired = parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
@@ -1194,7 +1226,6 @@ export function createChatGptWebAdapter(
           const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
           await chatGptTurnSessions.retireAndWait(responseExecutionKey, incoming.abortSignal);
         }
-        const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
         const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
         const nativeTurnId = nativeIdentity.turnId;
         if (!nativeTurnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser ownership");
@@ -1215,6 +1246,7 @@ export function createChatGptWebAdapter(
           nativeTurnId,
           ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
           ...browserAccountLeaseInput(provider, traceId),
+          capabilitySnapshot,
           retryPolicy: parsed._compactionRequest ? "side_effect_free" : "strict",
           recovery,
         });

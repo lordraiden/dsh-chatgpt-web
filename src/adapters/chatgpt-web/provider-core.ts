@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { CapabilitySnapshot } from "./capability-projector";
 
 export const CHATGPT_WEB_PROVIDER_CORE_SERVICE = "chatgpt-web" as const;
 
@@ -223,6 +224,7 @@ export interface ProviderTurnSnapshot {
   readonly retryPolicy: RetryPolicy;
   readonly lease: ReturnType<BrowserAccountLease["provenance"]>;
   readonly provenance: ProviderTurnProvenance;
+  readonly capabilitySnapshot: CapabilitySnapshot;
 }
 
 export class ProviderTurnLifecycle {
@@ -244,6 +246,7 @@ export class ProviderTurnLifecycle {
   constructor(
     readonly lease: BrowserAccountLease,
     readonly provenance: ProviderTurnProvenance,
+    readonly capabilitySnapshot: CapabilitySnapshot,
     private readonly retryPolicy: RetryPolicy = "strict",
     private readonly bindResource: (binding: ProviderTurnPhysicalResourceBinding) => void = binding => lease.bindPhysicalResource(binding),
     private readonly releaseLease: () => void = () => lease.release(),
@@ -270,6 +273,7 @@ export class ProviderTurnLifecycle {
         : {}),
       retryPolicy: this.retryPolicy,
       lease: this.lease.provenance(),
+      capabilitySnapshot: this.capabilitySnapshot,
       provenance: this.provenance,
     };
   }
@@ -512,12 +516,16 @@ export interface ChatGptWebProviderCoreTurnInput {
   browserProfile: string;
   browserContext: string;
   pageIdentity: string;
+  capabilitySnapshot: CapabilitySnapshot;
   retryPolicy?: RetryPolicy;
   recovery?: ProviderRecovery;
 }
 
 export class ChatGptWebProviderCore {
   private readonly turns = new Map<string, ProviderTurnLifecycle>();
+  // A snapshot is a capability binding for one logical provider execution, not a reusable tool-set token.
+  // Keep the ownership record after retirement so an old immutable snapshot cannot be attached to a new turn.
+  private readonly capabilitySnapshotOwners = new Map<string, string>();
   private readonly retiredExecutions = new Map<string, number>();
   private closed = false;
 
@@ -547,7 +555,16 @@ export class ChatGptWebProviderCore {
     if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
     const existing = this.turns.get(input.executionKey);
     if (existing) {
-      const provenance = existing.snapshot().provenance;
+      const existingSnapshot = existing.snapshot();
+      const provenance = existingSnapshot.provenance;
+      if (
+        existingSnapshot.capabilitySnapshot.snapshotId !== input.capabilitySnapshot.snapshotId
+        || existingSnapshot.capabilitySnapshot.sessionId !== input.capabilitySnapshot.sessionId
+        || existingSnapshot.capabilitySnapshot.agentId !== input.capabilitySnapshot.agentId
+        || existingSnapshot.capabilitySnapshot.turnId !== input.capabilitySnapshot.turnId
+      ) {
+        throw new Error("Provider execution key is already bound to a different capability snapshot");
+      }
       if (input.nativeTurnId && provenance.nativeTurnId !== input.nativeTurnId) {
         throw new Error("Provider execution key is already bound to a different native DSH turn");
       }
@@ -555,6 +572,11 @@ export class ChatGptWebProviderCore {
         throw new Error("Provider execution key is already bound to a different native DSH thread");
       }
       return existing;
+    }
+
+    const capabilityOwner = this.capabilitySnapshotOwners.get(input.capabilitySnapshot.snapshotId);
+    if (capabilityOwner !== undefined && capabilityOwner !== input.executionKey) {
+      throw new Error("Capability snapshot is already bound to a different provider execution");
     }
 
     if (input.nativeThreadId) {
@@ -575,7 +597,8 @@ export class ChatGptWebProviderCore {
       browserProfile: input.browserProfile,
       browserContext: input.browserContext,
       pageIdentity: input.pageIdentity,
-      turnId: input.traceId,
+      // Native DSH turn identity is the authoritative lease owner; traceId remains diagnostic only.
+      turnId: input.nativeTurnId ?? input.traceId,
     });
     const turn = new ProviderTurnLifecycle(
       lease,
@@ -586,6 +609,7 @@ export class ChatGptWebProviderCore {
         ...(input.nativeTurnId ? { nativeTurnId: input.nativeTurnId } : {}),
         ...(input.nativeThreadId ? { nativeThreadId: input.nativeThreadId } : {}),
       },
+      input.capabilitySnapshot,
       input.retryPolicy,
       binding => this.leases.bindPhysicalResource(lease, binding),
       () => this.leases.release(lease),
@@ -597,6 +621,7 @@ export class ChatGptWebProviderCore {
     const recovery = input.recovery ?? (this.wasRetired(input.executionKey) ? "REPLAY" : "NEW");
     if (recovery !== "NEW") turn.markRecovery(recovery);
     turn.markLeased();
+    this.capabilitySnapshotOwners.set(input.capabilitySnapshot.snapshotId, input.executionKey);
     this.turns.set(input.executionKey, turn);
     return turn;
   }
@@ -631,6 +656,7 @@ export class ChatGptWebProviderCore {
     }));
     this.leases.clear();
     this.turns.clear();
+    this.capabilitySnapshotOwners.clear();
     this.retiredExecutions.clear();
   }
 }

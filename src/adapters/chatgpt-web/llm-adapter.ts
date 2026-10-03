@@ -348,7 +348,9 @@ export function toCodexParsedRequest(
     : undefined;
 
   const turnId = randomUUID();
-  const threadId = options.sessionId !== undefined ? String(options.sessionId) : randomUUID();
+  const dshSessionId = options.sessionId !== undefined ? String(options.sessionId) : undefined;
+  // ChatGPT thread affinity is provider-private. Preserve the canonical DSH session identity separately.
+  const threadId = dshSessionId ?? randomUUID();
   const purpose = options.purpose;
   const input = nativeInputFromMessages(messages, systemPrompt, turnId, purpose);
 
@@ -379,6 +381,7 @@ export function toCodexParsedRequest(
         "x-codex-turn-metadata": {
           thread_id: threadId,
           turn_id: turnId,
+          ...(dshSessionId !== undefined ? { dsh_session_id: dshSessionId } : {}),
           ...(purpose !== undefined ? { purpose } : {}),
         },
       },
@@ -524,22 +527,30 @@ function mapRequestMessage(
         id: block.id,
         name: block.name,
         ...(typeof namespace === "string" && namespace.length > 0 ? { namespace } : {}),
-        arguments: parseRawArguments(block.arguments),
+        arguments: parseRawArguments(block.arguments, block.name),
       });
     }
   }
   return { role: "assistant", content: parts, timestamp };
 }
 
-function parseRawArguments(raw: string): Record<string, unknown> {
+function parseRawArguments(raw: string, toolName: string): Record<string, unknown> {
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : { value: parsed };
+    parsed = JSON.parse(raw);
   } catch {
-    return { raw };
+    throw new LlmError(
+      `ChatGPT Web received invalid JSON arguments for tool "${toolName}".`,
+      "PROTOCOL_ERROR",
+    );
   }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new LlmError(
+      `ChatGPT Web received non-object arguments for tool "${toolName}".`,
+      "PROTOCOL_ERROR",
+    );
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function toCodexContent(content: readonly unknown[]): string | CodexContentPart[] {

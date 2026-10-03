@@ -22,6 +22,9 @@ export interface ChatGptTurnEnvironment {
 }
 
 export interface ChatGptTurnIdentity {
+  /** Canonical DSH session identity carried by the native LLM boundary. */
+  dshSessionId?: string;
+  /** Provider-private ChatGPT conversation/thread continuity identity. */
   threadId?: string;
   turnId?: string;
   parentThreadId?: string;
@@ -618,6 +621,7 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
       .digest("hex")
       .slice(0, 16);
     return {
+      ...(base.dshSessionId ? { dshSessionId: base.dshSessionId } : {}),
       threadId: base.threadId ?? "dsh-session",
       turnId: `dsh-luna-${contentHash}`,
       ...(base.parentThreadId ? { parentThreadId: base.parentThreadId } : {}),
@@ -637,7 +641,11 @@ export function extractCodexTurnIdentityFromBody(value: unknown): ChatGptTurnIde
   const metadata = clientTurnMetadataFromBody(value);
   const threadId = typeof metadata?.thread_id === "string" && metadata.thread_id.trim() ? metadata.thread_id.trim() : undefined;
   const turnId = typeof metadata?.turn_id === "string" && metadata.turn_id.trim() ? metadata.turn_id.trim() : undefined;
+  const dshSessionId = typeof metadata?.dsh_session_id === "string" && metadata.dsh_session_id.trim()
+    ? metadata.dsh_session_id.trim()
+    : undefined;
   return {
+    ...(dshSessionId ? { dshSessionId } : {}),
     ...(threadId ? { threadId } : {}),
     ...(turnId ? { turnId } : {}),
     ...(typeof metadata?.parent_thread_id === "string" ? { parentThreadId: metadata.parent_thread_id } : {}),
