@@ -768,6 +768,7 @@ export function createChatGptWebAdapter(
       })), browserAbort);
       return {
         mode: "read-only",
+        capabilitySnapshot,
         browser: browserTurn.browser,
         physicalSettlement: browserTurn.physicalSettlement,
         trace,
@@ -841,6 +842,7 @@ export function createChatGptWebAdapter(
     });
     return {
       mode: "tools",
+      capabilitySnapshot,
       token: token.promise,
       externalProgress,
       browser: browserTurn.browser,

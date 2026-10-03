@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import type { CodexTool } from "../src/types";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities } from "../src/adapters/chatgpt-web/capability-projector";
 
-const tool = {
+const tool: CodexTool = {
   name: "exec_command",
   namespace: "codex",
   description: "Run a command",
   parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"], additionalProperties: false },
 };
-const secondTool = {
+const secondTool: CodexTool = {
   name: "view_image",
   namespace: "",
   description: "View an image",
