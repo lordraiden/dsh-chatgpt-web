@@ -320,22 +320,14 @@ const environment = capabilitySnapshotForEnvironment({
     }, expiredSnapshot);
     const expiredToken = await broker.register(expiredEnvironment, 5_000, "trace-10b-expired-snapshot");
     await new Promise(resolve => setTimeout(resolve, 75));
-    const expiredClaim = await callTurnBroker<{ bindingId: string }>(socketPath, {
-      method: "claim",
-      token: expiredToken,
-      activityId: "activity_10b_expired_snapshot",
-      contract: "native",
-    });
     await assert.rejects(
       () => callTurnBroker(socketPath, {
-        method: "invoke",
-        bindingId: expiredClaim.bindingId,
-        capabilitySnapshotId: expiredSnapshot.snapshotId,
-        wireName: "native__echo",
-        freeform: false,
-        arguments: { value: "expired" },
+        method: "claim",
+        token: expiredToken,
+        activityId: "activity_10b_expired_snapshot",
+        contract: "native",
       }),
-      /snapshot is expired/i,
+      /already finished|invalid, expired, or revoked/i,
     );
 
     const result: BrokerToolResult = {
