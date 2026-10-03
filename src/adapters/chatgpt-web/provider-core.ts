@@ -247,6 +247,19 @@ export class ProviderTurnLifecycle {
     await this.physicalSettlement;
   }
 
+  failBeforePhysicalSettlement(): void {
+    if (this.physicalSettlementAttached) {
+      throw new Error("Cannot force provider turn retirement after physical execution has started");
+    }
+    if (this.state === "RETIRED") return;
+    this.markLogicalSettled();
+    if (this.state !== "SETTLING") this.transition("SETTLING");
+    this.physicalSettled = true;
+    this.activity = "idle";
+    this.releaseLease();
+    this.transition("RETIRED");
+  }
+
   private finishPhysicalSettlement(): void {
     if (this.physicalSettled) return;
     this.physicalSettled = true;
