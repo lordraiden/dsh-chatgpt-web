@@ -113,12 +113,16 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
 
   let spawnedProcess: ChildProcess | undefined;
+  let spawnedPort: number | undefined;
+  let startGeneration = 0;
   let reconfiguration = Promise.resolve();
 
   const startDaemon = async () => {
-    const alreadyHealthy = await isSidecarHealthy(host, port);
+    const generation = ++startGeneration;
+    const targetPort = port;
+    const alreadyHealthy = await isSidecarHealthy(host, targetPort);
     if (alreadyHealthy) {
-      logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${port}/v1`);
+      logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1`);
       return;
     }
 
@@ -127,8 +131,8 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       return;
     }
 
-    const launcher = resolveLauncher(config.bunPath, port);
-    logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${port}/v1...`);
+    const launcher = resolveLauncher(config.bunPath, targetPort);
+    logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${targetPort}/v1...`);
 
     const child = spawn(launcher.cmd, launcher.args, {
       cwd: ROOT_DIR,
@@ -140,6 +144,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     });
 
     spawnedProcess = child;
+    spawnedPort = targetPort;
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString().trim();
@@ -159,14 +164,18 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       if (code !== 0 && code !== null) {
         logger.warn(`[dsh-chatgpt-web] Sidecar process exited with code ${code} (signal: ${signal})`);
       }
-      spawnedProcess = undefined;
+      if (spawnedProcess === child) {
+        spawnedProcess = undefined;
+        spawnedPort = undefined;
+      }
     });
 
     // Wait for healthcheck
     const deadline = Date.now() + readyTimeoutMs;
     while (Date.now() < deadline) {
-      if (await isSidecarHealthy(host, port)) {
-        logger.info(`[dsh-chatgpt-web] Sidecar ready and accepting turns at http://${host}:${port}/v1`);
+      if (generation !== startGeneration) return;
+      if (await isSidecarHealthy(host, targetPort)) {
+        logger.info(`[dsh-chatgpt-web] Sidecar ready and accepting turns at http://${host}:${targetPort}/v1`);
         return;
       }
       await new Promise((r) => setTimeout(r, 500));
@@ -176,13 +185,16 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   };
 
   const stopDaemon = async () => {
-    if (!spawnedProcess) return;
+    ++startGeneration;
+    const child = spawnedProcess;
+    const childPort = spawnedPort;
+    if (!child) return;
 
     logger.info("[dsh-chatgpt-web] Stopping sidecar daemon...");
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 2000);
-      await fetch(`http://${host}:${port}/admin/shutdown`, {
+      await fetch(`http://${host}:${childPort ?? port}/admin/shutdown`, {
         method: "POST",
         signal: controller.signal,
       }).catch(() => {});
@@ -191,10 +203,13 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       // ignore
     }
 
-    if (spawnedProcess && !spawnedProcess.killed) {
-      spawnedProcess.kill("SIGTERM");
+    if (!child.killed) {
+      child.kill("SIGTERM");
     }
-    spawnedProcess = undefined;
+    if (spawnedProcess === child) {
+      spawnedProcess = undefined;
+      spawnedPort = undefined;
+    }
   };
 
   if (typeof ctx.on === "function") {
