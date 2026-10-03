@@ -62,7 +62,7 @@ function transportSpy(
     },
     bindReplacementConversation(previous, next) {
       calls.push("bind:" + previous.id + "->" + next.id);
-      return Promise.resolve();
+      return Promise.resolve({ conversation: next, identity });
     },
     replayCanonicalContext(conversation, replayContext, replayBoundary, replayIdentity) {
       calls.push(
@@ -214,4 +214,29 @@ test("a late callback from the old conversation stays rejected after replay comp
 test("EXACT_RESUME is never represented as replay", () => {
   const coordinator = new ChatGptReplayCoordinator();
   expect(coordinator.recoveryOutcome()).toBe("NEW");
+});
+
+
+test("replacement binding cannot change DSH session, agent, turn, snapshot, or capability identity", async () => {
+  const { transport } = transportSpy();
+  const mismatched: ChatGptReplayTransport = {
+    ...transport,
+    bindReplacementConversation(previous, next, replayIdentity) {
+      return Promise.resolve({
+        conversation: next,
+        identity: { ...replayIdentity, turnId: "different-turn" },
+      });
+    },
+  };
+  const coordinator = new ChatGptReplayCoordinator();
+
+  await expect(coordinator.replay({
+    exhaustedConversation: { id: "conversation-1", generation: 1 },
+    identity,
+    context,
+    boundary,
+  }, mismatched)).rejects.toMatchObject({
+    name: "ChatGptReplayError",
+    phase: "FAILED",
+  });
 });
