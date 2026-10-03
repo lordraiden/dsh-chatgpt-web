@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "bun:test";
 import {
   BrowserAccountLease,
@@ -82,8 +84,21 @@ test("ProviderCore reuses the immutable capability snapshot after physical retir
   expect(replayTurn.snapshot().capabilitySnapshot).toBe(snapshot);
   expect(capabilityBindingIdForExecution("execution-66", snapshot.snapshotId))
     .toBe(capabilityBindingIdForExecution("execution-66", snapshot.snapshotId));
+  expect(capabilityBindingIdForExecution("execution-66", snapshot.snapshotId))
+    .not.toBe(capabilityBindingIdForExecution("execution-other", snapshot.snapshotId));
 
   replayTurn.failBeforePhysicalSettlement();
+});
+
+test("launcher helper negotiates the semantic surface lifecycle protocol explicitly", () => {
+  const root = join(import.meta.dir, "..");
+  const helperMain = readFileSync(join(root, "src", "adapters", "chatgpt-web", "browser-helper-main.ts"), "utf8");
+  const helperClient = readFileSync(join(root, "src", "adapters", "chatgpt-web", "launcher-helper-client.ts"), "utf8");
+  expect(helperMain).toContain('"surface-lifecycle"');
+  expect(helperMain).toContain('event: "surface_bound"');
+  expect(helperMain).toContain('event: "surface_ready"');
+  expect(helperClient).toContain('"surface_ready_ack"');
+  expect(helperClient).toContain("surfaceBinding");
 });
 
 test("concrete ChatGPT replay waits for readiness, binds a fresh epoch, then releases generation", async () => {
