@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
-import { namespacedToolName, type CodexAssistantContentPart, type CodexContentPart, type CodexMessage, type CodexParsedRequest, type CodexTool } from "../../types";
+import { namespacedToolName, type CodexMessage, type CodexParsedRequest, type CodexTool } from "../../types";
 import { isReadableCompactionSummaryText } from "../../responses/compaction";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { projectCanonicalChatGptWebContext, serializeCanonicalChatGptWebContext, withoutRetiredTurnHandles, withoutSupersededModelSwitchContracts, type ChatGptWebPromptImage } from "./context-projection";
@@ -131,6 +131,18 @@ export function formatChatGptWebMultipartCommit(
     "</codex_multipart_execute>",
     multipart.commit,
   ].join("\n");
+}
+
+/** ChatGPT accepts at most this many attachments on one message. */
+export const CHATGPT_MAX_INPUT_IMAGES = 10;
+
+/**
+ * Conservative JSON-encoded prompt budget used by the existing native-style compaction fit recovery.
+ */
+export const CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET = 110_000;
+
+export function chatGptPromptJsonBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8");
 }
 
 type MultipartContextRecord =
