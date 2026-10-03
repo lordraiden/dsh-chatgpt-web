@@ -180,11 +180,11 @@ export class ProviderTurnLifecycle {
   }
 
   markLeased(): void {
-    this.transition("LEASED");
+    if (this.state === "PREPARING") this.transition("LEASED");
   }
 
   markSurfaceReady(): void {
-    this.transition("SURFACE_READY");
+    if (this.state === "LEASED" || this.state === "PREPARING") this.transition("SURFACE_READY");
   }
 
   markSendActivated(): void {
