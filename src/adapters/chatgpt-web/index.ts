@@ -22,7 +22,7 @@ import { type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
-import { ChatGptBrowserWorker, type ChatGptBrowserPhysicalSurface } from "./browser-worker";
+import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -412,7 +412,7 @@ export function createChatGptWebAdapter(
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
   } = {},
 ): ProviderAdapter {
-  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const transport = chatGptWebSurfaceTransportForProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
@@ -579,7 +579,7 @@ export function createChatGptWebAdapter(
       },
     };
     const providerTurnSurfaceHooks: {
-      onPhysicalSurfaceBound: (binding: ChatGptBrowserPhysicalSurface) => void;
+      onPhysicalSurfaceBound: (binding: WebSurfacePhysicalSurface) => void;
       onSurfaceReady: () => void;
     } | undefined = providerTurn
       ? {
@@ -765,7 +765,7 @@ export function createChatGptWebAdapter(
       };
     }
     if (!mode.localTools) {
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
+      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(transport.run({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
@@ -834,7 +834,7 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
+    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(transport.run({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
@@ -1120,7 +1120,7 @@ export function createChatGptWebAdapter(
                       );
                       preserveFinalResponse = !settlement.compactionInstructionDelivered;
                       rawSummary = await requestRetainedCompactionHandoff(
-                        worker,
+                        transport,
                         parsed,
                         source,
                         structuredBroker!,
@@ -1137,7 +1137,7 @@ export function createChatGptWebAdapter(
                         preserveFinalResponse = true;
                       }
                       rawSummary = await requestRetainedCompactionHandoff(
-                        worker,
+                        transport,
                         parsed,
                         source,
                         structuredBroker!,
