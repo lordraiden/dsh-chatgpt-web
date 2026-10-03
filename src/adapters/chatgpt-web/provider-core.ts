@@ -415,9 +415,8 @@ export class ProviderTurnLifecycle {
     }
   }
 
-  assertCapabilityExecution(requestTurnId?: string): void {
+  assertCapabilityExecution(): void {
     this.assertCanAct();
-    if (requestTurnId !== undefined) this.assertNotSelfReentrant(requestTurnId);
   }
 
   attachPhysicalSettlement(settlement: Promise<void>): void {
@@ -499,11 +498,6 @@ export class ProviderTurnLifecycle {
     }
   }
 
-  assertNotSelfReentrant(requestTurnId: string): void {
-    if (requestTurnId === this.provenance.nativeTurnId) {
-      throw new Error("A ChatGPT-owned provider turn cannot synchronously re-enter itself");
-    }
-  }
 }
 
 export interface ChatGptWebProviderCoreTurnInput {
@@ -550,6 +544,18 @@ export class ChatGptWebProviderCore {
     if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
     const existing = this.turns.get(input.executionKey);
     if (existing) return existing;
+
+    if (input.nativeThreadId) {
+      for (const [executionKey, activeTurn] of this.turns) {
+        if (executionKey === input.executionKey) continue;
+        const snapshot = activeTurn.snapshot();
+        if (!snapshot.physicalSettled && snapshot.provenance.nativeThreadId === input.nativeThreadId) {
+          throw new Error(
+            "ChatGPT Web cannot synchronously start a second provider turn for an active native DSH thread",
+          );
+        }
+      }
+    }
 
     const lease = this.leases.acquire({
       serviceId: this.serviceId,
