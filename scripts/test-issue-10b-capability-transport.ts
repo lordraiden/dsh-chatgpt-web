@@ -250,6 +250,13 @@ const environment = capabilitySnapshotForEnvironment({
     const claim = await callTurnBroker<{
       bindingId: string;
       activityId: string;
+      capabilityBinding: {
+        bindingId: string;
+        snapshotId: string;
+        sessionId: string;
+        agentId: string;
+        turnId: string;
+      };
       environment: typeof environment & { expiresAt?: number };
     }>(socketPath, {
       method: "claim",
@@ -258,6 +265,13 @@ const environment = capabilitySnapshotForEnvironment({
       contract: "native",
     });
     assert.equal(claim.environment.capabilitySnapshot?.snapshotId, snapshot.snapshotId);
+    assert.deepEqual(claim.capabilityBinding, {
+      bindingId: claim.bindingId,
+      snapshotId: snapshot.snapshotId,
+      sessionId: snapshot.sessionId,
+      agentId: snapshot.agentId,
+      turnId: snapshot.turnId,
+    });
 
     const pending = callTurnBroker<BrokerToolResult>(socketPath, {
       method: "invoke",
@@ -355,12 +369,23 @@ const environment = capabilitySnapshotForEnvironment({
     );
 
     const shutdownToken = await broker.register(environment, 5_000, "trace-10b-shutdown");
-    const shutdownClaim = await callTurnBroker<{ bindingId: string }>(socketPath, {
+    const shutdownClaim = await callTurnBroker<{
+      bindingId: string;
+      capabilityBinding: {
+        bindingId: string;
+        snapshotId: string;
+        sessionId: string;
+        agentId: string;
+        turnId: string;
+      };
+    }>(socketPath, {
       method: "claim",
       token: shutdownToken,
       activityId: "activity_10b_shutdown_delivery",
       contract: "native",
     });
+    assert.equal(shutdownClaim.capabilityBinding.bindingId, shutdownClaim.bindingId);
+    assert.equal(shutdownClaim.capabilityBinding.snapshotId, snapshot.snapshotId);
     const shutdownInvocation = callTurnBroker<BrokerToolResult>(socketPath, {
       method: "invoke",
       bindingId: shutdownClaim.bindingId,
