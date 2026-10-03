@@ -308,8 +308,17 @@ export interface ChatGptWebProviderCoreTurnInput {
 
 export class ChatGptWebProviderCore {
   private readonly turns = new Map<string, ProviderTurnLifecycle>();
-  private readonly retiredExecutions = new Set<string>();
+  private readonly retiredExecutions = new Map<string, number>();
   private closed = false;
+
+  private rememberRetired(executionKey: string): void {
+    this.retiredExecutions.set(executionKey, Date.now());
+    while (this.retiredExecutions.size > 1024) {
+      const oldest = this.retiredExecutions.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.retiredExecutions.delete(oldest);
+    }
+  }
 
   wasRetired(executionKey: string): boolean {
     return this.retiredExecutions.has(executionKey);
@@ -350,10 +359,11 @@ export class ChatGptWebProviderCore {
       () => this.leases.release(lease),
       () => {
         this.turns.delete(input.executionKey);
-        this.retiredExecutions.add(input.executionKey);
+        this.rememberRetired(input.executionKey);
       },
     );
-    if (input.recovery && input.recovery !== "NEW") turn.markRecovery(input.recovery);
+    const recovery = input.recovery ?? (this.wasRetired(input.executionKey) ? "REPLAY" : "NEW");
+    if (recovery !== "NEW") turn.markRecovery(recovery);
     turn.markLeased();
     this.turns.set(input.executionKey, turn);
     return turn;
@@ -379,5 +389,6 @@ export class ChatGptWebProviderCore {
     this.closed = true;
     this.leases.clear();
     this.turns.clear();
+    this.retiredExecutions.clear();
   }
 }
