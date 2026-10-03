@@ -1318,8 +1318,7 @@ export function createChatGptWebAdapter(
                 session.appendRoundReasoning(roundKey, session.reasoningForFinalReplay());
                 emitRoundEvents(finalReplay);
               } else {
-                const userPrompt = extractLatestUserPrompt(parsed);
-                const streamParser = new ChatGptToolStreamParser(userPrompt);
+                const streamParser = new ChatGptToolStreamParser();
                 const collectedToolCalls: ParsedToolCall[] = [];
                 const parsedDeltas: string[] = [];
                 const parsedThinking: string[] = [];
@@ -1434,7 +1433,7 @@ export function createChatGptWebAdapter(
             try {
               const roundReasoning = session.roundReasoning(roundKey);
               const userPrompt = extractLatestUserPrompt(parsed);
-              const streamParser = new ChatGptToolStreamParser(userPrompt);
+              const streamParser = new ChatGptToolStreamParser();
               const collectedToolCalls: ParsedToolCall[] = [];
 
               const emitNewTrace = (trace: ChatGptTraceEvent[]) => {
