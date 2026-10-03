@@ -14,6 +14,7 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const CONFIG_ID = 'dsh-chatgpt-web';
+    const LEGACY_TOKEN_KEY = 'dsh-chatgpt-web.controlToken';
     const LOOPBACK_HOST = '127.0.0.1';
 
     const DICT_EN = {
@@ -148,6 +149,12 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
 
       React.useEffect(() => {
+        try {
+          window.localStorage.removeItem(LEGACY_TOKEN_KEY);
+        } catch {
+          // Browser storage may be unavailable; the token remains page-local.
+        }
+
         const refreshEndpoint = () => setBase(resolveSidecarBase(configForm));
         refreshEndpoint();
         if (!configForm || typeof configForm.subscribe !== 'function') return undefined;
