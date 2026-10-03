@@ -234,3 +234,28 @@ test("compaction byte budget is explicit and positive", () => {
   expect(CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET).toBe(110_000);
   expect(CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET).toBeGreaterThan(0);
 });
+
+test("compaction preserves the latest agent handoff and assistant continuity", () => {
+  const messages: CodexMessage[] = [
+    { role: "user", content: "old request", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "old answer" }], timestamp: 2 },
+    { role: "agentMessage", author: "planner", recipient: "worker", content: "active handoff", timestamp: 3 },
+    { role: "assistant", content: [{ type: "thinking", thinking: "latest reasoning state" }], timestamp: 4 },
+    { role: "developer", content: "must keep", timestamp: 5 },
+    { role: "user", content: "latest request", timestamp: 6 },
+  ];
+
+  const selected = selectCompactionMessagesDeterministically(
+    messages,
+    candidate => candidate.length <= 4,
+  );
+
+  expect(selected.messages.length).toBe(4);
+  expect(selected.messages.some(message => message.role === "agentMessage")).toBe(true);
+  expect(selected.messages.some(message =>
+    message.role === "assistant"
+    && message.content.some(part => part.type === "thinking" && part.thinking === "latest reasoning state")
+  )).toBe(true);
+  expect(selected.messages.some(message => message.role === "developer")).toBe(true);
+  expect(selected.messages.at(-1)?.role).toBe("user");
+});
