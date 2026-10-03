@@ -83,7 +83,11 @@ function assertHandle(handle: ChatGptConversationHandle, expected: ChatGptConver
 export function createChatGptWebReplayTransport(
   dependencies: ChatGptWebReplayTransportDependencies,
 ): ChatGptWebReplayTransportHandle {
-  const replacementGeneration = dependencies.exhaustedConversation.generation + 1;
+  const currentGeneration = dependencies.sessions.conversationGeneration(dependencies.conversationKey);
+  const replacementGeneration = Math.max(
+    dependencies.exhaustedConversation.generation + 1,
+    currentGeneration + 1,
+  );
   if (!Number.isSafeInteger(replacementGeneration)) {
     throw new Error("ChatGPT replay replacement conversation generation overflowed");
   }
@@ -115,6 +119,10 @@ export function createChatGptWebReplayTransport(
     async createReplacementConversation() {
       if (replacementStarted) throw new Error("ChatGPT replay replacement conversation was already created");
       replacementStarted = true;
+      await awaitWithAbort(
+        dependencies.sessions.waitForConversationRetirement(dependencies.conversationKey),
+        dependencies.signal,
+      );
       dependencies.sessions.setConversationGeneration(
         dependencies.conversationKey,
         replacementGeneration,
