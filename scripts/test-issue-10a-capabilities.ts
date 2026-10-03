@@ -12,14 +12,24 @@ const tool: CodexTool = {
   name: "exec_command",
   namespace: "codex",
   description: "Run a command",
-  parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"], additionalProperties: false },
+  parameters: {
+    type: "object",
+    properties: { cmd: { type: "string" } },
+    required: ["cmd"],
+    additionalProperties: false,
+  },
 };
 const secondTool: CodexTool = {
   name: "view_image",
   namespace: "",
   description: "View an image",
-  parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  parameters: {
+    type: "object",
+    properties: { path: { type: "string" } },
+    required: ["path"],
+  },
 };
+const canonicalEnvironmentTool = structuredClone(tool);
 
 const snapshot = projectChatGptCapabilities({
   sessionId: "session-1",
@@ -36,7 +46,10 @@ assert.doesNotThrow(() => authorizeCapability(snapshot, { wireName: "codex__exec
 assert.doesNotThrow(() => authorizeCapability(snapshot, { wireName: "view_image" }));
 assert.throws(() => authorizeCapability(snapshot, { wireName: "codex/exec_command" }), /not authorized/);
 assert.throws(() => authorizeCapability(snapshot, { wireName: "shell_command" }), /not authorized/);
-assert.throws(() => authorizeCapability(snapshot, { wireName: "codex__exec_command" }, { lifecycle: "retired" }), /retired/);
+assert.throws(
+  () => authorizeCapability(snapshot, { wireName: "codex__exec_command" }, { lifecycle: "retired" }),
+  /retired/,
+);
 
 const source = [tool];
 const isolated = projectChatGptCapabilities({
@@ -48,7 +61,10 @@ const isolated = projectChatGptCapabilities({
 source.push(secondTool);
 tool.parameters.properties = { cmd: { type: "string", minLength: 1 } };
 assert.equal(isolated.tools.length, 1);
-assert.equal((isolated.tools[0]!.parameters.properties as Record<string, unknown>).cmd !== undefined, true);
+assert.equal(
+  (isolated.tools[0]!.parameters.properties as Record<string, unknown>).cmd !== undefined,
+  true,
+);
 assert.throws(() => authorizeCapability(isolated, { wireName: "view_image" }), /not authorized/);
 
 const reordered = projectChatGptCapabilities({
@@ -56,12 +72,12 @@ const reordered = projectChatGptCapabilities({
   agentId: "agent-2",
   turnId: "turn-2",
   tools: [{
-    ...tool,
+    ...canonicalEnvironmentTool,
     parameters: {
       additionalProperties: false,
       required: ["cmd"],
       type: "object",
-      properties: { cmd: { type: "string", minLength: 1 } },
+      properties: { cmd: { type: "string" } },
     },
   }],
 });
@@ -70,9 +86,9 @@ const reorderedEquivalent = projectChatGptCapabilities({
   agentId: "agent-2",
   turnId: "turn-2",
   tools: [{
-    ...tool,
+    ...canonicalEnvironmentTool,
     parameters: {
-      properties: { cmd: { type: "string", minLength: 1 } },
+      properties: { cmd: { type: "string" } },
       type: "object",
       required: ["cmd"],
       additionalProperties: false,
@@ -85,10 +101,10 @@ const differentTurn = projectChatGptCapabilities({
   agentId: "agent-2",
   turnId: "turn-3",
   tools: [{
-    ...tool,
+    ...canonicalEnvironmentTool,
     parameters: {
       type: "object",
-      properties: { cmd: { type: "string", minLength: 1 } },
+      properties: { cmd: { type: "string" } },
       required: ["cmd"],
       additionalProperties: false,
     },
@@ -96,27 +112,37 @@ const differentTurn = projectChatGptCapabilities({
 });
 assert.notEqual(differentTurn.snapshotId, isolated.snapshotId);
 
-assert.throws(() => projectChatGptCapabilities({
-  sessionId: "duplicate",
-  agentId: "agent",
-  turnId: "turn",
-  tools: [tool, { ...tool, description: "same wire name" }],
-}), /duplicate wire capability/);
+assert.throws(
+  () => projectChatGptCapabilities({
+    sessionId: "duplicate",
+    agentId: "agent",
+    turnId: "turn",
+    tools: [canonicalEnvironmentTool, { ...canonicalEnvironmentTool, description: "same wire name" }],
+  }),
+  /duplicate wire capability/,
+);
 
 const expiring = projectChatGptCapabilities({
   sessionId: "session-3",
   turnId: "turn-4",
-  tools: [tool],
+  tools: [canonicalEnvironmentTool],
   expiresAt: Date.now() + 1000,
 });
 assert.throws(
-  () => authorizeCapability(expiring, { wireName: "codex__exec_command" }, { lifecycle: "active", now: expiring.expiresAt! }),
+  () => authorizeCapability(
+    expiring,
+    { wireName: "codex__exec_command" },
+    { lifecycle: "active", now: expiring.expiresAt! },
+  ),
   /expired/,
 );
 
 const tampered = structuredClone(snapshot) as typeof snapshot;
 (tampered.tools[0]!.parameters as Record<string, unknown>).tampered = true;
-assert.throws(() => assertCapabilitySnapshotIntegrity(tampered), /integrity check failed/);
+assert.throws(
+  () => assertCapabilitySnapshotIntegrity(tampered),
+  /integrity check failed/,
+);
 assert.throws(
   () => assertCapabilitySnapshotBinding(tampered, {
     sessionId: tampered.sessionId,
@@ -132,12 +158,12 @@ const environment = {
   roots: ["/workspace"],
   writableRoots: ["/workspace"],
   sandboxPolicy: { type: "workspaceWrite" as const, networkAccess: true },
-  tools: [secondTool, tool],
+  tools: [secondTool, canonicalEnvironmentTool],
 };
 const bound = capabilitySnapshotForEnvironment(environment, snapshot);
 assert.equal(bound.capabilitySnapshot.snapshotId, snapshot.snapshotId);
 assert.throws(
-  () => capabilitySnapshotForEnvironment({ ...environment, tools: [tool] }, snapshot),
+  () => capabilitySnapshotForEnvironment({ ...environment, tools: [canonicalEnvironmentTool] }, snapshot),
   /does not match/,
 );
 assert.throws(
