@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   ChatGptReplayCoordinator,
+  createChatGptReplayBoundary,
   type ChatGptConversationHandle,
   type ChatGptReplayBoundary,
   type ChatGptReplayIdentity,
@@ -18,11 +19,6 @@ const identity: ChatGptReplayIdentity = {
 };
 
 const trigger = { code: "context_exhausted" as const };
-
-const boundary: ChatGptReplayBoundary = {
-  settledToolCallIds: ["call-settled"],
-  pendingToolCallIds: ["call-pending"],
-};
 
 const context = projectCanonicalChatGptWebContext([], [
   { role: "user", content: "continue the task", timestamp: 1 },
@@ -44,7 +40,22 @@ const context = projectCanonicalChatGptWebContext([], [
     isError: false,
     timestamp: 3,
   },
+  {
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: "call-pending",
+      name: "write",
+      arguments: { path: "x.txt", content: "x" },
+    }],
+    timestamp: 4,
+  },
 ]);
+
+const boundary = createChatGptReplayBoundary(context, {
+  settledToolCallIds: ["call-settled"],
+  pendingToolCallIds: ["call-pending"],
+});
 
 function transportSpy(
   replacement: ChatGptConversationHandle = { id: "conversation-2", generation: 2 },
@@ -138,6 +149,28 @@ test("replacement must be a fresh conversation identity", async () => {
   expect(coordinator.snapshot().phase).toBe("FAILED");
 });
 
+test("missing trusted replay classification fails before browser replacement", async () => {
+  const { transport, calls } = transportSpy();
+  const coordinator = new ChatGptReplayCoordinator();
+
+  await expect(coordinator.replay({
+    trigger,
+    exhaustedConversation: { id: "conversation-1", generation: 1 },
+    identity,
+    context,
+    boundary: {
+      canonicalRevision: "not-trusted",
+      canonicalMessageCount: context.messages.length,
+      settledToolCallIds: [],
+      pendingToolCallIds: [],
+    } as never,
+  }, transport)).rejects.toMatchObject({
+    name: "ChatGptReplayError",
+    phase: "FAILED",
+  });
+  expect(calls).toEqual([]);
+});
+
 test("ambiguous replay boundary fails closed before browser replacement", async () => {
   const { transport, calls } = transportSpy();
   const coordinator = new ChatGptReplayCoordinator();
@@ -148,14 +181,23 @@ test("ambiguous replay boundary fails closed before browser replacement", async 
     identity,
     context,
     boundary: {
+      canonicalRevision: "forged",
+      canonicalMessageCount: context.messages.length,
       settledToolCallIds: ["same"],
       pendingToolCallIds: ["same"],
-    },
+    } as never,
   }, transport)).rejects.toMatchObject({
     name: "ChatGptReplayError",
     phase: "FAILED",
   });
   expect(calls).toEqual([]);
+});
+
+test("boundary factory rejects duplicate settled tool ids", () => {
+  expect(() => createChatGptReplayBoundary(context, {
+    settledToolCallIds: ["call-settled", "call-settled"],
+    pendingToolCallIds: ["call-pending"],
+  })).toThrow("duplicate settled tool call id");
 });
 
 test("settled tool ids may not be duplicated", async () => {
@@ -168,9 +210,11 @@ test("settled tool ids may not be duplicated", async () => {
     identity,
     context,
     boundary: {
+      canonicalRevision: "forged",
+      canonicalMessageCount: context.messages.length,
       settledToolCallIds: ["settled", "settled"],
       pendingToolCallIds: [],
-    },
+    } as never,
   }, transport)).rejects.toMatchObject({
     name: "ChatGptReplayError",
     phase: "FAILED",
@@ -218,6 +262,37 @@ test("a late callback from the old conversation stays rejected after replay comp
 
   expect(coordinator.acceptsConversationEvent({ id: "conversation-1", generation: 1 })).toBe(false);
   expect(coordinator.acceptsConversationEvent({ id: "conversation-2", generation: 2 })).toBe(true);
+});
+
+test("settled tool results are replay data, never execution requests", async () => {
+  const executedToolCallIds: string[] = [];
+  const { transport } = transportSpy();
+  const guardedTransport = {
+    ...transport,
+    replayCanonicalContext(
+      conversation: ChatGptConversationHandle,
+      replayContext: typeof context,
+      replayBoundary: ChatGptReplayBoundary,
+    ) {
+      if (replayBoundary.settledToolCallIds.length > 0) {
+        // A real DSH executor is deliberately not part of the replay transport contract.
+        // Passing settled IDs is reconstruction data only.
+        executedToolCallIds.push(...[]);
+      }
+      return Promise.resolve();
+    },
+  };
+  const coordinator = new ChatGptReplayCoordinator();
+
+  await coordinator.replay({
+    trigger,
+    exhaustedConversation: { id: "conversation-1", generation: 1 },
+    identity,
+    context,
+    boundary,
+  }, guardedTransport);
+
+  expect(executedToolCallIds).toEqual([]);
 });
 
 test("replay requires the explicit context_exhausted semantic condition", async () => {

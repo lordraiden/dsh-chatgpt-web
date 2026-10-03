@@ -593,6 +593,8 @@ The critical rule is:
 
 A caller must be able to distinguish "the original ChatGPT continuity resumed" from "a new ChatGPT conversation was reconstructed."
 
+Replay boundaries are trusted execution-state artifacts, not caller-provided transcript interpretations. A replay boundary must be created from the canonical DSH projection plus authoritative DSH/ProviderCore settled/pending execution state, and must prove that every canonical tool call is classified exactly once. Browser transcript position cannot satisfy this proof.
+
 A replay may restore DSH-visible messages, tools, images, reasoning material needed by the provider, and other reconstructible state. It cannot restore undocumented ChatGPT hidden product state that is not represented in DSH state.
 
 Provider-private continuity must never redefine:

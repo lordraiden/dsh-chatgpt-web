@@ -471,11 +471,15 @@ export async function loginToChatGpt(
     const rawState = await context.storageState();
     const state = sanitizeBrowserLoginStorageState(rawState);
 
-    let capabilities: ChatGptWebAccountCapabilities;
+    let capabilities: ChatGptWebAccountCapabilities = {
+      solAvailable: false,
+      proAvailable: false,
+    };
     try {
       capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
     } catch {
-      capabilities = { solAvailable: true, proAvailable: false };
+      // Fail closed for the Free-only product target: an inconclusive capability probe
+      // must never manufacture paid/Sol capability.\n      capabilities = { solAvailable: false, proAvailable: false };
     }
 
     atomicWriteFile(config.storageStatePath, `${JSON.stringify(state)}\n`);

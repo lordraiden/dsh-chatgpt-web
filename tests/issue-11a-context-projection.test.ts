@@ -27,8 +27,21 @@ function sampleMessages(): CodexMessage[] {
       phase: "commentary",
       content: [
         { type: "text", text: "I will inspect the code." },
-        { type: "thinking", thinking: "working" },
-        { type: "toolCall", id: "call-1", name: "read_file", namespace: "mcp__fs", arguments: { path: "src/index.ts" } },
+        {
+          type: "thinking",
+          thinking: "working",
+          signature: "sig-1",
+          itemId: "reasoning-1",
+          redacted: ["redacted-1"],
+        },
+        {
+          type: "toolCall",
+          id: "call-1",
+          name: "read_file",
+          namespace: "mcp__fs",
+          arguments: { path: "src/index.ts" },
+          thoughtSignature: "tool-sig-1",
+        },
       ],
       timestamp: 5,
     },
@@ -55,8 +68,21 @@ test("canonical projection preserves ordering and semantic tool results", () => 
   ]);
   expect(projected.messages[2]!.content).toEqual([
     { type: "text", text: "I will inspect the code." },
-    { type: "thinking_summary", text: "working" },
-    { type: "tool_call", id: "call-1", name: "read_file", namespace: "mcp__fs", arguments: { path: "src/index.ts" } },
+    {
+      type: "thinking_summary",
+      text: "working",
+      signature: "sig-1",
+      item_id: "reasoning-1",
+      redacted: ["redacted-1"],
+    },
+    {
+      type: "tool_call",
+      id: "call-1",
+      name: "read_file",
+      namespace: "mcp__fs",
+      arguments: { path: "src/index.ts" },
+      thought_signature: "tool-sig-1",
+    },
   ]);
   expect(projected.messages[3]).toEqual({
     role: "tool_result",
