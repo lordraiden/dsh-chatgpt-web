@@ -1,18 +1,15 @@
 import { createHash } from "node:crypto";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
-import { namespacedToolName, type CodexAssistantContentPart, type CodexContentPart, type CodexMessage, type CodexParsedRequest, type CodexTool } from "../../types";
-import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
+import { namespacedToolName, type CodexMessage, type CodexParsedRequest, type CodexTool } from "../../types";
+import { isReadableCompactionSummaryText } from "../../responses/compaction";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import { projectCanonicalChatGptWebContext, serializeCanonicalChatGptWebContext, withoutRetiredTurnHandles, withoutSupersededModelSwitchContracts, type ChatGptWebPromptImage } from "./context-projection";
 import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
 } from "./rolling-checkpoint";
 
-export interface ChatGptWebPromptImage {
-  ref: string;
-  imageUrl: string;
-  detail?: string;
-}
+export type { ChatGptWebPromptImage } from "./context-projection";
 
 export interface CompiledChatGptWebPrompt {
   text: string;
@@ -138,191 +135,16 @@ export function formatChatGptWebMultipartCommit(
   ].join("\n");
 }
 
-const RETIRED_TURN_HANDLE = /\b(turn|request|binding)_[A-Za-z0-9_-]{24,}/g;
-
-/**
- * The accumulated Codex context replays earlier turns, including the broker handles those turns
- * held. A model that copies one binds to a finished turn and burns the round trip. The handle for
- * the current turn is supplied by the contract text, never by the replayed context.
- */
-export function withoutRetiredTurnHandles(contextJson: string): string {
-  return contextJson.replace(RETIRED_TURN_HANDLE, (_handle, kind: string) => `[retired ${kind} handle]`);
-}
-
 /** ChatGPT accepts at most this many attachments on one message. */
 export const CHATGPT_MAX_INPUT_IMAGES = 10;
 
 /**
- * ChatGPT's current `/backend-api/f/conversation` edge rejects large inline JSON bodies before a
- * model sees them. Keep the JSON-encoded visible prompt below this conservative budget so the
- * product request still has room for its own message metadata. Free/Luna additionally needs a
- * measured input-token ceiling below its generic browser composer limit so the model still has
- * room to produce the summary. This applies only to compaction: native Codex also removes the
- * oldest history items until a compaction request fits, then re-injects fresh initial context into
- * the replacement history.
+ * Conservative JSON-encoded prompt budget used by the existing native-style compaction fit recovery.
  */
 export const CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET = 110_000;
 
 export function chatGptPromptJsonBytes(text: string): number {
   return Buffer.byteLength(JSON.stringify(text), "utf8");
-}
-
-const DROPPED_IMAGE_NOTE =
-  `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
-
-/**
- * A fresh compaction epoch receives the complete canonical context, so every still-relevant image
- * must be attached on that first message. Retained continuation messages send only their new
- * canonical suffix because prior images remain in the same Temporary Chat. The per-message image
- * limit still drops overflow from the oldest end so the images the task is actively working on
- * survive.
- */
-interface ImageBudget {
-  seen: number;
-  dropped: number;
-}
-
-function inputContent(
-  content: string | CodexContentPart[],
-  images: ChatGptWebPromptImage[],
-  budget: ImageBudget,
-): unknown {
-  if (typeof content === "string") return content;
-  const semantic = content.filter(part =>
-    part.type !== "image" || !isOnePixelPngDataUrl(part.imageUrl)
-  );
-  if (!semantic.some(part => part.type === "image")) {
-    return semantic.filter(part => part.type === "text").map(part => part.text).join("\n");
-  }
-  return semantic.map(part => {
-    if (part.type === "text") return { type: "text", text: part.text };
-    budget.seen += 1;
-    if (budget.seen <= budget.dropped) return { type: "text", text: DROPPED_IMAGE_NOTE };
-    const ref = `codex-input-image-${images.length + 1}`;
-    images.push({ ref, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
-    return { type: "image_attachment", attachment_ref: ref, ...(part.detail ? { detail: part.detail } : {}) };
-  });
-}
-
-export function countChatGptContextImages(messages: readonly CodexMessage[]): number {
-  let total = 0;
-  for (const message of messages) {
-    if (message.role === "assistant" || typeof message.content === "string") continue;
-    for (const part of message.content) {
-      if (part.type === "image" && !isOnePixelPngDataUrl(part.imageUrl)) total += 1;
-    }
-  }
-  return total;
-}
-
-function assistantContent(content: CodexAssistantContentPart[], userContext?: string): unknown[] {
-  return content.map(part => {
-    if (part.type === "text") return { type: "text", text: part.text };
-    if (part.type === "thinking") {
-      const text = part.thinking?.trim();
-      if (!text || /^Thought\s+for\s+/i.test(text) || /^Thinking\s*(?:Process|\.\.\.)?$/i.test(text)) {
-        return undefined;
-      }
-      return { type: "thinking_summary", text: part.thinking };
-    }
-    let args = part.arguments;
-    if (part.name === "write" && args && typeof args === "object") {
-      const rec = { ...(args as Record<string, unknown>) };
-      if ((typeof rec.file_path !== "string" || !rec.file_path.trim()) && userContext) {
-        const cleaned = userContext
-          .replace(/https?:\/\/[^\s]+/g, "")
-          .replace(/\b(?:AGENTS|CLAUDE)\.md\b/gi, "");
-        const match = cleaned.match(/\b([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]{1,10})\b/);
-        if (match && match[1]) {
-          rec.file_path = match[1];
-          args = rec;
-        }
-      }
-    }
-    return {
-      type: "tool_call",
-      id: part.id,
-      name: part.name,
-      ...(part.namespace ? { namespace: part.namespace } : {}),
-      arguments: args,
-    };
-  }).filter(Boolean);
-}
-
-function plainMessageText(message: CodexMessage): string | undefined {
-  if (message.role === "assistant" || message.role === "agentMessage" || message.role === "toolResult") return undefined;
-  if (typeof message.content === "string") return message.content;
-  if (message.content.some(part => part.type !== "text")) return undefined;
-  return message.content.map(part => part.type === "text" ? part.text : "").join("\n");
-}
-
-function startsWithControlBlock(message: CodexMessage, tag: string): boolean {
-  return message.role === "developer" && plainMessageText(message)?.trimStart().startsWith(tag) === true;
-}
-
-/**
- * Codex appends a complete replacement developer contract whenever the user changes models. On a
- * later switch the earlier model-switch contract and its adjacent skill catalog are obsolete, but
- * both remain in the Responses history. Replaying every obsolete copy can exceed ChatGPT's composer
- * character ceiling even while the actual model token count is comfortably inside its window.
- *
- * Keep the newest contract verbatim and remove only older Codex-generated replacement contracts.
- * Human messages, assistant history, tool results, and unrelated developer instructions are never
- * touched.
- */
-export function withoutSupersededModelSwitchContracts(messages: readonly CodexMessage[]): CodexMessage[] {
-  const switchIndices = messages.flatMap((message, index) =>
-    startsWithControlBlock(message, "<model_switch>") ? [index] : []
-  );
-  if (switchIndices.length < 2) return [...messages];
-
-  const newestSwitchIndex = switchIndices.at(-1)!;
-  const dropped = new Set<number>();
-  for (const index of switchIndices.slice(0, -1)) {
-    dropped.add(index);
-    const skillCatalogIndex = index + 1;
-    if (
-      skillCatalogIndex < newestSwitchIndex
-      && startsWithControlBlock(messages[skillCatalogIndex]!, "<skills_instructions>")
-    ) {
-      dropped.add(skillCatalogIndex);
-    }
-  }
-  return messages.filter((_message, index) => !dropped.has(index));
-}
-
-function messageEnvelope(
-  message: CodexMessage,
-  images: ChatGptWebPromptImage[],
-  budget: ImageBudget,
-  userContext?: string,
-): Record<string, unknown> {
-  if (message.role === "toolResult") {
-    return {
-      role: "tool_result",
-      tool_call_id: message.toolCallId,
-      tool_name: message.toolName,
-      ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
-      is_error: message.isError,
-      content: inputContent(message.content, images, budget),
-    };
-  }
-  if (message.role === "agentMessage") {
-    return {
-      role: "agent_message",
-      ...(message.author !== undefined ? { author: message.author } : {}),
-      ...(message.recipient !== undefined ? { recipient: message.recipient } : {}),
-      content: inputContent(message.content, images, budget),
-    };
-  }
-  if (message.role === "assistant") {
-    return {
-      role: "assistant",
-      ...(message.phase ? { phase: message.phase } : {}),
-      content: assistantContent(message.content, userContext),
-    };
-  }
-  return { role: message.role, content: inputContent(message.content, images, budget) };
 }
 
 type MultipartContextRecord =
@@ -604,30 +426,17 @@ export function compileChatGptWebPrompt(
       "</dsh_transport_resume>",
     ];
   const build = (sourceMessages: readonly CodexMessage[]): CompiledChatGptWebPrompt => {
-    const images: ChatGptWebPromptImage[] = [];
-    const budget: ImageBudget = {
-      seen: 0,
-      dropped: Math.max(0, countChatGptContextImages(sourceMessages) - CHATGPT_MAX_INPUT_IMAGES),
-    };
-    const userContext = sourceMessages
-      .filter(m => m.role === "user")
-      .map(m => {
-        if (typeof m.content === "string") return m.content;
-        if (Array.isArray(m.content)) {
-          return m.content
-            .map(part => typeof part === "string" ? part : (part && "text" in part && typeof part.text === "string" ? part.text : ""))
-            .join(" ");
-        }
-        return "";
-      })
-      .join(" ");
-    const messages = sourceMessages.map(message => messageEnvelope(message, images, budget, userContext));
+    // #11-A owns the lossless canonical projection. Image transport limits are applied by #11-B
+    // after this boundary; this path must not silently discard canonical semantic images.
+    const canonical = projectCanonicalChatGptWebContext(system, sourceMessages);
+    const images = [...canonical.images];
+    const messages = canonical.messages;
     const answerContract = captureLunaCheckpoint
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
       : "Return only the answer that the outer Codex task should receive.";
     if (multipartEnabled) {
       const records: MultipartContextRecord[] = [
-        ...system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
+        ...canonical.system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
         ...messages.map((message, message_index) => ({
           kind: "message" as const,
           message_index,
@@ -648,8 +457,10 @@ export function compileChatGptWebPrompt(
       };
       return { text: multipart.commit, images, multipart, awaitingToolResultAnswer };
     }
-    console.info(`[chatgpt-web] compile: systemItems=${system.length} (${system.reduce((a, b) => a + b.length, 0)} chars), messagesCount=${messages.length} (${JSON.stringify(messages).length} chars)`);
-    const envelopeJson = withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages }));
+    console.info("[chatgpt-web] compile: systemItems=" + canonical.system.length + " ("
+      + canonical.system.reduce((a, b) => a + b.length, 0)
+      + " chars), messagesCount=" + messages.length + " (" + JSON.stringify(messages).length + " chars)");
+    const envelopeJson = serializeCanonicalChatGptWebContext(canonical);
     const text = [
       ...sharedContract,
       ...transportContract,
