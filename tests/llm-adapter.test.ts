@@ -155,7 +155,7 @@ describe("ChatGptWebLlmAdapter model resolution", () => {
 });
 
 describe("ChatGptWebLlmAdapter stream conversion", () => {
-  test("text and reasoning map to ordered blocks with usage before finish", async () => {
+  test("text and reasoning map to ordered blocks with finish terminal", async () => {
     const seen: { parsed?: CodexParsedRequest } = {};
     const backend = scriptedBackend([
       { type: "thinking_delta", thinking: "let me think" },
@@ -166,20 +166,14 @@ describe("ChatGptWebLlmAdapter stream conversion", () => {
     const adapter = new ChatGptWebLlmAdapter({ loadProvider: () => providerConfigFixture(), createBackend: () => backend });
     const chunks = await collect(adapter.stream(userRequest("hi")));
 
-    // Ordering: reasoning block, text block, usage, finish.
+    // Native LLM stream intentionally omits usage; finish remains terminal.
     const types = chunks.map(chunk => chunk.type);
     expect(types).toEqual([
       "block-start", "reasoning-delta", "block-end",
       "block-start", "text-delta", "text-delta", "block-end",
-      "usage", "finish",
+      "finish",
     ]);
-    const usage = chunks.find(chunk => chunk.type === "usage");
-    expect(usage?.type).toBe("usage");
-    if (usage?.type === "usage") {
-      expect(usage.usage.inputTokens).toBe(90); // 100 total - 10 cache read
-      expect(usage.usage.cacheReadTokens).toBe(10);
-      expect(usage.usage.outputTokens).toBe(5);
-    }
+    expect(chunks.some(chunk => chunk.type === "usage")).toBe(false);
     expect(lastFinish(chunks).reason.kind).toBe("stop");
     // Native path drives the backend directly with the translated request.
     expect(seen.parsed?.modelId).toBe("gpt-5.6-luna");
@@ -204,11 +198,9 @@ describe("ChatGptWebLlmAdapter stream conversion", () => {
     expect(blockEnd.block.type).toBe("tool-call");
     expect(blockEnd.block.arguments).toBe('{"q":"dsh"}');
     expect(lastFinish(chunks).reason.kind).toBe("tool-calls");
-    // usage precedes finish
-    const usageIndex = chunks.findIndex(chunk => chunk.type === "usage");
-    const finishIndex = chunks.findIndex(chunk => chunk.type === "finish");
-    expect(usageIndex).toBeGreaterThanOrEqual(0);
-    expect(usageIndex).toBeLessThan(finishIndex);
+    // Native LLM output intentionally omits usage; the terminal finish is retained.
+    expect(chunks.some(chunk => chunk.type === "usage")).toBe(false);
+    expect(lastFinish(chunks).reason.kind).toBe("tool-calls");
   });
 
   test("finish is terminal even when a backend incorrectly emits trailing events", async () => {
@@ -353,7 +345,7 @@ describe("native path does not enter the Responses server", () => {
   test("plugin declares the LLM service as a hard Cordis dependency", () => {
     const source = readFileSync(join(HERE, "..", "src", "plugin.ts"), "utf8");
     expect(source).toContain('export const inject = ["llm"];');
-    expect(source).toContain("const disposeAdapter = ctx.llm.registerAdapter");
+    expect(source).toContain("ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], adapter)");
     expect(source).not.toContain("if (ctx.llm)");
   });
   test("llm-adapter module has no import of server.ts", () => {
