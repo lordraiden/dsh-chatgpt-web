@@ -565,6 +565,12 @@ export class ChatGptWebProviderCore {
     return this.turns.get(executionKey);
   }
 
+  async waitForRetirement(executionKey: string): Promise<void> {
+    const turn = this.turns.get(executionKey);
+    if (!turn) return;
+    await turn.waitForPhysicalSettlement();
+  }
+
   begin(input: ChatGptWebProviderCoreTurnInput): ProviderTurnLifecycle {
     if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
     const existing = this.turns.get(input.executionKey);
