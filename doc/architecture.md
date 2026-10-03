@@ -952,6 +952,8 @@ A full capability cache/epoch strategy is Phase 2. Runtime detection and safe in
 
 No single UI string is a completion protocol.
 
+ChatGPT Web product context exhaustion is a transport-owned terminal condition. The browser surface may detect it from a structural error surface and localized equivalent copy, but the provider exposes only the semantic `context_exhausted` error to DSH. Detection never authorizes replay or creates a replacement conversation. Once confirmed, the retained conversation handle is invalidated while physical browser settlement remains independent and must complete before the retained resource is released.
+
 Completion must use transport state and authoritative signals such as:
 
 - turn identity;
