@@ -213,8 +213,7 @@ function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
     throw new Error("turn owner environment is invalid");
   }
   const cloned = structuredClone(environment as ChatGptTurnEnvironment & { capabilitySnapshot: CapabilitySnapshot });
-  assertCapabilitySnapshotBinding(cloned.capabilitySnapshot, { sessionId: cloned.capabilitySnapshot.sessionId, agentId: cloned.capabilitySnapshot.agentId, turnId: cloned.capabilitySnapshot.turnId, snapshotId: cloned.capabilitySnapshot.snapshotId });
-  return cloned;
+  return capabilitySnapshotForEnvironment(cloned, cloned.capabilitySnapshot!);
 }
 
 function assertSurfaceNonce(value: unknown): asserts value is string {
