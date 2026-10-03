@@ -195,7 +195,13 @@ function assistantContent(
         || /^Thought\s+for\s+/i.test(text)
         || /^Thinking\s*(?:Process|\.\.\.)?$/i.test(text)
       ) return undefined;
-      return {\n        type: "thinking_summary",\n        text: part.thinking,\n        ...(part.signature ? { signature: part.signature } : {}),\n        ...(part.itemId ? { item_id: part.itemId } : {}),\n        ...(part.redacted?.length ? { redacted: [...part.redacted] } : {}),\n      };
+      return {
+        type: "thinking_summary",
+        text: part.thinking,
+        ...(part.signature ? { signature: part.signature } : {}),
+        ...(part.itemId ? { item_id: part.itemId } : {}),
+        ...(part.redacted?.length ? { redacted: [...part.redacted] } : {}),
+      };
     }
     let args = part.arguments;
     if (part.name === "write" && args && typeof args === "object") {
@@ -217,6 +223,7 @@ function assistantContent(
       name: part.name,
       ...(part.namespace ? { namespace: part.namespace } : {}),
       arguments: args,
+      ...(part.thoughtSignature ? { thought_signature: part.thoughtSignature } : {}),
     };
   }).filter(Boolean);
 }
