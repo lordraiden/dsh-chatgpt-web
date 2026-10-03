@@ -21,6 +21,13 @@ function leaseInput(turnId: string) {
   const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("state"));
   assert.equal(turn.snapshot().state, "LEASED");
+  turn.bindPhysicalResource({
+    resourceId: "surface-state",
+    browserContextId: "ctx-state",
+    pageId: "page-state",
+    profileId: "profile-state",
+    accountId: "account-state",
+  });
   turn.markSurfaceReady();
   turn.markSendActivated();
   assert.equal(turn.snapshot().state, "SUBMITTED");
@@ -38,6 +45,13 @@ function leaseInput(turnId: string) {
 {
   const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("settlement"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-settlement",
+    browserContextId: "ctx-settlement",
+    pageId: "page-settlement",
+    profileId: "profile-settlement",
+    accountId: "account-settlement",
+  });
   turn.markSurfaceReady();
   turn.markSubmitted();
   turn.markRunning();
@@ -87,8 +101,16 @@ function leaseInput(turnId: string) {
 {
   const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("retry"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry",
+    browserContextId: "ctx-retry",
+    pageId: "page-retry",
+    profileId: "profile-retry",
+    accountId: "account-retry",
+  });
   turn.markSurfaceReady();
   assert.equal(turn.canAutomaticallyRetry(), true);
+  turn.authorizeSurfaceReplay();
   turn.markSendActivated();
   assert.equal(turn.canAutomaticallyRetry(), false);
   console.log("ok post-submit retry boundary");
@@ -157,6 +179,23 @@ function leaseInput(turnId: string) {
 }
 
 {
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("replay-guard"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-replay",
+    browserContextId: "ctx-replay",
+    pageId: "page-replay",
+    profileId: "profile-replay",
+    accountId: "account-replay",
+  });
+  turn.markSurfaceReady();
+  turn.markSendActivated();
+  assert.equal(turn.canAutomaticallyRetry(), false);
+  assert.throws(() => turn.authorizeSurfaceReplay(), /replay is forbidden/i);
+  console.log("ok post-submit surface replay is forbidden");
+}
+
+{
   const registry = new BrowserAccountLeaseRegistry();
   const descriptor = {
     serviceId: "chatgpt-web",
@@ -177,6 +216,13 @@ function leaseInput(turnId: string) {
 {
   const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("preflight"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-preflight",
+    browserContextId: "ctx-preflight",
+    pageId: "page-preflight",
+    profileId: "profile-preflight",
+    accountId: "account-preflight",
+  });
   turn.markSurfaceReady();
   turn.failBeforePhysicalSettlement();
   assert.equal(turn.snapshot().state, "RETIRED");
