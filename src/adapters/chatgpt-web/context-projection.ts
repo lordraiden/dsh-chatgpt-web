@@ -195,7 +195,7 @@ function assistantContent(
         || /^Thought\s+for\s+/i.test(text)
         || /^Thinking\s*(?:Process|\.\.\.)?$/i.test(text)
       ) return undefined;
-      return { type: "thinking_summary", text: part.thinking };
+      return {\n        type: "thinking_summary",\n        text: part.thinking,\n        ...(part.signature ? { signature: part.signature } : {}),\n        ...(part.itemId ? { item_id: part.itemId } : {}),\n        ...(part.redacted?.length ? { redacted: [...part.redacted] } : {}),\n      };
     }
     let args = part.arguments;
     if (part.name === "write" && args && typeof args === "object") {
