@@ -335,6 +335,9 @@ export class ChatGptWebReplayCoordinator {
       );
     }
     this.assertCurrentConversation(conversationHandle);
+    // The exhaustion condition itself invalidates the old browser conversation. From this point on,
+    // late events from that handle are stale even before the replacement is ready.
+    this.retiredConversationHandles.add(conversationHandle);
     this.continuity = "REPLAY";
     this.phase = "CONTEXT_EXHAUSTED";
   }
