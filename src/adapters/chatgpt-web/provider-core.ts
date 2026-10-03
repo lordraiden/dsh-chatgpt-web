@@ -611,7 +611,12 @@ export class ChatGptWebProviderCore {
     this.closed = true;
     const activeTurns = [...this.turns.values()];
     for (const turn of activeTurns) turn.requestShutdown(reason);
-    await Promise.allSettled(activeTurns.map(turn => turn.waitForPhysicalSettlement()));
+    await Promise.allSettled(activeTurns.map(async turn => {
+      while (!turn.snapshot().physicalSettlementAttached && !turn.snapshot().physicalSettled) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      await turn.waitForPhysicalSettlement();
+    }));
     this.leases.clear();
     this.turns.clear();
     this.retiredExecutions.clear();
