@@ -394,12 +394,13 @@ export class ChatGptWebReplayCoordinator {
       );
     }
 
-    const boundary = validateChatGptReplayBoundary(input.canonicalContext, input.replayBoundary);
-    const canonicalJson = serializeCanonicalChatGptWebContext(input.canonicalContext);
     const oldConversationHandle = this.currentConversationHandle;
     const identity = this.currentIdentity;
 
     try {
+      const boundary = validateChatGptReplayBoundary(input.canonicalContext, input.replayBoundary);
+      const canonicalJson = serializeCanonicalChatGptWebContext(input.canonicalContext);
+
       this.phase = "REPLACING_CONVERSATION";
       this.retiredConversationHandles.add(oldConversationHandle);
       await transport.invalidateConversation(oldConversationHandle, input.signal);
