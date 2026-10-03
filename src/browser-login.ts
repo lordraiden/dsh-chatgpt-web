@@ -471,7 +471,10 @@ export async function loginToChatGpt(
     const rawState = await context.storageState();
     const state = sanitizeBrowserLoginStorageState(rawState);
 
-    let capabilities: ChatGptWebAccountCapabilities;
+    let capabilities: ChatGptWebAccountCapabilities = {
+      solAvailable: false,
+      proAvailable: false,
+    };
     try {
       capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
     } catch {
