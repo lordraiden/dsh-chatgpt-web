@@ -32,7 +32,6 @@ export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 17841;
 
 export interface Config {
-  host: string;
   port: Volatile<number>;
   autoStart: boolean;
   readyTimeoutMs: number;
@@ -40,7 +39,6 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  host: z.string().default(DEFAULT_HOST),
   port: z.number().step(1).min(1).max(65535).default(DEFAULT_PORT).description("Local ChatGPT Web sidecar port.").volatile(),
   autoStart: z.boolean().default(true),
   readyTimeoutMs: z.number().step(1).min(0).default(30_000),
@@ -48,24 +46,13 @@ export const Config: z<Config> = z.object({
 });
 
 type ChatGPTWebPluginConfig = Partial<Omit<Config, "port">> & { port?: number | Volatile<number> };
-  /** Host to bind or check for health (default: 127.0.0.1). */
-  host?: string;
-  /** Port the sidecar listens on (default: 17841). */
-  port?: number;
-  /** Automatically start the sidecar daemon if not running (default: true). */
-  autoStart?: boolean;
-  /** Maximum milliseconds to wait for the sidecar to report ready (default: 30000). */
-  readyTimeoutMs?: number;
-  /** Explicit path to the bun executable (optional). */
-  bunPath?: string;
-}
 
 import { pathToFileURL } from "node:url";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-function resolveLauncher(customBunPath: string | undefined, host: string, port: number): { cmd: string; args: string[] } {
-  const serveArgs = ["serve", "--host", host, "--port", String(port)];
+function resolveLauncher(customBunPath: string | undefined, port: number): { cmd: string; args: string[] } {
+  const serveArgs = ["serve", "--host", DEFAULT_HOST, "--port", String(port)];
   const libCliPath = resolve(ROOT_DIR, "lib", "cli.js");
   if (existsSync(libCliPath)) {
     return {
@@ -119,8 +106,7 @@ async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
 }
 
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
-  const host = config.host || DEFAULT_HOST;
-  if (host !== DEFAULT_HOST) throw new Error("The ChatGPT Web sidecar must remain loopback-only");
+  const host = DEFAULT_HOST;
   let port = readPort(config.port);
   const autoStart = config.autoStart !== false;
   const readyTimeoutMs = config.readyTimeoutMs ?? 30_000;
@@ -141,7 +127,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       return;
     }
 
-    const launcher = resolveLauncher(config.bunPath, host, port);
+    const launcher = resolveLauncher(config.bunPath, port);
     logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${port}/v1...`);
 
     const child = spawn(launcher.cmd, launcher.args, {
