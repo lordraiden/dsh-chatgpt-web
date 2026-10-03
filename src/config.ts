@@ -313,7 +313,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
     headed: false,
-    solAvailable: true,
+    solAvailable: false,
     proAvailable: false,
     experimentalBiggerContext: false,
     zeroRiskProEnabled: false,
