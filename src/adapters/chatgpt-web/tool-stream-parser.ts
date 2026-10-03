@@ -12,8 +12,8 @@ export interface StreamParseChunk {
 
 const THINKING_OPEN = "<thinking>";
 const THINKING_CLOSE = "</thinking>";
-const TOOL_OPEN_TAGS = ["<dsh_tool_call>", "<tool_call>"] as const;
-const TOOL_CLOSE_TAGS = ["</dsh_tool_call>", "</tool_call>"] as const;
+const TOOL_OPEN_TAGS = ["<dsh_tool_call>"] as const;
+const TOOL_CLOSE_TAGS = ["</dsh_tool_call>"] as const;
 const TOOL_PROTOCOL_VERSION = 1 as const;
 const MAX_TOOL_FRAME_CHARS = 128 * 1024;
 const MAX_TOOL_ID_CHARS = 96;
