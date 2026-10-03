@@ -8,6 +8,7 @@ import {
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
+import type { CapabilityToolResult } from "./capability-transport";
 import { assertCapabilitySnapshotBinding, capabilitySnapshotForEnvironment, type CapabilitySnapshot } from "./capability-projector";
 
 export interface BrokerToolRequest {
@@ -18,12 +19,7 @@ export interface BrokerToolRequest {
   input?: string;
 }
 
-export interface BrokerToolResult {
-  content: unknown[];
-  structuredContent?: unknown;
-  isError?: boolean;
-  _meta?: unknown;
-}
+export type BrokerToolResult = CapabilityToolResult;
 
 interface PendingInvocation {
   request: BrokerToolRequest;
