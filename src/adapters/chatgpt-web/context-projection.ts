@@ -1,6 +1,8 @@
 import { isOnePixelPngDataUrl } from "../../responses/compaction";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage } from "../../types";
 
+export const CHATGPT_WEB_MAX_INPUT_IMAGES = 10;
+
 export interface ChatGptWebPromptImage {
   ref: string;
   imageUrl: string;
@@ -24,18 +26,10 @@ export interface CanonicalChatGptWebContext {
 export function projectCanonicalChatGptWebContext(
   system: readonly string[],
   sourceMessages: readonly CodexMessage[],
-  maxInputImages = 10,
 ): CanonicalChatGptWebContext {
-  if (!Number.isSafeInteger(maxInputImages) || maxInputImages < 0) {
-    throw new Error("ChatGPT canonical context image budget is invalid");
-  }
-
   const messages = withoutSupersededModelSwitchContracts(sourceMessages);
   const images: ChatGptWebPromptImage[] = [];
-  const budget: ImageBudget = {
-    seen: 0,
-    dropped: Math.max(0, countChatGptContextImages(messages) - maxInputImages),
-  };
+  const budget: ImageBudget = { seen: 0, dropped: 0 };
   const userContext = messages
     .filter(message => message.role === "user")
     .map(message => {
@@ -73,6 +67,60 @@ export function withoutRetiredTurnHandles(contextJson: string): string {
     RETIRED_TURN_HANDLE,
     (_handle, kind: string) => "[retired " + kind + " handle]",
   );
+}
+
+
+/**
+ * Apply the provider's per-message image budget after canonical projection.
+ *
+ * This is deliberately separate from the canonical projection: canonical DSH context retains every
+ * supported semantic image, while the transport projection may replace only the oldest excess
+ * attachments with an explicit note.
+ */
+export function applyChatGptWebImageBudget(
+  context: CanonicalChatGptWebContext,
+  maxImages = CHATGPT_WEB_MAX_INPUT_IMAGES,
+): CanonicalChatGptWebContext {
+  if (!Number.isSafeInteger(maxImages) || maxImages < 0) {
+    throw new Error("ChatGPT image transport budget is invalid");
+  }
+  if (context.images.length <= maxImages) return context;
+
+  const droppedRefs = new Set(
+    context.images
+      .slice(0, context.images.length - maxImages)
+      .map(image => image.ref),
+  );
+
+  const messages = context.messages.map(message => {
+    const clone = structuredClone(message);
+    if (!Array.isArray(clone.content)) return clone;
+    clone.content = clone.content.flatMap(part => {
+      if (
+        part
+        && typeof part === "object"
+        && !Array.isArray(part)
+        && (part as { type?: unknown }).type === "image_attachment"
+        && droppedRefs.has((part as { attachment_ref?: string }).attachment_ref ?? "")
+      ) {
+        return [{
+          type: "text",
+          text: "[older image not attached: ChatGPT accepts at most "
+            + String(maxImages)
+            + " input images]",
+        }];
+      }
+      return [part];
+    });
+    return clone;
+  });
+
+  return Object.freeze({
+    version: context.version,
+    system: context.system,
+    messages: Object.freeze(messages),
+    images: Object.freeze(context.images.slice(context.images.length - maxImages)),
+  });
 }
 
 export function countChatGptContextImages(messages: readonly CodexMessage[]): number {
