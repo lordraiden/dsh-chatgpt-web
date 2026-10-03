@@ -5,7 +5,7 @@ import type {
   CodexToolResultMessage,
 } from "../../types";
 import { extractChatGptCompactionSourceRevision } from "./environment";
-import type { ChatGptBrowserWorker } from "./browser-worker";
+import type { WebSurfaceTransport } from "./web-surface-transport";
 import type { CompactionTransactionHandle } from "./compaction-transaction";
 import type { ChatGptWebCapabilities } from "./model";
 import {
@@ -274,7 +274,7 @@ export async function settleActiveZeroRiskCompactionSource(
 }
 
 export async function requestRetainedCompactionHandoff(
-  worker: ChatGptBrowserWorker,
+  transport: WebSurfaceTransport,
   parsed: CodexParsedRequest,
   source: ChatGptTurnSession,
   broker: TurnBroker,
@@ -311,7 +311,7 @@ export async function requestRetainedCompactionHandoff(
     transaction = await withCompactionAbort(transactionPromise, operationSignal);
     const instruction = structuredCompactionHandoffInstruction(transaction);
     const prepare = async () => ({ text: instruction, images: [], release: () => {} });
-    browser = worker.run({
+    browser = transport.run({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
