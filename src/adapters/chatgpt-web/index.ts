@@ -1180,15 +1180,38 @@ export function createChatGptWebAdapter(
           chatGptTurnSessions.retireAbortedOwnerTurns(ownerKey, abortedTurnIds, executionKey);
         }
         const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
-        const session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
+        const previousProviderTurn = providerCore.get(executionKey);
+        const recovery = previousProviderTurn
+          ? (previousProviderTurn.snapshot().state === "RETIRED" ? "REPLAY" as const : "EXACT_RESUME" as const)
+          : "NEW" as const;
+        const providerTurn = providerCore.begin({
           executionKey,
-          ownerKey,
-          () => startRuntime(parsed, environment, traceId, turnCapabilities),
           traceId,
-          incoming.abortSignal,
           nativeTurnId,
-          nativeIdentity.threadId,
-        );
+          ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
+          ...browserAccountLeaseInput(provider, traceId),
+          retryPolicy: parsed._compactionRequest ? "side_effect_free" : "strict",
+          recovery,
+        });
+        let session: ChatGptTurnSession;
+        try {
+          session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
+            executionKey,
+            ownerKey,
+            () => startRuntime(parsed, environment, traceId, turnCapabilities, providerTurn),
+            traceId,
+            incoming.abortSignal,
+            nativeTurnId,
+            nativeIdentity.threadId,
+          );
+        } catch (error) {
+          providerTurn.failBeforePhysicalSettlement();
+          throw error;
+        }
+        providerTurn.markSurfaceReady();
+        if (!providerTurn.snapshot().physicalSettlementAttached) {
+          providerCore.bindPhysicalSettlement(executionKey, session.physicalSettlement);
+        }
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
           // Journal the complete synchronous event batch before touching the HTTP observer. If the
