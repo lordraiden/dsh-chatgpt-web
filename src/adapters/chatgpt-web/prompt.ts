@@ -2,8 +2,13 @@ import { createHash } from "node:crypto";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { namespacedToolName, type CodexMessage, type CodexParsedRequest, type CodexTool } from "../../types";
 import { isReadableCompactionSummaryText } from "../../responses/compaction";
+import {
+  CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
+  chatGptPromptJsonBytes,
+  selectCompactionMessagesDeterministically,
+} from "./context-budget";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { projectCanonicalChatGptWebContext, serializeCanonicalChatGptWebContext, withoutRetiredTurnHandles, withoutSupersededModelSwitchContracts, type ChatGptWebPromptImage } from "./context-projection";
+import { applyChatGptWebImageBudget, CHATGPT_WEB_MAX_INPUT_IMAGES, projectCanonicalChatGptWebContext, serializeCanonicalChatGptWebContext, withoutRetiredTurnHandles, withoutSupersededModelSwitchContracts, type ChatGptWebPromptImage } from "./context-projection";
 import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
@@ -135,17 +140,8 @@ export function formatChatGptWebMultipartCommit(
   ].join("\n");
 }
 
-/** ChatGPT accepts at most this many attachments on one message. */
-export const CHATGPT_MAX_INPUT_IMAGES = 10;
-
-/**
- * Conservative JSON-encoded prompt budget used by the existing native-style compaction fit recovery.
- */
-export const CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET = 110_000;
-
-export function chatGptPromptJsonBytes(text: string): number {
-  return Buffer.byteLength(JSON.stringify(text), "utf8");
-}
+/** Free-Web bridge transport cap; measured conservatively and not an OpenAI/ChatGPT product maximum. */
+export const CHATGPT_MAX_INPUT_IMAGES = CHATGPT_WEB_MAX_INPUT_IMAGES;
 
 type MultipartContextRecord =
   | { kind: "system"; system_index: number; content: string }
@@ -426,17 +422,16 @@ export function compileChatGptWebPrompt(
       "</dsh_transport_resume>",
     ];
   const build = (sourceMessages: readonly CodexMessage[]): CompiledChatGptWebPrompt => {
-    // #11-A owns the lossless canonical projection. Image transport limits are applied by #11-B
-    // after this boundary; this path must not silently discard canonical semantic images.
     const canonical = projectCanonicalChatGptWebContext(system, sourceMessages);
-    const images = [...canonical.images];
-    const messages = canonical.messages;
+    const transportContext = applyChatGptWebImageBudget(canonical, CHATGPT_MAX_INPUT_IMAGES);
+    const images = [...transportContext.images];
+    const messages = transportContext.messages;
     const answerContract = captureLunaCheckpoint
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
       : "Return only the answer that the outer Codex task should receive.";
     if (multipartEnabled) {
       const records: MultipartContextRecord[] = [
-        ...canonical.system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
+        ...transportContext.system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
         ...messages.map((message, message_index) => ({
           kind: "message" as const,
           message_index,
@@ -457,10 +452,10 @@ export function compileChatGptWebPrompt(
       };
       return { text: multipart.commit, images, multipart, awaitingToolResultAnswer };
     }
-    console.info("[chatgpt-web] compile: systemItems=" + canonical.system.length + " ("
+    console.info("[chatgpt-web] compile: systemItems=" + transportContext.system.length + " ("
       + canonical.system.reduce((a, b) => a + b.length, 0)
       + " chars), messagesCount=" + messages.length + " (" + JSON.stringify(messages).length + " chars)");
-    const envelopeJson = serializeCanonicalChatGptWebContext(canonical);
+    const envelopeJson = serializeCanonicalChatGptWebContext(transportContext);
     const text = [
       ...sharedContract,
       ...transportContract,
@@ -488,26 +483,25 @@ export function compileChatGptWebPrompt(
   // fail explicitly if any atomic record is genuinely too large for one stage.
   if (compiled.multipart) return compiled;
 
-  const exceedsCompactionBudget = (): boolean => (
-    chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET
-  );
+  const fitsCompactionTransport = (candidate: readonly CodexMessage[]): boolean => {
+    const candidateCompiled = build(candidate);
+    return chatGptPromptJsonBytes(candidateCompiled.text) <= CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET;
+  };
 
-  // Match native Codex compaction recovery: discard oldest history items one at a time until the
-  // summarization request fits. Never discard the final compaction instruction itself, and rebuild
-  // image references after every trim so removed messages cannot leave orphaned attachments.
-  while (
-    exceedsCompactionBudget()
-    && sourceMessages.length > 1
-  ) {
-    sourceMessages = sourceMessages.slice(1);
+  if (!fitsCompactionTransport(sourceMessages)) {
+    const selected = selectCompactionMessagesDeterministically(sourceMessages, fitsCompactionTransport);
+    sourceMessages = selected.messages;
     compiled = build(sourceMessages);
   }
+
   const encodedBytes = chatGptPromptJsonBytes(compiled.text);
-  if (exceedsCompactionBudget()) {
+  if (encodedBytes > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET) {
     throw new Error(
-      `ChatGPT Web compaction prompt still requires ${encodedBytes.toLocaleString("en-US")} JSON bytes after all older history was trimmed; the final compaction instruction alone exceeds the browser compaction budget`,
+      "ChatGPT Web compaction transport budget cannot fit while preserving required instructions and settled tool results",
     );
   }
   const trimmedCompactionMessages = initialMessageCount - sourceMessages.length;
-  return trimmedCompactionMessages > 0 ? { ...compiled, trimmedCompactionMessages } : compiled;
+  return trimmedCompactionMessages > 0
+    ? { ...compiled, trimmedCompactionMessages }
+    : compiled;
 }
