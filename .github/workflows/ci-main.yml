@@ -1,0 +1,207 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# GitHub currently has cases where filtered push workflows in private repositories
+# are materialized as 0-job startup failures. Keep push unfiltered and gate actual
+# execution at job level so non-target branches are cleanly skipped.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.event_name != 'push' || github.ref_type == 'tag' || github.ref_name == 'main' || github.ref_name == 'integration/staging' || startsWith(github.ref_name, 'feat/') }}
+    name: Typecheck, build, contract tests and tarball smoke test
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      artifact_sha256: ${{ steps.package.outputs.artifact_sha256 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build bundles
+        run: bun run build
+
+      - name: Issue contract tests
+        run: node scripts/test-issue-20-settings.mjs
+
+      - name: Pack validated artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifact
+          npm pack --silent --pack-destination artifact
+
+          mapfile -t tarballs < <(find artifact -maxdepth 1 -type f -name '*.tgz' -print)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected exactly one package tarball, found ${#tarballs[@]}" >&2
+            exit 1
+          fi
+
+          tarball="${tarballs[0]}"
+          checksum="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+          echo "Validated artifact: $tarball"
+          echo "SHA-256: $checksum"
+
+          echo "artifact_name=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test the exact validated artifact
+        run: node scripts/smoke-tarball.mjs "artifact/${{ steps.package.outputs.artifact_name }}"
+
+      - name: Upload release artifact
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-tarball
+          path: artifact/${{ steps.package.outputs.artifact_name }}
+          if-no-files-found: error
+
+  publish-gpr:
+    name: Publish to GitHub Packages
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download validated artifact
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-tarball
+          path: artifact
+
+      - name: Verify release tag and artifact integrity
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA256: ${{ needs.verify.outputs.artifact_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="$RELEASE_TAG"
+          version="$(node -p "require('./package.json').version")"
+
+          if ! [[ "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "Release tag must match vX.Y.Z; received $tag" >&2
+            exit 1
+          fi
+
+          if [ "${tag#v}" != "$version" ]; then
+            echo "Release tag $tag does not match package.json version $version" >&2
+            exit 1
+          fi
+
+          tarball="artifact/${{ needs.verify.outputs.artifact_name }}"
+          test -f "$tarball"
+          actual_sha256="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+
+          if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+            echo "Artifact digest mismatch: expected $EXPECTED_SHA256, got $actual_sha256" >&2
+            exit 1
+          fi
+
+          echo "Publishing exact validated artifact: $(basename "$tarball")"
+          echo "SHA-256: $actual_sha256"
+
+      - name: Publish to GitHub Packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tarball="artifact/${{ needs.verify.outputs.artifact_name }}"
+          printf '%s\n' \
+  '@lordraiden:registry=https://npm.pkg.github.com/' \
+  "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
+  > ~/.npmrc
+
+          npm publish "$tarball" --registry https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    name: Publish to npmjs.com
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download validated artifact
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-tarball
+          path: artifact
+
+      - name: Verify release tag and artifact integrity
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA256: ${{ needs.verify.outputs.artifact_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="$RELEASE_TAG"
+          version="$(node -p "require('./package.json').version")"
+
+          if ! [[ "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "Release tag must match vX.Y.Z; received $tag" >&2
+            exit 1
+          fi
+
+          if [ "${tag#v}" != "$version" ]; then
+            echo "Release tag $tag does not match package.json version $version" >&2
+            exit 1
+          fi
+
+          tarball="artifact/${{ needs.verify.outputs.artifact_name }}"
+          test -f "$tarball"
+          actual_sha256="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+
+          if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+            echo "Artifact digest mismatch: expected $EXPECTED_SHA256, got $actual_sha256" >&2
+            exit 1
+          fi
+
+          echo "Publishing exact validated artifact: $(basename "$tarball")"
+          echo "SHA-256: $actual_sha256"
+
+      - name: Publish to npmjs.com
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tarball="artifact/${{ needs.verify.outputs.artifact_name }}"
+          printf '%s\n' \
+  '@lordraiden:registry=https://registry.npmjs.org/' \
+  "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" \
+  > ~/.npmrc
+
+          npm publish "$tarball" --registry https://registry.npmjs.org --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
