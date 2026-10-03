@@ -204,6 +204,27 @@ test("ambiguous replay boundaries fail closed", () => {
   })).toThrowError(/unknown tool call|missing/i);
 });
 
+test("ambiguous canonical replay state is terminal FAILED", async () => {
+  const coordinator = new ChatGptWebReplayCoordinator(identity, "old");
+  coordinator.reportContextExhausted("old");
+
+  await expect(
+    coordinator.recover(
+      {
+        canonicalContext,
+        replayBoundary: {
+          ...replayBoundary,
+          pendingToolCallIds: [],
+        },
+      },
+      fakeTransport(),
+    ),
+  ).rejects.toMatchObject({ code: "canonical_replay_boundary_ambiguous" });
+
+  expect(coordinator.snapshot().phase).toBe("FAILED");
+  expect(coordinator.snapshot().continuity).toBe("FAILED");
+});
+
 test("replacement readiness failure becomes deterministic FAILED recovery", async () => {
   const coordinator = new ChatGptWebReplayCoordinator(identity, "old");
   coordinator.reportContextExhausted("old");
