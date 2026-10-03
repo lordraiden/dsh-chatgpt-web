@@ -327,7 +327,7 @@ function leaseInput(turnId: string) {
 }
 
 {
-  const parser = new ChatGptToolStreamParser("user context");
+  const parser = new ChatGptToolStreamParser();
   const parsed = parser.feed(
     'before<dsh_tool_call>{"version":1,"id":"call_12345678","name":"read","arguments":{"file_path":"README.md"}}</dsh_tool_call>after',
   );
