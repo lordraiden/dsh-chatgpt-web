@@ -82,7 +82,7 @@ const environment = capabilitySnapshotForEnvironment({
   roots: ["/workspace"],
   writableRoots: ["/workspace"],
   sandboxPolicy: { type: "workspaceWrite", writableRoots: ["/workspace"], networkAccess: true },
-  tools: [echoTool, execTool, hiddenTool],
+  tools: [echoTool, execTool, hiddenTool, nestedTool],
 }, snapshot);
 
 {
@@ -128,6 +128,16 @@ const environment = capabilitySnapshotForEnvironment({
   assert.equal(seen.length, 1);
   assert.equal(seen[0]!.snapshotId, snapshot.snapshotId);
   assert.equal(seen[0]!.wireName, "native__echo");
+
+  await assert.rejects(
+    () => transport.invoke({
+      wireName: "native__echo",
+      freeform: true,
+      input: "not a freeform echo call",
+    }),
+    /invocation mode does not match/i,
+  );
+  assert.equal(seen.length, 1, "mode mismatch must fail before reaching the dispatcher");
 
   await assert.rejects(
     () => transport.invoke({
@@ -313,7 +323,7 @@ const environment = capabilitySnapshotForEnvironment({
     agentId: "agent-stale",
     turnId: "turn-stale",
     tools: [echoTool],
-    expiresAt: Date.now() + 10,
+    expiresAt: Date.now() + 50,
   });
   const staleEnvironment = capabilitySnapshotForEnvironment({
     ...environment,
@@ -332,7 +342,7 @@ const environment = capabilitySnapshotForEnvironment({
     agentId: staleSnapshot.agentId,
     turnId: staleSnapshot.turnId,
   });
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await new Promise(resolve => setTimeout(resolve, 75));
   await assert.rejects(
     () => transport.invoke({ wireName: "echo", freeform: false, arguments: { value: "late" } }),
     /expired/i,
