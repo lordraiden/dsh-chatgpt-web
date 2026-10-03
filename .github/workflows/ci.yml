@@ -5,8 +5,63 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   verify:
+    if: ${{ github.event_name != 'push' || github.ref_type == 'tag' || github.ref_name == 'main' || github.ref_name == 'integration/staging' || startsWith(github.ref_name, 'feat/') }}
+    name: Typecheck, build, contract tests and tarball smoke test
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      artifact_sha256: ${{ steps.package.outputs.artifact_sha256 }}
     steps:
-      - run: echo "CI workflow registration probe"
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22.19.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build bundles
+        run: bun run build
+
+      - name: Issue contract tests
+        run: node scripts/test-issue-20-settings.mjs
+
+      - name: Pack validated artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          npm pack --silent --pack-destination artifact
+          mapfile -t tarballs < <(find artifact -maxdepth 1 -type f -name '*.tgz' -print)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected exactly one package tarball, found ${#tarballs[@]}" >&2
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+          checksum="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+          echo "artifact_name=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test the exact validated artifact
+        run: node scripts/smoke-tarball.mjs "artifact/${{ steps.package.outputs.artifact_name }}"
