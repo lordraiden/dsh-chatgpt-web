@@ -106,7 +106,12 @@ export class BrokerCapabilityTransport implements CapabilityTransport {
 
   bind(rawBinding: CapabilityTransportBinding): BoundCapabilityTransport {
     const binding = normalizeBinding(rawBinding);
+    let revoked = false;
+    const assertLive = (): void => {
+      if (revoked) throw new Error("capability transport binding is revoked");
+    };
     const authorize = (request: CapabilityRequest): CodexTool => {
+      assertLive();
       return authorizeCapability(binding.snapshot, request, { lifecycle: "active" });
     };
 
@@ -125,6 +130,8 @@ export class BrokerCapabilityTransport implements CapabilityTransport {
         }, signal);
       },
       revoke: async reason => {
+        if (revoked) return;
+        revoked = true;
         await this.dispatcher.revoke(binding, reason);
       },
     };
