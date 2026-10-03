@@ -19,6 +19,8 @@ export type SubmissionPhase = "prepared" | "send_activated" | "accepted";
 
 export type PhysicalSettlementOutcome = "not_started" | "pending" | "fulfilled" | "rejected";
 
+export type LogicalSettlementOutcome = "pending" | "completed" | "failed" | "cancelled";
+
 export interface ProviderTurnPhysicalResourceBinding {
   resourceId: string;
   browserContextId: string;
@@ -134,6 +136,11 @@ export class BrowserAccountLease {
 export class BrowserAccountLeaseRegistry {
   private readonly leases = new Map<string, BrowserAccountLease>();
   private readonly physicalResources = new Map<string, BrowserAccountLease>();
+  private readonly accountLeases = new Map<string, BrowserAccountLease>();
+
+  private accountKey(descriptor: BrowserAccountLeaseDescriptor): string {
+    return `${descriptor.serviceId}:${fingerprint(descriptor.accountIdentity)}`;
+  }
 
   acquire(descriptor: BrowserAccountLeaseDescriptor): BrowserAccountLease {
     const lease = new BrowserAccountLease(descriptor);
@@ -141,7 +148,13 @@ export class BrowserAccountLeaseRegistry {
     if (existing?.isActive()) {
       throw new Error(`Browser resource is already leased for turn ${descriptor.turnId}`);
     }
+    const accountKey = this.accountKey(descriptor);
+    const accountOwner = this.accountLeases.get(accountKey);
+    if (accountOwner?.isActive() && accountOwner !== existing) {
+      throw new Error(`Authenticated ChatGPT account is already leased by turn ${accountOwner.descriptor.turnId}`);
+    }
     this.leases.set(lease.leaseId, lease);
+    this.accountLeases.set(accountKey, lease);
     return lease;
   }
 
@@ -168,6 +181,8 @@ export class BrowserAccountLeaseRegistry {
     }
     lease.release();
     if (this.leases.get(lease.leaseId) === lease) this.leases.delete(lease.leaseId);
+    const accountKey = this.accountKey(lease.descriptor);
+    if (this.accountLeases.get(accountKey) === lease) this.accountLeases.delete(accountKey);
   }
 
   activeCount(): number {
@@ -178,6 +193,7 @@ export class BrowserAccountLeaseRegistry {
     for (const lease of this.leases.values()) lease.release();
     this.leases.clear();
     this.physicalResources.clear();
+    this.accountLeases.clear();
   }
 }
 
@@ -195,6 +211,7 @@ export interface ProviderTurnSnapshot {
   readonly recovery: ProviderRecovery;
   readonly submission: SubmissionPhase;
   readonly logicalSettled: boolean;
+  readonly logicalOutcome: LogicalSettlementOutcome;
   readonly physicalSettled: boolean;
   readonly physicalSettlementAttached: boolean;
   readonly physicalSettlementOutcome: PhysicalSettlementOutcome;
@@ -212,12 +229,15 @@ export class ProviderTurnLifecycle {
   private recovery: ProviderRecovery = "NEW";
   private submission: SubmissionPhase = "prepared";
   private logicalSettled = false;
+  private logicalOutcome: LogicalSettlementOutcome = "pending";
   private physicalSettled = false;
   private physicalSettlement: Promise<void> = Promise.resolve();
   private physicalSettlementAttached = false;
   private physicalSettlementOutcome: PhysicalSettlementOutcome = "not_started";
   private physicalSettlementError?: Error;
   private retirementScheduled = false;
+  private shutdownRequested = false;
+  private cancelExecution?: (reason: Error) => void;
 
   constructor(
     readonly lease: BrowserAccountLease,
@@ -235,6 +255,7 @@ export class ProviderTurnLifecycle {
       recovery: this.recovery,
       submission: this.submission,
       logicalSettled: this.logicalSettled,
+      logicalOutcome: this.logicalOutcome,
       physicalSettled: this.physicalSettled,
       physicalSettlementAttached: this.physicalSettlementAttached,
       physicalSettlementOutcome: this.physicalSettlementOutcome,
@@ -307,7 +328,17 @@ export class ProviderTurnLifecycle {
 
   markRunning(): void {
     this.assertMutable();
-    if (this.state === "SUBMITTED") this.transition("RUNNING");
+    if (this.state !== "SUBMITTED") {
+      if (this.state === "RUNNING" && this.submission === "accepted") {
+        this.activity = "running";
+        return;
+      }
+      throw new Error(`Provider turn cannot enter RUNNING from ${this.state}`);
+    }
+    if (this.submission !== "accepted") {
+      throw new Error("Provider turn cannot enter RUNNING before submission is accepted");
+    }
+    this.transition("RUNNING");
     this.activity = "running";
   }
 
@@ -332,9 +363,33 @@ export class ProviderTurnLifecycle {
     this.recovery = value;
   }
 
-  markLogicalSettled(): void {
+  markLogicalSettled(outcome: Exclude<LogicalSettlementOutcome, "pending"> = "completed"): void {
     this.assertMutable();
+    if (this.logicalSettled) {
+      if (this.logicalOutcome !== outcome) {
+        throw new Error(`Provider turn logical outcome cannot change: ${this.logicalOutcome} -> ${outcome}`);
+      }
+      return;
+    }
     this.logicalSettled = true;
+    this.logicalOutcome = outcome;
+  }
+
+  attachCancellation(cancel: (reason: Error) => void): void {
+    if (this.cancelExecution) throw new Error("Provider turn cancellation callback can only be attached once");
+    this.cancelExecution = cancel;
+    if (this.shutdownRequested) {
+      cancel(new Error("ChatGPT Web ProviderCore is shutting down"));
+    }
+  }
+
+  requestShutdown(reason: Error = new Error("ChatGPT Web ProviderCore is shutting down")): void {
+    if (this.state === "RETIRED") return;
+    this.shutdownRequested = true;
+    if (!this.logicalSettled && this.state !== "SETTLING") {
+      this.markLogicalSettled("cancelled");
+    }
+    this.cancelExecution?.(reason);
   }
 
   canAutomaticallyRetry(): boolean {
@@ -385,7 +440,7 @@ export class ProviderTurnLifecycle {
       throw new Error("Cannot force provider turn retirement after physical execution has started");
     }
     if (this.state === "RETIRED") return;
-    this.markLogicalSettled();
+    this.markLogicalSettled("failed");
     if (this.state !== "SETTLING") this.transition("SETTLING");
     this.physicalSettled = true;
     this.physicalSettlementOutcome = "not_started";
@@ -406,6 +461,13 @@ export class ProviderTurnLifecycle {
     if (outcome === "rejected") {
       this.physicalSettlementError = normalizeError(error);
       this.recovery = "FAILED";
+      if (!this.logicalSettled) {
+        this.logicalSettled = true;
+        this.logicalOutcome = "failed";
+      }
+    } else if (!this.logicalSettled) {
+      this.logicalSettled = true;
+      this.logicalOutcome = "failed";
     }
     this.activity = "idle";
     if (this.state !== "RETIRED") {
@@ -534,8 +596,12 @@ export class ChatGptWebProviderCore {
     this.turns.delete(executionKey);
   }
 
-  shutdown(): void {
+  async shutdown(reason = new Error("ChatGPT Web ProviderCore is shutting down")): Promise<void> {
+    if (this.closed && this.turns.size === 0) return;
     this.closed = true;
+    const activeTurns = [...this.turns.values()];
+    for (const turn of activeTurns) turn.requestShutdown(reason);
+    await Promise.allSettled(activeTurns.map(turn => turn.waitForPhysicalSettlement()));
     this.leases.clear();
     this.turns.clear();
     this.retiredExecutions.clear();
