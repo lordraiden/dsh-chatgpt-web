@@ -543,10 +543,25 @@ async function main(): Promise<void> {
       stdout.write("Playwright can launch the configured Chrome executable.\n");
     }
   } else if (command === "serve") {
+    const hostOverride = takeOption(args, "--host");
+    const portOverride = takeOption(args, "--port");
     assertNoArgs(args);
+    if (hostOverride !== undefined && hostOverride !== "127.0.0.1") {
+      throw new Error("--host must be 127.0.0.1; the sidecar is loopback-only");
+    }
     const config = loadConfig();
-    const server = startServer(config);
-    stdout.write(`dsh-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
+    const port = portOverride === undefined ? config.port : Number(portOverride);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("--port must be an integer between 1 and 65535");
+    }
+    const activeHost = hostOverride === undefined ? config.host : "127.0.0.1";
+    const activeConfig = {
+      ...config,
+      host: activeHost,
+      ...(portOverride !== undefined ? { port } : {}),
+    };
+    const server = startServer(activeConfig);
+    stdout.write(`dsh-chatgpt-web ${VERSION} listening on http://${activeConfig.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "dev") await runDevCommand(args);
   else if (command === "mcp") await runChatGptMcpMain(args);
