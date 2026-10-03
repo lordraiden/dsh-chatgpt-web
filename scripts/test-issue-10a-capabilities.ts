@@ -96,6 +96,7 @@ const reorderedEquivalent = projectChatGptCapabilities({
   }],
 });
 assert.equal(reordered.snapshotId, reorderedEquivalent.snapshotId);
+
 const differentTurn = projectChatGptCapabilities({
   sessionId: "session-2",
   agentId: "agent-2",
@@ -112,12 +113,17 @@ const differentTurn = projectChatGptCapabilities({
 });
 assert.notEqual(differentTurn.snapshotId, isolated.snapshotId);
 
+const flattenedCollision: CodexTool = {
+  ...canonicalEnvironmentTool,
+  namespace: "",
+  name: "codex__exec_command",
+};
 assert.throws(
   () => projectChatGptCapabilities({
-    sessionId: "duplicate",
+    sessionId: "collision",
     agentId: "agent",
     turnId: "turn",
-    tools: [canonicalEnvironmentTool, { ...canonicalEnvironmentTool, description: "same wire name" }],
+    tools: [canonicalEnvironmentTool, flattenedCollision],
   }),
   /duplicate wire capability/,
 );
@@ -136,10 +142,21 @@ assert.throws(
   ),
   /expired/,
 );
-const expiryTampered = structuredClone(expiring) as typeof expiring;
-expiryTampered.expiresAt = expiring.expiresAt! + 60_000;
+
+const laterExpiry = projectChatGptCapabilities({
+  sessionId: "session-3",
+  turnId: "turn-4",
+  tools: [canonicalEnvironmentTool],
+  expiresAt: expiring.expiresAt! + 60_000,
+});
+assert.notEqual(laterExpiry.snapshotId, expiring.snapshotId);
+
+const expiryTampered = {
+  ...structuredClone(expiring),
+  expiresAt: expiring.expiresAt! + 60_000,
+};
 assert.throws(
-  () => assertCapabilitySnapshotIntegrity(expiryTampered),
+  () => assertCapabilitySnapshotIntegrity(expiryTampered as typeof expiring),
   /integrity check failed/,
 );
 
