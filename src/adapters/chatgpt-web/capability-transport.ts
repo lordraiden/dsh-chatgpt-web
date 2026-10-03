@@ -122,6 +122,11 @@ export class BrokerCapabilityTransport implements CapabilityTransport {
       invoke: async (request, signal) => {
         const capabilityRequest = invocationRequest(request);
         const tool = authorize(capabilityRequest);
+        if (request.freeform !== (tool.freeform === true)) {
+          throw new Error(
+            `capability transport invocation mode does not match the authorized tool: ${capabilityRequest.wireName}`,
+          );
+        }
         return this.dispatcher.invoke(binding, {
           ...request,
           wireName: capabilityRequest.wireName,
