@@ -160,6 +160,15 @@ assert.throws(
   /integrity check failed/,
 );
 
+const creationTimeTampered = {
+  ...structuredClone(expiring),
+  createdAt: expiring.createdAt - 1,
+};
+assert.throws(
+  () => assertCapabilitySnapshotIntegrity(creationTimeTampered as typeof expiring),
+  /integrity check failed/,
+);
+
 const tampered = structuredClone(snapshot) as typeof snapshot;
 (tampered.tools[0]!.parameters as Record<string, unknown>).tampered = true;
 assert.throws(
