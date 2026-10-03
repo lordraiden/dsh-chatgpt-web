@@ -267,7 +267,13 @@ export function toCodexParsedRequest(
     );
   }
 
-  if (options.toolHistory?.updates.length) {
+  if (options.tools?.some(tool => tool.freeform === true || tool.toolSearch === true)) {
+    throw new LlmError(
+      "ChatGPT Web native provider does not support freeform or tool-search tool semantics in this phase.",
+      "UNSUPPORTED_OPTION",
+    );
+  }
+    if (options.toolHistory?.updates.length) {
     throw new LlmError(
       "ChatGPT Web native provider does not support dynamic tool updates in this phase; refusing to discard tool history.",
       "UNSUPPORTED_OPTION",
