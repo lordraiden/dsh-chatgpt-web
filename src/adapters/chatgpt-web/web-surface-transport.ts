@@ -76,7 +76,7 @@ export interface WebSurfaceInspection {
  * Upper layers receive WebSurfaceTurn/WebSurfacePhysicalSurface and never import BrowserTurn,
  * Playwright types, selectors, or DOM structures.
  */
-interface WebSurfaceTransportBackend {
+export interface WebSurfaceTransportBackend {
   run(turn: WebSurfaceTurn): Promise<string>;
   verifyConnector(traceId?: string): Promise<string>;
   inspectSession(detectCapabilities: boolean): Promise<WebSurfaceInspection>;
