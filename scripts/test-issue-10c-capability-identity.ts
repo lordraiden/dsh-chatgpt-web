@@ -91,6 +91,7 @@ assert.equal(identity.threadId, "dsh-session-parent");
   assert.notEqual(firstSnapshot.agentId, "/root/provider-name");
 
   const turn = core.begin({ ...leaseInput(identity.turnId!, firstSnapshot) });
+  assert.equal(turn.lease.provenance().turnId, identity.turnId);
 
   const sameSnapshot = resolveChatGptCapabilitySnapshotForTurn(
     core,
