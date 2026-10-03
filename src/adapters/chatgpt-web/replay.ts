@@ -1,5 +1,10 @@
 import type { CanonicalChatGptWebContext } from "./context-projection";
+import { CHATGPT_CONTEXT_EXHAUSTED_CODE } from "./adapter-error";
 import type { ProviderRecovery } from "./provider-core";
+
+export interface ChatGptReplayTrigger {
+  readonly code: typeof CHATGPT_CONTEXT_EXHAUSTED_CODE;
+}
 
 export interface ChatGptReplayIdentity {
   readonly sessionId: string;
@@ -103,6 +108,12 @@ function requireNonEmpty(value: string, name: string): void {
   if (!value.trim()) throw new Error("ChatGPT replay requires a non-empty " + name);
 }
 
+function validateTrigger(trigger: ChatGptReplayTrigger): void {
+  if (trigger.code !== CHATGPT_CONTEXT_EXHAUSTED_CODE) {
+    throw new Error("ChatGPT replay requires the context_exhausted recovery condition");
+  }
+}
+
 function validateIdentity(identity: ChatGptReplayIdentity): void {
   requireNonEmpty(identity.sessionId, "session id");
   requireNonEmpty(identity.agentId, "agent id");
@@ -150,6 +161,7 @@ function validateBoundary(boundary: ChatGptReplayBoundary): void {
 }
 
 export interface ChatGptReplayRequest {
+  readonly trigger: ChatGptReplayTrigger;
   readonly exhaustedConversation: ChatGptConversationHandle;
   readonly identity: ChatGptReplayIdentity;
   readonly context: CanonicalChatGptWebContext;
@@ -199,6 +211,7 @@ export class ChatGptReplayCoordinator {
     }
 
     try {
+      validateTrigger(request.trigger);
       validateIdentity(request.identity);
       validateHandle(request.exhaustedConversation, "exhausted");
       validateBoundary(request.boundary);
@@ -220,9 +233,6 @@ export class ChatGptReplayCoordinator {
       await transport.waitForReplacementReady(replacement, request.identity);
       this.phase = "REPLACEMENT_READY";
 
-      await transport.invalidateConversation(request.exhaustedConversation, request.identity);
-      this.staleConversationIds.add(request.exhaustedConversation.id);
-
       const binding = await transport.bindReplacementConversation(
         request.exhaustedConversation,
         replacement,
@@ -237,7 +247,12 @@ export class ChatGptReplayCoordinator {
       ) {
         throw new Error("ChatGPT replay replacement binding does not match the replacement conversation");
       }
+
       this.activeConversation = { ...binding.conversation };
+      this.generation = replacement.generation;
+
+      await transport.invalidateConversation(request.exhaustedConversation, request.identity);
+      this.staleConversationIds.add(request.exhaustedConversation.id);
 
       this.phase = "REPLAYING_CANONICAL_CONTEXT";
       await transport.replayCanonicalContext(
