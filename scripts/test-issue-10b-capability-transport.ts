@@ -110,7 +110,7 @@ const environment = capabilitySnapshotForEnvironment({
       revocations += 1;
     },
   }).bind({
-    bindingId: "binding_10b_test",
+    bindingId: "binding/10b:test",
     snapshot,
     snapshotId: snapshot.snapshotId,
     sessionId: snapshot.sessionId,
