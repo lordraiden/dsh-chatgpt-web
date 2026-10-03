@@ -225,26 +225,12 @@ function assistantContent(content: CodexAssistantContentPart[], userContext?: st
       }
       return { type: "thinking_summary", text: part.thinking };
     }
-    let args = part.arguments;
-    if (part.name === "write" && args && typeof args === "object") {
-      const rec = { ...(args as Record<string, unknown>) };
-      if ((typeof rec.file_path !== "string" || !rec.file_path.trim()) && userContext) {
-        const cleaned = userContext
-          .replace(/https?:\/\/[^\s]+/g, "")
-          .replace(/\b(?:AGENTS|CLAUDE)\.md\b/gi, "");
-        const match = cleaned.match(/\b([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]{1,10})\b/);
-        if (match && match[1]) {
-          rec.file_path = match[1];
-          args = rec;
-        }
-      }
-    }
     return {
       type: "tool_call",
       id: part.id,
       name: part.name,
       ...(part.namespace ? { namespace: part.namespace } : {}),
-      arguments: args,
+      arguments: part.arguments,
     };
   }).filter(Boolean);
 }
@@ -515,6 +501,14 @@ export function compileChatGptWebPrompt(
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to the harness.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
+    ...(mode.localTools
+      ? [
+        "Codex Native tool calls are strict control frames, not prose or Markdown. Emit exactly one <dsh_tool_call>...</dsh_tool_call> frame when a local tool must be called.",
+        "The control-frame JSON must contain exactly these fields and no others: version, id, name, arguments. Set version to 1; id must be a fresh opaque correlation id matching call_<token>; name must be the exact advertised tool name; arguments must be a JSON object.",
+        "Never synthesize or reuse a tool-call id, never emit a tool call in XML parameter tags, fenced JSON, prose, or legacy tool-call formats, and never emit more than one frame with the same id.",
+        "The tool frame is a protocol message for the outer harness. Do not discuss it, quote it, or place ordinary user-facing prose inside the frame.",
+      ]
+      : []),
   ];
   const transportContract = parsed._compactionRequest
     ? manualControl

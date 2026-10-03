@@ -28,6 +28,8 @@ import {
   type StreamChunk,
   type TokenUsage,
   type ToolSchema,
+  type ResolvedRetryPolicy,
+  resolveRetryPolicy,
 } from "@deepseek-ai/dsh-llm";
 import {
   availableChatGptWebModelRoutes,
@@ -62,6 +64,8 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
   private readonly createBackend: (provider: ReturnType<typeof providerConfig>) => ProviderAdapter;
   private providerMemo: ReturnType<typeof providerConfig> | undefined;
   private backendMemo: ProviderAdapter | undefined;
+  private shuttingDown = false;
+  private shutdownPromise?: Promise<void>;
 
   constructor(deps: LlmAdapterDeps = {}) {
     super();
@@ -85,6 +89,9 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
   }
 
   private resolveBackend(): ProviderAdapter {
+    if (this.shuttingDown) {
+      throw new LlmError("ChatGPT Web provider is shutting down.", "PROVIDER_CONFIG");
+    }
     if (!this.backendMemo) {
       this.backendMemo = this.createBackend(this.resolveProvider());
     }
@@ -93,6 +100,21 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: "ChatGPT Web" };
+  }
+
+  /**
+   * ChatGPT Web owns browser submission/recovery authority. Disable the optional
+   * DSH provider retry executor so a browser turn cannot be retried by two
+   * independent authorities.
+   */
+  override providerRetryPolicy(provider: string): ResolvedRetryPolicy {
+    return resolveRetryPolicy(
+      {
+        mode: "normal",
+        maxRetries: 0,
+      },
+      `llm.provider.${provider}.retryPolicy`,
+    );
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
@@ -171,7 +193,20 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
           );
         }
       },
+      { usageMode: "omit" },
     );
+  }
+
+  /** Dispose the lazily-created browser provider without creating one during shutdown. */
+  async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shuttingDown = true;
+    const backend = this.backendMemo;
+    this.backendMemo = undefined;
+    this.shutdownPromise = backend?.shutdown
+      ? Promise.resolve(backend.shutdown())
+      : Promise.resolve();
+    await this.shutdownPromise;
   }
 }
 
@@ -224,7 +259,41 @@ export function toCodexParsedRequest(
       "UNSUPPORTED_OPTION",
     );
   }
-  if (options.toolHistory?.updates.length) {
+
+  const nativeOptions = options as GenerateOptions & Record<string, unknown>;
+  const unsupportedOptions: string[] = [];
+  for (const key of [
+    "maxTokens",
+    "temperature",
+    "stop",
+    "topP",
+    "presencePenalty",
+    "frequencyPenalty",
+    "seed",
+    "toolChoice",
+    "parallelToolCalls",
+    "verbosity",
+    "responseFormat",
+  ]) {
+    if (nativeOptions[key] !== undefined) unsupportedOptions.push(key);
+  }
+  if (unsupportedOptions.length > 0) {
+    throw new LlmError(
+      `ChatGPT Web browser transport cannot faithfully apply GenerateOptions: ${unsupportedOptions.join(", ")}. Refusing to silently discard unsupported options.`,
+      "UNSUPPORTED_OPTION",
+    );
+  }
+
+  if (options.tools?.some(tool => {
+    const extended = tool as ToolSchema & { freeform?: boolean; toolSearch?: boolean };
+    return extended.freeform === true || extended.toolSearch === true;
+  })) {
+    throw new LlmError(
+      "ChatGPT Web native provider does not support freeform or tool-search tool semantics in this phase.",
+      "UNSUPPORTED_OPTION",
+    );
+  }
+    if (options.toolHistory?.updates.length) {
     throw new LlmError(
       "ChatGPT Web native provider does not support dynamic tool updates in this phase; refusing to discard tool history.",
       "UNSUPPORTED_OPTION",
@@ -301,9 +370,6 @@ export function toCodexParsedRequest(
     },
     stream: true,
     options: {
-      ...(options.maxTokens !== undefined ? { maxOutputTokens: options.maxTokens } : {}),
-      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-      ...(options.stop?.length ? { stopSequences: options.stop } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
       ...(purpose === "session-title" || purpose === "compaction" ? { hideThinkingSummary: true } : {}),
     },
@@ -530,16 +596,17 @@ export function mapStream(
   resolveBackend: () => ProviderAdapter,
   options: GenerateOptions,
   toRequest: () => CodexParsedRequest,
+  settings: { usageMode?: "emit" | "omit" } = {},
 ): AsyncIterable<StreamChunk> {
   return (async function* (): AsyncGenerator<StreamChunk> {
     if (options.signal?.aborted) {
       yield { type: "finish", reason: { kind: "aborted", failure: failureFromEvent("ChatGPT Web turn aborted.", "aborted") } };
       return;
     }
-    let backend: ProviderAdapter;
-    try { backend = resolveBackend(); } catch (error) { yield { type: "finish", reason: toFinishFailure(error, options.signal) }; return; }
     let parsed: CodexParsedRequest;
     try { parsed = toRequest(); } catch (error) { yield { type: "finish", reason: toFinishFailure(error, options.signal) }; return; }
+    let backend: ProviderAdapter;
+    try { backend = resolveBackend(); } catch (error) { yield { type: "finish", reason: toFinishFailure(error, options.signal) }; return; }
 
     const backendAbort = new AbortController();
     const onAbort = () => backendAbort.abort(options.signal?.reason);
@@ -556,6 +623,7 @@ export function mapStream(
       }
     })();
 
+    const emitUsage = settings.usageMode !== "omit";
     let blockIndex = 0;
     let openBlock: { index: number; kind: "text" | "reasoning"; text: string } | { index: number; kind: "tool"; id: string; name?: string; arguments: string } | undefined;
     let usageEmitted = false;
@@ -604,7 +672,7 @@ export function mapStream(
           }
           case "tool_call_delta": {
             if (!openBlock || openBlock.kind !== "tool") {
-              yield { type: "tool-call-delta", index: blockIndex++, id: ToolCallId("unknown"), argumentsDelta: event.arguments };
+              throw new LlmError("ChatGPT Web emitted tool arguments without an active tool-call block.", "PROTOCOL_ERROR");
               break;
             }
             openBlock.arguments += event.arguments;
@@ -622,7 +690,7 @@ export function mapStream(
             break;
           case "done": {
             const end = closeBlock(); if (end) yield end;
-            const tokenUsage = toTokenUsage(event.usage);
+            const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             const kind = event.stopReason === "tool_use" ? "tool-calls" : event.stopReason === "max_tokens" ? "max-tokens" : "stop";
             yield { type: "finish", reason: { kind } };
@@ -631,7 +699,7 @@ export function mapStream(
           }
           case "incomplete": {
             const end = closeBlock(); if (end) yield end;
-            const tokenUsage = toTokenUsage(event.usage);
+            const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             yield { type: "finish", reason: { kind: "error", failure: failureFromEvent(event.message ?? event.reason, "PROVIDER_ERROR") } };
             finishYielded = true;
@@ -639,7 +707,7 @@ export function mapStream(
           }
           case "error": {
             const end = closeBlock(); if (end) yield end;
-            const tokenUsage = toTokenUsage(event.usage);
+            const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             const kind = isAbortError(event) && (options.signal?.aborted || backendAbort.signal.aborted) ? "aborted" : "error";
             yield { type: "finish", reason: { kind, failure: failureFromEvent(event.message, event.code ?? (kind === "aborted" ? "aborted" : "PROVIDER_ERROR"), event.status) } };

@@ -693,12 +693,20 @@ export class ChatGptTurnSessions {
     return matches.length;
   }
 
-  clear(): number {
-    const cancelled = this.entries.size;
-    for (const [key, session] of this.entries) this.beginRetirement(key, session);
-    this.entries.clear();
-    this.conversationHeads.clear();
-    return cancelled;
+  clear(executionNamespace?: string): number {
+    const matches = [...this.entries].filter(([key]) => (
+      executionNamespace === undefined || key.startsWith(`${executionNamespace}:`)
+    ));
+    for (const [key, session] of matches) this.beginRetirement(key, session);
+    for (const [key] of matches) this.entries.delete(key);
+    if (executionNamespace === undefined) {
+      this.conversationHeads.clear();
+    } else {
+      for (const [key, session] of this.conversationHeads) {
+        if (session.ownerKey?.startsWith(`${executionNamespace}:`)) this.conversationHeads.delete(key);
+      }
+    }
+    return matches.length;
   }
 
   async cancelTrace(traceId: string, reason = chatGptBrowserTabClosedError()): Promise<number> {

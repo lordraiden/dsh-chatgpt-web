@@ -40,6 +40,9 @@ jobs:
       - name: Build bundles
         run: bun run build
 
+      - name: Issue #9 ProviderCore lifecycle tests
+        run: bun scripts/test-issue-9-provider-core.ts
+
       - name: Issue contract tests
         run: node scripts/test-issue-20-settings.mjs
 

@@ -101,6 +101,16 @@ import type {
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+const physicalObjectIds = new WeakMap<object, string>();
+let nextPhysicalObjectId = 0;
+
+function physicalObjectId(value: object, prefix: string): string {
+  const existing = physicalObjectIds.get(value);
+  if (existing) return existing;
+  const id = `${prefix}:${(++nextPhysicalObjectId).toString(36)}`;
+  physicalObjectIds.set(value, id);
+  return id;
+}
 
 export async function closeChatGptBrowserWorkers(): Promise<void> {
   const active = [...workers.values()];
@@ -1181,6 +1191,14 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
   });
 }
 
+export interface ChatGptBrowserPhysicalSurface {
+  resourceId: string;
+  browserContextId: string;
+  pageId: string;
+  profileId: string;
+  accountId: string;
+}
+
 export interface BrowserTurn {
   traceId: string;
   modelId: string;
@@ -1200,6 +1218,10 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void;
+  /** Bound to the concrete browser surface/context/page before the surface is declared ready. */
+  onPhysicalSurfaceBound?: (binding: ChatGptBrowserPhysicalSurface) => void | Promise<void>;
+  /** Physical ChatGPT surface has completed authentication, temporary-chat preparation, and model setup. */
+  onSurfaceReady?: () => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
   onReasoningSummary?: (text: string, continuation?: boolean) => void;
   /** Stable visible ChatGPT prose between status/tool rows. */
@@ -4442,6 +4464,23 @@ export class ChatGptBrowserWorker {
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
+      const physicalResourceId = launcherSurfaceId ?? physicalObjectId(page, "managed-surface");
+      const physicalProfileId = this.config.browserHost === "launcher"
+        ? `launcher-profile:${this.config.browserHostDescriptorPath ?? "unknown"}`
+        : `chrome-profile:${this.config.chromeExecutablePath}`;
+      const physicalAccountId = `chatgpt-account:${this.config.storageStatePath}`;
+      let physicalPageId = physicalObjectId(page, "page");
+      let physicalContextId = physicalObjectId(page.context(), "context");
+      const bindPhysicalSurface = async (): Promise<void> => {
+        await turn.onPhysicalSurfaceBound?.({
+          resourceId: physicalResourceId,
+          browserContextId: physicalContextId,
+          pageId: physicalPageId,
+          profileId: physicalProfileId,
+          accountId: physicalAccountId,
+        });
+      };
+      await bindPhysicalSurface();
       const rebindLauncherPage = async (
         attempt: number,
         cause: Error,
@@ -4492,6 +4531,9 @@ export class ChatGptBrowserWorker {
         turnConnection = connection.browser;
         page = connection.page;
         diagnosticPage = page;
+        physicalPageId = physicalObjectId(page, "page");
+        physicalContextId = physicalObjectId(page.context(), "context");
+        await bindPhysicalSurface();
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
         );
@@ -4570,6 +4612,7 @@ export class ChatGptBrowserWorker {
         ));
       }
       await diagnostics.capture(page, "effort-selection-complete");
+      await turn.onSurfaceReady?.();
 
       let finalPrompt = prepared.text;
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
@@ -4600,8 +4643,8 @@ export class ChatGptBrowserWorker {
               stageBaseline,
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-              undefined,
-              undefined,
+              turn.externalProgress,
+              turn,
               undefined,
               toolTurnObservationRecovery
                 ? async (...args) => {
@@ -4776,55 +4819,7 @@ export class ChatGptBrowserWorker {
         await diagnostics.capture(page, `${stagePrefix}send-accepted`);
         return responseTurn;
       };
-      // Free-plan Temporary Chat rehydrates the conversation SPA unpredictably ("Loading chats" /
-      // "Loading profile"), discarding the in-flight generation. A rehydration that outlives the
-      // stall budget fails the wait with ChatGptSurfaceStaleError; the recovery reloads a fresh
-      // Temporary Chat document and resubmits the same prompt. Retained-conversation turns cannot
-      // be replayed onto a fresh document, so they surface the error instead.
-      const surfaceStaleRecoveryAttempts = 2;
-      let responseTurn: ChatGptAssistantTurnBinding;
-      for (let surfaceStaleAttempt = 1; ; surfaceStaleAttempt++) {
-        try {
-          responseTurn = await sendAndWaitForResponse(surfaceStaleAttempt);
-          break;
-        } catch (error) {
-          if (!(error instanceof ChatGptSurfaceStaleError)
-            || surfaceStaleAttempt >= surfaceStaleRecoveryAttempts
-            || reuseConversation) {
-            throw error;
-          }
-          console.warn(
-            `[chatgpt-web] browser turn ${turn.traceId} recovered from a stale temporary-chat surface`
-            + ` (attempt ${surfaceStaleAttempt}/${surfaceStaleRecoveryAttempts}): ${redactChatGptUiDiagnostic(error.message)}`,
-          );
-          await diagnostics.capture(page, `surface-stale-recovery_${surfaceStaleAttempt}`);
-          await this.runStage(
-            turn.traceId,
-            `surface_stale_recovery_${surfaceStaleAttempt}`,
-            browserStageTimeouts.temporaryChatPreparation,
-            async () => {
-              await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-              await this.prepareTemporaryChatSurface(
-                page,
-                checkpoint => diagnostics.capture(page, checkpoint),
-              );
-              mode = await this.selectModelAndEffort(
-                page,
-                turn.modelId,
-                turn.reasoning,
-                turn.capabilities,
-                checkpoint => diagnostics.capture(page, checkpoint),
-              );
-              // Let the freshly reloaded composer finish hydrating before re-attaching, so the
-              // send button can enable once the prompt lands. Re-sending into a mid-rehydration
-              // composer leaves the button disabled and fails the recovery attempt.
-              await this.waitForRehydrationSettled(page, 15_000);
-              submissionBaseline = await this.captureSubmissionBaseline(page);
-            },
-          );
-          await diagnostics.capture(page, `surface-stale-recovery-ready_${surfaceStaleAttempt}`);
-        }
-      }
+      let responseTurn = await sendAndWaitForResponse(1);
 
       let lastHeartbeat = 0;
       let finalText = "";
