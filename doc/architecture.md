@@ -841,7 +841,7 @@ DSH session history remains canonical.
 
 Provider-specific compaction, rolling checkpoints, and replay handoff are optimization/transport state.
 
-They may reduce the amount of material physically re-submitted to ChatGPT Web, but they do not become a second DSH session log.
+They may reduce the amount of material physically re-submitted to ChatGPT Web, but they do not become a second DSH session log. For #11-B's deterministic transport reduction, required developer instructions, the latest user/agent/assistant continuity, and settled tool-call/result pairs are protected; older ordinary conversation may be omitted from the transport projection without mutating DSH's canonical history.
 
 If provider-private continuity is lost, replay comes from DSH state, not from a provider-owned substitute history.
 
