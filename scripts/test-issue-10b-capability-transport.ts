@@ -175,6 +175,21 @@ const environment = capabilitySnapshotForEnvironment({
     }),
     /binding does not match/i,
   );
+
+  assert.throws(
+    () => new BrokerCapabilityTransport({
+      async invoke() { return expected; },
+      revoke() {},
+    }).bind({
+      bindingId: "binding_10b_test",
+      snapshot,
+      snapshotId: snapshot.snapshotId,
+      sessionId: "forged-session",
+      agentId: snapshot.agentId,
+      turnId: snapshot.turnId,
+    }),
+    /binding does not match/i,
+  );
 }
 
 {
