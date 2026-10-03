@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
 
 export interface CordisContext {
   effect?: (cb: () => void | Promise<void> | (() => void) | (() => Promise<void>)) => void;
@@ -12,10 +13,18 @@ export interface CordisContext {
     error(msg: string): void;
     debug(msg: string): void;
   };
+  /**
+   * Native DSH LLM runtime (augmented onto the Cordis context by
+   * `@deepseek-ai/dsh-llm`). Structural on purpose: the plugin only needs to
+   * register the ChatGPT Web provider and dispose the registration.
+   */
+  llm: {
+    registerAdapter(providers: string[], adapter: ChatGptWebLlmAdapter): { (): void };
+  };
 }
 
 export const name = "dsh-chatgpt-web";
-export const inject = [];
+export const inject = ["llm"];
 
 export interface ChatGPTWebPluginConfig {
   /** Host to bind or check for health (default: 127.0.0.1). */
@@ -171,16 +180,28 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     spawnedProcess = undefined;
   };
 
+  const registerAdapter = (): (() => void) => {
+    const disposeAdapter = ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], new ChatGptWebLlmAdapter());
+    logger.info(`[dsh-chatgpt-web] Registered native DSH provider "${CHATGPT_WEB_PROVIDER_ID}"`);
+    return disposeAdapter;
+  };
+
   if (typeof ctx.effect === "function") {
     ctx.effect(() => {
+      const disposeAdapter = registerAdapter();
       void startDaemon();
       return () => {
         void stopDaemon();
+        disposeAdapter();
       };
     });
   } else {
+    const disposeAdapter = registerAdapter();
     void startDaemon();
-    process.once("beforeExit", () => void stopDaemon());
+    process.once("beforeExit", () => {
+      void stopDaemon();
+      disposeAdapter();
+    });
   }
 }
 
