@@ -875,7 +875,59 @@ Before submit:
 5. use a supported multipart strategy if already available;
 6. otherwise return a deterministic context error.
 
+
 Never rely on browser/editor truncation as context management.
+
+### 15.4 Deterministic conversation-replacement replay
+
+Context exhaustion is an explicit continuity event, not an ordinary model error and not permission to start a new DSH conversation.
+
+The #11-C replay boundary is:
+
+~~~text
+EXACT_RESUME
+   |
+   | explicit CONTEXT_EXHAUSTED
+   v
+REPLAY
+   |
+   +--> invalidate exhausted browser conversation
+   +--> create/select replacement conversation
+   +--> prove replacement readiness
+   +--> bind replacement while preserving DSH identity
+   +--> replay canonical DSH projection
+   v
+RESUME
+~~~
+
+The replay seam accepts only trusted, out-of-band DSH identity:
+
+- session identity;
+- agent identity;
+- logical turn identity;
+- immutable capability snapshot identity;
+- capability binding identity.
+
+A replacement may change only the provider-private ChatGPT conversation/browser handle.
+
+The replay boundary is also trusted DSH state. Every canonical tool call must be explicitly classified as either:
+
+- settled, with its canonical tool result preserved as replay data; or
+- pending, as the only execution state eligible to continue.
+
+Ambiguous or incomplete classification fails closed. Replay never infers the boundary from the last visible ChatGPT message.
+
+The abstract replacement seam exposed to #12 is responsible only for browser-side mechanics:
+
+- retire/invalidate the exhausted handle;
+- create/select the replacement;
+- prove readiness;
+- bind the replacement and echo the unchanged trusted DSH identity.
+
+No DOM selector, Playwright object, ChatGPT transcript, or browser-local history is visible to the replay state machine.
+
+After context exhaustion, the old conversation handle is fenced immediately. Late events from that handle are rejected, and the replacement cannot be bound unless its readiness and trusted identity continuity are proven. Any replacement, readiness, binding, or canonical replay ambiguity transitions the recovery classification to §FAILED§.
+
 ### 16.1 Free Web guardrails are empirical transport policy
 
 The current #11-B Free Web policy uses conservative measurements from the ChatGPT Web surface, not OpenAI API limits:
