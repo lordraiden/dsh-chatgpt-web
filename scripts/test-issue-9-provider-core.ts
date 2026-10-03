@@ -93,6 +93,13 @@ function leaseInput(turnId: string) {
 {
   const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("settlement-failure"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-settlement-failure",
+    browserContextId: "ctx-settlement-failure",
+    pageId: "page-settlement-failure",
+    profileId: "profile-settlement-failure",
+    accountId: "account-settlement-failure",
+  });
   turn.markSurfaceReady();
   turn.markSubmitted();
   turn.markRunning();
@@ -176,6 +183,13 @@ function leaseInput(turnId: string) {
 {
   const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("late-callback"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-late-callback",
+    browserContextId: "ctx-late-callback",
+    pageId: "page-late-callback",
+    profileId: "profile-late-callback",
+    accountId: "account-late-callback",
+  });
   turn.markSurfaceReady();
   turn.markSubmitted();
   turn.markRunning();
