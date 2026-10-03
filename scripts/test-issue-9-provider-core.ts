@@ -46,6 +46,7 @@ function leaseInput(turnId: string) {
   const settlement = new Promise<void>(resolve => { resolveSettlement = resolve; });
   core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
   assert.equal(turn.snapshot().physicalSettlementAttached, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "pending");
   assert.equal(turn.snapshot().physicalSettled, false);
   assert.equal(turn.lease.isActive(), true);
 
@@ -53,10 +54,34 @@ function leaseInput(turnId: string) {
   await turn.waitForPhysicalSettlement();
 
   assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "fulfilled");
   assert.equal(turn.snapshot().state, "RETIRED");
   assert.equal(turn.lease.isActive(), false);
   assert.throws(() => turn.assertCanAct(), /retired/i);
   console.log("ok logical vs physical settlement");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("settlement-failure"));
+  turn.markSurfaceReady();
+  turn.markSubmitted();
+  turn.markRunning();
+
+  let rejectSettlement!: (error: Error) => void;
+  const settlement = new Promise<void>((_resolve, reject) => { rejectSettlement = reject; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+
+  const settlementError = new Error("launcher /turn/end failed");
+  rejectSettlement(settlementError);
+  await assert.rejects(turn.waitForPhysicalSettlement(), /launcher \/turn\/end failed/);
+
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "rejected");
+  assert.equal(turn.snapshot().physicalSettlementError, settlementError.message);
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.lease.isActive(), false);
+  console.log("ok rejected physical settlement remains observable");
 }
 
 {
@@ -88,11 +113,47 @@ function leaseInput(turnId: string) {
     recovery: "EXACT_RESUME",
   });
   assert.equal(resumed.snapshot().recovery, "EXACT_RESUME");
-  resumed.markRecovery("REPLAY");
-  assert.equal(resumed.snapshot().recovery, "REPLAY");
-  resumed.markRecovery("FAILED");
-  assert.equal(resumed.snapshot().recovery, "FAILED");
-  console.log("ok continuity classification and reentrancy guard");
+  assert.throws(
+    () => resumed.markRecovery("REPLAY"),
+    /cannot downgrade exact resume to replay/i,
+  );
+  assert.equal(resumed.snapshot().recovery, "EXACT_RESUME");
+
+  const replay = core.begin({
+    ...leaseInput("resume"),
+    executionKey: "execution-replay",
+    traceId: "trace-replay",
+    nativeTurnId: "native-replay",
+    recovery: "REPLAY",
+  });
+  replay.markRecovery("FAILED");
+  assert.equal(replay.snapshot().recovery, "FAILED");
+  assert.throws(
+    () => replay.markRecovery("REPLAY"),
+    /cannot downgrade/i,
+  );
+  console.log("ok monotonic continuity classification and reentrancy guard");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("late-callback"));
+  turn.markSurfaceReady();
+  turn.markSubmitted();
+  turn.markRunning();
+
+  let resolveSettlement!: () => void;
+  const settlement = new Promise<void>(resolve => { resolveSettlement = resolve; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+  resolveSettlement();
+  await turn.waitForPhysicalSettlement();
+
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.throws(() => turn.markRunning(), /cannot accept lifecycle mutations/i);
+  assert.throws(() => turn.markCapabilityWait(), /cannot accept lifecycle mutations/i);
+  assert.throws(() => turn.markRecovery("FAILED"), /cannot accept lifecycle mutations/i);
+  assert.throws(() => turn.markLogicalSettled(), /cannot accept lifecycle mutations/i);
+  console.log("ok late lifecycle callbacks fail closed");
 }
 
 {
@@ -120,6 +181,7 @@ function leaseInput(turnId: string) {
   turn.failBeforePhysicalSettlement();
   assert.equal(turn.snapshot().state, "RETIRED");
   assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "not_started");
   assert.equal(turn.lease.isActive(), false);
   console.log("ok pre-browser failure retirement");
 }
