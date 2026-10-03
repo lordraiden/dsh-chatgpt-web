@@ -212,6 +212,7 @@ export interface ProviderTurnSnapshot {
   readonly state: ProviderTurnState;
   readonly activity: ProviderTurnActivity;
   readonly recovery: ProviderRecovery;
+  readonly recoveryReason?: "context_exhausted";
   readonly submission: SubmissionPhase;
   readonly logicalSettled: boolean;
   readonly logicalOutcome: LogicalSettlementOutcome;
@@ -231,6 +232,7 @@ export class ProviderTurnLifecycle {
   private state: ProviderTurnState = "PREPARING";
   private activity: ProviderTurnActivity = "idle";
   private recovery: ProviderRecovery = "NEW";
+  private recoveryReason?: "context_exhausted";
   private submission: SubmissionPhase = "prepared";
   private logicalSettled = false;
   private logicalOutcome: LogicalSettlementOutcome = "pending";
@@ -258,6 +260,7 @@ export class ProviderTurnLifecycle {
       state: this.state,
       activity: this.activity,
       recovery: this.recovery,
+      ...(this.recoveryReason ? { recoveryReason: this.recoveryReason } : {}),
       submission: this.submission,
       logicalSettled: this.logicalSettled,
       logicalOutcome: this.logicalOutcome,
@@ -370,6 +373,28 @@ export class ProviderTurnLifecycle {
       throw new Error("Provider recovery cannot reclassify a replay as exact resume");
     }
     this.recovery = value;
+  }
+
+  /**
+   * Context exhaustion is an explicit continuity event, not an implicit downgrade. It authorizes
+   * the one safe transition from an exact browser resume to a canonical replay of the same DSH turn.
+   */
+  markReplayForContextExhaustion(): void {
+    this.assertMutable();
+    if (this.recovery === "FAILED") {
+      throw new Error("A failed provider turn cannot enter replay recovery");
+    }
+    if (this.recovery === "REPLAY") {
+      if (this.recoveryReason !== "context_exhausted") {
+        throw new Error("Provider turn replay reason cannot change after classification");
+      }
+      return;
+    }
+    if (this.recovery !== "NEW" && this.recovery !== "EXACT_RESUME") {
+      throw new Error(`Provider turn cannot enter context-exhaustion replay from ${this.recovery}`);
+    }
+    this.recovery = "REPLAY";
+    this.recoveryReason = "context_exhausted";
   }
 
   markLogicalSettled(outcome: Exclude<LogicalSettlementOutcome, "pending"> = "completed"): void {
