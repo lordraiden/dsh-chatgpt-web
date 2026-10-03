@@ -12,6 +12,13 @@ import type { CodexMessage } from "../../types";
 export const CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET = 128_000;
 export const CHATGPT_WEB_DEFAULT_IMAGE_LIMIT = 10;
 
+/** Conservative JSON-encoded ceiling for a single compaction-control request. */
+export const CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET = 110_000;
+
+export function chatGptPromptJsonBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8");
+}
+
 /**
  * Output headroom is the gap between the theoretical model context and the explicit pre-compaction
  * threshold. It is derived from provider limits rather than becoming another model window.
