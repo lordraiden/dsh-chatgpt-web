@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import type { TurnBrokerOwner } from "../src/adapters/chatgpt-web/turn-broker";
 import { readFileSync } from "node:fs";
+import { defaultConfig } from "../src/config";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LlmError, type GenerateOptions, type StreamChunk, type ToolSchema } from "@deepseek-ai/dsh-llm";
@@ -98,6 +99,11 @@ function lastFinish(chunks: StreamChunk[]): Extract<StreamChunk, { type: "finish
 }
 
 describe("ChatGptWebLlmAdapter registration", () => {
+  test("default configuration is Free/Luna and does not invent Sol capability", () => {
+    const config = defaultConfig();
+    expect(config.solAvailable).toBe(false);
+    expect(config.proAvailable).toBe(false);
+  });
   test("constructor performs no I/O and providerInfo identifies the route", () => {
     const adapter = new ChatGptWebLlmAdapter();
     const info = adapter.providerInfo(CHATGPT_WEB_PROVIDER_ID);
