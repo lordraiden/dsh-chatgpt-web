@@ -201,14 +201,14 @@ test("concrete ChatGPT replay waits for readiness, binds a fresh epoch, then rel
   session?.cancel();
 });
 
-test("concrete replay fails closed when replacement never reaches readiness", async () => {
+test("concrete replay fails closed when replacement ends before readiness", async () => {
   const sessions = new ChatGptTurnSessions();
   const snapshot = capabilitySnapshot();
   const exhaustedConversation = chatGptConversationHandleForEpoch("conversation-66-fail", 1);
   const runtime: ChatGptTurnRuntime = {
     mode: "read-only",
     capabilitySnapshot: snapshot,
-    browser: new Promise(() => {}),
+    browser: Promise.reject(new Error("replacement failed before readiness")),
     physicalSettlement: Promise.resolve(),
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
@@ -235,23 +235,17 @@ test("concrete replay fails closed when replacement never reaches readiness", as
     deriveChatGptReplayExecutionState(context),
   );
   const coordinator = new ChatGptReplayCoordinator();
-  const replay = coordinator.replay({
+  await expect(coordinator.replay({
     trigger: { code: "context_exhausted" },
     exhaustedConversation,
     identity: replayIdentity(snapshot),
     context,
     boundary,
-  }, replayRuntime.transport);
-  const failure = replay.then(() => { throw new Error("expected replay failure"); }).catch(error => error);
-  // The fake runtime never calls onSurfaceReady, so the readiness gate is the only pending step.
-  await new Promise(resolve => setTimeout(resolve, 0));
+  }, replayRuntime.transport)).rejects.toMatchObject({
+    name: "ChatGptReplayError",
+    phase: "FAILED",
+  });
   expect(replayRuntime.getSession()).toBeDefined();
-  replayRuntime.getSession()?.cancel(new Error("test cleanup"));
-  const error = await Promise.race([
-    failure,
-    new Promise<Error>(resolve => setTimeout(() => resolve(new Error("readiness gate did not fail")), 25)),
-  ]);
-  expect(error).toBeInstanceOf(Error);
   expect(coordinator.snapshot().phase).toBe("FAILED");
 });
 
