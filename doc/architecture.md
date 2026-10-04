@@ -954,6 +954,8 @@ No single UI string is a completion protocol.
 
 ChatGPT Web product context exhaustion is a transport-owned terminal condition. The browser surface may detect it from a structural error surface and localized equivalent copy, but the provider exposes only the semantic `context_exhausted` error to DSH. Detection never authorizes replay or creates a replacement conversation. Once confirmed, the retained conversation handle is invalidated while physical browser settlement remains independent and must complete before the retained resource is released.
 
+Context-exhaustion recovery consumes that semantic condition through the existing #11 replay boundary. The recovery creates a new ChatGPT conversation epoch only after the exhausted browser execution has physically settled, blocks the replacement before prompt submission until surface readiness is acknowledged, binds the replacement without changing DSH session/agent/turn/capability identity, and then releases generation from the same canonical DSH projection. The old epoch is permanently stale; a replacement retry never reuses its browser event stream. A failed replacement or readiness proof fails closed.
+
 Completion must use transport state and authoritative signals such as:
 
 - turn identity;

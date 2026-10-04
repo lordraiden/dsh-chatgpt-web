@@ -27,6 +27,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGpt
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { projectCanonicalChatGptWebContext } from "./context-projection";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
@@ -39,6 +40,17 @@ import {
   type CapturedChatGptLunaCheckpoint,
 } from "./rolling-checkpoint";
 import { ChatGptExternalTurnProgress } from "./turn-progress";
+import {
+  ChatGptReplayCoordinator,
+  createChatGptReplayBoundary,
+  deriveChatGptReplayExecutionState,
+  type ChatGptReplayIdentity,
+} from "./replay";
+import {
+  chatGptConversationHandleForEpoch,
+  createChatGptWebReplayTransport,
+} from "./replay-transport";
+import { capabilityBindingIdForExecution } from "./provider-core";
 import {
   canonicalizeCompactionHandoff,
   existingStructuredCompactionRun,
@@ -381,13 +393,14 @@ export function resolveChatGptCapabilitySnapshotForTurn(
   const tools = parsed.context.tools ?? [];
   const dshSessionId = identity.dshSessionId ?? executionKey;
   const existing = providerCore.get(executionKey);
-  if (existing) {
-    const snapshot = existing.snapshot().capabilitySnapshot;
+  const snapshot = existing?.snapshot().capabilitySnapshot
+    ?? providerCore.getRetiredCapabilitySnapshot(executionKey);
+  if (snapshot) {
     if (snapshot.sessionId !== dshSessionId || snapshot.agentId !== dshSessionId) {
       throw new Error("ChatGPT Web DSH identity changed during an active provider turn");
     }
     if (identity.turnId !== undefined && snapshot.turnId !== identity.turnId) {
-      throw new Error("ChatGPT Web native turn identity changed during an active provider turn");
+      throw new Error("ChatGPT Web native turn identity changed during provider replay");
     }
     capabilitySnapshotForEnvironment({ tools }, snapshot);
     return snapshot;
@@ -468,6 +481,10 @@ export function createChatGptWebAdapter(
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
     providerTurn?: ProviderTurnLifecycle,
+    replayOptions?: {
+      conversationGeneration?: number;
+      onSurfaceReady?: () => void | Promise<void>;
+    },
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -498,6 +515,9 @@ export function createChatGptWebAdapter(
       ? retainedConversationResumeRequest(checkpointInput.parsed)
       : undefined;
     const retainConversation = conversationKey !== undefined;
+    const conversationGeneration = conversationKey
+      ? replayOptions?.conversationGeneration ?? chatGptTurnSessions.conversationGeneration(conversationKey)
+      : undefined;
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
       ? async () => {
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
@@ -580,11 +600,14 @@ export function createChatGptWebAdapter(
     };
     const providerTurnSurfaceHooks: {
       onPhysicalSurfaceBound: (binding: WebSurfacePhysicalSurface) => void;
-      onSurfaceReady: () => void;
+      onSurfaceReady: () => void | Promise<void>;
     } | undefined = providerTurn
       ? {
         onPhysicalSurfaceBound: binding => providerTurn.bindPhysicalResource(binding),
-        onSurfaceReady: () => providerTurn.markSurfaceReady(),
+        onSurfaceReady: async () => {
+          providerTurn.markSurfaceReady();
+          await replayOptions?.onSurfaceReady?.();
+        },
       }
       : undefined;
     if (manualRequest) {
@@ -749,6 +772,7 @@ export function createChatGptWebAdapter(
         usageInput: checkpointInput.parsed,
         manualControl: { surfaceNonce },
         ...(conversationKey ? { conversationKey } : {}),
+        ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
         ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
         retireCapability: async () => {
           if (activeToken) await broker.revoke(activeToken);
@@ -799,6 +823,7 @@ export function createChatGptWebAdapter(
         trace,
         text,
         usageInput: checkpointInput.parsed,
+        ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
         submission,
         cancel: browserTurn.cancel,
       };
@@ -876,6 +901,7 @@ export function createChatGptWebAdapter(
       text,
       usageInput: checkpointInput.parsed,
       ...(conversationKey ? { conversationKey } : {}),
+      ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
       ...(releaseRetainedConversation ? { releaseRetainedConversation } : {}),
       retireCapability: async () => {
         if (activeToken) await broker.revoke(activeToken);
@@ -915,6 +941,7 @@ export function createChatGptWebAdapter(
           ? AbortSignal.any([incoming.abortSignal, shutdownController.signal])
           : shutdownController.signal,
       };
+      let contextReplayAttempts = 0;
       const runChatGptWebTurn = async (): Promise<void> => {
         const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
         if (manualRequest !== manualInteraction) {
@@ -1234,12 +1261,18 @@ export function createChatGptWebAdapter(
           chatGptTurnSessions.retireAbortedOwnerTurns(ownerKey, abortedTurnIds, executionKey);
         }
         const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
+        const contextExhaustion = chatGptTurnSessions.contextExhaustion(executionKey);
+        if (contextExhaustion) {
+          await providerCore.waitForRetirement(executionKey);
+        }
         const previousProviderTurn = providerCore.get(executionKey);
-        const recovery = previousProviderTurn
-          ? "EXACT_RESUME" as const
-          : providerCore.wasRetired(executionKey)
-            ? "REPLAY" as const
-            : "NEW" as const;
+        const recovery = contextExhaustion
+          ? "REPLAY" as const
+          : previousProviderTurn
+            ? "EXACT_RESUME" as const
+            : providerCore.wasRetired(executionKey)
+              ? "REPLAY" as const
+              : "NEW" as const;
         const providerTurn = providerCore.begin({
           executionKey,
           traceId,
@@ -1251,23 +1284,95 @@ export function createChatGptWebAdapter(
           recovery,
         });
         let session: ChatGptTurnSession;
-        try {
-          session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
+        if (contextExhaustion) {
+          let replaySession: ChatGptTurnSession | undefined;
+          providerTurn.attachCancellation(reason => replaySession?.cancel(reason));
+          const canonicalContext = projectCanonicalChatGptWebContext(
+            parsed.context.systemPrompt ?? [],
+            parsed.context.messages,
+          );
+          const replayBoundary = createChatGptReplayBoundary(
+            canonicalContext,
+            deriveChatGptReplayExecutionState(canonicalContext),
+          );
+          const replayIdentity: ChatGptReplayIdentity = {
+            sessionId: capabilitySnapshot.sessionId,
+            agentId: capabilitySnapshot.agentId,
+            turnId: capabilitySnapshot.turnId,
+            capabilitySnapshotId: capabilitySnapshot.snapshotId,
+            capabilityBindingId: capabilityBindingIdForExecution(executionKey, capabilitySnapshot.snapshotId),
+          };
+          const replayRuntime = createChatGptWebReplayTransport({
+            sessions: chatGptTurnSessions,
             executionKey,
             ownerKey,
-            () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn),
             traceId,
-            incoming.abortSignal,
             nativeTurnId,
-            nativeIdentity.threadId,
-          );
-        } catch (error) {
-          providerTurn.failBeforePhysicalSettlement();
-          throw error;
-        }
-        providerTurn.attachCancellation(reason => session.cancel(reason));
-        if (!providerTurn.snapshot().physicalSettlementAttached) {
-          providerCore.bindPhysicalSettlement(executionKey, session.physicalSettlement);
+            ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
+            conversationKey: contextExhaustion.conversationKey,
+            exhaustedConversation: contextExhaustion.handle,
+            capabilitySnapshot,
+            signal: incoming.abortSignal,
+            startRuntime: options => startRuntime(
+              parsed,
+              environment,
+              capabilitySnapshot,
+              traceId,
+              turnCapabilities,
+              providerTurn,
+              options,
+            ),
+            onSessionCreated: created => {
+              replaySession = created;
+              if (!providerTurn.snapshot().physicalSettlementAttached) {
+                providerCore.bindPhysicalSettlement(executionKey, created.physicalSettlement);
+              }
+            },
+          });
+          const coordinator = new ChatGptReplayCoordinator();
+          try {
+            await coordinator.replay({
+              trigger: { code: CHATGPT_CONTEXT_EXHAUSTED_CODE },
+              exhaustedConversation: contextExhaustion.handle,
+              identity: replayIdentity,
+              context: canonicalContext,
+              boundary: replayBoundary,
+            }, replayRuntime.transport);
+          } catch (error) {
+            const failedSession = replaySession ?? replayRuntime.getSession();
+            if (!failedSession) {
+              providerTurn.failBeforePhysicalSettlement();
+            } else {
+              if (providerTurn.snapshot().state !== "RETIRED") {
+                providerTurn.markRecovery("FAILED");
+              }
+              failedSession.cancel(error instanceof Error ? error : new Error(String(error)));
+            }
+            throw error;
+          }
+          const replacementSession = replayRuntime.getSession();
+          if (!replacementSession) throw new Error("ChatGPT replay completed without a replacement session");
+          session = replacementSession;
+          chatGptTurnSessions.clearContextExhaustion(executionKey);
+        } else {
+          try {
+            session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
+              executionKey,
+              ownerKey,
+              () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn),
+              traceId,
+              incoming.abortSignal,
+              nativeTurnId,
+              nativeIdentity.threadId,
+            );
+          } catch (error) {
+            providerTurn.failBeforePhysicalSettlement();
+            throw error;
+          }
+          providerTurn.attachCancellation(reason => session.cancel(reason));
+          if (!providerTurn.snapshot().physicalSettlementAttached) {
+            providerCore.bindPhysicalSettlement(executionKey, session.physicalSettlement);
+          }
         }
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
@@ -1640,6 +1745,21 @@ export function createChatGptWebAdapter(
           ) {
             const exhaustedConversationKey = session.conversationKey();
             if (exhaustedConversationKey) {
+              const generation = session.runtime.conversationGeneration
+                ?? chatGptTurnSessions.conversationGeneration(exhaustedConversationKey);
+              chatGptTurnSessions.rememberContextExhaustion(executionKey, {
+                conversationKey: exhaustedConversationKey,
+                handle: chatGptConversationHandleForEpoch(exhaustedConversationKey, generation),
+              });
+
+              if (contextReplayAttempts < 1) {
+                contextReplayAttempts += 1;
+                await chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey);
+                await providerCore.waitForRetirement(executionKey);
+                await runChatGptWebTurn();
+                return;
+              }
+
               void chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey).catch(retirementError => {
                 console.error(
                   `[chatgpt-web] failed to invalidate exhausted conversation: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
