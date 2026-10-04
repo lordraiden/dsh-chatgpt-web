@@ -963,7 +963,7 @@ async function nativeDshTurnRequest(
         controller.close();
         return;
       }
-      controller.enqueue(encoder.encode(JSON.stringify(event) + "\\n"));
+      controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
     },
     cancel(reason) {
       abort.abort(reason);
@@ -1344,6 +1344,7 @@ export function startServer(
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
+        sharedProviderCore.shutdown(),
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
