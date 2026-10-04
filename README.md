@@ -23,6 +23,7 @@
 - [Overview](#overview)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
+- [Configuration Reference](#configuration-reference)
 - [Diagnostics & Health Check](#diagnostics--health-check)
 - [Troubleshooting](#troubleshooting)
 - [Notes & Limitations](#notes--limitations)
@@ -169,6 +170,313 @@ dsh --profile <profile> web
 ```
 
 The plugin registers the provider, starts its local browser sidecar, and connects it to the authenticated ChatGPT Web session.
+
+
+## Configuration Reference
+
+This section is the user-facing configuration reference for the current integration/staging runtime. The native DSH path is the primary configuration. The local /v1/responses endpoint remains a compatibility ingress and does not need a separate provider configuration for native ctx.llm calls.
+
+### Native DSH provider configuration
+
+The plugin registers the provider through DSH's ctx.llm runtime. For a normal DSH installation, do not add an OpenAI API key, an openai-responses provider entry, or a second ChatGPT provider just to use the native integration.
+
+To make ChatGPT Web the default model for new agents, use DSH's normal default-model configuration:
+
+~~~
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: chatgpt-web
+    # Pick a route that the authenticated account currently exposes.
+    # model: chatgpt-web/light
+~~~
+
+The old localhost /v1/responses provider snippet printed by older plugin releases is not the native DSH configuration. On current staging, ctx.llm is the canonical boundary.
+
+### Setup modes
+
+There are two main runtime modes, plus an explicit Zero Risk browser interaction mode.
+
+| Mode | Use case | Browser control | Tunnel required |
+| --- | --- | --- | --- |
+| browser-only | Native DSH + local authenticated ChatGPT Web | Plugin-managed Chrome/Chromium | No |
+| full | Browser mode plus the optional Codex/Tunnel integration surface | Plugin-managed Chrome/Chromium or Launcher | Yes |
+| full + zero-risk-browser-interaction | Manual model selection and prompt submission through the Launcher | Launcher-owned browser; ChatGPT DOM automation disabled | Yes, with a separate Zero Risk tunnel |
+
+For the native DSH provider, browser-only is the simplest configuration. full is only needed when the additional tunnel/Codex integration is required.
+
+### setup options
+
+Run:
+
+~~~
+dsh-chatgpt-web setup [options]
+~~~
+
+| Option | Description |
+| --- | --- |
+| --browser-only | Select the local browser-only runtime. This is the normal choice when using native ctx.llm. |
+| --full | Enable the full runtime, including the OpenAI MCP Tunnel/Codex integration surface. Full mode requires a Tunnel ID and runtime key. |
+| --preflight-only | Validate browser/runtime/Tunnel prerequisites and Codex integration state without committing a new setup. |
+| --port PORT | Sidecar port. Default: 17841. The sidecar remains loopback-only. |
+| --chrome PATH | Explicit Chrome/Chromium executable path. Use this when the browser is not at the detected default path. |
+| --login | Perform an interactive ChatGPT login as part of setup. |
+| --acknowledge-unofficial | Store the required acknowledgement that the browser automation is unofficial software. Interactive setup can ask for the acknowledgement when it is not already stored. |
+| --automatic-browser-interaction | Select automatic browser interaction. This is the default unless Zero Risk is explicitly selected. |
+| --zero-risk-browser-interaction | Select Zero Risk/manual interaction. Requires --full and a Launcher browser-host descriptor. ChatGPT model selection and prompt submission remain under user control. |
+| --browser-host-descriptor PATH | Use a running DSH/Codex Launcher browser host instead of a plugin-managed browser. This selects Launcher ownership. |
+| --refresh-account-capabilities | Re-inspect the authenticated account's Web capability state instead of relying on the existing stored capability snapshot. Not available in Zero Risk mode. |
+| --app-name NAME | Set the automatic ChatGPT connector name. The reserved Codex Zero Risk name is not accepted here. |
+| --tunnel-id ID | Supply the OpenAI MCP Tunnel ID for the selected interaction mode. Automatic and Zero Risk modes require separate Tunnel IDs. |
+| --runtime-key-file PATH | Supply the runtime key file for the selected Tunnel. |
+| --auto-approve-tool-calls | Enable automatic approval of browser-bridge tool calls. This reduces approval friction and weakens the normal interactive approval boundary; use only when that trade-off is intentional. |
+| --bigger-context | Enable the experimental larger-context profile for automatic browser interaction. The exact effective capacity is still bounded by the account/model transport limits. Incompatible with Zero Risk. |
+| --standard-context | Disable the experimental larger-context profile and return to the standard profile. |
+| --zero-risk-pro | In Zero Risk mode, expose the additional Pro-sized manual route. It does not verify that the user selected Pro; it only enables the Pro-sized profile. |
+| --zero-risk-default | In Zero Risk mode, keep the default manual Zero Risk profile and disable the additional Pro-sized route. |
+| --subagent-protocol compatibility-v1 or native | Select the Codex subagent protocol used by the separate Codex integration surface. This does not change the native ctx.llm provider boundary. |
+| --replace-codex-route | Allow setup to replace an existing Codex route during integration setup. This affects the separate first-party Codex integration, not native ChatGPT Web model accounting. |
+| --restart-service | Restart the installed sidecar/service after setup. When reconfiguring an existing installation, the runtime control token is rotated. |
+
+The flags --browser-only and --full are mutually exclusive. The two browser-interaction flags are mutually exclusive. The two Zero Risk model-profile flags are mutually exclusive.
+
+For full mode, setup can prompt interactively for the Tunnel ID and runtime key when they are not already stored. Runtime keys are stored privately by the plugin; do not put them in a repository or shell history.
+
+### Global and runtime commands
+
+The plugin CLI also exposes the following operational configuration surfaces.
+
+| Command | Syntax | Purpose |
+| --- | --- | --- |
+| doctor | dsh-chatgpt-web doctor [--json] | Validate configuration, browser availability, authentication evidence, and sidecar health. --json emits machine-readable diagnostics. |
+| login | dsh-chatgpt-web login | Re-authenticate the configured browser session. Launcher-owned authentication must be performed through the Launcher. |
+| browser check | dsh-chatgpt-web browser check | Verify that the configured browser can be reached/launched. |
+| serve | dsh-chatgpt-web serve [--host 127.0.0.1] [--port PORT] | Run the local compatibility sidecar manually. The host is intentionally restricted to 127.0.0.1. |
+| route | dsh-chatgpt-web route status or connect or disconnect | Inspect or control the separate Codex route integration. It is not the native ctx.llm provider. |
+| subagents | dsh-chatgpt-web subagents status or compatibility-v1 or native | Inspect or select the separate Codex subagent protocol. |
+| service | dsh-chatgpt-web service status or install or start or restart or stop or cancel-turns | Inspect or control the installed background service and cancel active browser turns when necessary. |
+| tunnel | dsh-chatgpt-web tunnel status or start or restart or stop or key-import | Inspect/control the full-mode MCP Tunnel and import a runtime key securely. |
+| open | dsh-chatgpt-web open tunnels or runtime-keys or connectors | Print/open the relevant OpenAI or ChatGPT management page. |
+| uninstall | dsh-chatgpt-web uninstall --yes [--keep-data] | Remove the integration, restore managed Codex configuration where applicable, and optionally preserve private plugin data. |
+
+--home, --help, and --version are global options:
+
+~~~
+dsh-chatgpt-web --home PATH doctor
+dsh-chatgpt-web --help
+dsh-chatgpt-web --version
+~~~
+
+The dev, mcp, and hook interrupt commands are integration/development plumbing rather than normal end-user configuration interfaces. Their exact contracts may change independently of the supported installation path.
+
+### Storage and environment variables
+
+By default, plugin state is stored under:
+
+~~~
+~/.dsh/storages/chatgpt-web/
+~~~
+
+The main configuration file is:
+
+~~~
+~/.dsh/storages/chatgpt-web/config.json
+~~~
+
+The browser authentication state is kept in the same private storage tree. Do not commit this directory or copy its contents into a repository.
+
+For environments where the default hidden directory cannot be used by the browser, set:
+
+~~~
+export DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web"
+~~~
+
+DSH_CHATGPT_FREE_HOME is retained as a compatibility alias for the plugin home. Prefer DSH_CHATGPT_WEB_HOME in new configurations.
+
+Advanced runtime selection variables also exist for managed Bun/Launcher execution:
+
+- DSH_CHATGPT_WEB_BUN / DSH_CHATGPT_FREE_BUN can provide an explicit durable Bun executable.
+- DSH_CHATGPT_FREE_LAUNCHER can provide an explicit launcher executable.
+- DSH_CHATGPT_FREE_BROWSER_HOST_DESCRIPTOR and DSH_CHATGPT_FREE_LAUNCHER_CONTROL_TOKEN are Launcher-controlled plumbing variables. Users should not set or persist these manually; the active Launcher supplies them for authorized operations.
+
+The plugin also uses internal/generated environment and control values. Those are not configuration knobs and should not be copied into service files or shell profiles unless a documented integration explicitly requires them.
+
+### Persisted config.json
+
+The plugin writes a versioned JSON configuration. Most installations should be configured with setup; direct editing is mainly useful for advanced tuning or controlled recovery.
+
+User-relevant persisted settings include:
+
+| Field | Meaning |
+| --- | --- |
+| mode | browser-only or full. |
+| browserInteractionMode | automatic or manual (Zero Risk). |
+| subagentProtocol | compatibility-v1 or native for the separate Codex subagent surface. |
+| port | Loopback sidecar port. Default: 17841. |
+| chromeExecutablePath | Browser executable path for plugin-managed Chrome/Chromium. |
+| experimentalBiggerContext | Whether the automatic larger-context profile is enabled. |
+| zeroRiskProEnabled | Whether the additional Pro-sized Zero Risk route is exposed. |
+| autoApproveToolCalls | Whether browser-bridge tool approvals are automatically accepted. |
+| stallTimeoutSec | Optional advanced watchdog timeout for the Responses compatibility surface. It is independent of native DSH model selection. |
+| tuning | Optional browser transport tuning described below. |
+| appName / automaticAppName | Connector identity used by the full integration. |
+| browserHostDescriptorPath | Launcher browser-host descriptor when Launcher ownership is active. |
+
+Generated/private fields such as controlToken, storageStatePath, brokerSocketPath, account capability state, runtime command, and Tunnel credentials should normally be managed by the plugin rather than hand-edited.
+
+Do not manually set contextWindow to override the effective ChatGPT model capacity. Active model and account limits are resolved from the authenticated Web capability state and route; a larger numeric value in a local JSON file cannot create upstream capacity that the account/product does not expose.
+
+### Browser transport tuning
+
+The optional tuning object controls transport timing and the visible composer boundary. Defaults are applied per field when a key is absent.
+
+Example:
+
+~~~
+{
+  "tuning": {
+    "composerCharLimit": 120000,
+    "responseDomGraceMs": 60000,
+    "responseDomGraceMaxMs": 240000,
+    "responseDomGracePerCharMs": 2.5,
+    "sendEnableGraceMs": 5000
+  }
+}
+~~~
+
+| Key | Default | Meaning |
+| --- | ---: | --- |
+| composerCharLimit | 120000 | Maximum visible composer characters accepted by the Luna browser transport. |
+| responseDomGraceMs | 60000 | Minimum grace period for the first assistant token. |
+| responseDomGraceMaxMs | 240000 | Maximum first-token DOM grace period. Must not be lower than responseDomGraceMs. |
+| responseDomGracePerCharMs | 2.5 | Additional first-token grace, in milliseconds per visible prompt character, clamped to the floor/ceiling above. |
+| sendEnableGraceMs | 5000 | Time allowed for the send control to become enabled after the complete prompt is attached. |
+| turnTimeoutMs | unset | Optional absolute ceiling for a browser turn. When absent, there is no tuning-level absolute deadline. |
+
+All tuning values must be finite positive numbers. Unknown tuning keys are rejected. turnTimeoutMs is optional; the other defaults are always available.
+
+Tuning does not override account/model transport limits. For example, a larger composerCharLimit does not make the ChatGPT Web composer accept a larger payload if the selected product route cannot transport it safely.
+
+### Model and account configuration
+
+Model availability is determined from the authenticated ChatGPT Web product capability state, not from a hard-coded assumption about Free vs paid.
+
+Automatic routes currently exposed by the provider are:
+
+| Route | Product surface |
+| --- | --- |
+| chatgpt-web/luna | Luna-only accounts without the Sol model selector |
+| chatgpt-web/think | Think/Luna-only account route |
+| chatgpt-web/light | Sol/Instant |
+| chatgpt-web/medium | Sol/Medium |
+| chatgpt-web/high | Sol/High |
+| chatgpt-web/extra-high | Pro-gated |
+| chatgpt-web/pro | Pro-gated |
+
+Zero Risk routes are:
+
+| Route | Meaning |
+| --- | --- |
+| chatgpt-web/zero-risk | Manual browser interaction with the user selecting the ChatGPT model and submitting the prompt. |
+| chatgpt-web/zero-risk-pro | Optional Pro-sized manual profile enabled explicitly by --zero-risk-pro. |
+
+The route list is a capability catalogue, not a promise that every account has every route. For automatic accounts, the runtime only enables routes established by the authenticated product surface. Unknown or unverifiable capability state fails closed.
+
+Do not configure the provider by backend model IDs such as gpt-5.6-sol or gpt-5.6-luna. Those are internal transport identities; users select the public chatgpt-web/... route.
+
+### Context and model limits
+
+The plugin reports practical Web transport capacity rather than blindly exposing the underlying model's theoretical context.
+
+Important current limits include:
+
+- Luna automatic transport uses a measured composer boundary around 120000 characters and a model context window of about 1050000 tokens, with browser-side safeguards and rolling checkpoints.
+- Automatic Sol routes use account/effort-specific practical windows. Non-Pro accounts expose smaller measured browser envelopes than Pro accounts.
+- Pro routes use larger measured message and context limits.
+- Zero Risk uses a fixed multi-turn manual context profile; the optional Pro profile is larger but still depends on manually selecting the appropriate ChatGPT product mode.
+- --bigger-context multiplies the eligible automatic context profile, but it does not remove browser composer, account, or product limits and is unavailable in Zero Risk.
+
+Treat these values as implementation limits for the current release, not as guarantees of what ChatGPT will expose permanently. The authenticated product capability state remains authoritative.
+
+### Full mode: Tunnel and runtime key configuration
+
+Full mode is separate from the native DSH provider. It adds the OpenAI MCP Tunnel/Codex integration surface and therefore needs an OpenAI Tunnel and a runtime key with the required tunnel permissions.
+
+Interactive setup:
+
+~~~
+dsh-chatgpt-web setup --full
+~~~
+
+Non-interactive setup can supply both values:
+
+~~~
+dsh-chatgpt-web setup --full \
+  --tunnel-id <TUNNEL_ID> \
+  --runtime-key-file /secure/path/runtime-key
+~~~
+
+A runtime key can also be imported into the plugin-managed private location:
+
+~~~
+dsh-chatgpt-web tunnel key-import
+~~~
+
+Automatic and Zero Risk interaction modes require different Tunnel IDs and separate ChatGPT connector identities. Do not reuse one Tunnel ID between the two modes.
+
+### Zero Risk configuration
+
+Zero Risk keeps model selection and prompt submission under user control through the Launcher. It intentionally disables ChatGPT DOM inspection/automatic submission.
+
+Typical setup:
+
+~~~
+dsh-chatgpt-web setup \
+  --full \
+  --zero-risk-browser-interaction \
+  --browser-host-descriptor <LIVE_LAUNCHER_DESCRIPTOR> \
+  --tunnel-id <ZERO_RISK_TUNNEL_ID>
+~~~
+
+Enable the additional Pro-sized manual route only when you intend to manually select a Pro product mode:
+
+~~~
+dsh-chatgpt-web setup \
+  --full \
+  --zero-risk-browser-interaction \
+  --browser-host-descriptor <LIVE_LAUNCHER_DESCRIPTOR> \
+  --tunnel-id <ZERO_RISK_TUNNEL_ID> \
+  --zero-risk-pro
+~~~
+
+Zero Risk cannot use --bigger-context, cannot refresh account capabilities through the automatic probe, and cannot use the plugin's --login flow because authentication is owned by the Launcher.
+
+### Security-sensitive settings
+
+Treat the following as security-sensitive:
+
+- browser authentication state;
+- Tunnel runtime keys;
+- the sidecar control token;
+- Launcher control variables;
+- --auto-approve-tool-calls;
+- full-mode connector configuration.
+
+The plugin keeps private files in its storage directory with restrictive permissions where the platform allows it. Never publish browser state, runtime keys, control tokens, or Launcher authorization material.
+
+### Configuration precedence
+
+For plugin storage location, the effective order is:
+
+1. --home PATH for the current CLI invocation;
+2. DSH_CHATGPT_FREE_HOME, retained as a compatibility alias;
+3. DSH_CHATGPT_WEB_HOME;
+4. ~/.dsh/storages/chatgpt-web;
+5. legacy storage locations are considered only when the current default directory does not exist.
+
+For browser path, an explicit --chrome setup value overrides automatic executable discovery.
+
+For capability/model selection, the authenticated ChatGPT Web product surface is authoritative. Local route names or backend IDs cannot override a failed capability check.
 
 ## Diagnostics & Health Check
 
