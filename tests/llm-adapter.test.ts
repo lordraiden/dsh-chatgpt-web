@@ -240,6 +240,35 @@ describe("ChatGptWebLlmAdapter stream conversion", () => {
     }
   });
 
+  test("a truncated native sidecar frame ends the turn with a stable PROTOCOL_ERROR", async () => {
+    // Production native turns stream NDJSON AdapterEvent frames from the sidecar.
+    // A frame cut short by a dying sidecar used to surface as a raw SyntaxError
+    // under a generic PROVIDER_ERROR; it must end the turn as a typed protocol
+    // failure while preserving whatever the stream already delivered.
+    const body =
+      JSON.stringify({ type: "text_delta", text: "partial" }) + "\n" +
+      JSON.stringify({ type: "done", stopReason: "stop", endTurn: true }).slice(0, 12) + "\n";
+    const adapter = new ChatGptWebLlmAdapter({
+      loadProvider: () => providerConfigFixture(),
+      resolveNativeDshTransport: () => ({ baseUrl: "http://127.0.0.1:1", controlToken: "token" }),
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(body, { status: 200 })) as unknown as typeof fetch;
+    try {
+      const chunks = await collect(adapter.stream(userRequest("hi")));
+      const textDeltas = chunks.filter((chunk): chunk is Extract<StreamChunk, { type: "text-delta" }> => chunk.type === "text-delta");
+      expect(textDeltas.map(chunk => chunk.text).join("")).toBe("partial");
+      const finish = lastFinish(chunks);
+      expect(finish.reason.kind).toBe("error");
+      if (finish.reason.kind === "error") {
+        expect(finish.reason.failure.code).toBe("PROTOCOL_ERROR");
+        expect(finish.reason.failure.message).toContain("unreadable native DSH stream frame");
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("missing provider configuration maps to a stable PROVIDER_CONFIG finish", async () => {
     const adapter = new ChatGptWebLlmAdapter({
       loadProvider: () => {
