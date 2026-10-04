@@ -47,6 +47,7 @@ export interface ProviderRetryDecision {
 // Maximum automatic retries after the initial browser submission attempt.
 const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BUDGET_TTL_MS = 30 * 60_000;
+const DEFAULT_SHUTDOWN_SETTLEMENT_GRACE_MS = 5_000;
 
 const TRANSITIONS: Record<ProviderTurnState, readonly ProviderTurnState[]> = {
   PREPARING: ["LEASED", "SETTLING"],
@@ -647,7 +648,12 @@ export class ChatGptWebProviderCore {
   constructor(
     readonly serviceId = CHATGPT_WEB_PROVIDER_CORE_SERVICE,
     private readonly leases = new BrowserAccountLeaseRegistry(),
-  ) {}
+    private readonly shutdownSettlementGraceMs = DEFAULT_SHUTDOWN_SETTLEMENT_GRACE_MS,
+  ) {
+    if (!Number.isFinite(shutdownSettlementGraceMs) || shutdownSettlementGraceMs < 0) {
+      throw new Error("ProviderCore shutdown settlement grace must be a non-negative finite number");
+    }
+  }
 
   get(executionKey: string): ProviderTurnLifecycle | undefined {
     return this.turns.get(executionKey);
@@ -767,8 +773,13 @@ export class ChatGptWebProviderCore {
     const activeTurns = [...this.turns.values()];
     for (const turn of activeTurns) turn.requestShutdown(reason);
     await Promise.allSettled(activeTurns.map(async turn => {
+      const deadline = Date.now() + this.shutdownSettlementGraceMs;
       while (!turn.snapshot().physicalSettlementAttached && !turn.snapshot().physicalSettled) {
-        await new Promise(resolve => setTimeout(resolve, 10));
+        if (Date.now() >= deadline) {
+          turn.failBeforePhysicalSettlement();
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
       }
       await turn.waitForPhysicalSettlement();
     }));
