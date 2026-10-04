@@ -40,6 +40,9 @@ jobs:
       - name: Build bundles
         run: bun run build
 
+      - name: Verify checked-in bundles are current
+        run: git diff --exit-code -- lib
+
       - name: Full regression suite
         run: bun run test
 
