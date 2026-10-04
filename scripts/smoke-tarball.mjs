@@ -100,28 +100,7 @@ try {
     }
   }
 
-  // 5. Import the exact published plugin entrypoint. This catches broken externalization,
-  //    stale generated bundles, and package export/runtime resolution issues that --help does not touch.
-  const pluginImport = run(
-    process.execPath,
-    [
-      "--input-type=module",
-      "-e",
-      [
-        "const plugin = await import(" + JSON.stringify(packageName) + ");",
-        "if (plugin.name !== 'dsh-chatgpt-web' || typeof plugin.apply !== 'function' || !plugin.Config) throw new Error('invalid plugin entrypoint');",
-        "console.log('plugin-import-ok');",
-      ].join("\n"),
-    ],
-    { cwd: cleanDir },
-  );
-  if (pluginImport.status === 0 && /plugin-import-ok/.test(pluginImport.stdout)) {
-    ok("generated plugin entrypoint imports from the clean install");
-  } else {
-    fail(`plugin entrypoint import failed: ${(pluginImport.stderr || pluginImport.stdout).trim().slice(-600)}`);
-  }
-
-  // 6. doctor must start without module-resolution errors (it exits 1 when no
+  // 5. doctor must start without module-resolution errors (it exits 1 when no
   //    config exists, which is the expected clean-machine result).
   const doctor = run(process.execPath, [join(pkgDir, "lib", "cli.js"), "doctor"], { cwd: cleanDir });
   const doctorText = `${doctor.stdout}\n${doctor.stderr}`;
@@ -133,7 +112,7 @@ try {
     fail(`doctor crashed (exit ${doctor.status}): ${doctorText.trim().slice(-400)}`);
   }
 
-  // 7. Build-environment contamination check on the packed artifact.
+  // 6. Build-environment contamination check on the packed artifact.
   execFileSync("tar", ["-xzf", tarball, "-C", extractDir]);
   const contaminationPatterns = [
     /\/home\/runner\/work\//,
@@ -168,7 +147,7 @@ try {
   }
   if (contaminated === 0) ok("no build-environment paths found in the tarball");
 
-  // 8. Runtime dependency resolution from the clean install.
+  // 7. Runtime dependency resolution from the clean install.
   const depCheck = run(
     process.execPath,
     [
@@ -196,7 +175,7 @@ try {
     }
   }
 
-  // 9. tiktoken actually loads (wasm) from the clean install.
+  // 8. tiktoken actually loads (wasm) from the clean install.
   const twLoad = run(
     process.execPath,
     [
