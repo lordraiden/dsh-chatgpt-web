@@ -1,4 +1,4 @@
-import { isOnePixelPngDataUrl } from "../../responses/compaction";
+import { isOnePixelPngDataUrl } from "../../lib/image";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage } from "../../types";
 
 export const CHATGPT_WEB_MAX_INPUT_IMAGES = 10;
