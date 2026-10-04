@@ -274,7 +274,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-replay",
     pageId: "page-replay",
     profileId: "profile-replay",
-    accountId: "chatgpt-account:account-replay",
+    accountId: "chatgpt-account:account-replay-guard",
   });
   turn.markSurfaceReady();
   turn.markSendActivated();
