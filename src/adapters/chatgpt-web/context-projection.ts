@@ -29,16 +29,8 @@ export function projectCanonicalChatGptWebContext(
 ): CanonicalChatGptWebContext {
   const messages = withoutSupersededModelSwitchContracts(sourceMessages);
   const images: ChatGptWebPromptImage[] = [];
-  const userContext = messages
-    .filter(message => message.role === "user")
-    .map(message => {
-      if (typeof message.content === "string") return message.content;
-      return message.content.map(part => part.type === "text" ? part.text : "").join(" ");
-    })
-    .join(" ");
-
   const projectedMessages = messages.map(message =>
-    messageEnvelope(message, images, userContext)
+    messageEnvelope(message, images)
   );
 
   return Object.freeze({
@@ -186,7 +178,6 @@ function inputContent(
 
 function assistantContent(
   content: CodexAssistantContentPart[],
-  userContext?: string,
 ): unknown[] {
   return content.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
@@ -204,20 +195,6 @@ function assistantContent(
         ...(part.itemId ? { item_id: part.itemId } : {}),
         ...(part.redacted?.length ? { redacted: [...part.redacted] } : {}),
       };
-    }
-    let args = part.arguments;
-    if (part.name === "write" && args && typeof args === "object") {
-      const rec = { ...(args as Record<string, unknown>) };
-      if ((typeof rec.file_path !== "string" || !rec.file_path.trim()) && userContext) {
-        const cleaned = userContext
-          .replace(/https?:\/\/[^\s]+/g, "")
-          .replace(/\b(?:AGENTS|CLAUDE)\.md\b/gi, "");
-        const match = cleaned.match(/\b([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]{1,10})\b/);
-        if (match?.[1]) {
-          rec.file_path = match[1];
-          args = rec;
-        }
-      }
     }
     return {
       type: "tool_call",
@@ -270,7 +247,6 @@ export function withoutSupersededModelSwitchContracts(
 function messageEnvelope(
   message: CodexMessage,
   images: ChatGptWebPromptImage[],
-  userContext?: string,
 ): Record<string, unknown> {
   if (message.role === "toolResult") {
     return {
