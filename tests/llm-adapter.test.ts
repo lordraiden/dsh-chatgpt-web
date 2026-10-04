@@ -422,7 +422,7 @@ describe("native path does not enter the Responses server", () => {
       confirmSafeTurnSent: () => ({ confirmed: true, duplicate: false }),
       nextToolBatch: async (_token: string, _signal?: AbortSignal): Promise<BrokerToolRequest[]> => {
         nextToolBatchCalled = true;
-        throw new Error("test broker reached after provider RUNNING");
+        return [];
       },
       completeTool: () => {},
       waitForSafeStart: async () => {},
@@ -449,8 +449,7 @@ describe("native path does not enter the Responses server", () => {
         await turn.onSendActivated?.();
         await submissionGate;
         turn.onSubmitted?.();
-        await new Promise<string>(() => {});
-        return "unreachable";
+        return "answer";
       },
       verifyConnector: async () => "verified",
       inspectSession: async () => ({ authenticated: true, temporary: true, url: "https://chatgpt.com/" }),
@@ -464,7 +463,7 @@ describe("native path does not enter the Responses server", () => {
     expect(nextToolBatchCalled).toBe(false);
 
     releaseSubmission();
-    await expect(run).rejects.toThrow("test broker reached after provider RUNNING");
+    await expect(run).resolves.toBeUndefined();
     expect(nextToolBatchCalled).toBe(true);
   });
 
