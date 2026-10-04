@@ -67,35 +67,42 @@ assert.equal(
 );
 assert.throws(() => authorizeCapability(isolated, { wireName: "view_image" }), /not authorized/);
 
-const reordered = projectChatGptCapabilities({
-  sessionId: "session-2",
-  agentId: "agent-2",
-  turnId: "turn-2",
-  tools: [{
-    ...canonicalEnvironmentTool,
-    parameters: {
-      additionalProperties: false,
-      required: ["cmd"],
-      type: "object",
-      properties: { cmd: { type: "string" } },
-    },
-  }],
-});
-const reorderedEquivalent = projectChatGptCapabilities({
-  sessionId: "session-2",
-  agentId: "agent-2",
-  turnId: "turn-2",
-  tools: [{
-    ...canonicalEnvironmentTool,
-    parameters: {
-      properties: { cmd: { type: "string" } },
-      type: "object",
-      required: ["cmd"],
-      additionalProperties: false,
-    },
-  }],
-});
-assert.equal(reordered.snapshotId, reorderedEquivalent.snapshotId);
+const originalNow = Date.now;
+Date.now = () => 1_700_000_000_000;
+try {
+  const reordered = projectChatGptCapabilities({
+    sessionId: "session-2",
+    agentId: "agent-2",
+    turnId: "turn-2",
+    tools: [{
+      ...canonicalEnvironmentTool,
+      parameters: {
+        additionalProperties: false,
+        required: ["cmd"],
+        type: "object",
+        properties: { cmd: { type: "string" } },
+      },
+    }],
+  });
+  const reorderedEquivalent = projectChatGptCapabilities({
+    sessionId: "session-2",
+    agentId: "agent-2",
+    turnId: "turn-2",
+    tools: [{
+      ...canonicalEnvironmentTool,
+      parameters: {
+        properties: { cmd: { type: "string" } },
+        type: "object",
+        required: ["cmd"],
+        additionalProperties: false,
+      },
+    }],
+  });
+  assert.equal(reordered.snapshotId, reorderedEquivalent.snapshotId);
+  
+} finally {
+  Date.now = originalNow;
+}
 
 const differentTurn = projectChatGptCapabilities({
   sessionId: "session-2",
