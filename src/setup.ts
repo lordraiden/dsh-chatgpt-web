@@ -518,7 +518,8 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       && (options.refreshAccountCapabilities === true
         || existing?.browserInteractionMode === "manual"
         || solAvailable === undefined
-        || proAvailable === undefined);
+        || proAvailable === undefined
+        || thinkAvailable === undefined);
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
       throw new Error(
         "Setup must verify the browser account before changing the running daemon. "
