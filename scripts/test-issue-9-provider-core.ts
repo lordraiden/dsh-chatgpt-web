@@ -4,6 +4,7 @@ import {
   BrowserAccountLeaseRegistry,
   ChatGptWebProviderCore,
 } from "../src/adapters/chatgpt-web/provider-core";
+import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { mapStream } from "../src/adapters/chatgpt-web/llm-adapter";
 import { projectChatGptCapabilities, type CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 import {
@@ -608,7 +609,7 @@ function leaseInput(turnId: string) {
 }
 
 {
-  const sessions = new (await import("../src/adapters/chatgpt-web/turn-execution")).ChatGptTurnSessions(30 * 60_000, 2);
+  const sessions = new ChatGptTurnSessions(30 * 60_000, 2);
   sessions.setConversationGeneration("conversation-a", 1);
   sessions.setConversationGeneration("conversation-b", 2);
   sessions.setConversationGeneration("conversation-c", 3);
