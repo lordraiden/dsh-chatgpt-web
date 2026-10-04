@@ -124,4 +124,25 @@ describe("SidecarSupervisor", () => {
     assert.equal(harness.getSpawnCount(), 2);
     assert.equal(harness.supervisor.activeProcessPort, 19001);
   });
+  test("shutdown prevents an already-queued reconfiguration from respawning the sidecar", async () => {
+    const harness = createHarness({ health: child => Boolean(child && !child.killed) });
+
+    await harness.supervisor.start();
+    assert.equal(harness.getSpawnCount(), 1);
+
+    const reconfigure = harness.supervisor.reconfigure({
+      host: "127.0.0.1",
+      port: 19002,
+      autoStart: true,
+      readyTimeoutMs: 100,
+    });
+    const shutdown = harness.supervisor.shutdown();
+
+    await Promise.all([reconfigure, shutdown]);
+
+    assert.equal(harness.getSpawnCount(), 1);
+    assert.equal(harness.getChild()?.signalCode, "SIGTERM");
+    assert.equal(harness.supervisor.activeProcessPort, undefined);
+  });
+
 });
