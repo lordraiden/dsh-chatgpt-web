@@ -31,7 +31,7 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt
 import { projectCanonicalChatGptWebContext } from "./context-projection";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
-import { chatGptWebTurnRetryPolicy } from "./retry-policy";
+import { classifyChatGptWebRetry } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
@@ -968,18 +968,6 @@ export function createChatGptWebAdapter(
           : createChatGptStructuredOutputValidator(parsed.options.outputFormat);
         const bufferStructuredOutput = structuredOutputValidator !== undefined;
         const retryKey = `${executionNamespace}:${chatGptTurnRetryKey(parsed)}`;
-        const exhaustedRetry = chatGptWebTurnRetryPolicy.exhaustedError(retryKey);
-        if (exhaustedRetry) {
-          emit({
-            type: "error",
-            message: exhaustedRetry.message,
-            status: exhaustedRetry.status,
-            errorType: exhaustedRetry.errorType,
-            code: exhaustedRetry.code,
-            retryable: false,
-          });
-          return;
-        }
         let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
         if (mode.localTools) {
           try {
@@ -1767,38 +1755,43 @@ export function createChatGptWebAdapter(
               });
             }
           }
-          const retryAllowed = providerTurn.canAutomaticallyRetry();
-          const retryCandidate = turnError instanceof ChatGptWebAdapterError && turnError.retryable
-            ? (
-              retryAllowed
-                ? turnError
-                : new ChatGptWebAdapterError(
-                  turnError.message,
-                  {
-                    status: turnError.status,
-                    errorType: turnError.errorType,
-                    code: turnError.code,
-                    retryable: false,
-                    cause: turnError,
-                  },
-                )
-            )
+          const retryCandidate = turnError instanceof ChatGptWebAdapterError
+            ? classifyChatGptWebRetry(turnError)
             : turnError;
-          const handledError = retryCandidate instanceof ChatGptWebAdapterError && retryCandidate.retryable
-            ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, retryCandidate)
-            : retryCandidate;
-          if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
-            chatGptWebTurnRetryPolicy.clear(retryKey);
+          const retryDecision = retryCandidate instanceof ChatGptWebAdapterError
+            ? providerTurn.retryDecision()
+            : { allowed: false as const, attempt: 0, maxAttempts: 4 };
+          const retryAllowed = retryCandidate instanceof ChatGptWebAdapterError
+            && retryCandidate.retryable
+            && retryDecision.allowed;
+
+          if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed && retryCandidate.retryable) {
+            const exhausted = new ChatGptWebAdapterError(
+              retryCandidate.message + " ChatGPT remained unavailable after the ProviderCore retry budget was exhausted.",
+              {
+                status: retryCandidate.status,
+                errorType: retryCandidate.errorType,
+                code: retryCandidate.code,
+                retryable: false,
+                cause: retryCandidate,
+              },
+            );
+            providerTurn.markRecovery("FAILED");
+            providerTurn.markLogicalSettled("failed");
+            emitRoundEvent({
+              type: "error",
+              message: exhausted.message,
+              status: exhausted.status,
+              errorType: exhausted.errorType,
+              code: exhausted.code,
+              retryable: false,
+            });
+            session.completeRound(roundKey);
+            return;
           }
-          // Every terminal browser-attempt failure must be classified as FAILED before the
-          // session is retired. A later explicit retry starts a new physical attempt and is therefore
-          // a replay, never an implicit downgrade of this failed execution.
+
           providerTurn.markRecovery("FAILED");
-          if (handledError instanceof ChatGptWebAdapterError && !handledError.retryable) {
-            // A deterministic request failure remains replayable so a native reconnect cannot burn
-            // another browser attempt. Every other failure retires the browser session: client
-            // disconnects, stage failures, and retryable ChatGPT errors must start a fresh surface
-            // instead of replaying one rejected browser outcome for the registry's full TTL.
+          if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed) {
             session.cancel();
           } else {
             chatGptTurnSessions.retire(executionKey, session);
