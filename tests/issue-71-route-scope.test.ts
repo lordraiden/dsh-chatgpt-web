@@ -44,11 +44,10 @@ describe("issue #71 ChatGPT Web product-route scope", () => {
     ]);
   });
 
-  test("Luna-only capability exposes Luna and Think regardless of persisted Think probe state", () => {
+  test("Luna-only capability exposes Luna and Think reasoning modes", () => {
     const authority = createChatGptWebRouteAuthority({
       solAvailable: false,
       proAvailable: false,
-      thinkAvailable: false,
     });
     expect(availableChatGptWebRoutes(authority).map(route => route.slug)).toEqual([
       "chatgpt-web/luna",
