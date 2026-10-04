@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { namespacedToolName, type CodexMessage, type CodexParsedRequest, type CodexTool } from "../../types";
-import { isReadableCompactionSummaryText } from "../../responses/compaction";
+import { isReadableCompactionSummaryText } from "../../lib/compaction";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
   chatGptPromptJsonBytes,
