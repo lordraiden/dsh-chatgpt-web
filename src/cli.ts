@@ -295,7 +295,14 @@ async function setupCommand(args: string[]): Promise<void> {
     }
   }
 
-  const result = await setup(options);\n  stdout.write(`\n✓ DSH ChatGPT Web setup complete (${result.mode})!\n`);\n  stdout.write(`Config: ${result.configPath}\n`);\n  stdout.write("Native DSH usage: the plugin registers chatgpt-web through ctx.llm automatically.\n");\n  stdout.write("No OpenAI API key or openai-responses provider entry is required for native DSH calls.\n");\n  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your DSH default-model configuration.\n");\n  stdout.write("See README.md -> Configuration Reference for all setup flags, storage settings, tuning, and model routes.\n");
+  const result = await setup(options);
+  stdout.write(`\n✓ DSH ChatGPT Web setup complete (${result.mode})!\n`);
+  stdout.write(`Config: ${result.configPath}\n`);
+  stdout.write("Native DSH usage: the plugin registers chatgpt-web through ctx.llm automatically.\n");
+  stdout.write("No OpenAI API key or openai-responses provider entry is required for native DSH calls.\n");
+  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your DSH default-model configuration.\n");
+  stdout.write("See README.md -> Configuration Reference for all setup flags, storage settings, tuning, and model routes.\n");
+}
 
 async function doctorCommand(args: string[]): Promise<void> {
   const json = takeFlag(args, "--json");
