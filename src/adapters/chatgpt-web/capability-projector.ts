@@ -5,6 +5,8 @@ export type CapabilityLifecycle = "active" | "cancelled" | "retired" | "expired"
 
 export interface CapabilitySnapshot {
   readonly snapshotId: string;
+  /** Integrity digest for immutable snapshot metadata, including creation time. */
+  readonly integrityHash: string;
   /** Canonical DSH session identity; never the provider-private ChatGPT conversation identity. */
   readonly sessionId: string;
   /** Canonical DSH agent identity represented at this provider boundary. */
@@ -92,6 +94,24 @@ function canonicalIdentity(
   })).digest("hex");
 }
 
+function canonicalIntegrityHash(
+  sessionId: string,
+  agentId: string,
+  turnId: string,
+  createdAt: number,
+  tools: readonly CodexTool[],
+  expiresAt?: number,
+): string {
+  return createHash("sha256").update(canonicalJson({
+    sessionId,
+    agentId,
+    turnId,
+    createdAt,
+    tools: canonicalToolSet(tools),
+    expiresAt: expiresAt ?? null,
+  })).digest("hex");
+}
+
 function assertUniqueWireNames(tools: readonly CodexTool[]): void {
   const seen = new Set<string>();
   for (const tool of tools) {
@@ -126,6 +146,7 @@ export function projectChatGptCapabilities(input: {
   assertUniqueWireNames(tools);
   const snapshot: CapabilitySnapshot = {
     snapshotId: canonicalIdentity(sessionId, agentId, turnId, tools, input.expiresAt),
+    integrityHash: canonicalIntegrityHash(sessionId, agentId, turnId, createdAt, tools, input.expiresAt),
     sessionId,
     agentId,
     turnId,
@@ -152,6 +173,9 @@ export function assertCapabilitySnapshotIntegrity(snapshot: CapabilitySnapshot):
   if (typeof snapshot.snapshotId !== "string" || !/^[a-f0-9]{64}$/.test(snapshot.snapshotId)) {
     throw new Error("Capability snapshot id is invalid");
   }
+  if (typeof snapshot.integrityHash !== "string" || !/^[a-f0-9]{64}$/.test(snapshot.integrityHash)) {
+    throw new Error("Capability snapshot integrity hash is invalid");
+  }
   if (
     typeof snapshot.sessionId !== "string"
     || typeof snapshot.agentId !== "string"
@@ -175,14 +199,25 @@ export function assertCapabilitySnapshotIntegrity(snapshot: CapabilitySnapshot):
     throw new Error("Capability snapshot lifecycle or tool set is invalid");
   }
   assertUniqueWireNames(snapshot.tools);
-  const expected = canonicalIdentity(
+  const expectedSnapshotId = canonicalIdentity(
     snapshot.sessionId,
     snapshot.agentId,
     snapshot.turnId,
     snapshot.tools,
     snapshot.expiresAt,
   );
-  if (snapshot.snapshotId !== expected) {
+  if (snapshot.snapshotId !== expectedSnapshotId) {
+    throw new Error("Capability snapshot identity check failed");
+  }
+  const expectedIntegrityHash = canonicalIntegrityHash(
+    snapshot.sessionId,
+    snapshot.agentId,
+    snapshot.turnId,
+    snapshot.createdAt,
+    snapshot.tools,
+    snapshot.expiresAt,
+  );
+  if (snapshot.integrityHash !== expectedIntegrityHash) {
     throw new Error("Capability snapshot integrity check failed");
   }
 }
