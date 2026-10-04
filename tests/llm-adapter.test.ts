@@ -256,7 +256,8 @@ describe("ChatGptWebLlmAdapter stream conversion", () => {
     globalThis.fetch = (async () => new Response(body, { status: 200 })) as unknown as typeof fetch;
     try {
       const chunks = await collect(adapter.stream(userRequest("hi")));
-      expect(chunks.some(chunk => chunk.type === "text-delta")).toBe(true);
+      const textDeltas = chunks.filter((chunk): chunk is Extract<StreamChunk, { type: "text-delta" }> => chunk.type === "text-delta");
+      expect(textDeltas.map(chunk => chunk.text).join("")).toBe("partial");
       const finish = lastFinish(chunks);
       expect(finish.reason.kind).toBe("error");
       if (finish.reason.kind === "error") {
