@@ -40,6 +40,10 @@ jobs:
       - name: Build bundles
         run: bun run build
 
+      - name: Verify committed generated bundles
+        shell: bash
+        run: git diff --exit-code -- lib
+
       - name: Install DSH runtime for Native2 integration test
         run: bun add --no-save @deepseek-ai/dsh@0.2.0-rc.2
 
