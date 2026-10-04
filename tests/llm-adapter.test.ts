@@ -465,7 +465,7 @@ describe("native path does not enter the Responses server", () => {
           browserContextId: "context-127",
           pageId: "page-127",
           profileId: "profile-127",
-          accountId: "account-issue-127-session",
+          accountId: "chatgpt-account:unknown",
         });
         await turn.onSurfaceReady?.();
         await turn.onSendActivated?.();
