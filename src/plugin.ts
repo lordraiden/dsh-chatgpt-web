@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +9,7 @@ import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgp
 import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
 import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
+import { SidecarSupervisor } from "./sidecar-supervisor";
 
 export interface CordisContext {
   /**
@@ -189,167 +190,52 @@ function readReadyTimeout(value: number | Volatile<number> | undefined): number 
   return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
 }
 
-async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
-    const res = await fetch(`http://${host}:${port}/healthz`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return false;
-    const body = (await res.json()) as { status?: string };
-    return body.status === "ok";
-  } catch {
-    return false;
-  }
-}
-
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
   const host = DEFAULT_HOST;
   let port = readPort(config.port);
-  let autoStart = readBoolean(config.autoStart, true);
-  let readyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
+  const autoStart = readBoolean(config.autoStart, true);
+  const readyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
 
-  let spawnedProcess: ChildProcess | undefined;
-  let spawnedPort: number | undefined;
-  let startGeneration = 0;
-  let reconfiguration = Promise.resolve();
-
-  const startDaemon = async () => {
-    const generation = ++startGeneration;
-    const targetPort = port;
-    const alreadyHealthy = await isSidecarHealthy(host, targetPort);
-    if (alreadyHealthy) {
-      logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1`);
-      return;
-    }
-
-    if (!autoStart) {
-      logger.warn(`[dsh-chatgpt-web] Sidecar is offline and autoStart is false. Start it manually with 'bun run src/cli.ts serve'`);
-      return;
-    }
-
-    const launcher = resolveLauncher(config.bunPath, targetPort);
-    logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${targetPort}/v1...`);
-
-    const child = spawn(launcher.cmd, launcher.args, {
+  const supervisor = new SidecarSupervisor(
+    {
+      host,
+      port,
+      autoStart,
+      readyTimeoutMs,
+      bunPath: config.bunPath,
+    },
+    {
+      resolveLauncher,
+      spawn,
+      fetch,
       cwd: ROOT_DIR,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      env: {
-        ...process.env,
-      },
-    });
-
-    spawnedProcess = child;
-    spawnedPort = targetPort;
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString().trim();
-      if (text && typeof logger.debug === "function") logger.debug(`[sidecar] ${safeTextDescriptor(text)}`);
-    });
-
-    child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString().trim();
-      if (text && typeof logger.debug === "function") logger.debug(`[sidecar:err] ${safeTextDescriptor(text)}`);
-    });
-
-    child.on("error", (err) => {
-      logger.error(`[dsh-chatgpt-web] Failed to launch sidecar process ${safeErrorDescriptor(err)}`);
-    });
-
-    child.on("exit", (code, signal) => {
-      if (code !== 0 && code !== null) {
-        logger.warn(`[dsh-chatgpt-web] Sidecar process exited with code ${code} (signal: ${signal})`);
-      }
-      if (spawnedProcess === child) {
-        spawnedProcess = undefined;
-        spawnedPort = undefined;
-      }
-    });
-
-    // Wait for healthcheck
-    const deadline = Date.now() + readyTimeoutMs;
-    while (Date.now() < deadline) {
-      if (generation !== startGeneration) return;
-      if (await isSidecarHealthy(host, targetPort)) {
-        logger.info(`[dsh-chatgpt-web] Sidecar ready and accepting turns at http://${host}:${targetPort}/v1`);
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
-
-    logger.error(`[dsh-chatgpt-web] Sidecar did not become healthy within ${readyTimeoutMs}ms`);
-  };
-
-  const stopDaemon = async () => {
-    ++startGeneration;
-    const child = spawnedProcess;
-    const childPort = spawnedPort;
-    if (!child) return;
-
-    logger.info("[dsh-chatgpt-web] Stopping sidecar daemon...");
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2000);
-      await fetch(`http://${host}:${childPort ?? port}/admin/shutdown`, {
-        method: "POST",
-        signal: controller.signal,
-      }).catch(() => {});
-      clearTimeout(timer);
-    } catch {
-      // ignore
-    }
-
-    if (!child.killed) {
-      child.kill("SIGTERM");
-    }
-    if (spawnedProcess === child) {
-      spawnedProcess = undefined;
-      spawnedPort = undefined;
-    }
-  };
+      logger,
+      safeErrorDescriptor,
+      safeTextDescriptor,
+    },
+  );
 
   if (typeof ctx.on === "function") {
     ctx.on("loader/volatile-update", () => {
-      reconfiguration = reconfiguration
-        .then(async () => {
-          const nextPort = readPort(config.port);
-          const nextAutoStart = readBoolean(config.autoStart, true);
-          const nextReadyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
-          const portChanged = nextPort !== port;
-          const autoStartChanged = nextAutoStart !== autoStart;
-          const readyTimeoutChanged = nextReadyTimeoutMs !== readyTimeoutMs;
-
-          if (!portChanged && !autoStartChanged && !readyTimeoutChanged) return;
-
-          // The plugin only stops processes it spawned itself. A healthy external sidecar is
-          // detected on the next start and is left untouched.
-          if (portChanged || (autoStartChanged && !nextAutoStart)) {
-            await stopDaemon();
-          }
-
-          port = nextPort;
-          autoStart = nextAutoStart;
-          readyTimeoutMs = nextReadyTimeoutMs;
-
-          if (nextAutoStart && (portChanged || autoStartChanged)) {
-            await startDaemon();
-          } else {
-            const changes = [];
-            if (portChanged) changes.push(`port=${port}`);
-            if (autoStartChanged) changes.push(`autoStart=${autoStart}`);
-            if (readyTimeoutChanged) changes.push(`readyTimeoutMs=${readyTimeoutMs}`);
-            logger.info(`[dsh-chatgpt-web] Live configuration applied (${changes.join(", ")}).`);
-          }
-        })
-        .catch((error) => {
-          logger.error(`[dsh-chatgpt-web] Failed to apply live configuration ${safeErrorDescriptor(error)}`);
-        });
+      const nextPort = readPort(config.port);
+      const nextAutoStart = readBoolean(config.autoStart, true);
+      const nextReadyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
+      port = nextPort;
+      void supervisor.reconfigure({
+        host,
+        port: nextPort,
+        autoStart: nextAutoStart,
+        readyTimeoutMs: nextReadyTimeoutMs,
+        bunPath: config.bunPath,
+      }).catch((error) => {
+        logger.error(
+          `[dsh-chatgpt-web] Failed to apply live sidecar configuration ${safeErrorDescriptor(error)}`,
+        );
+      });
     });
   }
+
   const registerAdapter = (): { adapter: ChatGptWebLlmAdapter; dispose: () => void } => {
     const adapter = new ChatGptWebLlmAdapter({
       resolveNativeDshContext: (options, turnId, threadId) =>
@@ -370,20 +256,24 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   if (typeof ctx.effect === "function") {
     ctx.effect(() => {
       const { adapter, dispose } = registerAdapter();
-      void startDaemon();
+      void supervisor.start().catch((error) => logger.error(
+        `[dsh-chatgpt-web] Sidecar failed to start ${safeErrorDescriptor(error)}`,
+      ));
       return async () => {
         await adapter.shutdown();
-        await stopDaemon();
+        await supervisor.shutdown();
         dispose();
       };
     });
   } else {
     const { adapter, dispose } = registerAdapter();
-    void startDaemon();
+    void supervisor.start().catch((error) => logger.error(
+      `[dsh-chatgpt-web] Sidecar failed to start ${safeErrorDescriptor(error)}`,
+    ));
     process.once("beforeExit", () => {
       void (async () => {
         await adapter.shutdown();
-        await stopDaemon();
+        await supervisor.shutdown();
         dispose();
       })();
     });
