@@ -40,6 +40,7 @@ import {
 } from "./codex-integration";
 import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+  isChatGptWebInternalBackendModel,
   isChatGptWebModelSlug,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -488,6 +489,13 @@ export async function responseRequest(
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+    if (isChatGptWebInternalBackendModel(requestedModel)) {
+      return formatErrorResponse(
+        400,
+        "invalid_request_error",
+        "ChatGPT Web backend model IDs are internal implementation identifiers and cannot be selected as public routes",
+      );
+    }
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -696,6 +704,13 @@ export async function compactRequest(
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
   if (!isChatGptWebModelSlug(raw.model)) {
+    if (isChatGptWebInternalBackendModel(raw.model)) {
+      return formatErrorResponse(
+        400,
+        "invalid_request_error",
+        "ChatGPT Web backend model IDs are internal implementation identifiers and cannot be selected as public routes",
+      );
+    }
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
