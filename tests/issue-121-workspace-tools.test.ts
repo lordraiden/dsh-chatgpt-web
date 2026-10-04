@@ -59,6 +59,9 @@ async function expectWorkspaceError(action: () => Promise<unknown>, code: string
 }
 
 describe("issue #121 bounded workspace filesystem tools", () => {
+  test("plugin declares the DSH tools service dependency", () => {
+    expect(inject).toEqual(["llm", "tools"]);
+  });
   test("disabled workspace registers no tools and read/write policy gates the surface", () => {
     const disabled = createWorkspaceToolDefinitions({
       enabled: false,

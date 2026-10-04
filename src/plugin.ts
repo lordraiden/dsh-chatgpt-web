@@ -41,7 +41,7 @@ export interface CordisContext {
 }
 
 export const name = "dsh-chatgpt-web";
-export const inject = ["llm"];
+export const inject = ["llm", "tools"];
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 17841;
 
