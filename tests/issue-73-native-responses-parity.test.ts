@@ -149,7 +149,8 @@ describe("issue #73 native DSH / Responses ProviderCore parity", () => {
 
   test("ProviderCore remains the only owner of retry budget, settlement, recovery and provenance", () => {
     const core = read("src/adapters/chatgpt-web/provider-core.ts");
-    expect(core).toContain("retryAttempts");
+    expect(core).toContain("retryBudgets");
+    expect(core).toContain("recordRetryAttempt");
     expect(core).toContain("physicalSettlement");
     expect(core).toContain("ProviderRecovery");
     expect(core).toContain("ProviderTurnProvenance");
