@@ -4,6 +4,7 @@ import { classifyChatGptWebRetry } from "../src/adapters/chatgpt-web/retry-polic
 import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
 import type { CodexParsedRequest } from "../src/types";
 
+
 function parsedWithoutTrustedEnvironment(): CodexParsedRequest {
   return {
     modelId: "chatgpt-web/light",
@@ -28,7 +29,7 @@ const store = new ChatGptThreadEnvironmentStore();
 const parsed = parsedWithoutTrustedEnvironment();
 assert.throws(
   () => store.resolve(parsed),
-  /trusted Codex cwd|environment|authority/i,
+  /trusted Codex cwd|environment|sandbox mode/i,
 );
 
 console.log("Issue #77 targeted retry classification and continuity fail-closed contracts passed.");
