@@ -5,18 +5,18 @@ import {
 } from "@deepseek-ai/dsh-llm";
 import {
   ChatGptThreadEnvironmentStore,
-} from "../src/adapters/chatgpt-web/thread-environment.ts";
+} from "../src/adapters/chatgpt-web/thread-environment";
 import {
   extractChatGptTurnEnvironment,
   extractChatGptTurnIdentity,
-} from "../src/adapters/chatgpt-web/environment.ts";
+} from "../src/adapters/chatgpt-web/environment";
 import {
   ChatGptWebLlmAdapter,
   mapStream,
   toCodexParsedRequest,
-} from "../src/adapters/chatgpt-web/llm-adapter.ts";
-import { CHATGPT_WEB_LUNA_MODEL_ROUTE } from "../src/chatgpt-web-models.ts";
-import type { CodexParsedRequest, DshNativeTurnContext } from "../src/types.ts";
+} from "../src/adapters/chatgpt-web/llm-adapter";
+import { CHATGPT_WEB_LUNA_MODEL_ROUTE } from "../src/chatgpt-web-models";
+import type { CodexParsedRequest, DshNativeTurnContext } from "../src/types";
 
 const provider = {
   chatgptWeb: {
@@ -150,8 +150,9 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
   )) {
     chunks.push(chunk);
   }
-  const finish = chunks.at(-1);
-  assert.deepEqual(finish?.reason, {
+  const finish = chunks.findLast((chunk) => chunk.type === "finish");
+  assert.ok(finish && finish.type === "finish");
+  assert.deepEqual(finish.reason, {
     kind: "error",
     failure: {
       message: "ChatGPT Web completed without any response content.",
