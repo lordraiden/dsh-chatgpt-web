@@ -64,7 +64,7 @@ function sanitizeRetiredTransportFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeRetiredTransportFields);
   if (!value || typeof value !== "object") return value;
 
-    // Only bridge-owned metadata keys are retired here. The scrubber is not a generic
+  // Only bridge-owned metadata keys are retired here. The scrubber is not a generic
     // normalization pass and therefore never rewrites arbitrary field names/values.
   const record = value as Record<string, unknown>;
   const result: Record<string, unknown> = {};
