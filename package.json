@@ -54,7 +54,7 @@
     "setup": "node lib/cli.js setup",
     "login": "node lib/cli.js login",
     "doctor": "node lib/cli.js doctor",
-    "test": "node scripts/test-issue-20-settings.mjs && bun test ./scripts/test-issue-74-native-dsh.ts && bun test ./scripts/test-issue-75-authority.ts && bun test ./tests/issue-76-canonical-context.test.ts && bun test ./tests/issue-77-continuity-retry.test.ts && bun test ./tests/issue-78-responses-seam.test.ts && node scripts/smoke-tarball.mjs",
+    "test": "node scripts/test-issue-20-settings.mjs && bun test ./scripts/test-issue-74-native-dsh.ts && bun test ./scripts/test-issue-75-authority.ts && bun test ./tests/issue-76-canonical-context.test.ts && bun test ./tests/issue-77-continuity-retry.test.ts && node scripts/smoke-tarball.mjs && bun test ./tests/issue-72-responses-provider-core.test.ts && bun test ./tests/issue-78-responses-seam.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
