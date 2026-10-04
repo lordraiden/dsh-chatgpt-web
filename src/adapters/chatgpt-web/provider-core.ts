@@ -586,11 +586,6 @@ export class ChatGptWebProviderCore {
         this.retryBudgets.delete(executionKey);
       }
     }
-    while (this.retryBudgets.size > 1024) {
-      const oldest = this.retryBudgets.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.retryBudgets.delete(oldest);
-    }
   }
 
   private retryBudgetIfPresent(executionKey: string): ProviderRetryBudget | undefined {
