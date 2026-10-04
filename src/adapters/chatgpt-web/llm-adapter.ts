@@ -304,6 +304,13 @@ export function toCodexParsedRequest(
     );
   }
 
+  if (options.toolHistory?.updates.length) {
+    throw new LlmError(
+      "ChatGPT Web native provider does not support dynamic tool history updates yet; refusing to silently discard tool additions/removals.",
+      "UNSUPPORTED_OPTION",
+    );
+  }
+
   if (options.tools?.some(tool => {
     const extended = tool as ToolSchema & { freeform?: boolean; toolSearch?: boolean };
     return extended.freeform === true || extended.toolSearch === true;
