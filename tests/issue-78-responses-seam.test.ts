@@ -283,7 +283,7 @@ describe("issue #78 Responses compatibility seam audit", () => {
       adapterFactory,
     );
     expect(response.status).toBe(200);
-    const body = await response.json() as { output?: Array<{ type?: string; encrypted_content?: string }> };
+    const body = await response.json() as { output?: Array<{ type?: string; encrypted_content?: string; content?: Array<{ text?: string }> }> };
     expect(body.output).toHaveLength(2);
     expect(body.output?.[1]?.type).toBe("message");
     expect(body.output?.[1]?.content?.[0]?.text).toContain("compaction summary");
