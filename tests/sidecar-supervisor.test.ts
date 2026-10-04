@@ -105,7 +105,9 @@ describe("SidecarSupervisor", () => {
   test("terminates a child that never becomes healthy instead of leaking it", async () => {
     const harness = createHarness({ health: () => false, readyTimeoutMs: 0 });
 
-    await harness.supervisor.start();
+    await expect(harness.supervisor.start()).rejects.toThrow(
+      /did not become healthy/i,
+    );
 
     const child = harness.getChild();
     assert(child);
