@@ -268,6 +268,7 @@ export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
   slug: "chatgpt-web/think",
   displayName: "ChatGPT Web — Think",
   description: "ChatGPT Web Think for Luna-only accounts.",
+  accountingDomain: "chatgpt-web",
   interactionMode: "automatic",
   backendModel: CHATGPT_WEB_LUNA_BACKEND_MODEL,
   // The backend model remains Luna. This internal adapter effort distinguishes the explicit
@@ -295,7 +296,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-      adapterEffort: "low",
+    adapterEffort: "low",
     requiresPro: false,
   },
   {
@@ -305,7 +306,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-      adapterEffort: "medium",
+    adapterEffort: "medium",
     requiresPro: false,
   },
   {
@@ -315,7 +316,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-      adapterEffort: "high",
+    adapterEffort: "high",
     requiresPro: false,
   },
   {
@@ -325,7 +326,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-      adapterEffort: "xhigh",
+    adapterEffort: "xhigh",
     requiresPro: true,
   },
   {
@@ -334,7 +335,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     description: "Account-gated ChatGPT Pro.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-      adapterEffort: "max",
+    adapterEffort: "max",
     requiresPro: true,
   },
 ];
