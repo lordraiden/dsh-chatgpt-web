@@ -44,6 +44,19 @@ window.__ModuleLoader__.load({
       'turns.error': 'Error',
       'notice.saved': 'Saved. New limits apply from the next turn.',
       'notice.reloaded': 'Reloaded.',
+      'notice.runtimeSaved': 'Runtime configuration saved.',
+      'notice.runtimeRestored': 'Runtime defaults restored.',
+      'notice.runtimeNoop': 'No runtime changes to save.',
+      'runtime.title': 'Runtime',
+      'runtime.hint': 'Live DSH plugin configuration. Changes are applied without remounting the plugin.',
+      'runtime.port': 'Sidecar port',
+      'runtime.autoStart': 'Start sidecar automatically',
+      'runtime.readyTimeoutMs': 'Sidecar ready timeout (ms)',
+      'runtime.save': 'Save',
+      'runtime.restore': 'Restore defaults',
+      'runtime.readOnly': 'Runtime configuration is not writable in this profile.',
+      'runtime.portInvalid': 'Port must be an integer between 1 and 65535.',
+      'runtime.timeoutInvalid': 'Ready timeout must be zero or a positive number of milliseconds.',
     };
 
     const CSS = `
@@ -78,6 +91,12 @@ window.__ModuleLoader__.load({
     `;
 
     const NS = 'dsh-chatgpt-web';
+    const BUNDLE_CONFIG_KEY = '@lordraiden/dsh-chatgpt-web';
+    const RUNTIME_DEFAULTS = {
+      port: 17841,
+      autoStart: true,
+      readyTimeoutMs: 30000,
+    };
 
     /** Wrap the bound translate so a missing key never throws and always yields a string. */
     function makeT(translate) {
@@ -138,6 +157,29 @@ window.__ModuleLoader__.load({
       ['turnTimeoutMs', 'tuning.turnTimeoutMs'],
     ];
 
+    function getRuntimeSnapshot(configForm) {
+      try {
+        const snapshot = configForm && typeof configForm.getSnapshot === 'function'
+          ? configForm.getSnapshot()
+          : undefined;
+        const value = snapshot && snapshot.value ? snapshot.value : {};
+        return {
+          port: Number.isSafeInteger(value.port) && value.port >= 1 && value.port <= 65535
+            ? value.port
+            : RUNTIME_DEFAULTS.port,
+          autoStart: typeof value.autoStart === 'boolean' ? value.autoStart : RUNTIME_DEFAULTS.autoStart,
+          readyTimeoutMs: typeof value.readyTimeoutMs === 'number' && Number.isFinite(value.readyTimeoutMs) && value.readyTimeoutMs >= 0
+            ? value.readyTimeoutMs
+            : RUNTIME_DEFAULTS.readyTimeoutMs,
+          ready: Boolean(snapshot && snapshot.status === 'ready'),
+          writable: Boolean(snapshot && snapshot.writable === true),
+          revision: snapshot && Number.isInteger(snapshot.revision) ? snapshot.revision : undefined,
+        };
+      } catch {
+        return { ...RUNTIME_DEFAULTS, ready: false, writable: false, revision: undefined };
+      }
+    }
+
     function ChatGptWebSettings(t, configForm) {
       const [token, setToken] = React.useState('');
       const [base, setBase] = React.useState(() => resolveSidecarBase(configForm));
@@ -147,6 +189,9 @@ window.__ModuleLoader__.load({
       const [form, setForm] = React.useState({});
       const [notice, setNotice] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
+      const [runtimeDraft, setRuntimeDraft] = React.useState(() => getRuntimeSnapshot(configForm));
+      const [runtimeDirty, setRuntimeDirty] = React.useState(false);
+      const [runtimeSaving, setRuntimeSaving] = React.useState(false);
 
       React.useEffect(() => {
         try {
@@ -155,13 +200,76 @@ window.__ModuleLoader__.load({
           // Browser storage may be unavailable; the token remains page-local.
         }
 
-        const refreshEndpoint = () => setBase(resolveSidecarBase(configForm));
+        const refreshEndpoint = () => {
+          const runtime = getRuntimeSnapshot(configForm);
+          setBase(resolveSidecarBase(configForm));
+          if (!runtimeDirty) setRuntimeDraft(runtime);
+        };
         refreshEndpoint();
         if (!configForm || typeof configForm.subscribe !== 'function') return undefined;
         return configForm.subscribe(refreshEndpoint);
-      }, [configForm]);
+      }, [configForm, runtimeDirty]);
 
-      async function loadAll(currentToken, currentBase) {
+      async function saveRuntimeConfig() {
+        if (!configForm || typeof configForm.mutate !== 'function') return;
+        const snapshot = configForm.getSnapshot();
+        if (snapshot.status !== 'ready' || snapshot.writable !== true) {
+          setNotice({ kind: 'err', text: t('runtime.readOnly', 'Runtime configuration is not writable in this profile.') });
+          return;
+        }
+        if (!Number.isSafeInteger(runtimeDraft.port) || runtimeDraft.port < 1 || runtimeDraft.port > 65535) {
+          setNotice({ kind: 'err', text: t('runtime.portInvalid', 'Port must be an integer between 1 and 65535.') });
+          return;
+        }
+        if (!Number.isFinite(runtimeDraft.readyTimeoutMs) || runtimeDraft.readyTimeoutMs < 0) {
+          setNotice({ kind: 'err', text: t('runtime.timeoutInvalid', 'Ready timeout must be zero or a positive number of milliseconds.') });
+          return;
+        }
+        const current = snapshot.value || {};
+        const ops = [];
+        if (runtimeDraft.port !== current.port) ops.push({ op: 'set', path: ['port'], value: runtimeDraft.port });
+        if (runtimeDraft.autoStart !== current.autoStart) ops.push({ op: 'set', path: ['autoStart'], value: runtimeDraft.autoStart });
+        if (runtimeDraft.readyTimeoutMs !== current.readyTimeoutMs) ops.push({ op: 'set', path: ['readyTimeoutMs'], value: runtimeDraft.readyTimeoutMs });
+        if (ops.length === 0) {
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeNoop', 'No runtime changes to save.') });
+          return;
+        }
+        setRuntimeSaving(true);
+        try {
+          const accepted = await configForm.mutate(ops, snapshot.revision);
+          if (!accepted) throw new Error('DSH refused the runtime configuration update.');
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeSaved', 'Runtime configuration saved.') });
+        } catch (error) {
+          setNotice({ kind: 'err', text: error instanceof Error ? error.message : String(error) });
+        } finally {
+          setRuntimeSaving(false);
+        }
+      }
+
+      async function restoreRuntimeDefaults() {
+        if (!configForm || typeof configForm.mutate !== 'function') return;
+        const snapshot = configForm.getSnapshot();
+        if (snapshot.status !== 'ready' || snapshot.writable !== true) return;
+        setRuntimeSaving(true);
+        try {
+          const accepted = await configForm.mutate([
+            { op: 'unset', path: ['port'] },
+            { op: 'unset', path: ['autoStart'] },
+            { op: 'unset', path: ['readyTimeoutMs'] },
+          ], snapshot.revision);
+          if (!accepted) throw new Error('DSH refused the runtime reset.');
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeRestored', 'Runtime defaults restored.') });
+        } catch (error) {
+          setNotice({ kind: 'err', text: error instanceof Error ? error.message : String(error) });
+        } finally {
+          setRuntimeSaving(false);
+        }
+      }
+
+            async function loadAll(currentToken, currentBase) {
         if (!currentToken) { setStatus(null); return; }
         if (!currentBase) {
           setStatus(null);
@@ -245,7 +353,66 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'cwg-root' },
         h('style', null, CSS),
-        h('h2', null, t('section.title', 'ChatGPT Web')),
+
+        h('section', { className: 'cwg-card' },
+          h('h3', null, t('runtime.title', 'Runtime')),
+          h('p', { className: 'cwg-muted' }, t('runtime.hint', 'These fields use DSH live plugin configuration. Changes are applied without remounting the plugin.')),
+          h('label', { className: 'cwg-field' },
+            h('span', { className: 'cwg-label' }, t('runtime.port', 'Sidecar port')),
+            h('input', {
+              className: 'cwg-input',
+              type: 'number',
+              min: 1,
+              max: 65535,
+              step: 1,
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              value: runtimeDraft.port,
+              onChange: (e) => {
+                setRuntimeDirty(true);
+                setRuntimeDraft({ ...runtimeDraft, port: Number(e.target.value) });
+              },
+            }),
+          ),
+          h('label', { className: 'cwg-check' },
+            h('input', {
+              type: 'checkbox',
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              checked: runtimeDraft.autoStart,
+              onChange: (e) => {
+                setRuntimeDirty(true);
+                setRuntimeDraft({ ...runtimeDraft, autoStart: e.target.checked });
+              },
+            }),
+            h('span', { className: 'cwg-label' }, t('runtime.autoStart', 'Start sidecar automatically')),
+          ),
+          h('label', { className: 'cwg-field' },
+            h('span', { className: 'cwg-label' }, t('runtime.readyTimeoutMs', 'Sidecar ready timeout (ms)')),
+            h('input', {
+              className: 'cwg-input',
+              type: 'number',
+              min: 0,
+              step: 100,
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              value: runtimeDraft.readyTimeoutMs,
+              onChange: (e) => {
+                setRuntimeDirty(true);
+                setRuntimeDraft({ ...runtimeDraft, readyTimeoutMs: Number(e.target.value) });
+              },
+            }),
+          ),
+          h('div', { className: 'cwg-row cwg-actions' },
+            h('button', {
+              className: 'cwg-btn',
+              disabled: runtimeSaving || !runtimeDirty || !getRuntimeSnapshot(configForm).writable,
+              onClick: saveRuntimeConfig,
+            }, t('runtime.save', 'Save')),
+            h('button', {
+              className: 'cwg-btn cwg-secondary',
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              onClick: restoreRuntimeDefaults,
+            }, t('runtime.restore', 'Restore defaults')),
+          ),
+        ),
 
         h('section', { className: 'cwg-card' },
           h('h3', null, t('conn.title', 'Connection')),
