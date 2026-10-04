@@ -419,4 +419,17 @@ describe("issue #78 Responses compatibility seam audit", () => {
     expect(expanded).not.toHaveProperty("capabilities");
     expect(expanded).not.toHaveProperty("sandbox");
   });
+  test("native DSH and Responses converge on one sidecar ProviderCore authority", () => {
+    const server = read("src/server.ts");
+    const adapter = read("src/adapters/chatgpt-web/llm-adapter.ts");
+    const plugin = read("src/plugin.ts");
+    expect(server).toContain("const sharedProviderCore = new ChatGptWebProviderCore();");
+    expect(server).toContain("createChatGptWebAdapter(provider, { providerCore: sharedProviderCore })");
+    expect(server).toContain("/internal/native-llm");
+    expect(adapter).toContain("createNativeDshRemoteBackend(options.model, transport)");
+    expect(adapter).toContain("/internal/native-llm");
+    expect(plugin).toContain("resolveNativeDshTransport");
+    expect(plugin).toContain("controlToken: appConfig.controlToken");
+  });
+
 });
