@@ -20,11 +20,11 @@ describe("issue #73 native DSH / Responses ProviderCore parity", () => {
 
   test("native and Responses use identical route eligibility and backend mapping", () => {
     const matrix = [
-      { model: "chatgpt-web/light", sol: true, pro: false },
-      { model: "chatgpt-web/high", sol: true, pro: false },
-      { model: "chatgpt-web/extra-high", sol: true, pro: true },
-      { model: "chatgpt-web/pro", sol: true, pro: true },
-      { model: "chatgpt-web/luna", sol: false, pro: false },
+      { model: "chatgpt-web/light", sol: true, pro: false, think: false },
+      { model: "chatgpt-web/high", sol: true, pro: false, think: false },
+      { model: "chatgpt-web/extra-high", sol: true, pro: true, think: false },
+      { model: "chatgpt-web/pro", sol: true, pro: true, think: false },
+      { model: "chatgpt-web/luna", sol: false, pro: false, think: false },
       { model: "chatgpt-web/think", sol: false, pro: false, think: true },
     ] as const;
 
