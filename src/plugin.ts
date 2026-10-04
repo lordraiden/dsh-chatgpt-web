@@ -62,8 +62,8 @@ export const Config = z.object({
 
 type ChatGPTWebPluginConfig = {
   port?: number | Volatile<number>;
-  autoStart?: boolean;
-  readyTimeoutMs?: number;
+  autoStart?: boolean | Volatile<boolean>;
+  readyTimeoutMs?: number | Volatile<number>;
   bunPath?: string;
 };
 
