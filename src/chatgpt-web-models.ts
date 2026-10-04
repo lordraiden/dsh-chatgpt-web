@@ -233,6 +233,8 @@ export type ChatGptWebModelRoute = ChatGptWebAutomaticModelRoute | ChatGptWebZer
 export interface ChatGptWebAccountCapabilities {
   solAvailable: boolean;
   proAvailable: boolean;
+  /** Luna Think is progressively rolled out on the web; absent means not yet verified. */
+  thinkAvailable?: boolean;
   experimentalBiggerContext?: boolean;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
@@ -377,7 +379,11 @@ export function availableChatGptWebModelRoutes(
       ? [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE, CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE]
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
-  if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
+  if (!capabilities.solAvailable) {
+    return capabilities.thinkAvailable === true
+      ? CHATGPT_WEB_LUNA_MODEL_ROUTES
+      : [CHATGPT_WEB_LUNA_MODEL_ROUTE];
+  }
   return capabilities.proAvailable
     ? CHATGPT_WEB_MODEL_ROUTES
     : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
@@ -407,6 +413,9 @@ export function requireChatGptWebModelRoute(
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     if (capabilities.solAvailable) {
       throw new Error(`${route.displayName} is only available for Luna-only accounts`);
+    }
+    if (route === CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE && capabilities.thinkAvailable !== true) {
+      throw new Error(`${route.displayName} is unavailable because Think is not currently available on this ChatGPT Web account`);
     }
     return route;
   }
