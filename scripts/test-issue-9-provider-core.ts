@@ -573,7 +573,7 @@ function leaseInput(turnId: string) {
   assert.equal(core.recordRetryAttempt("retry-budget-ttl", turn, 0).attempt, 1);
   assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.size, 1);
 
-  const fresh = core.begin(leaseInput("retry-budget-ttl-trigger"));
+  const fresh = core.begin({ ...leaseInput("retry-budget-ttl-trigger"), nativeThreadId: "thread-retry-budget-ttl-trigger" });
   fresh.bindPhysicalResource({
     resourceId: "surface-retry-budget-ttl-trigger",
     browserContextId: "ctx-retry-budget-ttl-trigger",
