@@ -1443,7 +1443,7 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
-                        return;
+                  return;
                 }
 
                 if (!bufferStructuredOutput) {
@@ -1467,7 +1467,7 @@ export function createChatGptWebAdapter(
               ));
               providerTurn.markLogicalSettled();
               session.completeRound(roundKey);
-                return;
+              return;
             }
 
             let turnToken: string | undefined;
@@ -1625,7 +1625,7 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
-                        return;
+                  return;
                 }
 
                 session.setFinalReasoning(roundReasoning);
