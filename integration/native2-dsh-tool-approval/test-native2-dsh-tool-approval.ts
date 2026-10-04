@@ -90,7 +90,12 @@ async function runNative2Integration(): Promise<void> {
       workspaceRoot: TEST_WORKSPACE,
     });
     await ctx.plugin(SandboxedFileSystem, { cwd: TEST_WORKSPACE });
-    applyFsTools(ctx, {\n      readLimit: 2000,\n      readMaxLineLength: 2000,\n      readMaxBytes: 50 * 1024,\n      readStreamMinSize: 10 * 1024 * 1024,\n    });
+    applyFsTools(ctx, {
+      readLimit: 2000,
+      readMaxLineLength: 2000,
+      readMaxBytes: 50 * 1024,
+      readStreamMinSize: 10 * 1024 * 1024,
+    });
 
     disposeApproval = ctx.on("approval/request", request => {
       approvalSeenResolve(request as ApprovalRequest);
