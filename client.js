@@ -512,7 +512,6 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale', 'configForms'],
       apply(ctx) {
-        // Register this plugin's English dictionary; the locale service owns the active locale.
         ctx.effect(() => {
           try {
             return ctx.locale.register(NS, { en: DICT_EN });
@@ -520,6 +519,7 @@ window.__ModuleLoader__.load({
             return () => {};
           }
         }, 'dsh-chatgpt-web: dictionaries');
+
         let translate;
         try {
           translate = ctx.locale.bind(NS);
@@ -528,13 +528,16 @@ window.__ModuleLoader__.load({
         }
         const t = makeT(translate);
         const configForm = ctx.configForms.get(CONFIG_ID);
-        const Page = () => ChatGptWebSettings(t, configForm);
-        return ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section',
-          id: 'chatgpt-web',
-          order: 35,
-          label: () => t('section.title', 'ChatGPT Web'),
-        }, Page));
+
+        // DSH 0.2's canonical plugin configuration seat is the bundle detail page.
+        // The Host owns schema/defaults/persistence; this page only edits the plugin's
+        // volatile Config fields through configForms. No parallel settings namespace or
+        // browser-local persistence is created here.
+        return ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+          name: 'plugins.bundle.config',
+          key: BUNDLE_CONFIG_KEY,
+          locale: NS,
+        }, (props) => props && props.view === 'page' ? ChatGptWebSettings(t, configForm) : null));
       },
     };
   },
