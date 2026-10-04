@@ -1993,12 +1993,12 @@ class ChatGptBrowserDiagnostics {
           + ` checkpoint=${stem} failures=${Object.keys(captureErrors).join(",")}`,
         );
       }
-      console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
+      console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem}`);
     } catch (captureError) {
       console.warn(
         `[chatgpt-web] browser diagnostic capture failed trace=${this.traceId}`
         + ` checkpoint=${browserDiagnosticCheckpoint(checkpoint)}:`
-        + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
+        + ` ${safeErrorDescriptor(captureError)}`,
       );
     }
   }
@@ -2317,7 +2317,7 @@ export class ChatGptBrowserWorker {
           }
         }
       }
-      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
+      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)} ${safeErrorDescriptor(surfacedError)}`);
       throw surfacedError;
     } finally {
       if (timer) clearTimeout(timer);
@@ -4592,7 +4592,7 @@ export class ChatGptBrowserWorker {
         if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause;
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
-          + ` ${redactChatGptUiDiagnostic(cause.message)}`,
+          + ` ${safeErrorDescriptor(cause)},
         );
         const previousConnection = turnConnection;
         // The observation timeout races the Playwright operation but cannot cancel the underlying
@@ -4941,7 +4941,7 @@ export class ChatGptBrowserWorker {
       };
       const throwMarkdownConsistencyError = (error: unknown): { markdown: string; delta: string } => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
-        console.warn(`[chatgpt-web] consistency warning handled gracefully: ${error.message}`);
+        console.warn(`[chatgpt-web] consistency warning handled gracefully ${safeErrorDescriptor(error)}`);
         return { markdown: "", delta: "" };
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
@@ -5199,7 +5199,7 @@ export class ChatGptBrowserWorker {
         }
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} tolerated internal observation fault`
-          + ` ${internalObservationFaults}/${MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS}: ${error.message}`,
+          + ` ${internalObservationFaults}/${MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS}: ${safeErrorDescriptor(error)}`,
         );
         await diagnostics.capture(page, "internal-observation-fault");
         responseDomCache.key = undefined;
@@ -5223,7 +5223,7 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
-        + ` ${safeErrorDescriptor(error)},
+        + ` ${safeErrorDescriptor(error)}`,
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
@@ -5234,13 +5234,13 @@ export class ChatGptBrowserWorker {
       if (turnConnection) {
         await turnConnection.close().catch(error => {
           console.error(
-            `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId} ${safeErrorDescriptor(error)}`,
           );
         });
       } else if (managedPage && !managedPage.isClosed()) {
         await managedPage.close().catch(error => {
           console.error(
-            `[chatgpt-web] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            `[chatgpt-web] failed to close managed browser tab for ${turn.traceId} ${safeErrorDescriptor(error)}`,
           );
         });
       }
