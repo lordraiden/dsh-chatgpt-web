@@ -266,6 +266,80 @@ export async function probeChatGptAccountCapabilities(
   }
 }
 
+export async function probeChatGptAccountCapabilities(
+  page: Page,
+  options: { selectorTimeoutMs?: number; stableAbsenceMs?: number } = {},
+): Promise<ChatGptAccountCapabilityProbe> {
+  const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+  const composer = composers.last();
+  const composerForm = composer.locator("xpath=ancestor::form[1]");
+  const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
+  const deadline = Date.now() + (options.selectorTimeoutMs ?? 30_000);
+  const stableAbsenceMs = options.stableAbsenceMs ?? 3_000;
+  let absenceSince: number | undefined;
+  let presenceObservations = 0;
+
+  while (true) {
+    const effortVisible = await effortButton.isVisible().catch(() => false);
+    if (effortVisible) {
+      presenceObservations += 1;
+      absenceSince = undefined;
+      if (presenceObservations >= 2) break;
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+      continue;
+    }
+
+    presenceObservations = 0;
+    const composerReady = await composers.count().then(count => count === 1).catch(() => false);
+    const formReady = await composerForm.count().then(count => count === 1).catch(() => false);
+    const documentReady = await page.evaluate(() => document.readyState === "complete").catch(() => false);
+    if (composerReady && formReady && documentReady) {
+      absenceSince ??= Date.now();
+      if (Date.now() - absenceSince >= stableAbsenceMs) {
+        return { solAvailable: "unsupported", proAvailable: "unsupported" };
+      }
+    } else {
+      absenceSince = undefined;
+    }
+
+    if (Date.now() >= deadline) {
+      return { solAvailable: "unknown", proAvailable: "unknown" };
+    }
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+  }
+
+  let surface: ChatGptEffortActivation;
+  try {
+    surface = await activateChatGptEffortMenu(
+      page,
+      effortButton,
+      { settleMs: Math.min(3_000, Math.max(250, options.selectorTimeoutMs ?? 3_000)) },
+    );
+  } catch {
+    return { solAvailable: "supported", proAvailable: "unknown" };
+  }
+
+  try {
+    if (!await surface.slider.isVisible().catch(() => false)) {
+      return { solAvailable: "supported", proAvailable: "unknown" };
+    }
+
+    const state = parseChatGptEffortSliderState(
+      await surface.slider.getAttribute("aria-valuemin"),
+      await surface.slider.getAttribute("aria-valuemax"),
+      await surface.slider.getAttribute("aria-valuenow"),
+    );
+    if (!state) return { solAvailable: "supported", proAvailable: "unknown" };
+
+    return {
+      solAvailable: "supported",
+      proAvailable: state.max - state.min + 1 >= 5 ? "supported" : "unsupported",
+    };
+  } finally {
+    await page.keyboard.press("Escape").catch(() => {});
+  }
+}
+
 export async function detectChatGptAccountCapabilities(
   page: Page,
   options: { selectorTimeoutMs?: number; stableAbsenceMs?: number } = {},
@@ -280,77 +354,4 @@ export async function detectChatGptAccountCapabilities(
     solAvailable: result.solAvailable === "supported",
     proAvailable: result.proAvailable === "supported",
   };
-} = {},
-): Promise<ChatGptWebAccountCapabilities> {
-  const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
-  const composer = composers.last();
-  const composerForm = composer.locator("xpath=ancestor::form[1]");
-  const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
-  const deadline = Date.now() + (options.selectorTimeoutMs ?? 30_000);
-  const stableAbsenceMs = options.stableAbsenceMs ?? 3_000;
-  let absenceSince: number | undefined;
-  let presenceObservations = 0;
-  while (true) {
-    const effortVisible = await effortButton.isVisible().catch(() => false);
-    if (effortVisible) {
-      presenceObservations += 1;
-      absenceSince = undefined;
-      if (presenceObservations >= 2) break;
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
-      continue;
-    }
-    presenceObservations = 0;
-    const composerReady = await composers.count().then(count => count === 1).catch(() => false);
-    const formReady = await composerForm.count().then(count => count === 1).catch(() => false);
-    const documentReady = await page.evaluate(() => document.readyState === "complete").catch(() => false);
-    if (composerReady && formReady && documentReady) {
-      absenceSince ??= Date.now();
-      if (Date.now() - absenceSince >= stableAbsenceMs) {
-        return { solAvailable: false, proAvailable: false };
-      }
-    } else {
-      absenceSince = undefined;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error("ChatGPT account capability probe did not reach a stable composer state");
-    }
-    await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
-  }
-  const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
-  const menuVisible = await menu.isVisible().catch(() => false);
-  const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
-  if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
-  try {
-    const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    const slider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true }).last();
-    const waitAbort = new AbortController();
-    try {
-      const ready = await Promise.race([
-        efforts.first().waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
-          .then(() => "items" as const),
-        slider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
-          .then(() => "slider" as const),
-      ]);
-      const sliderVisible = ready === "slider" || await slider.isVisible().catch(() => false);
-      if (!sliderVisible) {
-        return { solAvailable: true, proAvailable: await efforts.count() >= 5 };
-      }
-      const state = parseChatGptEffortSliderState(
-        await slider.getAttribute("aria-valuemin"),
-        await slider.getAttribute("aria-valuemax"),
-        await slider.getAttribute("aria-valuenow"),
-      );
-      if (!state) {
-        throw new Error(
-          "ChatGPT model controls are unavailable. Reload ChatGPT and run Repair again.",
-          { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
-        );
-      }
-      return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 };
-    } finally {
-      waitAbort.abort();
-    }
-  } finally {
-    await page.keyboard.press("Escape").catch(() => {});
-  }
 }
