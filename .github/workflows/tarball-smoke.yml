@@ -40,6 +40,13 @@ jobs:
       - name: Build bundles
         run: bun run build
 
+      - name: Upload generated plugin bundle for audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-plugin-${{ github.sha }}
+          path: lib/plugin.js
+          if-no-files-found: error
+
       - name: Pack exact validated artifact
         shell: bash
         run: |
