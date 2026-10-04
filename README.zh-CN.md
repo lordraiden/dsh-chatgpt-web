@@ -155,7 +155,9 @@ Failed to create .../login-profile-XXXX/SingletonLock: Permission denied (13)
   name: "@deepseek-ai/dsh-agent-default-model"
   config:
     provider: chatgpt-web
-    model: chatgpt-web/luna
+    # 请选择已认证 ChatGPT Web 模型目录当前暴露的路由，例如：
+    # model: chatgpt-web/light       # 使用 Sol 模型选择器的账户
+    # model: chatgpt-web/luna        # 仅有 Luna 路由的账户
 ```
 
 可用的 ChatGPT Web 模型路由由已认证账户的产品能力状态决定。插件面向受支持的 Free 和付费 ChatGPT 账户提供正常 Web 产品使用。使用 Codex/Work 配额的路由不属于 `chatgpt-web` provider，会被排除。
