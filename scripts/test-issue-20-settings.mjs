@@ -6,8 +6,9 @@ import vm from "node:vm";
 const root = resolve(import.meta.dirname, "..");
 const client = readFileSync(resolve(root, "client.js"), "utf8");
 const plugin = readFileSync(resolve(root, "src", "plugin.ts"), "utf8");
+
+const supervisor = readFileSync(resolve(root, "src", "sidecar-supervisor.ts"), "utf8");
 const cli = readFileSync(resolve(root, "src", "cli.ts"), "utf8");
-const config = readFileSync(resolve(root, "src", "config.ts"), "utf8");
 
 assert(!client.includes("localStorage.getItem"), "client must not read a persisted control token");
 assert(!client.includes("localStorage.setItem"), "client must not write a persisted control token");
@@ -34,10 +35,11 @@ assert(plugin.includes("loader/volatile-update"), "runtime must react to live co
 assert(plugin.includes("readBoolean(config.autoStart, true)"), "runtime must read the live autoStart value");
 assert(plugin.includes("readReadyTimeout(config.readyTimeoutMs)"), "runtime must read the live ready timeout");
 assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
-assert(plugin.includes("resolveLauncher(config.bunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
+assert(plugin.includes("new SidecarSupervisor("), "plugin must delegate sidecar lifecycle to the single supervisor");
+assert(supervisor.includes("resolveLauncher(targetBunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
 assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
-assert(plugin.includes("let startGeneration = 0"), "live reconfiguration must invalidate an in-flight start");
-assert(plugin.includes("if (spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
+assert(supervisor.includes("const generation = ++this.generation"), "live reconfiguration must invalidate an in-flight start");
+assert(supervisor.includes("if (this.spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
 assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
 assert(config.includes("contextWindow?: number"), "legacy contextWindow must be optional");
 assert(config.includes("New configurations do not write it") || config.includes("New configurations do not write it;"), "new config must stop treating contextWindow as a user capacity setting");
@@ -167,14 +169,14 @@ async function exerciseClient(port) {
   sandbox.plugin.factory(require).apply(context);
 
   cursor = 0;
-  const firstTree = page();
-  const tokenInput = findNode(firstTree, node => node.type === "input");
+  const firstTree = page({ view: "page" });
+  const tokenInput = findNode(firstTree, node => node.type === "input" && node.props.type === "password");
   assert(tokenInput, "control-token input must render");
   assert.equal(tokenInput.props.value, "");
 
   tokenInput.props.onChange({ target: { value: "ephemeral-token" } });
   cursor = 0;
-  page();
+  page({ view: "page" });
   await new Promise(resolve => setImmediate(resolve));
 
   assert(requests.includes("http://127.0.0.1:" + port + "/v1/control/status"));
@@ -185,7 +187,7 @@ async function exerciseClient(port) {
   form.value = { port: 19001, autoStart: true, readyTimeoutMs: 30000 };
   for (const listener of listeners) listener();
   cursor = 0;
-  page();
+  page({ view: "page" });
   await new Promise(resolve => setImmediate(resolve));
   assert(requests.includes("http://127.0.0.1:19001/v1/control/status"));
 }
