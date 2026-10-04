@@ -78,3 +78,7 @@ export function toolCallDiagnosticSummary(
 export function fingerprintDiagnosticValue(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
+
+export function safeTextDescriptor(value: string): string {
+  return `chars=${value.length} fp=${fingerprintDiagnosticValue(value)}`;
+}
