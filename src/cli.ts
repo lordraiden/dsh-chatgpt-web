@@ -31,32 +31,7 @@ import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopT
 import { VERSION } from "./version";
 import { runDevCommand } from "./dev-chat/cli";
 
-const HELP = `dsh-chatgpt-web ${VERSION}
-
-DeepSeek Harness plugin that bridges an authenticated ChatGPT Web session into the native DSH ctx.llm runtime.
-
-Usage:
-  dsh-chatgpt-web setup [options]
-  dsh-chatgpt-web login
-  dsh-chatgpt-web doctor [--json]
-  dsh-chatgpt-web serve
-  dsh-chatgpt-web browser check
-  dsh-chatgpt-web serve [--host 127.0.0.1] [--port PORT]
-  dsh-chatgpt-web browser check
-  dsh-chatgpt-web route status|connect|disconnect
-  dsh-chatgpt-web subagents status|compatibility-v1|native
-  dsh-chatgpt-web service status|install|start|restart|stop|cancel-turns
-  dsh-chatgpt-web tunnel status|start|restart|stop|key-import
-  dsh-chatgpt-web open tunnels|runtime-keys|connectors
-  dsh-chatgpt-web uninstall --yes [--keep-data]
-
-Global options:
-  --home PATH                 Override config storage path
-  -h, --help                  Show this help message
-  -v, --version               Show version
-
-For the complete setup and configuration reference, see README.md.
-`;
+const HELP = `dsh-chatgpt-web ${VERSION}\n\nDeepSeek Harness plugin that bridges an authenticated ChatGPT Web session into the native DSH ctx.llm runtime.\n\nUsage:\n  dsh-chatgpt-web setup [options]\n  dsh-chatgpt-web login\n  dsh-chatgpt-web doctor [--json]\n  dsh-chatgpt-web serve [--host 127.0.0.1] [--port PORT]\n  dsh-chatgpt-web browser check\n  dsh-chatgpt-web route status|connect|disconnect\n  dsh-chatgpt-web subagents status|compatibility-v1|native\n  dsh-chatgpt-web service status|install|start|restart|stop|cancel-turns\n  dsh-chatgpt-web tunnel status|start|restart|stop|key-import\n  dsh-chatgpt-web open tunnels|runtime-keys|connectors\n  dsh-chatgpt-web uninstall --yes [--keep-data]\n\nGlobal options:\n  --home PATH                 Override config storage path\n  -h, --help                  Show this help message\n  -v, --version               Show version\n\nFor the complete setup and configuration reference, see README.md.\n`;
 
 function takeOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -320,12 +295,7 @@ async function setupCommand(args: string[]): Promise<void> {
     }
   }
 
-  const result = await setup(options);
-  stdout.write(`\n✓ DSH ChatGPT Free setup complete (${result.mode})!\n`);
-  stdout.write(`Config: ${result.configPath}\n`);\n  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your DSH default-model configuration.\n");\n  stdout.write("See README.md → Configuration Reference for all setup flags, storage settings, tuning, and model routes.\n\n");
-  stdout.write("\nNative DSH usage: the plugin registers chatgpt-web through ctx.llm automatically.\n");
-  stdout.write("No OpenAI API key or openai-responses provider entry is required for native DSH calls.\n");
-}
+  const result = await setup(options);\n  stdout.write(`\n✓ DSH ChatGPT Web setup complete (${result.mode})!\n`);\n  stdout.write(`Config: ${result.configPath}\n`);\n  stdout.write("Native DSH usage: the plugin registers chatgpt-web through ctx.llm automatically.\n");\n  stdout.write("No OpenAI API key or openai-responses provider entry is required for native DSH calls.\n");\n  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your DSH default-model configuration.\n");\n  stdout.write("See README.md -> Configuration Reference for all setup flags, storage settings, tuning, and model routes.\n");
 
 async function doctorCommand(args: string[]): Promise<void> {
   const json = takeFlag(args, "--json");
@@ -427,9 +397,3 @@ async function interruptHookCommand(args: string[]): Promise<void> {
   }
   await interruptActiveTurn(loadConfig(), { threadId, turnId });
 }
-
-async function tunnelCommand(args: string[]): Promise<void> {
-  const action = args.shift() ?? "status";
-  assertNoArgs(args);
-  if (action === "key-import") {
-    const key = await secretPrompt("Runtime key (hidden): ");
