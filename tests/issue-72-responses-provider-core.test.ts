@@ -38,7 +38,11 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
       ...defaultConfig(),
       solAvailable: false,
       proAvailable: false,
-      capabilityState: { solAvailable: "unsupported" as const, proAvailable: "unsupported" as const },
+      capabilityState: {
+        solAvailable: "unsupported" as const,
+        proAvailable: "unsupported" as const,
+        thinkAvailable: "supported" as const,
+      },
     };
     const lunaAuthority = createChatGptWebRouteAuthority(lunaConfig);
     for (const model of ["chatgpt-web/luna", "chatgpt-web/think"]) {
