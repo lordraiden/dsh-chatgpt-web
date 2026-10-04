@@ -29,7 +29,6 @@ import {
   chatGptTurnExecutionKey,
   chatGptTurnRoundKey,
 } from "../src/adapters/chatgpt-web/turn-execution";
-import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -396,10 +395,14 @@ describe("native path does not enter the Responses server", () => {
         },
       }] as unknown as ToolSchema[],
     }), provider);
+    const rawInput = (parsed._rawBody as { input: Array<Record<string, unknown>> }).input;
+    const nativeUser = [...rawInput].reverse().find(item => item.type === "message" && item.role === "user");
+    const nativeTurnId = ((nativeUser?.internal_chat_message_metadata_passthrough as { turn_id?: unknown } | undefined)?.turn_id);
+    expect(typeof nativeTurnId).toBe("string");
     parsed._dshContext = {
       dshSessionId: "issue-127-session",
       threadId: "issue-127-thread",
-      turnId: extractChatGptTurnIdentity(parsed).turnId!,
+      turnId: nativeTurnId as string,
       environment: {
         cwd: "/tmp",
         roots: ["/tmp"],
