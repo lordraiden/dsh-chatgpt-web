@@ -157,6 +157,7 @@ test("concrete ChatGPT replay waits for readiness, binds a fresh epoch, then rel
     text: new ChatGptTextFeed(),
     conversationKey: "conversation-66",
     conversationGeneration: 2,
+    running: Promise.resolve(),
     cancel: () => {},
   };
   const replayRuntime = createChatGptWebReplayTransport({
