@@ -78,11 +78,7 @@ describe("issue #78 Responses compatibility seam audit", () => {
       let native = "rejected";
       try {
         const parsed = parseRequest({ model, input: "hello" });
-        native = routeChatGptWebRequest(parsed, config).modelId;
-        native = (() => {
-          try { return requireChatGptWebRoute(native, authority).slug; }
-          catch { return "rejected"; }
-        })();
+        native = routeChatGptWebRequest(parsed, config).slug;
       } catch {
         native = "rejected";
       }
