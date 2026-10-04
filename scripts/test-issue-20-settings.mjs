@@ -15,14 +15,23 @@ assert(!client.includes("sessionStorage"), "control token must not use sessionSt
 assert(!client.includes("127.0.0.1:17841"), "client must not hard-code the default sidecar port");
 assert(client.includes("configForms.get(CONFIG_ID)"), "client must consume the DSH config form");
 assert(client.includes("inject: ['slots', 'locale', 'configForms']"), "client must inject configForms");
+assert(client.includes("plugins.bundle.config"), "client must use the DSH 0.2 plugin configuration seat");
+assert(client.includes("BUNDLE_CONFIG_KEY = '@lordraiden/dsh-chatgpt-web'"), "client must key bundle configuration by package name");
+assert(!client.includes("settings.section"), "client must not register an obsolete settings.section page");
+assert(client.includes("configForm.mutate"), "runtime settings must use the canonical DSH config form write path");
+assert(client.includes("const RUNTIME_DEFAULTS"), "client must expose runtime setting defaults in the UI");
 assert(client.includes("const LOOPBACK_HOST = '127.0.0.1'"), "client must retain the loopback-only boundary");
 assert(client.includes("React.useState('')"), "control token must start empty in each page session");
 assert(client.includes("configForm.subscribe"), "client must follow live port updates");
 assert(client.includes("api(base, token, path, options)"), "API helper must use the effective endpoint");
 
 assert(plugin.includes("port: Volatile<number>"), "port must be declared volatile");
-assert(plugin.includes(".volatile()"), "port schema must be live");
-assert(plugin.includes("loader/volatile-update"), "runtime must react to live port changes");
+assert(plugin.includes("autoStart: Volatile<boolean>"), "autoStart must be declared volatile");
+assert(plugin.includes("readyTimeoutMs: Volatile<number>"), "readyTimeoutMs must be declared volatile");
+assert(plugin.includes(".volatile()"), "runtime schema fields must be live");
+assert(plugin.includes("loader/volatile-update"), "runtime must react to live configuration changes");
+assert(plugin.includes("readBoolean(config.autoStart, true)"), "runtime must read the live autoStart value");
+assert(plugin.includes("readReadyTimeout(config.readyTimeoutMs)"), "runtime must read the live ready timeout");
 assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
 assert(plugin.includes("resolveLauncher(config.bunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
 assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
@@ -168,7 +177,7 @@ async function exerciseClient(port) {
   assert(requests.includes("http://127.0.0.1:" + port + "/v1/control/recent-turns?limit=10"));
   assert(storage.removed.includes("dsh-chatgpt-web.controlToken"));
 
-  form.value = { port: 19001 };
+  form.value = { port: 19001, autoStart: true, readyTimeoutMs: 30000 };
   for (const listener of listeners) listener();
   cursor = 0;
   page();
