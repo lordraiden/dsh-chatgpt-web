@@ -1,9 +1,39 @@
+/**
+ * Trusted native DSH context carried into the ChatGPT Web backend as an internal
+ * projection. It is deliberately separate from Responses/Codex wire metadata.
+ */
+export interface DshNativeTurnContext {
+  /** Canonical DSH session identity, when the caller is session-bound. */
+  dshSessionId?: string;
+  /** Provider-private ChatGPT conversation affinity derived by the adapter. */
+  threadId: string;
+  /** Provider physical/logical turn identity generated for this invocation. */
+  turnId: string;
+  /** DSH auxiliary-call classification, when present. */
+  purpose?: "compaction" | "session-title";
+  /** DSH-authoritative sandbox projection used by the ChatGPT capability bridge. */
+  environment?: {
+    cwd: string;
+    roots: string[];
+    writableRoots: string[];
+    sandboxMode: "read-only" | "workspace-write" | "danger-full-access";
+    /** DSH sandbox policy has no network capability bit; keep this conservative. */
+    networkAccess: boolean;
+  };
+}
+
 export interface CodexParsedRequest {
   modelId: string;
   previousResponseId?: string;
   context: CodexContext;
   stream: boolean;
   options: CodexRequestOptions;
+  /**
+   * Native DSH authority for the browser turn. Never derived from model-visible
+   * text or Codex/Responses client metadata.
+   */
+  _dshContext?: DshNativeTurnContext;
+  /** Internal transport projection only; never the authority for DSH state. */
   _rawBody?: unknown;
   /** Number of leading raw input items restored from local previous_response_id state. */
   _replayPrefixLen?: number;
