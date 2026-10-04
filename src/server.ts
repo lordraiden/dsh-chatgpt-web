@@ -996,7 +996,14 @@ async function nativeDshTurnRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    /**
+     * Test/in-process override. The production server owns the ProviderCore and supplies the
+     * exact same instance to every adapter created for this listener.
+     */
+    adapterFactory?: (provider: CodexProviderConfig, providerCore: ChatGptWebProviderCore) => ProviderAdapter;
+  } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
@@ -1006,7 +1013,8 @@ export function startServer(
   // native DSH turns routed through the sidecar must share this lifecycle owner.
   const sharedProviderCore = new ChatGptWebProviderCore();
   const adapterFactory: ChatGptWebAdapterFactory = dependencies.adapterFactory
-    ?? (provider => createChatGptWebAdapter(provider, { providerCore: sharedProviderCore }));
+    ? provider => dependencies.adapterFactory!(provider, sharedProviderCore)
+    : provider => createChatGptWebAdapter(provider, { providerCore: sharedProviderCore });
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
