@@ -80,7 +80,10 @@ export function buildChatGptWebModel(
     slug: route.slug,
     display_name: route.displayName,
     description: route.description,
-    input_modalities: ["text"],
+    // The /v1/models catalog describes the Responses-compatible Web ingress. Automatic
+    // ChatGPT Web routes retain native image input support; Zero Risk stays text-only because its
+    // explicit manual launcher contract does not advertise image transport.
+    input_modalities: route.interactionMode === "manual" ? ["text"] : ["text", "image"],
     visibility: "list",
     supported_in_api: true,
     tool_mode: null,
