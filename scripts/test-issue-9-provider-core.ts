@@ -468,3 +468,41 @@ function leaseInput(turnId: string) {
 }
 
 console.log("Issue #9 ProviderCore contract tests passed.");
+
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("retry-budget"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry-budget",
+    browserContextId: "ctx-retry-budget",
+    pageId: "page-retry-budget",
+    profileId: "profile-retry-budget",
+    accountId: "account-retry-budget",
+  });
+  turn.markSurfaceReady();
+  assert.equal(turn.retryDecision(0, 2).allowed, true);
+  turn.authorizeSurfaceReplay(0, 2);
+  assert.equal(turn.retryDecision(1, 2).attempt, 2);
+  turn.authorizeSurfaceReplay(1, 2);
+  assert.equal(turn.retryDecision(2, 2).allowed, false);
+  assert.equal(turn.retryDecision(2, 2).reason, "budget_exhausted");
+  turn.markSendActivated();
+  assert.equal(turn.retryDecision(3, 2).reason, "submitted");
+  console.log("ok ProviderCore owns retry budget and submission boundary");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("provenance"));
+  const provenance = turn.snapshot().provenance;
+  assert.equal(provenance.nativeTurnId, "native-provenance");
+  assert.equal(provenance.nativeThreadId, "thread-1");
+  assert.match(turn.snapshot().lease.account, /^[a-f0-9]{12}$/);
+  assert.match(turn.snapshot().lease.browserProfile, /^[a-f0-9]{12}$/);
+  assert.match(turn.snapshot().lease.browserContext, /^[a-f0-9]{12}$/);
+  assert.match(turn.snapshot().lease.page, /^[a-f0-9]{12}$/);
+  assert.equal((turn.snapshot().lease as any).accountIdentity, undefined);
+  turn.failBeforePhysicalSettlement();
+  console.log("ok provenance fingerprints trusted account/profile context/page identity");
+}
