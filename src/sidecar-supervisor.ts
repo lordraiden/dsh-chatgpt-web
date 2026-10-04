@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { VERSION } from "./version";
 
 export interface SidecarLauncher {
   cmd: string;
@@ -251,8 +252,16 @@ export class SidecarSupervisor {
           { signal: controller.signal },
         );
         if (!res.ok) return false;
-        const body = (await res.json()) as { status?: string };
-        return body.status === "ok";
+        const body = (await res.json()) as {
+          status?: string;
+          service?: string;
+          version?: string;
+          port?: number;
+        };
+        return body.status === "ok"
+          && body.service === "dsh-chatgpt-web"
+          && body.version === VERSION
+          && body.port === port;
       } finally {
         clearTimeout(timer);
       }
