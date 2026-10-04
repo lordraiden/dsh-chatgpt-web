@@ -681,7 +681,10 @@ function accountIdentityFingerprint(config: AppConfig): string {
   }
 }
 
-export function providerConfig(config: AppConfig): CodexProviderConfig {
+export function providerConfig(
+  config: AppConfig,
+  options: { localToolsEnabled?: boolean } = {},
+): CodexProviderConfig {
   const manual = config.browserInteractionMode === "manual";
   const model = manual
     ? CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
@@ -733,7 +736,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
       headed: config.headed,
-      localToolsEnabled: config.mode === "full",
+      localToolsEnabled: options.localToolsEnabled === true || config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
       capabilityState: manual ? {
