@@ -33,7 +33,7 @@ import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `dsh-chatgpt-web ${VERSION}
 
-DeepSeek Harness bridge & Cordis plugin for free ChatGPT Web (GPT 5.6 Luna) pure chat and zero API fees.
+DeepSeek Harness plugin that bridges an authenticated ChatGPT Web session into the native DSH ctx.llm runtime.
 
 Usage:
   dsh-chatgpt-web setup [options]
@@ -41,16 +41,21 @@ Usage:
   dsh-chatgpt-web doctor [--json]
   dsh-chatgpt-web serve
   dsh-chatgpt-web browser check
-  dsh-chatgpt-web uninstall --yes
+  dsh-chatgpt-web serve [--host 127.0.0.1] [--port PORT]
+  dsh-chatgpt-web browser check
+  dsh-chatgpt-web route status|connect|disconnect
+  dsh-chatgpt-web subagents status|compatibility-v1|native
+  dsh-chatgpt-web service status|install|start|restart|stop|cancel-turns
+  dsh-chatgpt-web tunnel status|start|restart|stop|key-import
+  dsh-chatgpt-web open tunnels|runtime-keys|connectors
+  dsh-chatgpt-web uninstall --yes [--keep-data]
 
-Options:
-  --host HOST                  Host to bind (default: 127.0.0.1)
-  --port PORT                  Port to listen on (default: 17841)
-  --chrome PATH                Path to Chrome/Chromium executable
-  --home PATH                  Override config storage path (default: ~/.dsh/storages/chatgpt-web)
-  --login                      Trigger interactive browser login
-  -h, --help                   Show this help message
-  -v, --version                Show version
+Global options:
+  --home PATH                 Override config storage path
+  -h, --help                  Show this help message
+  -v, --version               Show version
+
+For the complete setup and configuration reference, see README.md.
 `;
 
 function takeOption(args: string[], name: string): string | undefined {
@@ -317,9 +322,9 @@ async function setupCommand(args: string[]): Promise<void> {
 
   const result = await setup(options);
   stdout.write(`\n✓ DSH ChatGPT Free setup complete (${result.mode})!\n`);
-  stdout.write(`Config: ${result.configPath}\n`);
-  stdout.write("\nTo use with DeepSeek Harness, ensure your ~/.dsh/settings.yaml includes:\n\n");
-  stdout.write("  providers:\n    chatgpt-web:\n      displayName: \"ChatGPT Web (Free)\"\n      api: openai-responses\n      baseURL: http://127.0.0.1:17841/v1\n      headers:\n        Authorization: \"Bearer chatgpt-web-free\"\n      models:\n        - id: chatgpt-web/luna\n          name: \"ChatGPT Web — Luna (Free)\"\n          contextWindow: 1050000\n          maxTokens: 32768\n\n");
+  stdout.write(`Config: ${result.configPath}\n`);\n  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your DSH default-model configuration.\n");\n  stdout.write("See README.md → Configuration Reference for all setup flags, storage settings, tuning, and model routes.\n\n");
+  stdout.write("\nNative DSH usage: the plugin registers chatgpt-web through ctx.llm automatically.\n");
+  stdout.write("No OpenAI API key or openai-responses provider entry is required for native DSH calls.\n");
 }
 
 async function doctorCommand(args: string[]): Promise<void> {
@@ -428,156 +433,3 @@ async function tunnelCommand(args: string[]): Promise<void> {
   assertNoArgs(args);
   if (action === "key-import") {
     const key = await secretPrompt("Runtime key (hidden): ");
-    if (!key) throw new Error("A non-empty runtime key is required");
-    installRuntimeKeyBytes(key);
-    stdout.write(`Runtime key stored privately at ${managedRuntimeKeyPath()}\n`);
-    return;
-  }
-  const config = loadConfig();
-  if (action === "start") startTunnelService();
-  else if (action === "restart") {
-    await assertServiceIdle(config);
-    await restartTunnelService();
-  }
-  else if (action === "stop") {
-    await assertServiceIdle(config);
-    await stopTunnelService();
-    stopTunnel(config);
-  }
-  else if (action !== "status") throw new Error(`Unknown tunnel action: ${action}`);
-  const status = action === "start" || action === "restart"
-    ? await waitForTunnelReady(config)
-    : tunnelStatus(config);
-  const service = getTunnelServiceStatus();
-  stdout.write(`${JSON.stringify({ service, runtime: status }, null, 2)}\n`);
-  if (action !== "stop" && (!service.running || !status.ok)) process.exitCode = 1;
-}
-
-async function openCommand(args: string[]): Promise<void> {
-  const target = args.shift();
-  assertNoArgs(args);
-  const urls: Record<string, string> = {
-    tunnels: "https://platform.openai.com/settings/organization/tunnels",
-    "runtime-keys": "https://platform.openai.com/settings/organization/api-keys",
-    connectors: "https://chatgpt.com/#settings/Plugins",
-  };
-  const url = target ? urls[target] : undefined;
-  if (!url) throw new Error("Choose one of: tunnels, runtime-keys, connectors");
-  if (process.platform === "darwin") {
-    const result = runCommand("open", [url]);
-    if (result.status !== 0) throw new Error(result.stderr.trim() || `Could not open ${url}`);
-  } else {
-    stdout.write(`${url}\n`);
-  }
-}
-
-async function uninstallCommand(args: string[]): Promise<void> {
-  const yes = takeFlag(args, "--yes");
-  const keepData = takeFlag(args, "--keep-data");
-  const launcherControl = takeFlag(args, "--launcher-control");
-  assertNoArgs(args);
-  if (launcherControl) authorizeLauncherControl("uninstall");
-  if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
-    throw new Error("Uninstall cancelled");
-  }
-  const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
-  if (config?.browserHost === "launcher" && !launcherControl) {
-    throw new Error(
-      "Launcher-owned integration must be removed from Codex Web GPT Settings so the active runtime can be drained safely.",
-    );
-  }
-  if (!config && process.platform === "darwin" && getServiceStatus().installed) {
-    throw new Error("Service exists but configuration is missing; refusing an unverifiable uninstall");
-  }
-  const launcherRuntimeStopped = config?.browserHost === "launcher" && launcherControl;
-  if (config && process.platform === "darwin" && !launcherRuntimeStopped) await assertServiceIdle(config);
-  if (config?.mode === "full" && !launcherRuntimeStopped) {
-    if (process.platform === "darwin") await uninstallTunnelService();
-    stopTunnel(config);
-  }
-  if (config && process.platform === "darwin" && !launcherRuntimeStopped) await uninstallService(config);
-  uninstallCodexIntegration();
-  if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
-  stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");
-}
-
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const home = takeOption(args, "--home");
-  if (home) {
-    process.env.DSH_CHATGPT_FREE_HOME = home;
-  }
-  if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
-    stdout.write(HELP);
-    return;
-  }
-  if (takeFlag(args, "--version") || takeFlag(args, "-v")) {
-    stdout.write(`${VERSION}\n`);
-    return;
-  }
-  const command = args.shift() ?? "help";
-  if (command === "dev" && home) {
-    throw new Error("--home does not apply to DEV mode; use DSH_CHATGPT_FREE_DEV_HOME for an explicit isolated DEV profile");
-  }
-  if (command === "help") stdout.write(HELP);
-  else if (command === "setup") await setupCommand(args);
-  else if (command === "login") await loginCommand(args);
-  else if (command === "doctor" || command === "status") await doctorCommand(args);
-  else if (command === "route") await routeCommand(args);
-  else if (command === "subagents") await subagentsCommand(args);
-  else if (command === "browser") {
-    const action = args.shift();
-    assertNoArgs(args);
-    if (action !== "check") throw new Error("Browser command must be: browser check");
-    const config = loadConfig();
-    if (config.browserHost === "launcher") {
-      if (config.browserInteractionMode === "manual") {
-        await inspectLauncherBrowserHostLiveness(config.browserHostDescriptorPath!);
-        stdout.write("The launcher browser is reachable; ChatGPT DOM inspection is intentionally disabled in Zero Risk.\n");
-      } else {
-        await inspectLauncherBrowserHost(config.browserHostDescriptorPath!);
-        stdout.write("Playwright can reach the authenticated ChatGPT surface embedded in the launcher.\n");
-      }
-    } else {
-      await checkBrowserEngine(config);
-      stdout.write("Playwright can launch the configured Chrome executable.\n");
-    }
-  } else if (command === "serve") {
-    const hostOverride = takeOption(args, "--host");
-    const portOverride = takeOption(args, "--port");
-    assertNoArgs(args);
-    if (hostOverride !== undefined && hostOverride !== "127.0.0.1") {
-      throw new Error("--host must be 127.0.0.1; the sidecar is loopback-only");
-    }
-    const config = loadConfig();
-    const port = portOverride === undefined ? config.port : Number(portOverride);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      throw new Error("--port must be an integer between 1 and 65535");
-    }
-    const activeHost = hostOverride === undefined ? config.host : "127.0.0.1";
-    const activeConfig = {
-      ...config,
-      host: activeHost,
-      ...(portOverride !== undefined ? { port } : {}),
-    };
-    const server = startServer(activeConfig);
-    stdout.write(`dsh-chatgpt-web ${VERSION} listening on http://${activeConfig.host}:${server.port}/v1 (${config.mode})\n`);
-    await new Promise<void>(() => {});
-  } else if (command === "dev") await runDevCommand(args);
-  else if (command === "mcp") await runChatGptMcpMain(args);
-  else if (command === "service") await serviceCommand(args);
-  else if (command === "hook") {
-    const action = args.shift();
-    if (action !== "interrupt") throw new Error("Hook command must be: hook interrupt");
-    await interruptHookCommand(args);
-  }
-  else if (command === "tunnel") await tunnelCommand(args);
-  else if (command === "open") await openCommand(args);
-  else if (command === "uninstall") await uninstallCommand(args);
-  else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
-}
-
-main().catch(error => {
-  process.stderr.write(`dsh-chatgpt-web: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
