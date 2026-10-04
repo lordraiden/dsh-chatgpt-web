@@ -123,6 +123,12 @@ export class BrowserAccountLease {
         throw new Error(`Browser lease physical resource ${name} must be a non-empty string`);
       }
     }
+    const expectedAccountId = `chatgpt-account:${this.descriptor.accountIdentity}`;
+    if (binding.accountId !== expectedAccountId) {
+      throw new Error(
+        `Browser lease physical account does not match its logical account identity: expected ${expectedAccountId}`,
+      );
+    }
     if (this.physicalResource && this.physicalResource.resourceId !== binding.resourceId) {
       throw new Error(
         `Browser lease cannot move to a different physical resource: ${this.physicalResource.resourceId} -> ${binding.resourceId}`,
