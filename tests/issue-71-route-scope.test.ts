@@ -44,32 +44,21 @@ describe("issue #71 ChatGPT Web product-route scope", () => {
     ]);
   });
 
-  test("Luna-only capability exposes only Luna until Think is proven available", () => {
-    const unavailable = createChatGptWebRouteAuthority({
+  test("Luna-only capability exposes Luna and Think regardless of persisted Think probe state", () => {
+    const authority = createChatGptWebRouteAuthority({
       solAvailable: false,
       proAvailable: false,
       thinkAvailable: false,
     });
-    expect(availableChatGptWebRoutes(unavailable).map(route => route.slug)).toEqual([
-      "chatgpt-web/luna",
-    ]);
-    expect(() => requireChatGptWebRoute("chatgpt-web/think", unavailable))
-      .toThrow(/Think is unavailable/);
-
-    const available = createChatGptWebRouteAuthority({
-      solAvailable: false,
-      proAvailable: false,
-      thinkAvailable: true,
-    });
-    expect(availableChatGptWebRoutes(available).map(route => route.slug)).toEqual([
+    expect(availableChatGptWebRoutes(authority).map(route => route.slug)).toEqual([
       "chatgpt-web/luna",
       "chatgpt-web/think",
     ]);
-    expect(requireChatGptWebRoute("chatgpt-web/luna", available).backendModel)
+    expect(requireChatGptWebRoute("chatgpt-web/luna", authority).backendModel)
       .toBe(CHATGPT_WEB_LUNA_BACKEND_MODEL);
-    expect(requireChatGptWebRoute("chatgpt-web/think", available).backendModel)
+    expect(requireChatGptWebRoute("chatgpt-web/think", authority).backendModel)
       .toBe(CHATGPT_WEB_LUNA_BACKEND_MODEL);
-    expect(() => requireChatGptWebRoute("chatgpt-web/high", available)).toThrow();
+    expect(() => requireChatGptWebRoute("chatgpt-web/high", authority)).toThrow();
   });
 
   test("Unknown capability is fail-closed", () => {
