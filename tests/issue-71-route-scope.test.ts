@@ -116,6 +116,32 @@ describe("issue #71 ChatGPT Web product-route scope", () => {
     }
   });
 
+  test("automatic Web catalog rows advertise image input while Zero Risk stays text-only", () => {
+    const automatic = buildChatGptWebModelCatalog({
+      ...defaultConfig(),
+      solAvailable: true,
+      proAvailable: false,
+      capabilityState: {
+        solAvailable: "supported",
+        proAvailable: "unsupported",
+      },
+      browserInteractionMode: "automatic",
+    });
+    const automaticModels = automatic.models as Array<Record<string, unknown>>;
+    expect(automaticModels.length).toBeGreaterThan(0);
+    expect(automaticModels.every(model => Array.isArray(model.input_modalities)
+      && JSON.stringify(model.input_modalities) === JSON.stringify(["text", "image"]))).toBe(true);
+
+    const manual = buildChatGptWebModelCatalog({
+      ...defaultConfig(),
+      browserInteractionMode: "manual",
+      zeroRiskProEnabled: false,
+    });
+    const manualModels = manual.models as Array<Record<string, unknown>>;
+    expect(manualModels).toHaveLength(1);
+    expect(manualModels[0]?.input_modalities).toEqual(["text"]);
+  });
+
   test("the Web catalog contains only authority-approved routes and no native Codex contamination", () => {
     const catalog = buildChatGptWebModelCatalog(defaultConfig());
     const models = catalog.models as Array<Record<string, unknown>>;
