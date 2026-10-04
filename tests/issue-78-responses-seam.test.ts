@@ -234,7 +234,7 @@ describe("issue #78 Responses compatibility seam audit", () => {
           adapterFactory,
         );
         expect(response.status).toBe(200);
-        expect((await response.json()).endpoint).toBe("/v1/responses");
+        expect((await response.json()).endpoint).toBe("/backend-api/codex/responses");
       }
 
       const compact = await compactRequest(
@@ -247,7 +247,7 @@ describe("issue #78 Responses compatibility seam audit", () => {
         adapterFactory,
       );
       expect(compact.status).toBe(200);
-      expect((await compact.json()).endpoint).toBe("/v1/responses/compact");
+      expect((await compact.json()).endpoint).toBe("/backend-api/codex/responses/compact");
       expect(adapterCalls).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
@@ -284,8 +284,9 @@ describe("issue #78 Responses compatibility seam audit", () => {
     );
     expect(response.status).toBe(200);
     const body = await response.json() as { output?: Array<{ type?: string; encrypted_content?: string }> };
-    expect(body.output).toHaveLength(1);
-    expect(body.output?.[0]?.type).toBe("compaction");
+    expect(body.output).toHaveLength(2);
+    expect(body.output?.[1]?.type).toBe("message");
+    expect(body.output?.[1]?.content?.[0]?.text).toContain("compaction summary");
     expect(typeof body.output?.[0]?.encrypted_content).toBe("string");
     expect(calls).toBe(1);
   });
@@ -319,8 +320,9 @@ describe("issue #78 Responses compatibility seam audit", () => {
       );
       expect(reader.exitCode).toBe(0);
       const expanded = JSON.parse(new TextDecoder().decode(reader.stdout)) as { input?: unknown[] };
-      expect(expanded.input).toHaveLength(2);
+      expect(expanded.input).toHaveLength(3);
       expect(JSON.stringify(expanded.input)).toContain("first");
+      expect(JSON.stringify(expanded.input)).toContain("answer");
       expect(JSON.stringify(expanded.input)).toContain("next");
       expect(expanded).not.toHaveProperty("capabilities");
       expect(expanded).not.toHaveProperty("sandbox");
