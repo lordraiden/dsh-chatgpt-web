@@ -37,11 +37,11 @@ mock.module("node:child_process", () => ({
   },
 }));
 
-const { apply } = await import("../src/plugin.ts");
+const { apply } = await import("../src/plugin");
 
 function makeContext() {
   let update: (() => void | Promise<void>) | undefined;
-  let cleanup: (() => Promise<void>) | undefined;
+  let cleanup: (() => void | Promise<void>) | undefined;
 
   const form = {
     value: undefined as Record<string, unknown> | undefined,
@@ -53,16 +53,17 @@ function makeContext() {
   const logs: string[] = [];
   const context = {
     get: () => undefined,
-    effect(effect: () => void | (() => void) | (() => Promise<void>)) {
-      cleanup = effect() as (() => Promise<void>) | undefined;
+    effect(effect: () => void | Promise<void> | (() => void) | (() => Promise<void>)) {
+      const result = effect();
+      if (typeof result === "function") cleanup = result;
     },
     on(_event: string, callback: () => void | Promise<void>) {
       update = callback;
     },
     logger: () => ({
-      info: (message: string) => logs.push(message),
-      warn: (message: string) => logs.push(message),
-      error: (message: string) => logs.push(message),
+      info: (message: string) => { logs.push(message); },
+      warn: (message: string) => { logs.push(message); },
+      error: (message: string) => { logs.push(message); },
       debug: () => {},
     }),
     llm: {
