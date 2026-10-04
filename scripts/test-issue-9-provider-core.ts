@@ -26,7 +26,7 @@ function leaseInput(turnId: string) {
     nativeTurnId,
     capabilitySnapshot,
     nativeThreadId: "thread-1",
-    accountIdentity: "account-1",
+    accountIdentity: `account-${turnId}`,
     browserProfile: "managed-chrome",
     browserContext: "context-1",
     pageIdentity: `page-${turnId}`,
@@ -274,7 +274,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-replay",
     pageId: "page-replay",
     profileId: "profile-replay",
-    accountId: "chatgpt-account:account-replay",
+    accountId: "chatgpt-account:account-replay-guard",
   });
   turn.markSurfaceReady();
   turn.markSendActivated();
@@ -570,10 +570,11 @@ function leaseInput(turnId: string) {
     accountId: "chatgpt-account:account-retry-budget-ttl",
   });
   turn.markSurfaceReady();
-  assert.equal(core.recordRetryAttempt("retry-budget-ttl", turn, 0).attempt, 1);
+  const retryBudgetBaseTime = 1_000_000;
+  assert.equal(core.recordRetryAttempt("retry-budget-ttl", turn, retryBudgetBaseTime).attempt, 1);
   assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.size, 1);
 
-  const fresh = core.begin(leaseInput("retry-budget-ttl-trigger"));
+  const fresh = core.begin({ ...leaseInput("retry-budget-ttl-trigger"), nativeThreadId: "thread-retry-budget-ttl-trigger" });
   fresh.bindPhysicalResource({
     resourceId: "surface-retry-budget-ttl-trigger",
     browserContextId: "ctx-retry-budget-ttl-trigger",
@@ -582,7 +583,10 @@ function leaseInput(turnId: string) {
     accountId: "chatgpt-account:account-retry-budget-ttl-trigger",
   });
   fresh.markSurfaceReady();
-  assert.equal(core.retryDecision("retry-budget-ttl-trigger", fresh, 30 * 60_000).attempt, 1);
+  assert.equal(
+    core.retryDecision("retry-budget-ttl-trigger", fresh, retryBudgetBaseTime + 30 * 60_000).attempt,
+    1,
+  );
   assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.has("retry-budget-ttl"), false);
   turn.failBeforePhysicalSettlement();
   fresh.failBeforePhysicalSettlement();

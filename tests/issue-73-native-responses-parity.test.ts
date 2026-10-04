@@ -14,7 +14,7 @@ describe("issue #73 native DSH / Responses ProviderCore parity", () => {
     const server = read("src/server.ts");
     expect(server).toContain("const adapter = adapterFactory(provider);");
     expect(server).toContain("await adapter.runTurn!");
-    expect(server).not.toContain("new ChatGptWebProviderCore()");
+    expect(server).toContain("const sharedProviderCore = new ChatGptWebProviderCore();");
     expect(server).not.toContain("new ProviderTurnLifecycle(");
   });
 

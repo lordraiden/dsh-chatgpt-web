@@ -16,7 +16,7 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
     expect(server).toContain("route = routeChatGptWebRequest(parsed, config)");
     expect(server).toContain("const adapter = adapterFactory(provider)");
     expect(server).toContain("await adapter.runTurn!");
-    expect(server).not.toContain("new ChatGptWebProviderCore()");
+    expect(server).toContain("const sharedProviderCore = new ChatGptWebProviderCore();");
     expect(server).not.toContain("new ProviderTurnLifecycle(");
   });
 

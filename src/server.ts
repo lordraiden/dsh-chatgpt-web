@@ -954,6 +954,7 @@ async function nativeDshTurnRequest(
   const provider = providerConfig(config);
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
+  const queueIterator = queue[Symbol.asyncIterator]();
   const encoder = new TextEncoder();
   const abort = new AbortController();
   if (req.signal.aborted) abort.abort(req.signal.reason);
@@ -973,15 +974,16 @@ async function nativeDshTurnRequest(
   })();
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const event = await queue.next();
-      if (event === undefined) {
+      const result = await queueIterator.next();
+      if (result.done) {
         controller.close();
         return;
       }
-      controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+      controller.enqueue(encoder.encode(JSON.stringify(result.value) + "\n"));
     },
     cancel(reason) {
       abort.abort(reason);
+      void queueIterator.return?.();
     },
   });
   return new Response(stream, {
@@ -996,7 +998,14 @@ async function nativeDshTurnRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    /**
+     * Test/in-process override. The production server owns the ProviderCore and supplies the
+     * exact same instance to every adapter created for this listener.
+     */
+    adapterFactory?: (provider: CodexProviderConfig, providerCore: ChatGptWebProviderCore) => ProviderAdapter;
+  } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
@@ -1006,7 +1015,8 @@ export function startServer(
   // native DSH turns routed through the sidecar must share this lifecycle owner.
   const sharedProviderCore = new ChatGptWebProviderCore();
   const adapterFactory: ChatGptWebAdapterFactory = dependencies.adapterFactory
-    ?? (provider => createChatGptWebAdapter(provider, { providerCore: sharedProviderCore }));
+    ? provider => dependencies.adapterFactory!(provider, sharedProviderCore)
+    : provider => createChatGptWebAdapter(provider, { providerCore: sharedProviderCore });
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
