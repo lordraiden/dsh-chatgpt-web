@@ -166,6 +166,30 @@ function leaseInput(turnId: string) {
   assert.equal(first.snapshot().recovery, "NEW");
   assert.throws(
     () => core.begin({
+      ...leaseInput("resume"),
+      accountIdentity: "account-2",
+      capabilitySnapshot: first.snapshot().capabilitySnapshot,
+    }),
+    /different browser\/account identity/i,
+  );
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("resume"),
+      browserContext: "context-2",
+      capabilitySnapshot: first.snapshot().capabilitySnapshot,
+    }),
+    /different browser\/account identity/i,
+  );
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("resume"),
+      retryPolicy: "side_effect_free",
+      capabilitySnapshot: first.snapshot().capabilitySnapshot,
+    }),
+    /different retry policy/i,
+  );
+  assert.throws(
+    () => core.begin({
       ...leaseInput("resume-conflict"),
       nativeThreadId: "thread-1",
     }),
