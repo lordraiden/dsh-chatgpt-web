@@ -57,10 +57,11 @@ export class SidecarSupervisor {
   async start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
     const promise = this.startGeneration();
-    this.startPromise = promise.finally(() => {
-      if (this.startPromise === promise) this.startPromise = undefined;
+    const tracked = promise.finally(() => {
+      if (this.startPromise === tracked) this.startPromise = undefined;
     });
-    return this.startPromise;
+    this.startPromise = tracked;
+    return tracked;
   }
 
   async stop(): Promise<void> {
@@ -124,6 +125,7 @@ export class SidecarSupervisor {
     const generation = ++this.generation;
     const targetPort = this.config.port;
     const alreadyHealthy = await this.isHealthy(targetPort);
+    if (generation !== this.generation) return;
     if (alreadyHealthy) {
       this.dependencies.logger.info(
         `[dsh-chatgpt-web] Sidecar already running and healthy at http://${this.config.host}:${targetPort}/v1`,
