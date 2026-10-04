@@ -5,14 +5,19 @@ on:
     branches:
       - tmp/audit-build-lib
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -25,9 +30,16 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build bundles
         run: bun run build
-      - name: Upload generated bundles
-        uses: actions/upload-artifact@v4
-        with:
-          name: audit-generated-lib
-          path: lib
-          if-no-files-found: error
+      - name: Commit generated bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib
+          if git diff --cached --quiet; then
+            echo "Generated bundles are already current."
+            exit 0
+          fi
+          git commit -m "chore: refresh generated bundles"
+          git push origin HEAD:tmp/audit-build-lib
