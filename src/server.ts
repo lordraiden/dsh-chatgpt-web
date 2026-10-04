@@ -952,7 +952,9 @@ async function nativeDshTurnRequest(
   if (parsed.modelId !== route.backendModel) {
     return formatErrorResponse(400, "invalid_request_error", "Native DSH public model and routed backend model do not match");
   }
-  const provider = providerConfig(config);
+  // Native DSH turns may carry model-facing DSH tools even in browser-only mode. Keep
+  // the legacy /v1/responses ingress on its existing mode-based capability policy.
+  const provider = providerConfig(config, { localToolsEnabled: true });
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const queueIterator = queue[Symbol.asyncIterator]();
