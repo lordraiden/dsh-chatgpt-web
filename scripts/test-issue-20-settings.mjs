@@ -37,7 +37,7 @@ assert(plugin.includes("readReadyTimeout(config.readyTimeoutMs)"), "runtime must
 assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
 assert(plugin.includes("new SidecarSupervisor("), "plugin must delegate sidecar lifecycle to the single supervisor");
 assert(supervisor.includes("resolveLauncher(targetBunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
-assert(supervisor.includes('"--host", DEFAULT_HOST, "--port", String(port)') === false || supervisor.includes("targetPort"), "supervisor must pass the effective port to the launcher");
+assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
 assert(supervisor.includes("const generation = ++this.generation"), "live reconfiguration must invalidate an in-flight start");
 assert(supervisor.includes("if (this.spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
 assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
