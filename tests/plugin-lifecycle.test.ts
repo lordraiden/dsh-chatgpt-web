@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import * as realChildProcess from "node:child_process";
 
 class FakeChild extends EventEmitter {
   exitCode: number | null = null;
@@ -29,6 +30,7 @@ const spawned: FakeChild[] = [];
 const events: string[] = [];
 
 mock.module("node:child_process", () => ({
+  ...realChildProcess,
   spawn: () => {
     const child = new FakeChild(events);
     spawned.push(child);
