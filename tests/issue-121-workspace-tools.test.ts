@@ -2,6 +2,7 @@ import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { inject } from "../src/plugin";
 import {
   createWorkspaceToolDefinitions,
   WorkspaceToolError,
