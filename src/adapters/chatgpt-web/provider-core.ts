@@ -44,7 +44,8 @@ export interface ProviderRetryDecision {
   readonly reason?: "submitted" | "budget_exhausted" | "retired" | "policy";
 }
 
-// Maximum automatic retries after the initial browser submission attempt.\nconst DEFAULT_MAX_RETRY_ATTEMPTS = 3;
+// Maximum automatic retries after the initial browser submission attempt.
+const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BUDGET_TTL_MS = 30 * 60_000;
 
 const TRANSITIONS: Record<ProviderTurnState, readonly ProviderTurnState[]> = {
