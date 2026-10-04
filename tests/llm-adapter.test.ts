@@ -398,7 +398,7 @@ describe("native path does not enter the Responses server", () => {
     expect(() => chatGptTurnExecutionKey(parsed)).not.toThrow();
     expect(() => chatGptTurnRoundKey(parsed)).not.toThrow();
     const second = toCodexParsedRequest(userRequest("hello"), provider);
-    expect(second._dshContext?.threadId).toBe(parsed._dshContext?.threadId);
+    expect(second._dshContext?.threadId).not.toBe(parsed._dshContext?.threadId);
     expect(second._dshContext?.turnId).not.toBe(parsed._dshContext?.turnId);
   });
 
