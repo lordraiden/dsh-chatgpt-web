@@ -190,19 +190,65 @@ function readReadyTimeout(value: number | Volatile<number> | undefined): number 
 }
 
 async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
     const res = await fetch(`http://${host}:${port}/healthz`, {
       signal: controller.signal,
     });
-    clearTimeout(timer);
     if (!res.ok) return false;
     const body = (await res.json()) as { status?: string };
     return body.status === "ok";
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise(resolve => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      child.off("error", onError);
+    };
+    const finish = (exited: boolean) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const onError = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+    child.once("error", onError);
+  });
+}
+
+async function terminateChild(
+  child: ChildProcess,
+  logger: Pick<Console, "warn" | "error">,
+  label: string,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    child.kill("SIGTERM");
+  } catch (error) {
+    logger.warn(`[dsh-chatgpt-web] Failed to SIGTERM ${label}: ${safeErrorDescriptor(error)}`);
+  }
+  if (await waitForChildExit(child, 2_000)) return;
+
+  logger.warn(`[dsh-chatgpt-web] ${label} did not exit after SIGTERM; escalating to SIGKILL`);
+  try {
+    child.kill("SIGKILL");
+  } catch (error) {
+    logger.error(`[dsh-chatgpt-web] Failed to SIGKILL ${label}: ${safeErrorDescriptor(error)}`);
+  }
+  await waitForChildExit(child, 1_000);
 }
 
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
@@ -225,6 +271,10 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1`);
       return;
     }
+
+    // A live configuration update can invalidate an in-flight health probe. Never
+    // spawn a child after that start generation has been superseded.
+    if (generation !== startGeneration) return;
 
     if (!autoStart) {
       logger.warn(`[dsh-chatgpt-web] Sidecar is offline and autoStart is false. Start it manually with 'bun run src/cli.ts serve'`);
@@ -282,6 +332,13 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     }
 
     logger.error(`[dsh-chatgpt-web] Sidecar did not become healthy within ${readyTimeoutMs}ms`);
+    if (spawnedProcess === child) {
+      await terminateChild(child, logger, "sidecar startup child");
+      if (spawnedProcess === child) {
+        spawnedProcess = undefined;
+        spawnedPort = undefined;
+      }
+    }
   };
 
   const stopDaemon = async () => {
@@ -290,22 +347,8 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     const childPort = spawnedPort;
     if (!child) return;
 
-    logger.info("[dsh-chatgpt-web] Stopping sidecar daemon...");
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2000);
-      await fetch(`http://${host}:${childPort ?? port}/admin/shutdown`, {
-        method: "POST",
-        signal: controller.signal,
-      }).catch(() => {});
-      clearTimeout(timer);
-    } catch {
-      // ignore
-    }
-
-    if (!child.killed) {
-      child.kill("SIGTERM");
-    }
+    logger.info(`[dsh-chatgpt-web] Stopping sidecar daemon on port ${childPort ?? port}...`);
+    await terminateChild(child, logger, "owned sidecar");
     if (spawnedProcess === child) {
       spawnedProcess = undefined;
       spawnedPort = undefined;
