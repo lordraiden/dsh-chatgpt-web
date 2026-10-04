@@ -71,7 +71,6 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
     dshSessionId: "session-74",
     threadId: "dsh-74-thread",
     turnId: "turn-74",
-    promptCacheKey: "dsh-purpose:compaction",
   });
   assert.deepEqual(extractChatGptTurnEnvironment(parsed), {
     cwd: "/workspace",
