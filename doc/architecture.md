@@ -1539,6 +1539,15 @@ Native Codex remains a separate first-party passthrough outside the Web Provider
 
 Contract coverage is in `tests/issue-72-responses-provider-core.test.ts`.
 
+## 31.3 Native DSH / Responses execution authority
+
+The browser execution authority is the local ChatGPT Web sidecar process. The native DSH LLM adapter is a DSH-facing translation boundary only: it resolves the trusted DSH session/sandbox context, builds the canonical provider request, and sends that request over an authenticated loopback transport to the sidecar.
+
+The sidecar creates one shared ChatGptWebProviderCore for its lifetime. Both /v1/responses and the internal native-DSH transport obtain Web adapters bound to that same ProviderCore, so leases, capability ownership, retry budget, submission/settlement state, replay and provenance cannot diverge merely because the caller used a different ingress.
+
+The native DSH transport carries the trusted _dshContext out-of-band from model-visible content. The sidecar validates the public Web route against the same ChatGPT Web authority and rejects requests whose public route/backend mapping is inconsistent. It does not infer or reconstruct DSH sandbox authority from browser state or Responses compatibility state.
+
+This is a process boundary, not a second provider authority: ChatGptWebProviderCore remains the single lifecycle/lease/retry authority for the ChatGPT Web execution process.
 ## 32. Final ownership model
 
 ~~~text
