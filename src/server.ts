@@ -954,6 +954,7 @@ async function nativeDshTurnRequest(
   const provider = providerConfig(config);
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
+  const queueIterator = queue[Symbol.asyncIterator]();
   const encoder = new TextEncoder();
   const abort = new AbortController();
   if (req.signal.aborted) abort.abort(req.signal.reason);
@@ -973,15 +974,16 @@ async function nativeDshTurnRequest(
   })();
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const event = await queue.next();
-      if (event === undefined) {
+      const result = await queueIterator.next();
+      if (result.done) {
         controller.close();
         return;
       }
-      controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+      controller.enqueue(encoder.encode(JSON.stringify(result.value) + "\n"));
     },
     cancel(reason) {
       abort.abort(reason);
+      void queueIterator.return?.();
     },
   });
   return new Response(stream, {
