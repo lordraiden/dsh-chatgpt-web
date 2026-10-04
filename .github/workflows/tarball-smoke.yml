@@ -38,5 +38,18 @@ jobs:
       - name: Build bundles
         run: bun run build
 
-      - name: Smoke test the packed tarball
-        run: npm run test
+      - name: Pack exact validated artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          tarball="$(npm pack --silent --pack-destination artifact)"
+          test -n "$tarball"
+          test -f "$GITHUB_WORKSPACE/artifact/$tarball"
+
+      - name: Smoke test the exact packed tarball
+        run: |
+          set -euo pipefail
+          tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+          node scripts/smoke-tarball.mjs "$GITHUB_WORKSPACE/$tarball"
