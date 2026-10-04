@@ -1057,13 +1057,17 @@ It must not own:
 
 ### 19.1.1 Responses seam audit evidence (#78)
 
+`src/adapters/chatgpt-web/rolling-checkpoint.ts` may reuse `src/responses/parser.ts` to rebuild a synthetic checkpointed `CodexParsedRequest` because this is wire translation only; the checkpoint code does not select routes, authorize capabilities, own retry/settlement state, or execute browser turns. This is an explicit dependency, not a second Responses execution path.
+
+
+
 The Responses compatibility layer is intentionally limited to translation and compatibility state. The retained components are classified as follows:
 
 - **Required public compatibility translation:** `src/responses/schema.ts`, `src/responses/parser.ts`, `src/responses/compaction.ts`, `src/responses/reasoning-envelope.ts`, and `src/bridge.ts`. They translate the Responses wire representation to/from the existing provider request/event representation.
 - **Required compatibility state:** `src/responses/state.ts` stores a bounded representation of completed Responses items so `previous_response_id` can continue across requests and process restarts. It is a cache only: it contains no browser handles, ProviderCore turn state, capability/sandbox authority, retry budget, or route decision, and it cannot initiate execution. Missing state fails closed at the Responses ingress.
 - **Required operational transport outside the Web core:** `src/native-passthrough.ts` serves first-party native Codex endpoints. It remains a separate protocol path and is not a ChatGPT Web execution authority.
 
-The executable audit in `tests/issue-78-responses-seam.test.ts` covers the seam behavior rather than only source structure: unary and streaming `/v1/responses` delegation through an injected Web adapter, Web route/capability parity and fail-closed behavior, Web catalog fallback when native Codex models are unavailable or malformed, Codex isolation for `/v1/responses` and `/v1/responses/compact`, Web compaction delegation, restart/reload and corruption behavior for the continuation cache, and a repository-wide Responses import/ownership scan.
+The executable audit in `tests/issue-78-responses-seam.test.ts` covers the seam behavior rather than only source structure: unary and streaming `/v1/responses` delegation through an injected Web adapter, Web route/capability parity and fail-closed behavior, Web catalog fallback when native Codex models are unavailable or malformed, Codex isolation for `/v1/responses` and `/v1/responses/compact`, Web compaction delegation, restart/reload and corruption behavior for the continuation cache, and a repository-wide Responses import/ownership scan. The repository-wide dependency scan explicitly permits only the ingress/bridge/native-passthrough consumers plus the Luna rolling-checkpoint parser reuse described below; every Responses module remains barred from ProviderCore, browser, retry, capability and transport authorities.
 
 No additional Responses execution core, model catalogue, capability authority, retry authority, or provider lifecycle state is retained. The existing `/v1/responses/compact` implementation calls the same `responseRequest` path rather than maintaining a second execution implementation; its extra logic is only Responses compaction representation and validation.
 
