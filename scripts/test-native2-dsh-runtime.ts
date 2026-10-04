@@ -420,8 +420,11 @@ async function main(): Promise<void> {
       const callResult = await callPromise;
       assert.equal(callResult.isError, undefined);
 
-      const callPayload = structured<{ content?: unknown[] }>(callResult);
-      assert.deepEqual(callPayload.content, dshResult.content);
+      assert.deepEqual(
+        callResult.content,
+        dshResult.content,
+        "MCP must return the DSH tool content unchanged across the broker boundary",
+      );
 
       const binding2 = await callTurnBroker<{
         bindingId: string;
