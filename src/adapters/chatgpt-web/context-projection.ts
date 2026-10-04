@@ -72,6 +72,8 @@ function sanitizeRetiredTransportFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeRetiredTransportFields);
   if (!value || typeof value !== "object") return value;
 
+    // Only bridge-owned metadata keys are retired here. The scrubber is not a generic
+    // normalization pass and therefore never rewrites arbitrary field names/values.
   const record = value as Record<string, unknown>;
   const result: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(record)) {
@@ -222,7 +224,7 @@ function assistantContent(
       id: part.id,
       name: part.name,
       ...(part.namespace ? { namespace: part.namespace } : {}),
-      arguments: args,
+      arguments: part.arguments,
       ...(part.thoughtSignature ? { thought_signature: part.thoughtSignature } : {}),
     };
   }).filter(Boolean);
@@ -292,7 +294,7 @@ function messageEnvelope(
     return {
       role: "assistant",
       ...(message.phase ? { phase: message.phase } : {}),
-      content: assistantContent(message.content, userContext),
+      content: assistantContent(message.content),
     };
   }
   return { role: message.role, content: inputContent(message.content, images) };
