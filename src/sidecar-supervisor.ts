@@ -46,6 +46,8 @@ export class SidecarSupervisor {
   private generation = 0;
   private startPromise?: Promise<void>;
   private reconfiguration = Promise.resolve();
+  private terminationPromises = new WeakMap<ChildProcess, Promise<void>>();
+  private closed = false;
 
   constructor(
     config: SidecarSupervisorConfig,
@@ -55,6 +57,7 @@ export class SidecarSupervisor {
   }
 
   async start(): Promise<void> {
+    if (this.closed) return;
     if (this.startPromise) return this.startPromise;
     const promise = this.startGeneration();
     const tracked = promise.finally(() => {
@@ -77,8 +80,10 @@ export class SidecarSupervisor {
   }
 
   async reconfigure(next: SidecarSupervisorConfig): Promise<void> {
+    if (this.closed) return;
     this.reconfiguration = this.reconfiguration
       .then(async () => {
+        if (this.closed) return;
         const previous = this.config;
         const portChanged = next.port !== previous.port;
         const autoStartChanged = next.autoStart !== previous.autoStart;
@@ -114,7 +119,13 @@ export class SidecarSupervisor {
   }
 
   async shutdown(): Promise<void> {
-    await this.stop();
+    this.closed = true;
+    ++this.generation;
+    const pendingStart = this.startPromise;
+    if (pendingStart) {
+      await pendingStart.catch(() => {});
+    }
+    await this.terminationForCurrentProcess();
   }
 
   get activeProcessPort(): number | undefined {
@@ -124,25 +135,29 @@ export class SidecarSupervisor {
   private async startGeneration(): Promise<void> {
     const generation = ++this.generation;
     const targetPort = this.config.port;
-    const alreadyHealthy = await this.isHealthy(targetPort);
+    const targetHost = this.config.host;
+    const targetAutoStart = this.config.autoStart;
+    const targetReadyTimeoutMs = this.config.readyTimeoutMs;
+    const targetBunPath = this.config.bunPath;
+    const alreadyHealthy = await this.isHealthy(targetHost, targetPort);
     if (generation !== this.generation) return;
     if (alreadyHealthy) {
       this.dependencies.logger.info(
-        `[dsh-chatgpt-web] Sidecar already running and healthy at http://${this.config.host}:${targetPort}/v1`,
+        `[dsh-chatgpt-web] Sidecar already running and healthy at http://${targetHost}:${targetPort}/v1`,
       );
       return;
     }
 
-    if (!this.config.autoStart) {
+    if (!targetAutoStart) {
       this.dependencies.logger.warn(
         "[dsh-chatgpt-web] Sidecar is offline and autoStart is false. Start it manually with 'bun run src/cli.ts serve'",
       );
       return;
     }
 
-    const launcher = this.dependencies.resolveLauncher(this.config.bunPath, targetPort);
+    const launcher = this.dependencies.resolveLauncher(targetBunPath, targetPort);
     this.dependencies.logger.info(
-      `[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${this.config.host}:${targetPort}/v1...`,
+      `[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${targetHost}:${targetPort}/v1...`,
     );
 
     const child = this.dependencies.spawn(launcher.cmd, launcher.args, {
@@ -187,15 +202,15 @@ export class SidecarSupervisor {
     });
 
     const exitPromise = this.waitForExit(child);
-    const deadline = Date.now() + this.config.readyTimeoutMs;
+    const deadline = Date.now() + targetReadyTimeoutMs;
     while (Date.now() < deadline) {
       if (generation !== this.generation) {
         await this.terminateChild(child, targetPort);
         return;
       }
-      if (await this.isHealthy(targetPort)) {
+      if (await this.isHealthy(targetHost, targetPort)) {
         this.dependencies.logger.info(
-          `[dsh-chatgpt-web] Sidecar ready and accepting turns at http://${this.config.host}:${targetPort}/v1`,
+          `[dsh-chatgpt-web] Sidecar ready and accepting turns at http://${targetHost}:${targetPort}/v1`,
         );
         return;
       }
@@ -212,18 +227,18 @@ export class SidecarSupervisor {
     }
 
     this.dependencies.logger.error(
-      `[dsh-chatgpt-web] Sidecar did not become healthy within ${this.config.readyTimeoutMs}ms`,
+      `[dsh-chatgpt-web] Sidecar did not become healthy within ${targetReadyTimeoutMs}ms`,
     );
     await this.terminateChild(child, targetPort);
   }
 
-  private async isHealthy(port: number): Promise<boolean> {
+  private async isHealthy(host: string, port: number): Promise<boolean> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
       try {
         const res = await this.dependencies.fetch(
-          `http://${this.config.host}:${port}/healthz`,
+          `http://${host}:${port}/healthz`,
           { signal: controller.signal },
         );
         if (!res.ok) return false;
@@ -252,6 +267,16 @@ export class SidecarSupervisor {
   }
 
   private async terminateChild(child: ChildProcess, port: number): Promise<void> {
+    const existing = this.terminationPromises.get(child);
+    if (existing) return existing;
+    const promise = this.terminateChildOnce(child, port).finally(() => {
+      if (this.terminationPromises.get(child) === promise) this.terminationPromises.delete(child);
+    });
+    this.terminationPromises.set(child, promise);
+    await promise;
+  }
+
+  private async terminateChildOnce(child: ChildProcess, port: number): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null) {
       if (this.spawnedProcess === child) {
         this.spawnedProcess = undefined;
