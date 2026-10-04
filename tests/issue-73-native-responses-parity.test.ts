@@ -25,7 +25,7 @@ describe("issue #73 native DSH / Responses ProviderCore parity", () => {
       { model: "chatgpt-web/extra-high", sol: true, pro: true },
       { model: "chatgpt-web/pro", sol: true, pro: true },
       { model: "chatgpt-web/luna", sol: false, pro: false },
-      { model: "chatgpt-web/think", sol: false, pro: false },
+      { model: "chatgpt-web/think", sol: false, pro: false, think: true },
     ] as const;
 
     for (const entry of matrix) {
@@ -36,6 +36,7 @@ describe("issue #73 native DSH / Responses ProviderCore parity", () => {
         capabilityState: {
           solAvailable: (entry.sol ? "supported" : "unsupported") as "supported" | "unsupported",
           proAvailable: (entry.pro ? "supported" : "unsupported") as "supported" | "unsupported",
+          thinkAvailable: (entry.think ? "supported" : "unsupported") as "supported" | "unsupported",
         },
       };
       const authority = createChatGptWebRouteAuthority(config);
