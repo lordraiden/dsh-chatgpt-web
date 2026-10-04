@@ -54,7 +54,10 @@ describe("issue #127 browser-only native DSH tool handoff", () => {
     );
 
     expect(prompt.text).toContain("Emit exactly one <dsh_tool_call>");
-    expect(prompt.text).toContain("fs.read");
+    expect(prompt.text).toContain("native DSH tool mode");
+    expect(prompt.text).toContain("<dsh_tool_schemas_json>");
+    expect(prompt.text).toContain("\"fs.read\"");
+    expect(prompt.text).toContain("\"file_path\"");
   });
 
   test("native DSH private ingress enables browser-local tools while Responses remains read-only", async () => {
@@ -94,6 +97,8 @@ describe("issue #127 browser-only native DSH tool handoff", () => {
         input: "read .dsh121-local-test.txt",
         stream: false,
       });
+      const nativeRoute = (await import("../src/server")).routeChatGptWebRequest(nativeParsed, config);
+      nativeParsed.modelId = nativeRoute.backendModel;
 
       nativeParsed._dshContext = {
         dshSessionId: "issue-127-session",
