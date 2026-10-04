@@ -14,6 +14,13 @@ are carried through runtime state rather than reconstructed from model-visible t
 Keep dependency security fixes and lockfile overrides documented in the repository. Verify security-sensitive
 dependency changes with the repository's normal typecheck, build, regression, packaging, and smoke-test gates.
 
-Once the GitHub repository is public, use its private Security Advisory reporting flow. Until that
-is enabled, do not publish a proof of concept that exposes credentials or arbitrary local tool
-execution; contact the maintainer privately through the GitHub account listed by the repository.
+For security reports, use the repository's private reporting channel when available. Do not publish a proof
+of concept that exposes credentials or enables arbitrary local execution; contact the maintainer privately
+through the GitHub account listed by the repository.
+
+
+## Diagnostics and provenance
+
+Routine runtime diagnostics use safe metadata rather than raw payloads. Tool diagnostics may include names, counts, and size statistics but not raw arguments or freeform input. Error diagnostics may include stable identity, codes, types, and status but not raw messages containing prompts or tool output. Arbitrary sidecar text is represented by length and a short fingerprint. Provenance and correlation identifiers are diagnostic only and must never become an alternate capability, sandbox, retry, or routing authority.
+
+Do not add logging that prints prompts, files, browser credentials, cookies, session tokens, raw tool output, or raw browser state.
