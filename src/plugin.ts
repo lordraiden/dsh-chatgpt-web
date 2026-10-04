@@ -10,6 +10,11 @@ import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
 import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
 import { selfDevelopmentPolicyFromDshEnvironment } from "./self-development-contract";
+import {
+  registerWorkspaceTools,
+  type WorkspaceToolConfig,
+  type WorkspaceToolsContext,
+} from "./workspace-tools";
 
 export interface CordisContext {
   /**
@@ -33,6 +38,7 @@ export interface CordisContext {
   llm: {
     registerAdapter(providers: string[], adapter: ChatGptWebLlmAdapter): { (): void };
   };
+  tools?: WorkspaceToolsContext["tools"];
 }
 
 export const name = "dsh-chatgpt-web";
@@ -49,6 +55,18 @@ export interface Config {
   readyTimeoutMs: Volatile<number>;
   /** Advanced runtime override; intentionally not exposed as a live user setting. */
   bunPath?: string;
+  /** Enable the bounded self-development workspace tools. */
+  workspaceEnabled: boolean;
+  /** Single explicit root authorized for workspace tools. */
+  workspaceRoot: string;
+  /** Expose workspace read/search tools. */
+  workspaceRead: boolean;
+  /** Expose workspace write/edit tools. */
+  workspaceWrite: boolean;
+  /** Maximum UTF-8 bytes read by one workspace operation. */
+  workspaceMaxReadBytes: number;
+  /** Maximum UTF-8 bytes written by one workspace operation. */
+  workspaceMaxWriteBytes: number;
 }
 
 export const Config = schemastery.object({
@@ -59,6 +77,20 @@ export const Config = schemastery.object({
   readyTimeoutMs: schemastery.number().step(1).min(0).default(30_000)
     .description("Milliseconds to wait for a newly started sidecar to become healthy.").volatile(),
   bunPath: schemastery.string().default(undefined as unknown as string),
+  workspaceEnabled: schemastery.boolean().default(false)
+    .description("Enable bounded filesystem tools for the configured self-development workspace."),
+  workspaceRoot: schemastery.string().default("")
+    .description("Single explicit workspace root available to self-development filesystem tools."),
+  workspaceRead: schemastery.boolean().default(true)
+    .description("Expose bounded workspace read/search tools."),
+  workspaceWrite: schemastery.boolean().default(false)
+    .description("Expose workspace write/edit tools. Disabled by default."),
+  workspaceMaxReadBytes: schemastery.number().step(1).min(1).max(16 * 1024 * 1024)
+    .default(1_048_576)
+    .description("Maximum UTF-8 bytes readable by one workspace tool call."),
+  workspaceMaxWriteBytes: schemastery.number().step(1).min(1).max(16 * 1024 * 1024)
+    .default(1_048_576)
+    .description("Maximum UTF-8 bytes writable by one workspace tool call."),
 });
 
 type ChatGPTWebPluginConfig = {
@@ -66,6 +98,12 @@ type ChatGPTWebPluginConfig = {
   autoStart?: boolean | Volatile<boolean>;
   readyTimeoutMs?: number | Volatile<number>;
   bunPath?: string;
+  workspaceEnabled?: boolean;
+  workspaceRoot?: string;
+  workspaceRead?: boolean;
+  workspaceWrite?: boolean;
+  workspaceMaxReadBytes?: number;
+  workspaceMaxWriteBytes?: number;
 };
 
 import { pathToFileURL } from "node:url";
@@ -204,6 +242,21 @@ function readReadyTimeout(value: number | Volatile<number> | undefined): number 
   return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
 }
 
+function readWorkspaceToolConfig(config: ChatGPTWebPluginConfig): WorkspaceToolConfig {
+  return {
+    enabled: config.workspaceEnabled ?? false,
+    root: typeof config.workspaceRoot === "string" ? config.workspaceRoot : "",
+    read: config.workspaceRead ?? true,
+    write: config.workspaceWrite ?? false,
+    maxReadBytes: Number.isSafeInteger(config.workspaceMaxReadBytes)
+      ? Number(config.workspaceMaxReadBytes)
+      : 1_048_576,
+    maxWriteBytes: Number.isSafeInteger(config.workspaceMaxWriteBytes)
+      ? Number(config.workspaceMaxWriteBytes)
+      : 1_048_576,
+  };
+}
+
 async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
   try {
     const controller = new AbortController();
@@ -226,6 +279,16 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   let autoStart = readBoolean(config.autoStart, true);
   let readyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
+
+  const workspaceTools = readWorkspaceToolConfig(config);
+  if (workspaceTools.enabled) {
+    const toolsContext = ctx.tools;
+    if (!toolsContext) {
+      throw new Error("DSH tools service is required when workspace tools are enabled");
+    }
+    const registered = registerWorkspaceTools({ tools: toolsContext }, workspaceTools);
+    logger.info(`[dsh-chatgpt-web] Registered bounded workspace tools: ${registered.join(", ")}`);
+  }
 
   let spawnedProcess: ChildProcess | undefined;
   let spawnedPort: number | undefined;
