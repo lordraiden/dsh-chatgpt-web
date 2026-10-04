@@ -166,15 +166,18 @@ async function exerciseClient(port) {
 
   sandbox.plugin.factory(require).apply(context);
 
+  assert.equal(typeof page, "function", "plugin bundle did not register the settings page component");
+  const renderPage = () => page({ view: "page" });
+
   cursor = 0;
-  const firstTree = page();
-  const tokenInput = findNode(firstTree, node => node.type === "input");
+  const firstTree = renderPage();
+  const tokenInput = findNode(firstTree, node => node.type === "input" && node.props?.type === "password");
   assert(tokenInput, "control-token input must render");
   assert.equal(tokenInput.props.value, "");
 
   tokenInput.props.onChange({ target: { value: "ephemeral-token" } });
   cursor = 0;
-  page();
+  renderPage();
   await new Promise(resolve => setImmediate(resolve));
 
   assert(requests.includes("http://127.0.0.1:" + port + "/v1/control/status"));
@@ -185,7 +188,7 @@ async function exerciseClient(port) {
   form.value = { port: 19001, autoStart: true, readyTimeoutMs: 30000 };
   for (const listener of listeners) listener();
   cursor = 0;
-  page();
+  renderPage();
   await new Promise(resolve => setImmediate(resolve));
   assert(requests.includes("http://127.0.0.1:19001/v1/control/status"));
 }
