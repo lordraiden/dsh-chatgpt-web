@@ -1,7 +1,7 @@
 /**
- * Client half of @lordraiden/dsh-chatgpt-web: a "ChatGPT Web" page in the DSH Web GUI settings
- * panel. It reads the sidecar control API (status, tuning config, recent browser turns) and lets
- * the user tune the browser transport limits without touching config files.
+ * Client half of @lordraiden/dsh-chatgpt-web: a "ChatGPT Web" configuration page on the DSH
+ * 0.2 Plugins surface. DSH-owned runtime settings are edited through configForms; the page also
+ * reads the loopback sidecar control API for diagnostics and advanced browser-transport tuning.
  *
  * Plain JS (no build step): React comes from the browser module table, text goes through the
  * Client locale service, and styling uses only --dsw-alias-* theme tokens rendered as a
