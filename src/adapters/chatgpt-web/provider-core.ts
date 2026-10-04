@@ -32,6 +32,11 @@ export interface ProviderTurnPhysicalResourceBinding {
 
 type RetryPolicy = "strict" | "side_effect_free";
 
+interface ProviderRetryBudget {
+  attempts: number;
+  lastRetryAt: number;
+}
+
 export interface ProviderRetryDecision {
   readonly allowed: boolean;
   readonly attempt: number;
@@ -259,8 +264,6 @@ export class ProviderTurnLifecycle {
   private physicalSettlementOutcome: PhysicalSettlementOutcome = "not_started";
   private physicalSettlementError?: Error;
   private retirementScheduled = false;
-  private retryAttempts = 0;
-  private lastRetryAt = 0;
   private shutdownRequested = false;
   private cancelExecution?: (reason: Error) => void;
 
@@ -422,44 +425,17 @@ export class ProviderTurnLifecycle {
     this.cancelExecution?.(reason);
   }
 
-  retryDecision(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): ProviderRetryDecision {
-    if (this.submission !== "prepared") {
-      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "submitted" };
-    }
-    if (this.state === "SETTLING" || this.state === "RETIRED") {
-      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "retired" };
-    }
-    if (this.retryPolicy !== "strict" && this.retryPolicy !== "side_effect_free") {
-      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "policy" };
-    }
-    if (this.lastRetryAt > 0 && now - this.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
-      this.retryAttempts = 0;
-    }
-    if (this.retryAttempts >= maxAttempts) {
-      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "budget_exhausted" };
-    }
-    return { allowed: true, attempt: this.retryAttempts + 1, maxAttempts };
+  canAutomaticallyRetry(): boolean {
+    if (this.submission !== "prepared") return false;
+    if (this.state === "SETTLING" || this.state === "RETIRED") return false;
+    return this.retryPolicy === "strict" || this.retryPolicy === "side_effect_free";
   }
 
-  recordRetryAttempt(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): ProviderRetryDecision {
+  authorizeSurfaceReplay(): void {
     this.assertMutable();
-    const decision = this.retryDecision(now, maxAttempts);
-    if (!decision.allowed) return decision;
-    this.retryAttempts += 1;
-    this.lastRetryAt = now;
-    return { allowed: true, attempt: this.retryAttempts, maxAttempts };
-  }
-
-  canAutomaticallyRetry(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): boolean {
-    return this.retryDecision(now, maxAttempts).allowed;
-  }
-
-  authorizeSurfaceReplay(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): void {
-    this.assertMutable();
-    const decision = this.recordRetryAttempt(now, maxAttempts);
-    if (!decision.allowed) {
+    if (!this.canAutomaticallyRetry()) {
       throw new Error(
-        `Automatic browser surface replay is forbidden (reason=${decision.reason}, submission=${this.submission}, state=${this.state})`,
+        `Automatic browser surface replay is forbidden (submission=${this.submission}, state=${this.state})`,
       );
     }
     if (!this.lease.physicalResourceBinding()) {
@@ -568,6 +544,12 @@ export interface ChatGptWebProviderCoreTurnInput {
 
 export class ChatGptWebProviderCore {
   private readonly turns = new Map<string, ProviderTurnLifecycle>();
+  /**
+   * Retry budgets belong to the logical execution key, not one ProviderTurnLifecycle instance.
+   * A failed physical turn is retired before a reconnect can create its replacement lifecycle;
+   * keeping the budget here prevents that replacement from resetting the retry limit.
+   */
+  private readonly retryBudgets = new Map<string, ProviderRetryBudget>();
   // A snapshot is a capability binding for one logical provider execution, not a reusable tool-set token.
   // Keep the ownership record after retirement so an old immutable snapshot cannot be attached to a new turn.
   private readonly capabilitySnapshotOwners = new Map<string, string>();
@@ -590,6 +572,56 @@ export class ChatGptWebProviderCore {
 
   getRetiredCapabilitySnapshot(executionKey: string): CapabilitySnapshot | undefined {
     return this.retiredCapabilitySnapshots.get(executionKey);
+  }
+
+  private retryBudget(executionKey: string): ProviderRetryBudget {
+    const existing = this.retryBudgets.get(executionKey);
+    if (existing) return existing;
+    const budget: ProviderRetryBudget = { attempts: 0, lastRetryAt: 0 };
+    this.retryBudgets.set(executionKey, budget);
+    return budget;
+  }
+
+  retryDecision(
+    executionKey: string,
+    turn: ProviderTurnLifecycle,
+    now = Date.now(),
+    maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS,
+  ): ProviderRetryDecision {
+    const snapshot = turn.snapshot();
+    if (snapshot.submission !== "prepared") {
+      const budget = this.retryBudget(executionKey);
+      return { allowed: false, attempt: budget.attempts, maxAttempts, reason: "submitted" };
+    }
+    if (snapshot.state === "SETTLING" || snapshot.state === "RETIRED") {
+      const budget = this.retryBudget(executionKey);
+      return { allowed: false, attempt: budget.attempts, maxAttempts, reason: "retired" };
+    }
+    const budget = this.retryBudget(executionKey);
+    if (budget.lastRetryAt > 0 && now - budget.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
+      budget.attempts = 0;
+    }
+    if (budget.attempts >= maxAttempts) {
+      return { allowed: false, attempt: budget.attempts, maxAttempts, reason: "budget_exhausted" };
+    }
+    return { allowed: true, attempt: budget.attempts + 1, maxAttempts };
+  }
+
+  recordRetryAttempt(
+    executionKey: string,
+    turn: ProviderTurnLifecycle,
+    now = Date.now(),
+    maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS,
+  ): ProviderRetryDecision {
+    if (turn.snapshot().state === "SETTLING" || turn.snapshot().state === "RETIRED") {
+      return this.retryDecision(executionKey, turn, now, maxAttempts);
+    }
+    const decision = this.retryDecision(executionKey, turn, now, maxAttempts);
+    if (!decision.allowed) return decision;
+    const budget = this.retryBudget(executionKey);
+    budget.attempts += 1;
+    budget.lastRetryAt = now;
+    return { allowed: true, attempt: budget.attempts, maxAttempts };
   }
 
   constructor(
@@ -670,9 +702,13 @@ export class ChatGptWebProviderCore {
       binding => this.leases.bindPhysicalResource(lease, binding),
       () => this.leases.release(lease),
       () => {
+        const finalSnapshot = turn.snapshot();
         this.turns.delete(input.executionKey);
         this.rememberRetired(input.executionKey);
         this.retiredCapabilitySnapshots.set(input.executionKey, input.capabilitySnapshot);
+        if (finalSnapshot.logicalOutcome === "completed") {
+          this.retryBudgets.delete(input.executionKey);
+        }
         while (this.retiredCapabilitySnapshots.size > 1024) {
           const oldest = this.retiredCapabilitySnapshots.keys().next().value as string | undefined;
           if (oldest === undefined) break;
@@ -721,5 +757,6 @@ export class ChatGptWebProviderCore {
     this.capabilitySnapshotOwners.clear();
     this.retiredExecutions.clear();
     this.retiredCapabilitySnapshots.clear();
+    this.retryBudgets.clear();
   }
 }
