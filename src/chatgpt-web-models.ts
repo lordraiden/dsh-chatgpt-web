@@ -233,7 +233,7 @@ export type ChatGptWebModelRoute = ChatGptWebAutomaticModelRoute | ChatGptWebZer
 export interface ChatGptWebAccountCapabilities {
   solAvailable: boolean;
   proAvailable: boolean;
-  /** Luna Think is progressively rolled out on the web; absent means not yet verified. */
+  /** Persisted observation of the Luna Think UI control; route availability does not depend on this hint. */
   thinkAvailable?: boolean;
   experimentalBiggerContext?: boolean;
   browserInteractionMode?: "automatic" | "manual";
