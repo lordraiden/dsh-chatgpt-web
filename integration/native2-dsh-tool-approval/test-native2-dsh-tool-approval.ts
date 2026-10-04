@@ -276,8 +276,17 @@ async function runNative2Integration(): Promise<void> {
       };
       await broker.completeTool(token, String(request.callId), brokerResult);
 
-      const result = mcpJson(await callPromise);
-      assert.match(JSON.stringify(result), /Created file/);
+      const result = await callPromise;
+      assert.equal(result.isError, undefined);
+      const resultTextPart = result.content?.find(value => (
+        value
+        && typeof value === "object"
+        && (value as Record<string, unknown>).type === "text"
+        && typeof (value as Record<string, unknown>).text === "string"
+      )) as Record<string, unknown> | undefined;
+      assert.ok(resultTextPart, "MCP tool result did not contain a text content part");
+      assert.match(String(resultTextPart.text), /<type>file<\/type>/);
+      assert.match(String(resultTextPart.text), /Created file/);
 
       const bindingAfterInvocation = await callTurnBroker<{
         bindingId: string;
