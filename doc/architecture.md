@@ -1055,6 +1055,18 @@ It must not own:
 - independent compaction;
 - provider-private continuity authority.
 
+### 19.1.1 Responses seam audit evidence (#78)
+
+The Responses compatibility layer is intentionally limited to translation and compatibility state. The retained components are classified as follows:
+
+- **Required public compatibility translation:** `src/responses/schema.ts`, `src/responses/parser.ts`, `src/responses/compaction.ts`, `src/responses/reasoning-envelope.ts`, and `src/bridge.ts`. They translate the Responses wire representation to/from the existing provider request/event representation.
+- **Required compatibility state:** `src/responses/state.ts` stores a bounded representation of completed Responses items so `previous_response_id` can continue across requests and process restarts. It is a cache only: it contains no browser handles, ProviderCore turn state, capability/sandbox authority, retry budget, or route decision, and it cannot initiate execution. Missing state fails closed at the Responses ingress.
+- **Required operational transport outside the Web core:** `src/native-passthrough.ts` serves first-party native Codex endpoints. It remains a separate protocol path and is not a ChatGPT Web execution authority.
+
+The audit contract in `tests/issue-78-responses-seam.test.ts` rejects forbidden Responses-layer imports, asserts that `/v1/responses` delegates through the existing adapter, checks route eligibility against the shared ChatGPT Web authority, and verifies that continuation expansion exposes only compatibility input/output state.
+
+No additional Responses execution core, model catalogue, capability authority, retry authority, or provider lifecycle state is retained. The existing `/v1/responses/compact` implementation calls the same `responseRequest` path rather than maintaining a second execution implementation; its extra logic is only Responses compaction representation and validation.
+
 ### 19.2 Native Codex passthrough
 
 The repository's first-party Codex passthrough is a separate upstream protocol.
