@@ -1,4 +1,5 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -904,6 +905,11 @@ export function startServer(
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
+  // The sidecar is the single ChatGPT Web execution authority. Responses requests and
+  // native DSH turns routed through the sidecar must share this lifecycle owner.
+  const sharedProviderCore = new ChatGptWebProviderCore();
+  const adapterFactory: ChatGptWebAdapterFactory = dependencies.adapterFactory
+    ?? (provider => createChatGptWebAdapter(provider, { providerCore: sharedProviderCore }));
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
@@ -1169,7 +1175,7 @@ export function startServer(
         (signal, bindIdentity) => responseRequest(
           new Request(req, { signal }),
           config,
-          dependencies.adapterFactory,
+          adapterFactory,
           { onTurnIdentity: bindIdentity },
         ),
         req.signal,
@@ -1183,7 +1189,7 @@ export function startServer(
         (signal, bindIdentity) => compactRequest(
           new Request(req, { signal }),
           config,
-          dependencies.adapterFactory,
+          adapterFactory,
           { onTurnIdentity: bindIdentity },
         ),
         req.signal,
