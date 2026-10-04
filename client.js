@@ -254,13 +254,18 @@ window.__ModuleLoader__.load({
         if (!configForm || typeof configForm.mutate !== 'function') return;
         const snapshot = configForm.getSnapshot();
         if (snapshot.status !== 'ready' || snapshot.writable !== true) return;
+        const user = snapshot.user && typeof snapshot.user === 'object' ? snapshot.user : {};
+        const ops = ['port', 'autoStart', 'readyTimeoutMs']
+          .filter((field) => Object.prototype.hasOwnProperty.call(user, field))
+          .map((field) => ({ op: 'unset', path: [field] }));
+        if (ops.length === 0) {
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeNoop', 'No runtime overrides to clear.') });
+          return;
+        }
         setRuntimeSaving(true);
         try {
-          const accepted = await configForm.mutate([
-            { op: 'unset', path: ['port'] },
-            { op: 'unset', path: ['autoStart'] },
-            { op: 'unset', path: ['readyTimeoutMs'] },
-          ], snapshot.revision);
+          const accepted = await configForm.mutate(ops, snapshot.revision);
           if (!accepted) throw new Error('DSH refused the runtime reset.');
           setRuntimeDirty(false);
           setNotice({ kind: 'ok', text: t('notice.runtimeRestored', 'Runtime defaults restored.') });
