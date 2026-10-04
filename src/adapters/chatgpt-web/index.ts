@@ -967,7 +967,6 @@ export function createChatGptWebAdapter(
           ? undefined
           : createChatGptStructuredOutputValidator(parsed.options.outputFormat);
         const bufferStructuredOutput = structuredOutputValidator !== undefined;
-        const retryKey = `${executionNamespace}:${chatGptTurnRetryKey(parsed)}`;
         let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
         if (mode.localTools) {
           try {
@@ -1235,7 +1234,6 @@ export function createChatGptWebAdapter(
               estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities),
               emit,
             );
-            chatGptWebTurnRetryPolicy.clear(retryKey);
             return;
           }
           const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
@@ -1445,8 +1443,7 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
-                  chatGptWebTurnRetryPolicy.clear(retryKey);
-                  return;
+                        return;
                 }
 
                 if (!bufferStructuredOutput) {
@@ -1470,8 +1467,7 @@ export function createChatGptWebAdapter(
               ));
               providerTurn.markLogicalSettled();
               session.completeRound(roundKey);
-              chatGptWebTurnRetryPolicy.clear(retryKey);
-              return;
+                return;
             }
 
             let turnToken: string | undefined;
@@ -1629,8 +1625,7 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
-                  chatGptWebTurnRetryPolicy.clear(retryKey);
-                  return;
+                        return;
                 }
 
                 session.setFinalReasoning(roundReasoning);
@@ -1646,8 +1641,7 @@ export function createChatGptWebAdapter(
                 ));
                 providerTurn.markLogicalSettled();
                 session.completeRound(roundKey);
-                chatGptWebTurnRetryPolicy.clear(retryKey);
-              };
+                  };
               const waitForTrace = () => session.runtime.trace.wait(toolWaitAbort.signal)
                 .then(() => ({ type: "trace" as const }))
                 .catch(error => toolWaitAbort.signal.aborted
