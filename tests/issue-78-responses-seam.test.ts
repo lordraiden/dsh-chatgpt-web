@@ -251,6 +251,42 @@ describe("issue #78 Responses compatibility seam audit", () => {
     }
   });
 
+  test("Web Responses compaction reuses the same adapter ingress and never creates a second execution core", async () => {
+    const config = {
+      ...defaultConfig(),
+      solAvailable: true,
+      proAvailable: false,
+      capabilityState: { solAvailable: "supported" as const, proAvailable: "unsupported" as const },
+    };
+    let calls = 0;
+    const adapterFactory = () => ({
+      name: "test-chatgpt-web",
+      runTurn: async (_parsed: unknown, _incoming: unknown, emit: (event: unknown) => void) => {
+        calls += 1;
+        emit({ type: "text_delta", text: "compaction summary", phase: "final_answer" });
+        emit({ type: "done", stopReason: "stop", endTurn: true });
+      },
+    });
+    const response = await compactRequest(
+      new Request("http://127.0.0.1/v1/responses/compact", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "chatgpt-web/light",
+          input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "old history" }] }],
+        }),
+      }),
+      config,
+      adapterFactory,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json() as { output?: Array<{ type?: string; encrypted_content?: string }> };
+    expect(body.output).toHaveLength(1);
+    expect(body.output?.[0]?.type).toBe("compaction");
+    expect(typeof body.output?.[0]?.encrypted_content).toBe("string");
+    expect(calls).toBe(1);
+  });
+
   test("previous_response_id state survives restart only as compatibility input", () => {
     const home = mkdtempSync(join(tmpdir(), "dsh-chatgpt-web-78-"));
     try {
