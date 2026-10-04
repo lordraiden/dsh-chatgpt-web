@@ -4592,7 +4592,7 @@ export class ChatGptBrowserWorker {
         if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause;
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
-          + ` ${safeErrorDescriptor(cause)},
+          + ` ${safeErrorDescriptor(cause)}`,
         );
         const previousConnection = turnConnection;
         // The observation timeout races the Playwright operation but cannot cancel the underlying
