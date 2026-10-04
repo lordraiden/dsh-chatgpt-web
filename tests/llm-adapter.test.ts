@@ -111,13 +111,26 @@ describe("ChatGptWebLlmAdapter registration", () => {
     expect(info.name).toBe("ChatGPT Web");
   });
 
-  test("listModels advertises the Luna route with text input modality", async () => {
+  test("listModels advertises Luna but not unverified Think for Luna-only accounts", async () => {
     const adapter = new ChatGptWebLlmAdapter({ loadProvider: () => providerConfigFixture() });
     const models = await adapter.listModels(CHATGPT_WEB_PROVIDER_ID);
+    const ids = models.map(model => model.id);
+    expect(ids).toEqual(["chatgpt-web/luna"]);
     const luna = models.find(model => model.id === "chatgpt-web/luna");
     expect(luna).toBeDefined();
     expect(luna?.provider).toBe(CHATGPT_WEB_PROVIDER_ID);
     expect(luna?.inputModalities).toEqual(["text"]);
+  });
+
+  test("listModels exposes Luna Think only after account capability is proven", async () => {
+    const adapter = new ChatGptWebLlmAdapter({
+      loadProvider: () => providerConfigFixture({ thinkAvailable: true }),
+    });
+    const models = await adapter.listModels(CHATGPT_WEB_PROVIDER_ID);
+    expect(models.map(model => model.id)).toEqual([
+      "chatgpt-web/luna",
+      "chatgpt-web/think",
+    ]);
   });
 });
 
