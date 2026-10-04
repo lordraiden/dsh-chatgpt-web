@@ -422,10 +422,10 @@ describe("native path does not enter the Responses server", () => {
       registerSafe: async () => "safe-turn-token",
       updateEnvironment: () => {},
       confirmSafeTurnSent: () => ({ confirmed: true, duplicate: false }),
-      nextToolBatch: async (_token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> => {
+      nextToolBatch: (_token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> => {
         nextToolBatchCalled = true;
         controller.abort();
-        await new Promise<never>((_resolve, reject) => {
+        return new Promise<BrokerToolRequest[]>((_resolve, reject) => {
           const onAbort = () => {
             signal?.removeEventListener("abort", onAbort);
             reject(new DOMException("aborted", "AbortError"));
