@@ -161,7 +161,7 @@ To make ChatGPT Web the default model for newly created agents, configure the st
     # model: chatgpt-web/luna        # Luna-only accounts
 ```
 
-Available ChatGPT Web model routes are resolved from the authenticated product capability state. The plugin supports normal ChatGPT Web usage on supported Free and paid accounts. Routes whose usage belongs to the Codex/Work allocation are outside this provider and remain unavailable through `chatgpt-web`.
+Available ChatGPT Web model routes are resolved from the authenticated product capability state. The plugin supports normal ChatGPT Web usage on supported Free and paid accounts. For Luna-only accounts, `chatgpt-web/think` is exposed only when the authenticated web probe confirms that the Think control is actually present; Think is rolling out on the web and is therefore not assumed from plan/model alone. Routes whose usage belongs to the Codex/Work allocation are outside this provider and remain unavailable through `chatgpt-web`.
 
 Start DeepSeek Harness with the profile:
 
@@ -382,7 +382,7 @@ Automatic routes currently exposed by the provider are:
 | Route | Product surface |
 | --- | --- |
 | chatgpt-web/luna | Luna-only accounts without the Sol model selector |
-| chatgpt-web/think | Think/Luna-only account route |
+| chatgpt-web/think | Luna-only accounts where the authenticated web session exposes the Think control |
 | chatgpt-web/light | Sol/Instant |
 | chatgpt-web/medium | Sol/Medium |
 | chatgpt-web/high | Sol/High |
