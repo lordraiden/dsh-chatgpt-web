@@ -16,6 +16,7 @@ import {
   type ResolvedChatGptWebTuning,
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
+import { safeErrorDescriptor } from "../../lib/safe-diagnostics";
 import type { CodexProviderConfig } from "../../types";
 import { accountIdentityFromStorageState, accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import { parseDataUrl } from "../image";
@@ -5222,7 +5223,7 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
-        + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
+        + ` ${safeErrorDescriptor(error)},
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
