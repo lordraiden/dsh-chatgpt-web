@@ -300,6 +300,23 @@ function createNativeDshRemoteBackend(
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      const emitFrame = (frame: string): void => {
+        let event: AdapterEvent;
+        try {
+          event = JSON.parse(frame) as AdapterEvent;
+        } catch {
+          // A truncated or corrupted NDJSON frame means the sidecar stream
+          // broke before a clean terminal event. Surface a stable
+          // protocol-level failure (like bad tool-argument JSON) instead of a
+          // raw SyntaxError, so the turn ends as a typed finish, not a
+          // cryptic generic PROVIDER_ERROR.
+          throw new LlmError(
+            `ChatGPT Web sidecar returned an unreadable native DSH stream frame: ${frame.slice(0, 120)}`,
+            "PROTOCOL_ERROR",
+          );
+        }
+        emit(event);
+      };
       try {
         for (;;) {
           const { value, done } = await reader.read();
@@ -311,12 +328,12 @@ function createNativeDshRemoteBackend(
             const line = buffer.slice(0, newline).trim();
             buffer = buffer.slice(newline + 1);
             if (!line) continue;
-            emit(JSON.parse(line) as AdapterEvent);
+            emitFrame(line);
           }
         }
         buffer += decoder.decode();
         const tail = buffer.trim();
-        if (tail) emit(JSON.parse(tail) as AdapterEvent);
+        if (tail) emitFrame(tail);
       } finally {
         await reader.cancel().catch(() => {});
       }
