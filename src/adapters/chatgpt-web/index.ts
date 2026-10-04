@@ -1753,11 +1753,18 @@ export function createChatGptWebAdapter(
             ? classifyChatGptWebRetry(turnError)
             : turnError;
           const retryDecision = retryCandidate instanceof ChatGptWebAdapterError
-            ? providerTurn.retryDecision()
+            ? providerCore.retryDecision(executionKey, providerTurn)
             : { allowed: false as const, attempt: 0, maxAttempts: 4 };
           const retryAllowed = retryCandidate instanceof ChatGptWebAdapterError
             && retryCandidate.retryable
             && retryDecision.allowed;
+
+          // Count a retryable pre-submission failure exactly once at the logical execution scope.
+          // The ProviderCore retains this budget when the failed physical turn is replaced, so a
+          // reconnect cannot reset the retry allowance by constructing a fresh ProviderTurnLifecycle.
+          if (retryAllowed) {
+            providerCore.recordRetryAttempt(executionKey, providerTurn);
+          }
 
           if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed && retryCandidate.retryable) {
             const exhausted = new ChatGptWebAdapterError(
