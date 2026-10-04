@@ -67,6 +67,8 @@ window.__ModuleLoader__.load({
       .cwg-card { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 14px; background: var(--dsw-alias-bg-layer-1); }
       .cwg-offline { border-color: var(--dsw-alias-border-l2); }
       .cwg-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+      .cwg-check { display: flex; align-items: center; gap: 8px; margin: 10px 0; cursor: pointer; }
+      .cwg-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--dsw-alias-brand-primary); }
       .cwg-actions { justify-content: flex-start; }
       .cwg-muted { font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.4; }
       .cwg-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
