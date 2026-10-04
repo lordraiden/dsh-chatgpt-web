@@ -9,7 +9,6 @@ import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgp
 import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
 import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
-import { selfDevelopmentPolicyFromDshEnvironment } from "./self-development-contract";
 import {
   registerWorkspaceTools,
   type WorkspaceToolConfig,
