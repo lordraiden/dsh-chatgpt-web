@@ -475,12 +475,7 @@ export async function loginToChatGpt(
       solAvailable: false,
       proAvailable: false,
     };
-    try {
-      capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
-    } catch {
-      // Fail closed for the Free-only product target: an inconclusive capability probe
-      // must never manufacture paid/Sol capability.\n      capabilities = { solAvailable: false, proAvailable: false };
-    }
+    capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
 
     atomicWriteFile(config.storageStatePath, `${JSON.stringify(state)}\n`);
     writeVerificationMarker(config.storageStatePath, capabilities);

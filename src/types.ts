@@ -350,6 +350,13 @@ export interface CodexProviderConfig {
     solAvailable?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     proAvailable?: boolean;
+    /** Tri-state capability authority. Unknown means the route must not be selected. */
+    capabilityState?: {
+      solAvailable: "supported" | "unsupported" | "unknown";
+      proAvailable: "supported" | "unsupported" | "unknown";
+    };
+    /** Fingerprint of the authenticated browser session; never a filesystem/profile identifier. */
+    accountIdentityFingerprint?: string;
     /** Whether Zero Risk exposes the explicit Pro-sized manual route. */
     zeroRiskProEnabled?: boolean;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */

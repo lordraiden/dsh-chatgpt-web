@@ -16,7 +16,6 @@ export type ChatGptWebZeroRiskBackendModel =
   | typeof CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
   | typeof CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL;
 
-export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
 export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
@@ -204,8 +203,9 @@ interface ChatGptWebModelRouteBase {
   slug: string;
   displayName: string;
   description: string;
-  codexEffort: ChatGptWebCodexEffort;
   requiresPro: boolean;
+  /** Explicit product accounting domain. Codex/Work routes are not Web routes. */
+  accountingDomain: "chatgpt-web";
 }
 
 export interface ChatGptWebAutomaticModelRoute extends ChatGptWebModelRouteBase {
@@ -234,10 +234,10 @@ export interface ChatGptWebAccountCapabilities {
 export const CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute = {
   slug: "chatgpt-web/zero-risk",
   displayName: "ChatGPT Web — Zero Risk",
-  description: "Zero Risk keeps model selection and prompt submission under your control while preserving the native Codex harness.",
+  description: "Zero Risk keeps model selection and prompt submission under your control while preserving the native DSH harness.",
+  accountingDomain: "chatgpt-web",
   interactionMode: "manual",
   backendModel: CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
-  codexEffort: "low",
   adapterEffort: "low",
   requiresPro: false,
 };
@@ -246,9 +246,9 @@ export const CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute
   slug: "chatgpt-web/zero-risk-pro",
   displayName: "ChatGPT Web — Zero Risk Pro",
   description: "Explicit Pro-sized Zero Risk context; select ChatGPT Pro manually for every turn.",
+  accountingDomain: "chatgpt-web",
   interactionMode: "manual",
   backendModel: CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
-  codexEffort: "low",
   adapterEffort: "low",
   requiresPro: true,
 };
@@ -257,9 +257,9 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
   slug: "chatgpt-web/luna",
   displayName: "ChatGPT Web — Luna",
   description: "ChatGPT Web Luna for accounts without the Sol model selector.",
+  accountingDomain: "chatgpt-web",
   interactionMode: "automatic",
   backendModel: CHATGPT_WEB_LUNA_BACKEND_MODEL,
-  codexEffort: "low",
   adapterEffort: "low",
   requiresPro: false,
 };
@@ -268,9 +268,9 @@ export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
   slug: "chatgpt-web/think",
   displayName: "ChatGPT Web — Think",
   description: "ChatGPT Web Think for Luna-only accounts.",
+  accountingDomain: "chatgpt-web",
   interactionMode: "automatic",
   backendModel: CHATGPT_WEB_LUNA_BACKEND_MODEL,
-  codexEffort: "low",
   // The backend model remains Luna. This internal adapter effort distinguishes the explicit
   // Think route after Codex has selected its separate catalog row.
   adapterEffort: "medium",
@@ -292,50 +292,50 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   {
     slug: "chatgpt-web/light",
     displayName: "ChatGPT Web — Instant",
-    description: "ChatGPT Web Instant through the native Codex harness.",
+    description: "ChatGPT Web Instant.",
+    accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-    codexEffort: "low",
     adapterEffort: "low",
     requiresPro: false,
   },
   {
     slug: "chatgpt-web/medium",
     displayName: "ChatGPT Web — Medium",
-    description: "ChatGPT Web Medium through the native Codex harness.",
+    description: "ChatGPT Web Medium.",
+    accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-    codexEffort: "medium",
     adapterEffort: "medium",
     requiresPro: false,
   },
   {
     slug: "chatgpt-web/high",
     displayName: "ChatGPT Web — High",
-    description: "ChatGPT Web High through the native Codex harness.",
+    description: "ChatGPT Web High.",
+    accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-    codexEffort: "high",
     adapterEffort: "high",
     requiresPro: false,
   },
   {
     slug: "chatgpt-web/extra-high",
     displayName: "ChatGPT Web — Extra High",
-    description: "Account-gated ChatGPT Web Extra High through the native Codex harness.",
+    description: "Account-gated ChatGPT Web Extra High.",
+    accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-    codexEffort: "xhigh",
     adapterEffort: "xhigh",
     requiresPro: true,
   },
   {
     slug: "chatgpt-web/pro",
     displayName: "ChatGPT Web — Pro",
-    description: "Account-gated ChatGPT Pro through the native Codex harness.",
+    description: "Account-gated ChatGPT Pro.",
+    accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
-    codexEffort: "ultra",
     adapterEffort: "max",
     requiresPro: true,
   },
@@ -353,6 +353,10 @@ const routesBySlug = new Map(
 
 export function isChatGptWebModelSlug(modelId: string): boolean {
   return modelId.startsWith(CHATGPT_WEB_MODEL_PREFIX);
+}
+
+export function chatGptWebModelRoute(modelId: string): ChatGptWebModelRoute | undefined {
+  return routesBySlug.get(modelId);
 }
 
 export function availableChatGptWebModelRoutes(

@@ -150,11 +150,20 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   const codex = inspectCodexIntegration();
   if (!codex.installed) {
-    checks.push({ id: "codex", status: "error", message: "Codex model route is not installed" });
+    checks.push({
+      id: "codex",
+      status: "warning",
+      message: "Native Codex model integration is not installed; ChatGPT Web operation does not depend on it",
+    });
   } else if (codex.errors.length > 0) {
-    checks.push({ id: "codex", status: "error", message: "Codex integration is inconsistent", detail: codex.errors.join("; ") });
+    checks.push({
+      id: "codex",
+      status: "warning",
+      message: "Native Codex integration is inconsistent; ChatGPT Web checks remain independent",
+      detail: codex.errors.join("; "),
+    });
   } else {
-    checks.push({ id: "codex", status: "ok", message: "Codex native model route is installed" });
+    checks.push({ id: "codex", status: "ok", message: "Native Codex model route is installed" });
   }
 
   const service = getServiceStatus();

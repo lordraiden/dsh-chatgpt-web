@@ -8,6 +8,7 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
+import { accountIdentityFromStorageState } from "./chatgpt-web-authority";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
@@ -183,6 +184,10 @@ export interface AppConfig {
   headed: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
+  capabilityState?: {
+    solAvailable: "supported" | "unsupported" | "unknown";
+    proAvailable: "supported" | "unsupported" | "unknown";
+  };
   experimentalBiggerContext: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
@@ -315,6 +320,10 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     headed: false,
     solAvailable: false,
     proAvailable: false,
+    capabilityState: {
+      solAvailable: "unsupported",
+      proAvailable: "unsupported",
+    },
     experimentalBiggerContext: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
@@ -587,6 +596,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
+  if (parsed.capabilityState !== undefined) {
+    const state = parsed.capabilityState;
+    const valid = state
+      && (state.solAvailable === "supported" || state.solAvailable === "unsupported" || state.solAvailable === "unknown")
+      && (state.proAvailable === "supported" || state.proAvailable === "unsupported" || state.proAvailable === "unknown");
+    if (!valid) throw new Error(`Invalid capabilityState in ${path}`);
+  }
   if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
     throw new Error(`Invalid solAvailable in ${path}`);
   }
@@ -604,8 +620,22 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.tuning !== undefined) {
     parsed.tuning = validateChatGptWebTuning(parsed.tuning, path);
   }
-  const solAvailable = parsed.solAvailable !== false;
+  const solAvailable = parsed.solAvailable === true;
   const proAvailable = parsed.proAvailable === true;
+  const capabilityState = parsed.capabilityState ?? {
+    solAvailable: parsed.solAvailable === undefined ? "unknown" : solAvailable ? "supported" : "unsupported",
+    proAvailable: parsed.proAvailable === undefined ? "unknown" : proAvailable ? "supported" : "unsupported",
+  };
+  if (capabilityState.solAvailable === "unknown") {
+    // Keep the boolean compatibility field conservative; route authority uses the tri-state value.
+    if (parsed.solAvailable !== undefined) throw new Error(`Invalid Sol capability state in ${path}`);
+  }
+  if (capabilityState.proAvailable === "unknown") {
+    if (parsed.proAvailable !== undefined) throw new Error(`Invalid Pro capability state in ${path}`);
+  }
+  if (capabilityState.proAvailable === "supported" && capabilityState.solAvailable !== "supported") {
+    throw new Error(`Invalid ChatGPT account capabilityState in ${path}: Pro requires supported Sol`);
+  }
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
@@ -623,6 +653,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     subagentProtocol,
     solAvailable,
     proAvailable,
+    capabilityState,
     experimentalBiggerContext,
     zeroRiskProEnabled,
   } as AppConfig;
@@ -632,6 +663,17 @@ export function saveConfig(config: AppConfig): void {
   const path = getConfigPath();
   const original = existsSync(path) ? readFileSync(path, "utf8") : "";
   atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, original));
+}
+
+function accountIdentityFingerprint(config: AppConfig): string {
+  try {
+    if (!existsSync(config.storageStatePath)) return "unknown";
+    return accountIdentityFromStorageState(
+      JSON.parse(readFileSync(config.storageStatePath, "utf8")),
+    ).fingerprint;
+  } catch {
+    return "unknown";
+  }
 }
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
@@ -677,6 +719,11 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
+      capabilityState: manual ? {
+        solAvailable: "unsupported",
+        proAvailable: "unsupported",
+      } : config.capabilityState,
+      accountIdentityFingerprint: accountIdentityFingerprint(config),
       zeroRiskProEnabled: manual ? config.zeroRiskProEnabled : false,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),

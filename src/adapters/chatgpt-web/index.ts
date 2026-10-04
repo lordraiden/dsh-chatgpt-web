@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
+import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import {
   cancelLauncherManualTurn,
@@ -81,9 +82,8 @@ function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string
   pageIdentity: string;
 } {
   const browser = provider.chatgptWeb;
-  const accountIdentity = browser?.storageStatePath
-    ?? browser?.browserHostDescriptorPath
-    ?? "chatgpt-web-default-account";
+  const accountIdentity = browser?.accountIdentityFingerprint
+    ?? accountIdentityFromUnknownSession().fingerprint;
   const browserProfile = browser?.chromeExecutablePath
     ?? browser?.browserHost
     ?? "managed-chrome";

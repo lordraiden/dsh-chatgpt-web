@@ -17,6 +17,7 @@ import {
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexProviderConfig } from "../../types";
+import { accountIdentityFromStorageState, accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import { parseDataUrl } from "../image";
 import {
   ChatGptMarkdownBuffer,
@@ -4563,7 +4564,13 @@ export class ChatGptBrowserWorker {
       const physicalProfileId = this.config.browserHost === "launcher"
         ? `launcher-profile:${this.config.browserHostDescriptorPath ?? "unknown"}`
         : `chrome-profile:${this.config.chromeExecutablePath}`;
-      const physicalAccountId = `chatgpt-account:${this.config.storageStatePath}`;
+      let physicalAccountId = "chatgpt-account:unknown";
+      try {
+        const storageState = await page.context().storageState();
+        physicalAccountId = `chatgpt-account:${accountIdentityFromStorageState(storageState).fingerprint}`;
+      } catch {
+        physicalAccountId = `chatgpt-account:${accountIdentityFromUnknownSession().fingerprint}`;
+      }
       let physicalPageId = physicalObjectId(page, "page");
       let physicalContextId = physicalObjectId(page.context(), "context");
       const bindPhysicalSurface = async (): Promise<void> => {
