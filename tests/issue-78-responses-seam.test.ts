@@ -53,7 +53,6 @@ describe("issue #78 Responses compatibility seam audit", () => {
     expect(server).toContain("responseRequest(");
     expect(server).toContain("adapterFactory(provider)");
     expect(server).toContain("responseRequest(internal, config, adapterFactory, options)");
-    expect(server).toContain('responseRequest(internal, config, adapterFactory, options)');
 
     expect(server).not.toContain("browser-worker");
     expect(server).not.toContain("retry-policy");
