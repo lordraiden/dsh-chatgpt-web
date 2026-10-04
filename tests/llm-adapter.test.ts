@@ -384,7 +384,7 @@ describe("native path does not enter the Responses server", () => {
 
     const raw = parsed._rawBody as {
       input?: unknown[];
-      client_metadata?: { "x-codex-turn-metadata"?: { thread_id?: string; turn_id?: string } };
+      client_metadata?: unknown;
     };
     expect(Array.isArray(raw.input)).toBe(true);
     expect((raw.input?.[0] as { type?: string }).type).toBe("message");
@@ -392,15 +392,14 @@ describe("native path does not enter the Responses server", () => {
     expect(
       (raw.input?.[0] as { internal_chat_message_metadata_passthrough?: { turn_id?: string } })
         .internal_chat_message_metadata_passthrough?.turn_id,
-    ).toBe(raw.client_metadata?.["x-codex-turn-metadata"]?.turn_id);
-    expect(raw.client_metadata?.["x-codex-turn-metadata"]?.thread_id).not.toBe("dsh-session");
+    ).toBe(parsed._dshContext?.turnId);
+    expect(raw.client_metadata).toBeUndefined();
+    expect(parsed._dshContext?.threadId).not.toBe("dsh-session");
     expect(() => chatGptTurnExecutionKey(parsed)).not.toThrow();
     expect(() => chatGptTurnRoundKey(parsed)).not.toThrow();
     const second = toCodexParsedRequest(userRequest("hello"), provider);
-    const firstThreadId = raw.client_metadata?.["x-codex-turn-metadata"]?.thread_id;
-    const secondThreadId = (second._rawBody as { client_metadata: { "x-codex-turn-metadata": { thread_id: string } } })
-      .client_metadata["x-codex-turn-metadata"].thread_id;
-    expect(secondThreadId).not.toBe(firstThreadId);
+    expect(second._dshContext?.threadId).not.toBe(parsed._dshContext?.threadId);
+    expect(second._dshContext?.turnId).not.toBe(parsed._dshContext?.turnId);
   });
 
   test("mapStream drives an injected backend without any HTTP hop", async () => {
@@ -500,7 +499,7 @@ describe("ChatGptWebLlmAdapter tool schemas", () => {
     }
   });
 
-  test("deferred tools and dynamic tool history are rejected rather than flattened", () => {
+  test("deferred tools are rejected explicitly while dynamic tool history is not rejected at the DSH boundary", () => {
     const deferred: ToolSchema = {
       name: "search",
       description: "Search the web",
@@ -509,19 +508,19 @@ describe("ChatGptWebLlmAdapter tool schemas", () => {
     };
     expect(() => toCodexParsedRequest(userRequest("hi", { tools: [deferred] }), providerConfigFixture()))
       .toThrow(LlmError);
+
     expect(() => toCodexParsedRequest(userRequest("hi", {
       toolHistory: {
         tools: [],
         updates: [{ messageId: "message-1", additions: [] }],
       } as unknown as GenerateOptions["toolHistory"],
-    }), providerConfigFixture())).toThrow(LlmError);
+    }), providerConfigFixture())).not.toThrow();
   });
 
   test("purpose is mapped instead of silently dropped", () => {
     const title = toCodexParsedRequest(userRequest("title me", { purpose: "session-title" }), providerConfigFixture());
-    const titleMeta = (title._rawBody as { client_metadata: { "x-codex-turn-metadata": { purpose?: string } } })
-      .client_metadata["x-codex-turn-metadata"];
-    expect(titleMeta.purpose).toBe("session-title");
+    expect(title._dshContext?.purpose).toBe("session-title");
+    expect(title._rawBody).not.toHaveProperty("client_metadata");
     expect(title.options.reasoning).toBeUndefined();
     expect(title.options.hideThinkingSummary).toBe(true);
 
@@ -533,12 +532,10 @@ describe("ChatGptWebLlmAdapter tool schemas", () => {
     );
     expect(compact._compactionRequest).toBe(true);
     expect(compact.context.messages.at(-1)?.role).toBe("user");
-    const raw = compact._rawBody as {
-      input: unknown[];
-      client_metadata: { "x-codex-turn-metadata": { purpose?: string } };
-    };
+    const raw = compact._rawBody as { input: unknown[]; client_metadata?: unknown };
     expect((raw.input.at(-1) as { type?: string }).type).toBe("compaction_trigger");
-    expect(raw.client_metadata["x-codex-turn-metadata"].purpose).toBe("compaction");
+    expect(raw.client_metadata).toBeUndefined();
+    expect(compact._dshContext?.purpose).toBe("compaction");
     expect(compact.options.reasoning).toBeUndefined();
 
     const lunaCompactRequest = userRequest("summarize", { purpose: "compaction" });
@@ -547,12 +544,10 @@ describe("ChatGptWebLlmAdapter tool schemas", () => {
     expect(lunaCompact.modelId).toBe("gpt-5.6-luna");
     expect(lunaCompact._compactionRequest).toBe(true);
     expect(lunaCompact.context.messages.at(-1)?.role).toBe("user");
-    const lunaRaw = lunaCompact._rawBody as {
-      input: unknown[];
-      client_metadata: { "x-codex-turn-metadata": { purpose?: string } };
-    };
+    const lunaRaw = lunaCompact._rawBody as { input: unknown[]; client_metadata?: unknown };
     expect((lunaRaw.input.at(-1) as { type?: string }).type).toBe("compaction_trigger");
-    expect(lunaRaw.client_metadata["x-codex-turn-metadata"].purpose).toBe("compaction");
+    expect(lunaRaw.client_metadata).toBeUndefined();
+    expect(lunaCompact._dshContext?.purpose).toBe("compaction");
     expect(lunaCompact.options.reasoning).toBeUndefined();
   });
 });

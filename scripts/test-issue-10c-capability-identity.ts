@@ -74,7 +74,8 @@ const provider = providerConfig();
 const parsed = toCodexParsedRequest(request("dsh-session-parent", '{"path":"README.md"}'), provider);
 const identity = extractChatGptTurnIdentity(parsed);
 assert.equal(identity.dshSessionId, "dsh-session-parent");
-assert.equal(identity.threadId, "dsh-session-parent");
+assert.ok(identity.threadId);
+assert.notEqual(identity.threadId, identity.dshSessionId);
 
 {
   const core = new ChatGptWebProviderCore();
