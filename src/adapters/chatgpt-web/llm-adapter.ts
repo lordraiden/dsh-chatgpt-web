@@ -4,10 +4,9 @@
  * `ChatGptWebLlmAdapter` is the only new DSH-facing seam. It registers the
  * `chatgpt-web` provider through `ctx.llm.registerAdapter`, resolves models
  * through the existing `chatgpt-web-models` catalogue (no second catalogue),
- * and streams turns by driving the *existing* in-process browser execution
- * (`createChatGptWebAdapter`). It never touches the Responses HTTP server
- * (`src/server.ts`), DOM selectors, or Playwright objects: the provider
- * backend stays behind the `ProviderAdapter` interface.
+ * and streams turns through the authenticated local execution sidecar. The sidecar owns the
+ * single ChatGPT Web ProviderCore used by both native DSH and Responses execution paths.
+ * The DSH-facing adapter never touches DOM selectors or Playwright objects.
  *
  * Registration is lazy: the constructor performs no I/O, so loading the
  * plugin and registering the provider never requires a logged-in browser.
@@ -267,7 +266,7 @@ function createNativeDshRemoteBackend(
   return {
     name: "chatgpt-web",
     async runTurn(parsed, incoming, emit) {
-      const response = await fetch(transport.baseUrl.replace(/\\/$/, "") + "/internal/native-llm", {
+      const response = await fetch(transport.baseUrl.replace(/\/$/, "") + "/internal/native-llm", {
         method: "POST",
         headers: {
           authorization: "Bearer " + transport.controlToken,
@@ -290,7 +289,7 @@ function createNativeDshRemoteBackend(
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
           for (;;) {
-            const newline = buffer.indexOf("\\n");
+            const newline = buffer.indexOf("\n");
             if (newline < 0) break;
             const line = buffer.slice(0, newline).trim();
             buffer = buffer.slice(newline + 1);
