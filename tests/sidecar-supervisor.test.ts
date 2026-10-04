@@ -34,7 +34,7 @@ function createHarness(options: {
   let spawnCount = 0;
   const logs: string[] = [];
 
-  const fetchImpl: typeof fetch = async (input) => {
+  const fetchImpl = async (input: URL | Request | string) => {
     const url = String(input);
     if (url.endsWith("/healthz")) {
       return Response.json({ status: options.health(child) ? "ok" : "down" });
