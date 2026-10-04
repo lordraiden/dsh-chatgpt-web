@@ -1,4 +1,5 @@
 name: Temporary build artifact sync
+# Runs only while PR #132 is being validated.
 
 on:
   pull_request:
