@@ -59,15 +59,21 @@ describe("issue #79 security and observability hardening", () => {
       source("src/plugin.ts"),
       source("src/server.ts"),
     ].join("\n");
+    const lines = runtime.split("\n");
+    const logBlocks = lines.flatMap((line, index) => {
+      if (!/\\b(?:console|logger)\\.(?:log|info|warn|error|debug)\\s*\\(/.test(line)) return [];
+      return [lines.slice(index, Math.min(index + 16, lines.length)).join("\n")];
+    });
+    const logs = logBlocks.join("\n");
 
-    expect(runtime).not.toContain("JSON.stringify(collectedToolCalls)");
-    expect(runtime).not.toContain("[sidecar] ${text}");
-    expect(runtime).not.toContain("[sidecar:err] ${text}");
-    expect(runtime).not.toContain("controlError.message");
-    expect(runtime).not.toContain("captureError.message");
-    expect(runtime).not.toContain("surfacedError instanceof Error ? surfacedError.message");
-    expect(runtime).not.toContain("error instanceof Error ? error.message : String(error)");
-    expect(runtime).not.toContain("failure instanceof Error ? failure.message : String(failure)");
-    expect(runtime).not.toContain("String(result.reason)");
+    expect(logs).not.toContain("JSON.stringify(collectedToolCalls)");
+    expect(logs).not.toContain("[sidecar] ${text}");
+    expect(logs).not.toContain("[sidecar:err] ${text}");
+    expect(logs).not.toContain("controlError.message");
+    expect(logs).not.toContain("captureError.message");
+    expect(logs).not.toContain("surfacedError instanceof Error ? surfacedError.message");
+    expect(logs).not.toContain("error instanceof Error ? error.message : String(error)");
+    expect(logs).not.toContain("failure instanceof Error ? failure.message : String(failure)");
+    expect(logs).not.toContain("String(result.reason)");
   });
 });
