@@ -38,3 +38,5 @@ jobs:
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
       - run: bun run test
+
+# trigger validation
