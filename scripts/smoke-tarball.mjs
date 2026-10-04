@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import process from "node:process";
 
 const repoRoot = resolve(new URL("..", import.meta.url).pathname);
@@ -112,7 +113,28 @@ try {
     fail(`doctor crashed (exit ${doctor.status}): ${doctorText.trim().slice(-400)}`);
   }
 
-  // 6. Build-environment contamination check on the packed artifact.
+  // 6. Import the actual generated lib/plugin.js from the clean install.
+  const pluginImport = run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      [
+        `const plugin = await import(${JSON.stringify(pathToFileURL(join(pkgDir, "lib", "plugin.js")).href)});`,
+        "if (typeof plugin.apply !== 'function') throw new Error('plugin apply export missing');",
+        "if (plugin.name !== 'dsh-chatgpt-web') throw new Error('plugin name export mismatch');",
+        "console.log('plugin-import-ok');",
+      ].join("\n"),
+    ],
+    { cwd: cleanDir },
+  );
+  if (pluginImport.status === 0 && /plugin-import-ok/.test(pluginImport.stdout)) {
+    ok("generated lib/plugin.js imports from the clean install");
+  } else {
+    fail(`generated lib/plugin.js import failed: ${(pluginImport.stderr || pluginImport.stdout).trim().slice(-500)}`);
+  }
+
+  // 7. Build-environment contamination check on the packed artifact.
   execFileSync("tar", ["-xzf", tarball, "-C", extractDir]);
   const contaminationPatterns = [
     /\/home\/runner\/work\//,
@@ -147,7 +169,7 @@ try {
   }
   if (contaminated === 0) ok("no build-environment paths found in the tarball");
 
-  // 7. Runtime dependency resolution from the clean install.
+  // 8. Runtime dependency resolution from the clean install.
   const depCheck = run(
     process.execPath,
     [
@@ -175,7 +197,7 @@ try {
     }
   }
 
-  // 8. tiktoken actually loads (wasm) from the clean install.
+  // 9. tiktoken actually loads (wasm) from the clean install.
   const twLoad = run(
     process.execPath,
     [
