@@ -31,7 +31,7 @@ import {
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
-import { augmentNativeModelCatalog } from "./model-catalog";
+import { augmentNativeModelCatalog, buildChatGptWebModelCatalog } from "./model-catalog";
 import {
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
@@ -40,9 +40,12 @@ import {
 import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   isChatGptWebModelSlug,
-  requireChatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
+import {
+  createChatGptWebRouteAuthority,
+  requireChatGptWebRoute,
+} from "./chatgpt-web-authority";
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import {
   buildCompactV1Output,
@@ -369,14 +372,20 @@ export interface ResponseRequestOptions {
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
 }
 
+function chatGptWebRouteAuthority(config: AppConfig) {
+  return createChatGptWebRouteAuthority({
+    solAvailable: config.solAvailable,
+    proAvailable: config.proAvailable,
+    capabilityState: config.capabilityState,
+    browserInteractionMode: config.browserInteractionMode,
+    zeroRiskProEnabled: config.zeroRiskProEnabled,
+  });
+}
+
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
-  const route = requireChatGptWebModelRoute(parsed.modelId, config);
+  const route = requireChatGptWebRoute(parsed.modelId, chatGptWebRouteAuthority(config));
   parsed.modelId = route.backendModel;
-  // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
-  // protocol/catalog value; the manual adapter must never reinterpret it as a ChatGPT selection.
-  parsed.options.reasoning = route.interactionMode === "automatic"
-    ? route.adapterEffort
-    : route.codexEffort;
+  parsed.options.reasoning = route.adapterEffort;
   return route;
 }
 
@@ -386,26 +395,40 @@ export async function modelsRequest(
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
 ): Promise<Response> {
-  let upstream: Response;
+  const override = contextOverride?.();
+  const webCatalog = buildChatGptWebModelCatalog(config, override);
+  let upstream: Response | undefined;
   try {
     upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
-  } catch (error) {
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+  } catch {
+    upstream = undefined;
   }
-  if (!upstream.ok) return upstream;
-  let catalog: Record<string, unknown>;
-  try {
-    catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
-  } catch (error) {
-    return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
+
+  let catalog: Record<string, unknown> = webCatalog;
+  let headers = new Headers({
+    "content-type": "application/json",
+  });
+  let status = 200;
+  let statusText = "OK";
+
+  if (upstream?.ok) {
+    try {
+      catalog = augmentNativeModelCatalog(await upstream.json(), config, override);
+      headers = new Headers(upstream.headers);
+      headers.delete("content-encoding");
+      headers.delete("content-length");
+      status = upstream.status;
+      statusText = upstream.statusText;
+    } catch {
+      // Native Codex catalog corruption must not make the independent Web catalog unavailable.
+      catalog = webCatalog;
+    }
   }
+
   const body = JSON.stringify(catalog);
-  const headers = new Headers(upstream.headers);
-  headers.delete("content-encoding");
-  headers.delete("content-length");
   headers.set("content-type", "application/json");
-  headers.set("etag", `W/\"${createHash("sha256").update(body).digest("base64url")}\"`);
-  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
+  headers.set("etag", `W/"${createHash("sha256").update(body).digest("base64url")}"`);
+  return new Response(body, { status, statusText, headers });
 }
 
 export async function nativeSearchRequest(
