@@ -609,6 +609,7 @@ export function createChatGptWebAdapter(
       );
     };
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
+    const running = deferred<void>();
     // A canonical compaction request is side-effect free and remains safe to rebuild after an
     // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
     const submissionLifecycle = {
@@ -620,6 +621,7 @@ export function createChatGptWebAdapter(
         submission.phase = "accepted" as const;
         providerTurn?.markSubmitted();
         providerTurn?.markRunning();
+        running.resolve(undefined);
       },
     };
     const providerTurnSurfaceHooks: {
@@ -715,6 +717,7 @@ export function createChatGptWebAdapter(
           submission.phase = "accepted";
           providerTurn?.markSubmitted();
           providerTurn?.markRunning();
+          running.resolve(undefined);
           if (!parsed._compactionRequest) trace.push({
             kind: "commentary",
             text: "> **Waiting for ChatGPT**\n>\n> The prompt is marked `Sent`. Waiting for `Codex Zero Risk` to bind this turn through the selected ChatGPT connector.",
@@ -776,6 +779,7 @@ export function createChatGptWebAdapter(
       };
       const browserTurn = cancellableBrowserTurn(trackBrowserOwner(runManual()), browserAbort);
       void browserTurn.browser.catch(error => {
+        running.reject(error instanceof Error ? error : new Error(String(error)));
         if (tokenSettled) return;
         tokenSettled = true;
         token.reject(error instanceof Error ? error : new Error(String(error)));
@@ -798,6 +802,7 @@ export function createChatGptWebAdapter(
           if (activeToken) await broker.revoke(activeToken);
         },
         submission,
+        running: running.promise,
         cancel: (reason?: Error) => {
           browserTurn.cancel(reason);
           if (activeToken) {
@@ -835,6 +840,9 @@ export function createChatGptWebAdapter(
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
       })), browserAbort);
+      void browserTurn.browser.catch(error => {
+        running.reject(error instanceof Error ? error : new Error(String(error)));
+      });
       return {
         mode: "read-only",
         capabilitySnapshot,
@@ -845,6 +853,7 @@ export function createChatGptWebAdapter(
         usageInput: checkpointInput.parsed,
         ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
         submission,
+        running: running.promise,
         cancel: browserTurn.cancel,
       };
     }
@@ -1572,11 +1581,11 @@ export function createChatGptWebAdapter(
                 ? session.runtime.externalProgress
                 : undefined;
               const armNextTools = () => turnToken
-                ? (
+                ? session.runtime.running.then(() => (
                   providerTurn.assertCapabilityExecution(),
                   providerTurn.markCapabilityWait(),
                   broker.nextToolBatch(turnToken, toolWaitAbort.signal)
-                ).then(async requests => {
+                )).then(async requests => {
                   providerTurn.assertCapabilityExecution();
                   providerTurn.markRunning();
                   if (!externalProgress) {
