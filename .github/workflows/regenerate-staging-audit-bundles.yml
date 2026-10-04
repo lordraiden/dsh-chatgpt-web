@@ -41,3 +41,5 @@ jobs:
           git add lib/
           git commit -m "build: regenerate committed bundles"
           git push origin "HEAD:${GITHUB_REF_NAME}"
+
+# trigger build after workflow installation
