@@ -251,6 +251,20 @@ export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexPa
     .slice(0, 12);
 }
 
+export function shouldRetainChatGptWebConversation(
+  parsed: CodexParsedRequest,
+  mode: { localTools: boolean },
+  hasRetainedLauncher: boolean,
+  manualRequest = false,
+): boolean {
+  if (manualRequest || parsed._compactionRequest || !hasRetainedLauncher) return false;
+  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+    const identity = extractChatGptTurnIdentity(parsed);
+    return Boolean(identity.threadId && identity.turnId);
+  }
+  return mode.localTools;
+}
+
 function structuredContent(text: string): unknown | undefined {
   try {
     const parsed: unknown = JSON.parse(text);
@@ -503,16 +517,20 @@ export function createChatGptWebAdapter(
       : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const identity = extractChatGptTurnIdentity(parsed);
     if (capabilitySnapshot.turnId !== identity.turnId) throw new Error("ChatGPT Web capability snapshot is bound to a different native turn");
+    const retainConversationForTurn = shouldRetainChatGptWebConversation(
+      parsed,
+      mode,
+      Boolean(retainedLauncherDescriptor),
+      manualRequest,
+    );
     const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
       && !parsed._compactionRequest
+      && !retainConversationForTurn
       && Boolean(identity.threadId && identity.turnId);
     const checkpointInput = captureLunaCheckpoint
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
-    const conversationKey = !parsed._compactionRequest
-      && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
-      && mode.localTools
-      && retainedLauncherDescriptor
+    const conversationKey = retainConversationForTurn
       ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
       : undefined;
     const resumeInput = conversationKey
@@ -543,6 +561,8 @@ export function createChatGptWebAdapter(
       console.info(
         `[chatgpt-web] Luna rolling checkpoint applied=${checkpointInput.applied}${checkpointInput.reason ? ` reason=${checkpointInput.reason}` : ""}`,
       );
+    } else if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && retainConversationForTurn) {
+      console.info("[chatgpt-web] Luna retained ChatGPT conversation enabled; sending continuation delta only");
     }
     let capturedCheckpoint: CapturedChatGptLunaCheckpoint | undefined;
     let checkpointCaptureError: Error | undefined;
