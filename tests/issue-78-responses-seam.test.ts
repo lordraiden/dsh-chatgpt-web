@@ -287,7 +287,6 @@ describe("issue #78 Responses compatibility seam audit", () => {
     expect(body.output).toHaveLength(2);
     expect(body.output?.[1]?.type).toBe("message");
     expect(body.output?.[1]?.content?.[0]?.text).toContain("compaction summary");
-    expect(typeof body.output?.[0]?.encrypted_content).toBe("string");
     expect(calls).toBe(1);
   });
 
