@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
-import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
+import type { CodexContentPart, CodexParsedRequest, CodexTool, DshNativeTurnContext } from "../../types";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
 import type { CapabilitySnapshot } from "./capability-projector";
 
@@ -59,6 +59,10 @@ export class MissingTrustedCodexEnvironmentError extends Error {
 function contentText(content: string | CodexContentPart[]): string {
   if (typeof content === "string") return content;
   return content.filter(part => part.type === "text").map(part => part.text).join("\n");
+}
+
+function nativeDshContext(parsed: CodexParsedRequest): DshNativeTurnContext | undefined {
+  return parsed._dshContext;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -486,6 +490,7 @@ function clientMetadataWorkspaceRoots(parsed: CodexParsedRequest): string[] {
 }
 
 function trustedEnvironmentText(parsed: CodexParsedRequest): string {
+  if (nativeDshContext(parsed)?.environment) return "";
   const raw = rawEnvironmentText(parsed);
   if (raw) return raw;
   // A real Responses request always has `_rawBody`. Parsed system/developer text has already lost
@@ -577,6 +582,27 @@ function matchesPath(root: string, path: string): boolean {
 }
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
+  const native = nativeDshContext(parsed);
+  if (native?.environment) {
+    return {
+      cwd: native.environment.cwd,
+      roots: [...native.environment.roots],
+      writableRoots: [...native.environment.writableRoots],
+      sandboxPolicy: native.environment.sandboxMode === "danger-full-access"
+        ? { type: "dangerFullAccess" }
+        : native.environment.sandboxMode === "workspace-write"
+          ? {
+            type: "workspaceWrite",
+            writableRoots: [...native.environment.writableRoots],
+            networkAccess: native.environment.networkAccess,
+          }
+          : {
+            type: "readOnly",
+            networkAccess: native.environment.networkAccess,
+          },
+      tools: parsed.context.tools ?? [],
+    };
+  }
   const text = trustedEnvironmentText(parsed);
   const cwdMatches = environmentCwdMatches(text, clientMetadataWorkspaceRoots(parsed));
   const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
@@ -613,6 +639,15 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
 }
 
 export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptTurnIdentity {
+  const native = nativeDshContext(parsed);
+  if (native) {
+    return {
+      ...(native.dshSessionId ? { dshSessionId: native.dshSessionId } : {}),
+      threadId: native.threadId,
+      turnId: native.turnId,
+      ...(native.purpose ? { promptCacheKey: `dsh-purpose:${native.purpose}` } : {}),
+    };
+  }
   const body = record(parsed._rawBody);
   const base = extractCodexTurnIdentityFromBody(body);
   if (!base.turnId && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
