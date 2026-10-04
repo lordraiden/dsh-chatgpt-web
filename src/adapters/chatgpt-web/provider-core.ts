@@ -44,7 +44,7 @@ export interface ProviderRetryDecision {
   readonly reason?: "submitted" | "budget_exhausted" | "retired" | "policy";
 }
 
-const DEFAULT_MAX_RETRY_ATTEMPTS = 4;
+// Maximum automatic retries after the initial browser submission attempt.\nconst DEFAULT_MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BUDGET_TTL_MS = 30 * 60_000;
 
 const TRANSITIONS: Record<ProviderTurnState, readonly ProviderTurnState[]> = {
@@ -580,7 +580,24 @@ export class ChatGptWebProviderCore {
     return this.retiredCapabilitySnapshots.get(executionKey);
   }
 
-  private retryBudget(executionKey: string): ProviderRetryBudget {
+  private pruneRetryBudgets(now: number): void {
+    for (const [executionKey, budget] of this.retryBudgets) {
+      if (budget.lastRetryAt > 0 && now - budget.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
+        this.retryBudgets.delete(executionKey);
+      }
+    }
+    while (this.retryBudgets.size > 1024) {
+      const oldest = this.retryBudgets.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.retryBudgets.delete(oldest);
+    }
+  }
+
+  private retryBudgetIfPresent(executionKey: string): ProviderRetryBudget | undefined {
+    return this.retryBudgets.get(executionKey);
+  }
+
+  private ensureRetryBudget(executionKey: string): ProviderRetryBudget {
     const existing = this.retryBudgets.get(executionKey);
     if (existing) return existing;
     const budget: ProviderRetryBudget = { attempts: 0, lastRetryAt: 0 };
@@ -594,23 +611,24 @@ export class ChatGptWebProviderCore {
     now = Date.now(),
     maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS,
   ): ProviderRetryDecision {
+    this.pruneRetryBudgets(now);
     const snapshot = turn.snapshot();
+    const budget = this.retryBudgetIfPresent(executionKey);
+    const attempts = budget?.attempts ?? 0;
     if (snapshot.submission !== "prepared") {
-      const budget = this.retryBudget(executionKey);
-      return { allowed: false, attempt: budget.attempts, maxAttempts, reason: "submitted" };
+      return { allowed: false, attempt: attempts, maxAttempts, reason: "submitted" };
     }
     if (snapshot.state === "SETTLING" || snapshot.state === "RETIRED") {
-      const budget = this.retryBudget(executionKey);
-      return { allowed: false, attempt: budget.attempts, maxAttempts, reason: "retired" };
+      return { allowed: false, attempt: attempts, maxAttempts, reason: "retired" };
     }
-    const budget = this.retryBudget(executionKey);
-    if (budget.lastRetryAt > 0 && now - budget.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
-      budget.attempts = 0;
+    if (budget && budget.lastRetryAt > 0 && now - budget.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
+      this.retryBudgets.delete(executionKey);
+      return { allowed: true, attempt: 1, maxAttempts };
     }
-    if (budget.attempts >= maxAttempts) {
-      return { allowed: false, attempt: budget.attempts, maxAttempts, reason: "budget_exhausted" };
+    if (attempts >= maxAttempts) {
+      return { allowed: false, attempt: attempts, maxAttempts, reason: "budget_exhausted" };
     }
-    return { allowed: true, attempt: budget.attempts + 1, maxAttempts };
+    return { allowed: true, attempt: attempts + 1, maxAttempts };
   }
 
   recordRetryAttempt(
@@ -624,7 +642,7 @@ export class ChatGptWebProviderCore {
     }
     const decision = this.retryDecision(executionKey, turn, now, maxAttempts);
     if (!decision.allowed) return decision;
-    const budget = this.retryBudget(executionKey);
+    const budget = this.ensureRetryBudget(executionKey);
     budget.attempts += 1;
     budget.lastRetryAt = now;
     return { allowed: true, attempt: budget.attempts, maxAttempts };
