@@ -32,7 +32,7 @@
 
 ## 概述
 
-**dsh-chatgpt-web** 将经过认证的 ChatGPT Web 会话桥接到 DeepSeek Harness (DSH)，通过本地 provider/兼容性入口暴露浏览器后端模型。
+**dsh-chatgpt-web** 将经过认证的 ChatGPT Web 会话作为原生 `ctx.llm` provider 接入 DeepSeek Harness (DSH)。`/v1/responses` 仅作为兼容性入口保留，并不是原生 provider 边界。
 
 它通过无头或可视的 Chrome/Chromium 浏览器自动化连接至 `chatgpt.com`，将网页会话转换为 DSH 可用的模型请求，并流式传递回答、推理、使用量、错误以及取消语义。浏览器只是 provider 的实现细节，并不是 OpenAI 官方 API。
 
@@ -45,11 +45,11 @@
 - **浏览器自动化只是传输层：** 负责 ChatGPT Web 的就绪、提交、流式、完成、取消和恢复。
 - **兼容性入口共享同一执行路径：** 避免为不同入口维护重复的浏览器执行实现。
 
-仓库还包含有意保持独立的集成路径，包括原生 Codex passthrough 和本地 Responses 兼容入口。
+仓库还保留两个有意隔离的入口：原生 Codex passthrough 始终位于 ChatGPT Web ProviderCore 之外；本地 `/v1/responses` 兼容入口则在普通 ChatGPT Web 路由下汇聚到同一个 ProviderCore。
 
 ### 核心功能
 
-- **经过认证的 ChatGPT Web 后端：** 浏览器后端路线复用本地会话，无需为该路线配置 OpenAI API Key。
+- **原生 DSH provider：** 通过 DSH 的 `ctx.llm` 运行时注册 `chatgpt-web`，复用经过认证的浏览器会话，无需为浏览器后端路线配置 OpenAI API Key。
 - **Cordis 插件优先生命周期：** 由 DSH 通过 `ctx.effect` 管理。DeepSeek Harness 在启动时自动拉起后台 Sidecar 进程，并在退出时安全关闭。
 - **运行时模型/账户发现：** 根据已认证会话发现可用的 ChatGPT Web 模型与账户能力。
 - **流式与 provider 语义：** 向 DSH 侧暴露流式文本、推理、使用量、错误和取消语义。
@@ -144,34 +144,11 @@ Failed to create .../login-profile-XXXX/SingletonLock: Permission denied (13)
 
 > **重要：** 所有接触插件状态的命令——`setup`、`login`、`doctor`，以及运行 Sidecar 的 DSH 进程——必须看到**同一个** `DSH_CHATGPT_WEB_HOME`。如果一部分使用隐藏默认路径、另一部分使用非隐藏路径，Sidecar 会报告 `Configuration is missing`。
 
-### 3. 在 DeepSeek Harness 中启用
+### 3. 选择原生 DSH provider
 
-提供者配置位于 profile 的 Cordis 补丁层（`~/.dsh/profiles/<profile>/cordis.patch.yml`）中，而不是某个全局配置文件里。在 `llm-pi-ai` 条目的现有 `providers` 映射下添加 `chatgpt-web` 提供者：
+插件会直接通过 DSH 的 `ctx.llm` 运行时注册 `chatgpt-web`。原生 DSH 调用**不需要**在 `llm-pi-ai` 中添加 provider，也不需要配置 OpenAI Responses URL 或第二套 provider。
 
-```yaml
-- id: llm-pi-ai
-  name: "@deepseek-ai/dsh-llm-pi-ai"
-  config:
-    providers:
-      # ...你现有的 providers...
-      chatgpt-web:
-        displayName: "ChatGPT Web (Free)"
-        api: openai-responses
-        baseURL: http://127.0.0.1:17841/v1
-        headers:
-          Authorization: "Bearer chatgpt-web-free"
-        streamIdleTimeoutMs: 300000
-        models:
-          - id: chatgpt-web/luna
-            name: "ChatGPT Web — Luna (Free)"
-            contextWindow: 1050000
-            maxTokens: 32768
-            input:
-              - text
-              - image
-```
-
-可选地，在 `agent-default-model` 条目中将其设为智能体的默认模型：
+如果希望新创建的 agent 默认使用 ChatGPT Web，可配置标准的 DSH 默认模型条目：
 
 ```yaml
 - id: agent-default-model
@@ -181,15 +158,15 @@ Failed to create .../login-profile-XXXX/SingletonLock: Permission denied (13)
     model: chatgpt-web/luna
 ```
 
-现在使用你的 profile 启动 DeepSeek Harness：
+可用的 ChatGPT Web 模型路由由已认证账户的产品能力状态决定。插件面向受支持的 Free 和付费 ChatGPT 账户提供正常 Web 产品使用。使用 Codex/Work 配额的路由不属于 `chatgpt-web` provider，会被排除。
+
+使用 profile 启动 DeepSeek Harness：
 
 ```bash
 dsh --profile <profile> web
 ```
 
-DSH 将自动启动后台 Sidecar 进程，连接已登录的 ChatGPT 会话并开始处理提问！
-
----
+插件会注册 provider、启动本地浏览器 sidecar，并连接到已认证的 ChatGPT Web 会话。
 
 ## 诊断与健康检查
 
@@ -205,7 +182,7 @@ DSH 将自动启动后台 Sidecar 进程，连接已登录的 ChatGPT 会话并�
 ✓ Configuration is valid (~/.dsh/storages/chatgpt-web/config.json)
 ✓ Chrome executable found
 ✓ ChatGPT login state has authenticated browser evidence
-✓ Responses proxy is healthy on 127.0.0.1:17841
+✓ ChatGPT Web sidecar is healthy on 127.0.0.1:17841/healthz
 Doctor result: ready
 ```
 
@@ -222,7 +199,7 @@ Doctor result: ready
 1. **非官方桥接：** 通过本地 Playwright 自动化驱动 `chatgpt.com` 网页。与 OpenAI 官方无隶属或背书关系。
 2. **单会话并发：** 运行在单个浏览器标签页中。顺序查询和正常的 DSH 智能体对话完全顺畅；请避免同时对同一标签页发起多个高并发子智能体任务。
 3. **能力边界：** DSH 所拥有的工具、技能、审批和沙箱策略仍由 DSH 控制；ChatGPT 原生产品能力不应被视为 DSH 权限。
-4. **浏览器与会话限制：** 浏览器后端路线受 ChatGPT Web 产品行为以及账户级限制影响。
+4. **产品范围：** provider 支持受支持的 Free 和付费账户可用的正常 ChatGPT Web 模型路由。使用 Codex/Work 配额的路由明确排除。实际可用性仍由当前 ChatGPT Web 产品能力状态和账户级限制决定。
 
 ---
 
@@ -231,5 +208,5 @@ Doctor result: ready
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — 开发环境与贡献指南。
 - [SECURITY.md](./SECURITY.md) — 插件如何保管你的会话凭据。
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) — 配置与运行时问题诊断。
-- [doc/architecture.md](./doc/architecture.md) — provider 架构与能力所有权边界。
+- [doc/architecture.md](./doc/architecture.md) — provider 架构、能力所有权边界以及产品范围规则。
 - [LICENSE](./LICENSE) — MIT。

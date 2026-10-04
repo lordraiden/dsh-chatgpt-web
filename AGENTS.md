@@ -61,7 +61,7 @@ Do not introduce parallel browser turns against one ChatGPT session unless the c
 
 ### Runtime and capability boundaries
 
-`browser-only` is the pure conversational provider path. `full` explicitly enables the tool/MCP and Codex-related integration surfaces. Do not widen or bypass these capabilities implicitly.
+`browser-only` is the ordinary browser-backed provider path. `full` explicitly enables the tool/MCP and separate Codex-related integration surfaces. Do not widen or bypass these capabilities implicitly.
 
 Keep browser-only behavior free of autonomous local execution. Tool-capable behavior must remain behind its explicit runtime and protocol boundaries.
 
@@ -126,13 +126,13 @@ bun run typecheck
 bun run build
 ```
 
-For packaging, installation, or published-artifact changes:
+For packaging, installation, architecture, or behavior changes:
 
 ```bash
 bun test
 ```
 
-Here, `bun test` is the tarball/smoke validation path, not a comprehensive unit-test suite.
+The suite covers the current contract/architecture tests and the validated tarball smoke path.
 
 For browser/session changes, also use the relevant diagnostics, such as:
 
