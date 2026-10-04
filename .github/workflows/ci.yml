@@ -15,14 +15,11 @@ jobs:
     name: Typecheck, build, contract tests and tarball smoke test
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
-          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
@@ -42,21 +39,6 @@ jobs:
 
       - name: Build bundles
         run: bun run build
-
-      - name: Sync compiled bundles for PR validation
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- lib; then
-            echo "Compiled artifacts are already current."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lib
-          git commit -m "chore: sync compiled bundles [skip ci]"
-          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
 
       - name: Install DSH runtime for Native2 integration test
         run: bun add --no-save @deepseek-ai/dsh@0.2.0-rc.2
