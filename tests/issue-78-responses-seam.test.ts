@@ -330,6 +330,38 @@ describe("issue #78 Responses compatibility seam audit", () => {
     }
   });
 
+  test("Unavailable previous_response_id fails before Web adapter execution", async () => {
+    const config = {
+      ...defaultConfig(),
+      solAvailable: true,
+      proAvailable: false,
+      capabilityState: { solAvailable: "supported" as const, proAvailable: "unsupported" as const },
+    };
+    let adapterCalls = 0;
+    const response = await responseRequest(
+      new Request("http://127.0.0.1/v1/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "chatgpt-web/light",
+          previous_response_id: "resp_missing_78",
+          input: "next",
+          stream: false,
+        }),
+      }),
+      config,
+      () => {
+        adapterCalls += 1;
+        return {
+          name: "must-not-run",
+          runTurn: async () => {},
+        };
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(adapterCalls).toBe(0);
+  });
+
   test("Malformed persisted continuation state fails closed", () => {
     const home = mkdtempSync(join(tmpdir(), "dsh-chatgpt-web-78-corrupt-"));
     try {
