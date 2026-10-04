@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { Volatile } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
+import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
 
 export interface CordisContext {
@@ -316,6 +317,13 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     const adapter = new ChatGptWebLlmAdapter({
       resolveNativeDshContext: (options, turnId, threadId) =>
         resolveNativeDshContext(ctx, options, turnId, threadId),
+      resolveNativeDshTransport: () => {
+        const appConfig = loadConfig();
+        return {
+          baseUrl: "http://" + host + ":" + port,
+          controlToken: appConfig.controlToken,
+        };
+      },
     });
     const dispose = ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], adapter);
     logger.info(`[dsh-chatgpt-web] Registered native DSH provider "${CHATGPT_WEB_PROVIDER_ID}"`);
