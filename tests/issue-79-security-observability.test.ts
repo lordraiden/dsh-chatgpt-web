@@ -61,7 +61,7 @@ describe("issue #79 security and observability hardening", () => {
     ].join("\n");
     const lines = runtime.split("\n");
     const logBlocks = lines.flatMap((line, index) => {
-      if (!/\\b(?:console|logger)\\.(?:log|info|warn|error|debug)\\s*\\(/.test(line)) return [];
+      if (!/(?:console|logger)\.(?:log|info|warn|error|debug)\s*\(/.test(line)) return [];
       return [lines.slice(index, Math.min(index + 16, lines.length)).join("\n")];
     });
     const logs = logBlocks.join("\n");
