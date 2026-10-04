@@ -155,7 +155,9 @@ To make ChatGPT Web the default model for newly created agents, configure the st
   name: "@deepseek-ai/dsh-agent-default-model"
   config:
     provider: chatgpt-web
-    model: chatgpt-web/luna
+    # Choose one route currently exposed by the authenticated ChatGPT Web catalog, for example:
+    # model: chatgpt-web/light       # accounts with the Sol model-selector route
+    # model: chatgpt-web/luna        # Luna-only accounts
 ```
 
 Available ChatGPT Web model routes are resolved from the authenticated product capability state. The plugin supports normal ChatGPT Web usage on supported Free and paid accounts. Routes whose usage belongs to the Codex/Work allocation are outside this provider and remain unavailable through `chatgpt-web`.
