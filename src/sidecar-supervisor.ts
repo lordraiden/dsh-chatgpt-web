@@ -324,4 +324,10 @@ export class SidecarSupervisor {
       this.spawnedPort = undefined;
     }
   }
+
+  private async terminationForCurrentProcess(): Promise<void> {
+    const child = this.spawnedProcess;
+    if (!child) return;
+    await this.terminateChild(child, this.spawnedPort ?? this.config.port);
+  }
 }
