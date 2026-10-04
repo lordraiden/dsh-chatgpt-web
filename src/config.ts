@@ -8,6 +8,7 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
+import { accountIdentityFromStorageState } from "./chatgpt-web-authority";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
@@ -660,6 +661,17 @@ export function saveConfig(config: AppConfig): void {
   atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, original));
 }
 
+function accountIdentityFingerprint(config: AppConfig): string {
+  try {
+    if (!existsSync(config.storageStatePath)) return "unknown";
+    return accountIdentityFromStorageState(
+      JSON.parse(readFileSync(config.storageStatePath, "utf8")),
+    ).fingerprint;
+  } catch {
+    return "unknown";
+  }
+}
+
 export function providerConfig(config: AppConfig): CodexProviderConfig {
   const manual = config.browserInteractionMode === "manual";
   const model = manual
@@ -707,6 +719,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
         solAvailable: "unsupported",
         proAvailable: "unsupported",
       } : config.capabilityState,
+      accountIdentityFingerprint: accountIdentityFingerprint(config),
       zeroRiskProEnabled: manual ? config.zeroRiskProEnabled : false,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
