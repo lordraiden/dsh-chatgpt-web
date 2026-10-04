@@ -228,6 +228,10 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
         autoStart: nextAutoStart,
         readyTimeoutMs: nextReadyTimeoutMs,
         bunPath: config.bunPath,
+      }).catch((error) => {
+        logger.error(
+          `[dsh-chatgpt-web] Failed to apply live sidecar configuration ${safeErrorDescriptor(error)}`,
+        );
       });
     });
   }
@@ -252,7 +256,9 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   if (typeof ctx.effect === "function") {
     ctx.effect(() => {
       const { adapter, dispose } = registerAdapter();
-      void supervisor.start();
+      void supervisor.start().catch((error) => logger.error(
+        `[dsh-chatgpt-web] Sidecar failed to start ${safeErrorDescriptor(error)}`,
+      ));
       return async () => {
         await adapter.shutdown();
         await supervisor.shutdown();
@@ -261,7 +267,9 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     });
   } else {
     const { adapter, dispose } = registerAdapter();
-    void supervisor.start();
+    void supervisor.start().catch((error) => logger.error(
+      `[dsh-chatgpt-web] Sidecar failed to start ${safeErrorDescriptor(error)}`,
+    ));
     process.once("beforeExit", () => {
       void (async () => {
         await adapter.shutdown();
