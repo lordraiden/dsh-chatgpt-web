@@ -193,6 +193,22 @@ To make ChatGPT Web the default model for new agents, use DSH's normal default-m
 
 The old localhost /v1/responses provider snippet printed by older plugin releases is not the native DSH configuration. On current staging, ctx.llm is the canonical boundary.
 
+### WebUI configuration
+
+On DSH 0.2, the plugin's supported configuration UI is exposed on the **Plugins** page, in the `@lordraiden/dsh-chatgpt-web` bundle details. The page is backed by the plugin's exported DSH `Config` schema and `configForms`; it does not create a second settings namespace or persist values in browser storage.
+
+The live runtime fields exposed there are:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| Sidecar port | `17841` | Loopback-only port used by the plugin's local sidecar. |
+| Start sidecar automatically | `true` | Whether the plugin starts/stops the sidecar automatically with the DSH plugin lifecycle. |
+| Sidecar ready timeout | `30000` ms | Maximum time the plugin waits for a newly started sidecar to become healthy. |
+
+These are DSH volatile configuration fields, so edits apply without remounting the plugin. Resetting the fields removes the profile-level override and returns to the schema defaults. Runtime tuning such as browser composer and DOM grace limits remains a sidecar-owned advanced setting and is available from the plugin configuration page only after authenticating to the loopback control API with the ephemeral control token.
+
+The WebUI does **not** expose Tunnel IDs, runtime keys, browser ownership, login state, connector identities, or model-route selection as ordinary switches. Those remain setup/Launcher/security boundaries, while model selection remains DSH's native Models surface.
+
 ### Setup modes
 
 There are two main runtime modes, plus an explicit Zero Risk browser interaction mode.
@@ -324,7 +340,7 @@ User-relevant persisted settings include:
 
 Generated/private fields such as controlToken, storageStatePath, brokerSocketPath, account capability state, runtime command, and Tunnel credentials should normally be managed by the plugin rather than hand-edited.
 
-Do not manually set contextWindow to override the effective ChatGPT model capacity. Active model and account limits are resolved from the authenticated Web capability state and route; a larger numeric value in a local JSON file cannot create upstream capacity that the account/product does not expose.
+Do not manually set `contextWindow` to override the effective ChatGPT model capacity. New configurations no longer write this legacy field. The provider derives its compatibility context value from the selected ChatGPT Web route and authenticated capability state; a local number cannot create upstream capacity that the account/product does not expose.
 
 ### Browser transport tuning
 
