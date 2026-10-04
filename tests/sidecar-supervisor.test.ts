@@ -39,9 +39,6 @@ function createHarness(options: {
     if (url.endsWith("/healthz")) {
       return Response.json({ status: options.health(child) ? "ok" : "down" });
     }
-    if (url.endsWith("/admin/shutdown")) {
-      return Response.json({ status: "ok" });
-    }
     throw new Error("unexpected request " + url);
   };
 
