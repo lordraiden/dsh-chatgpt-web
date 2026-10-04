@@ -952,9 +952,11 @@ async function nativeDshTurnRequest(
   if (parsed.modelId !== route.backendModel) {
     return formatErrorResponse(400, "invalid_request_error", "Native DSH public model and routed backend model do not match");
   }
-  // Native DSH turns may carry model-facing DSH tools even in browser-only mode. Keep
-  // the legacy /v1/responses ingress on its existing mode-based capability policy.
-  const provider = providerConfig(config, { localToolsEnabled: true });
+  // Only native DSH turns that actually carry model-facing tools need the browser tool
+  // capability lifecycle. Ordinary native turns remain pure ChatGPT Web and must not acquire a
+  // broker lease before the provider surface is running.
+  const nativeToolsEnabled = (parsed.context.tools?.length ?? 0) > 0;
+  const provider = providerConfig(config, { localToolsEnabled: nativeToolsEnabled });
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const queueIterator = queue[Symbol.asyncIterator]();
