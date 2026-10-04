@@ -38,4 +38,4 @@ jobs:
 
       - name: Run Native2 DSH approval E2E
         working-directory: integration/native2-dsh-tool-approval
-        run: bun test
+        run: bun run test
