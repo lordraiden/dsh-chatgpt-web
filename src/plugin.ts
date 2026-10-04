@@ -372,7 +372,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       spawnedProcess = undefined;
       spawnedPort = undefined;
     }
-  };  };
+  };
 
   if (typeof ctx.on === "function") {
     ctx.on("loader/volatile-update", () => {
