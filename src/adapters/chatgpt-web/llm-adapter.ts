@@ -38,7 +38,7 @@ import {
   requireChatGptWebRoute,
 } from "../../chatgpt-web-authority";
 import { loadConfig, providerConfig } from "../../config";
-import { COMPACT_PROMPT } from "../../responses/compaction";
+import { COMPACT_PROMPT } from "../../lib/compaction";
 import {
   type AdapterEvent,
   type CodexAssistantContentPart,
