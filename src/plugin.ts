@@ -40,16 +40,23 @@ export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 17841;
 
 export interface Config {
+  /** Loopback sidecar port. Live because the WebUI may update it without rebuilding the plugin. */
   port: Volatile<number>;
-  autoStart: boolean;
-  readyTimeoutMs: number;
+  /** Whether the plugin owns starting/stopping the sidecar. Live configuration. */
+  autoStart: Volatile<boolean>;
+  /** Maximum time the plugin waits for a newly started sidecar to become healthy. */
+  readyTimeoutMs: Volatile<number>;
+  /** Advanced runtime override; intentionally not exposed as a live user setting. */
   bunPath?: string;
 }
 
 export const Config = z.object({
-  port: z.number().step(1).min(1).max(65535).default(DEFAULT_PORT).description("Local ChatGPT Web sidecar port.").volatile(),
-  autoStart: z.boolean().default(true),
-  readyTimeoutMs: z.number().step(1).min(0).default(30_000),
+  port: z.number().step(1).min(1).max(65535).default(DEFAULT_PORT)
+    .description("Loopback ChatGPT Web sidecar port.").volatile(),
+  autoStart: z.boolean().default(true)
+    .description("Start and stop the local ChatGPT Web sidecar automatically.").volatile(),
+  readyTimeoutMs: z.number().step(1).min(0).default(30_000)
+    .description("Milliseconds to wait for a newly started sidecar to become healthy.").volatile(),
   bunPath: z.string().default(undefined as unknown as string),
 });
 
@@ -172,6 +179,16 @@ function readPort(value: number | Volatile<number> | undefined): number {
   return Number.isSafeInteger(raw) && raw >= 1 && raw <= 65535 ? raw : DEFAULT_PORT;
 }
 
+function readBoolean(value: boolean | Volatile<boolean> | undefined, fallback: boolean): boolean {
+  const raw = typeof value === "boolean" ? value : value?.get() ?? fallback;
+  return typeof raw === "boolean" ? raw : fallback;
+}
+
+function readReadyTimeout(value: number | Volatile<number> | undefined): number {
+  const raw = typeof value === "number" ? value : value?.get() ?? 30_000;
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
+}
+
 async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
   try {
     const controller = new AbortController();
@@ -191,8 +208,8 @@ async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
   const host = DEFAULT_HOST;
   let port = readPort(config.port);
-  const autoStart = config.autoStart !== false;
-  const readyTimeoutMs = config.readyTimeoutMs ?? 30_000;
+  let autoStart = readBoolean(config.autoStart, true);
+  let readyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
 
   let spawnedProcess: ChildProcess | undefined;
@@ -300,17 +317,36 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       reconfiguration = reconfiguration
         .then(async () => {
           const nextPort = readPort(config.port);
-          if (nextPort === port) return;
-          await stopDaemon();
+          const nextAutoStart = readBoolean(config.autoStart, true);
+          const nextReadyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
+          const portChanged = nextPort !== port;
+          const autoStartChanged = nextAutoStart !== autoStart;
+          const readyTimeoutChanged = nextReadyTimeoutMs !== readyTimeoutMs;
+
+          if (!portChanged && !autoStartChanged && !readyTimeoutChanged) return;
+
+          // The plugin only stops processes it spawned itself. A healthy external sidecar is
+          // detected on the next start and is left untouched.
+          if (portChanged || (autoStartChanged && !nextAutoStart)) {
+            await stopDaemon();
+          }
+
           port = nextPort;
-          if (autoStart) {
+          autoStart = nextAutoStart;
+          readyTimeoutMs = nextReadyTimeoutMs;
+
+          if (nextAutoStart && (portChanged || autoStartChanged)) {
             await startDaemon();
           } else {
-            logger.info(`[dsh-chatgpt-web] Sidecar endpoint reconfigured to http://${host}:${port}/v1; autoStart is false.`);
+            const changes = [];
+            if (portChanged) changes.push(`port=${port}`);
+            if (autoStartChanged) changes.push(`autoStart=${autoStart}`);
+            if (readyTimeoutChanged) changes.push(`readyTimeoutMs=${readyTimeoutMs}`);
+            logger.info(`[dsh-chatgpt-web] Live configuration applied (${changes.join(", ")}).`);
           }
         })
         .catch((error) => {
-          logger.error(`[dsh-chatgpt-web] Failed to apply live sidecar port change ${safeErrorDescriptor(error)}`);
+          logger.error(`[dsh-chatgpt-web] Failed to apply live configuration ${safeErrorDescriptor(error)}`);
         });
     });
   }
