@@ -6,6 +6,7 @@ import vm from "node:vm";
 const root = resolve(import.meta.dirname, "..");
 const client = readFileSync(resolve(root, "client.js"), "utf8");
 const plugin = readFileSync(resolve(root, "src", "plugin.ts"), "utf8");
+const config = readFileSync(resolve(root, "src", "config.ts"), "utf8");
 
 const supervisor = readFileSync(resolve(root, "src", "sidecar-supervisor.ts"), "utf8");
 const cli = readFileSync(resolve(root, "src", "cli.ts"), "utf8");
