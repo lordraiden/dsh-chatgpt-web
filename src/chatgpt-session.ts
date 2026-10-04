@@ -176,7 +176,6 @@ export async function assertTemporaryChatPage(page: Page): Promise<void> {
 export interface ChatGptAccountCapabilityProbe {
   solAvailable: ChatGptWebCapabilityState;
   proAvailable: ChatGptWebCapabilityState;
-  thinkAvailable: ChatGptWebCapabilityState;
 }
 
 export async function probeChatGptAccountCapabilities(
@@ -209,30 +208,14 @@ export async function probeChatGptAccountCapabilities(
     if (composerReady && formReady && documentReady) {
       absenceSince ??= Date.now();
       if (Date.now() - absenceSince >= stableAbsenceMs) {
-        // Think is a ChatGPT reasoning control on the composer/model surface and may
-        // sit outside the prompt form in the web SPA. Do not infer its absence from form scope.
-        const thinkButton = page
-          .getByRole("button", { name: "Think", exact: true })
-          .filter({ visible: true });
-        const thinkAvailable = await anyVisible(thinkButton)
-          ? "supported"
-          : "unsupported";
-        return {
-          solAvailable: "unsupported",
-          proAvailable: "unsupported",
-          thinkAvailable,
-        };
+        return { solAvailable: "unsupported", proAvailable: "unsupported" };
       }
     } else {
       absenceSince = undefined;
     }
 
     if (Date.now() >= deadline) {
-      return {
-        solAvailable: "unknown",
-        proAvailable: "unknown",
-        thinkAvailable: "unknown",
-      };
+      return { solAvailable: "unknown", proAvailable: "unknown" };
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
@@ -245,20 +228,12 @@ export async function probeChatGptAccountCapabilities(
       { settleMs: Math.min(3_000, Math.max(250, options.selectorTimeoutMs ?? 3_000)) },
     );
   } catch {
-    return {
-      solAvailable: "supported",
-      proAvailable: "unknown",
-      thinkAvailable: "unsupported",
-    };
+    return { solAvailable: "supported", proAvailable: "unknown" };
   }
 
   try {
     if (!await surface.slider.isVisible().catch(() => false)) {
-      return {
-        solAvailable: "supported",
-        proAvailable: "unknown",
-        thinkAvailable: "unsupported",
-      };
+      return { solAvailable: "supported", proAvailable: "unknown" };
     }
 
     const state = parseChatGptEffortSliderState(
@@ -267,17 +242,12 @@ export async function probeChatGptAccountCapabilities(
       await surface.slider.getAttribute("aria-valuenow"),
     );
     if (!state) {
-      return {
-        solAvailable: "supported",
-        proAvailable: "unknown",
-        thinkAvailable: "unsupported",
-      };
+      return { solAvailable: "supported", proAvailable: "unknown" };
     }
 
     return {
       solAvailable: "supported",
       proAvailable: state.max - state.min + 1 >= 5 ? "supported" : "unsupported",
-      thinkAvailable: "unsupported",
     };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
@@ -297,6 +267,5 @@ export async function detectChatGptAccountCapabilities(
   return {
     solAvailable: result.solAvailable === "supported",
     proAvailable: result.proAvailable === "supported",
-    thinkAvailable: result.thinkAvailable === "supported",
   };
 }
