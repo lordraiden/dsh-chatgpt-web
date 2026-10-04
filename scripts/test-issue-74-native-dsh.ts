@@ -86,23 +86,28 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
 }
 
 {
-  const parsed = nativeRequest({
-    toolHistory: {
-      tools: [],
-      updates: [{
-        messageId: "message-1",
-        additions: [{
-          toolName: "write",
-          tool: {
-            name: "write",
-            description: "write",
-            parameters: { type: "object" },
-          },
+  assert.throws(
+    () => nativeRequest({
+      toolHistory: {
+        tools: [],
+        updates: [{
+          messageId: "message-1",
+          additions: [{
+            toolName: "write",
+            tool: {
+              name: "write",
+              description: "write",
+              parameters: { type: "object" },
+            },
+          }],
         }],
-      }],
-    },
-  } as any);
-  assert.ok(parsed.context.messages.length > 0, "tool-history projection must remain usable by the native adapter");
+      },
+    } as any),
+    (error: unknown) => error instanceof LlmError
+      && error.code === "UNSUPPORTED_OPTION"
+      && /dynamic tool history updates/i.test(error.message),
+    "native DSH must reject unsupported tool-history updates instead of silently dropping them",
+  );
 }
 
 {

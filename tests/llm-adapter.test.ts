@@ -499,7 +499,7 @@ describe("ChatGptWebLlmAdapter tool schemas", () => {
     }
   });
 
-  test("deferred tools are rejected explicitly while dynamic tool history is not rejected at the DSH boundary", () => {
+  test("deferred tools and dynamic tool history are rejected explicitly at the DSH boundary", () => {
     const deferred: ToolSchema = {
       name: "search",
       description: "Search the web",
@@ -514,7 +514,7 @@ describe("ChatGptWebLlmAdapter tool schemas", () => {
         tools: [],
         updates: [{ messageId: "message-1", additions: [] }],
       } as unknown as GenerateOptions["toolHistory"],
-    }), providerConfigFixture())).not.toThrow();
+    }), providerConfigFixture())).toThrow(LlmError);
   });
 
   test("purpose is mapped instead of silently dropped", () => {
