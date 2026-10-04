@@ -106,9 +106,7 @@ export function buildChatGptWebModelCatalog(
 ): JsonObject {
   const routes = availableChatGptWebRoutes(createChatGptWebRouteAuthority({
     solAvailable: config.solAvailable,
-    proAvailable: config.proAvailable,
-    thinkAvailable: config.thinkAvailable,
-    capabilityState: config.capabilityState,
+    proAvailable: config.proAvailable,    capabilityState: config.capabilityState,
     browserInteractionMode: config.browserInteractionMode,
     zeroRiskProEnabled: config.zeroRiskProEnabled,
   }));
