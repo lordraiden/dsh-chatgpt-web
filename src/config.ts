@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import {
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
+  resolveChatGptWebContextLimits,
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
 import { accountIdentityFromStorageState } from "./chatgpt-web-authority";
@@ -171,7 +172,11 @@ export interface AppConfig {
   subagentProtocol: SubagentProtocol;
   host: "127.0.0.1";
   port: number;
-  contextWindow: number;
+  /**
+   * Legacy serialized field kept only so older v3 config files remain readable.
+   * New configurations do not write it; providerConfig resolves route-specific capacity.
+   */
+  contextWindow?: number;
   appName: string;
   automaticAppName: string;
   manualAppName: typeof ZERO_RISK_CHATGPT_CONNECTOR_NAME;
@@ -308,7 +313,6 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     subagentProtocol: "compatibility-v1",
     host: "127.0.0.1",
     port: 17841,
-    contextWindow: 256_000,
     appName: CHATGPT_CONNECTOR_NAME,
     automaticAppName: CHATGPT_CONNECTOR_NAME,
     manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
@@ -504,8 +508,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Zero Risk requires the launcher browser host in ${path}`);
   }
   if (!Number.isInteger(parsed.port) || parsed.port! < 1 || parsed.port! > 65_535) throw new Error(`Invalid port in ${path}`);
-  if (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow! <= 0) {
-    throw new Error(`Invalid contextWindow in ${path}`);
+  if (parsed.contextWindow !== undefined
+    && (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow <= 0)) {
+    throw new Error(`Invalid legacy contextWindow in ${path}`);
   }
   if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
@@ -692,13 +697,25 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     : config.solAvailable
     ? ["low", "medium", "high", "xhigh", ...(config.proAvailable ? ["max"] : [])]
     : ["low", "medium"];
+  const defaultEffort = manual ? "low" : config.solAvailable ? "high" : "low";
+  const resolvedContextWindow = resolveChatGptWebContextLimits(
+    model as Parameters<typeof resolveChatGptWebContextLimits>[0],
+    defaultEffort as Parameters<typeof resolveChatGptWebContextLimits>[1],
+    {
+      solAvailable: manual ? false : config.solAvailable,
+      proAvailable: manual ? false : config.proAvailable,
+      experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
+      browserInteractionMode: config.browserInteractionMode,
+      zeroRiskProEnabled: config.zeroRiskProEnabled,
+    },
+  ).contextWindow;
   return {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
     models,
     liveModels: false,
     defaultModel: model,
-    contextWindow: config.contextWindow,
+    contextWindow: resolvedContextWindow,
     modelInputModalities: Object.fromEntries(models.map(model => [model, manual ? ["text"] : ["text", "image"]])),
     modelReasoningEfforts: Object.fromEntries(models.map(modelId => [modelId, efforts])),
     modelDefaultReasoningEfforts: Object.fromEntries(
