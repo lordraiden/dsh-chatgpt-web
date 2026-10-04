@@ -42,7 +42,7 @@ describe("issue #78 Responses compatibility seam audit", () => {
     for (const file of responseFiles) {
       const source = read(file);
       for (const moduleName of forbiddenImports) {
-        expect(source).not.toMatch(new RegExp(`from ["'].*${moduleName}`);
+        expect(source).not.toMatch(new RegExp(`from ["'].*${moduleName}`));
       }
     }
   });
