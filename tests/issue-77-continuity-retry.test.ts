@@ -4,6 +4,7 @@ import { classifyChatGptWebRetry } from "../src/adapters/chatgpt-web/retry-polic
 import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
 import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import type { CodexParsedRequest } from "../src/types";
+import { projectChatGptCapabilities } from "../src/adapters/chatgpt-web/capability-projector";
 import type { CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 
 
@@ -40,15 +41,12 @@ console.log("Issue #77 targeted retry classification and continuity fail-closed 
 {
   const core = new ChatGptWebProviderCore();
   const executionKey = "issue-77-retry-budget";
-  const capabilitySnapshot: CapabilitySnapshot = {
-    snapshotId: "snapshot-77",
+  const capabilitySnapshot: CapabilitySnapshot = projectChatGptCapabilities({
     sessionId: "session-77",
     agentId: "session-77",
     turnId: "turn-77",
-    createdAt: Date.now(),
-    lifecycle: "active",
     tools: [],
-  };
+  });
 
   const begin = () => core.begin({
     executionKey,
