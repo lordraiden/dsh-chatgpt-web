@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  selfDevelopmentPolicyFromDshEnvironment,
-  type SelfDevelopmentCapability,
-} from "../src/self-development-contract";
+import { selfDevelopmentPolicyFromDshEnvironment } from "../src/self-development-contract";
 
 describe("issue #125 self-development capability contract", () => {
   test("requires one explicit workspace root", () => {
@@ -24,9 +21,7 @@ describe("issue #125 self-development capability contract", () => {
     expect(policy.writable).toBe(false);
     expect(policy.networkAccess).toBe(false);
     expect(policy.approvalPolicy).toBe("ask");
-    expect(policy.capabilities).toEqual(
-      expect.arrayContaining<SelfDevelopmentCapability>(["filesystem-read", "execution"]),
-    );
+    expect(policy.capabilities).toEqual(expect.arrayContaining(["filesystem-read", "execution"]));
     expect(policy.capabilities).not.toContain("filesystem-write");
   });
 
@@ -39,7 +34,7 @@ describe("issue #125 self-development capability contract", () => {
 
     expect(policy.writable).toBe(true);
     expect(policy.capabilities).toEqual(
-      expect.arrayContaining<SelfDevelopmentCapability>(["filesystem-read", "filesystem-write"]),
+      expect.arrayContaining(["filesystem-read", "filesystem-write"]),
     );
     expect(policy.capabilities).not.toContain("execution");
   });
@@ -52,7 +47,7 @@ describe("issue #125 self-development capability contract", () => {
     });
 
     expect(policy.capabilities).toEqual(
-      expect.arrayContaining<SelfDevelopmentCapability>(["git-read", "diagnostics-read"]),
+      expect.arrayContaining(["git-read", "diagnostics-read"]),
     );
     expect(policy.capabilities).not.toContain("filesystem-read");
     expect(policy.capabilities).not.toContain("execution");
