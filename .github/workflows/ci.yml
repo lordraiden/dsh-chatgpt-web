@@ -43,6 +43,14 @@ jobs:
       - name: Full regression suite
         run: bun run test
 
+      - name: Upload generated lib for audit
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-chatgpt-web-generated-lib-${{ github.sha }}
+          path: lib/
+          if-no-files-found: error
+
       - name: Issue #9 ProviderCore lifecycle tests
         run: bun scripts/test-issue-9-provider-core.ts
 
