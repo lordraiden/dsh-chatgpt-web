@@ -415,9 +415,7 @@ describe("native path does not enter the Responses server", () => {
     const controller = new AbortController();
     let nextToolBatchCalled = false;
     let releaseSubmission!: () => void;
-    let observeToolBatchCall!: () => void;
     const submissionGate = new Promise<void>(resolve => { releaseSubmission = resolve; });
-    const toolBatchCall = new Promise<void>(resolve => { observeToolBatchCall = resolve; });
 
     const broker: TurnBrokerOwner = {
       register: async () => "tool-turn-token",
@@ -426,20 +424,18 @@ describe("native path does not enter the Responses server", () => {
       confirmSafeTurnSent: () => ({ confirmed: true, duplicate: false }),
       nextToolBatch: async (_token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> => {
         nextToolBatchCalled = true;
-        observeToolBatchCall();
-        await new Promise<void>((resolve, reject) => {
-          if (signal?.aborted) {
-            reject(new DOMException("aborted", "AbortError"));
-            return;
-          }
+        controller.abort();
+        await new Promise<never>((_resolve, reject) => {
           const onAbort = () => {
             signal?.removeEventListener("abort", onAbort);
             reject(new DOMException("aborted", "AbortError"));
           };
-          signal?.addEventListener("abort", onAbort, { once: true });
-          void resolve;
+          if (signal?.aborted) {
+            onAbort();
+          } else {
+            signal?.addEventListener("abort", onAbort, { once: true });
+          }
         });
-        return [];
       },
       completeTool: () => {},
       waitForSafeStart: async () => {},
@@ -477,15 +473,13 @@ describe("native path does not enter the Responses server", () => {
 
     const adapter = createChatGptWebAdapter(provider, { broker, transport });
     const run = adapter.runTurn!(parsed, { headers: new Headers(), abortSignal: controller.signal }, () => {});
+
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(nextToolBatchCalled).toBe(false);
 
     releaseSubmission();
-    await toolBatchCall;
-    expect(nextToolBatchCalled).toBe(true);
-
-    controller.abort();
     await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(nextToolBatchCalled).toBe(true);
   });
 
   test("plugin declares the LLM service as a hard Cordis dependency", () => {
