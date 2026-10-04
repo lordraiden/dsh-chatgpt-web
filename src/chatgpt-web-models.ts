@@ -333,6 +333,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     slug: "chatgpt-web/pro",
     displayName: "ChatGPT Web — Pro",
     description: "Account-gated ChatGPT Pro.",
+    accountingDomain: "chatgpt-web",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     adapterEffort: "max",
