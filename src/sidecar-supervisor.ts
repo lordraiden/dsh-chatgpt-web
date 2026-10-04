@@ -269,35 +269,20 @@ export class SidecarSupervisor {
   private async terminateChild(child: ChildProcess, port: number): Promise<void> {
     const existing = this.terminationPromises.get(child);
     if (existing) return existing;
-    const promise = this.terminateChildOnce(child, port).finally(() => {
+    const promise = this.terminateChildOnce(child).finally(() => {
       if (this.terminationPromises.get(child) === promise) this.terminationPromises.delete(child);
     });
     this.terminationPromises.set(child, promise);
     await promise;
   }
 
-  private async terminateChildOnce(child: ChildProcess, port: number): Promise<void> {
+  private async terminateChildOnce(child: ChildProcess): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null) {
       if (this.spawnedProcess === child) {
         this.spawnedProcess = undefined;
         this.spawnedPort = undefined;
       }
       return;
-    }
-
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2000);
-      try {
-        await this.dependencies.fetch(`http://${this.config.host}:${port}/admin/shutdown`, {
-          method: "POST",
-          signal: controller.signal,
-        }).catch(() => {});
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch {
-      // Ignore control-plane failures and terminate the owned child directly.
     }
 
     if (child.exitCode === null && child.signalCode === null && !child.killed) {
@@ -307,7 +292,7 @@ export class SidecarSupervisor {
     const exited = this.waitForExit(child);
     const graceful = await Promise.race([
       exited.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000)),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10_000)),
     ]);
 
     if (!graceful && child.exitCode === null && child.signalCode === null) {
