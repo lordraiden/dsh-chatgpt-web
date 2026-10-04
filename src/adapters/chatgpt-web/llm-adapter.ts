@@ -717,7 +717,13 @@ export function mapStream(
       try {
         await backend.runTurn!(parsed, { headers: new Headers(), abortSignal: backendAbort.signal }, event => queue.push(event));
       } catch (error) {
-        queue.push({ type: "error", message: errorMessage(error), ...(isAbortLikeError(error) ? { code: "aborted" } : {}) });
+        queue.push({
+          type: "error",
+          message: errorMessage(error),
+          ...(error instanceof LlmError
+            ? { code: error.code, ...((error as { status?: number }).status !== undefined ? { status: (error as { status: number }).status } : {}) }
+            : isAbortLikeError(error) ? { code: "aborted" } : {}),
+        });
       } finally {
         queue.close();
       }
