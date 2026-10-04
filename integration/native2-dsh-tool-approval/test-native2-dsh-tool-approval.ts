@@ -34,7 +34,7 @@ import { ToolCallId } from "@deepseek-ai/dsh-llm";
 const ROOT = resolve(import.meta.dir);
 const TEST_WORKSPACE = join(ROOT, `.workspace-${randomUUID()}`);
 const OUTSIDE_PATH = join(ROOT, `.outside-${randomUUID()}.txt`);
-const SOCKET_PATH = join(ROOT, `.turn-broker-${randomUUID()}.sock`);
+const SOCKET_PATH = `/tmp/dsh-cgw-${randomUUID().replaceAll("-", "").slice(0, 20)}.sock`;
 
 function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(value && typeof value === "object" && !Array.isArray(value));
