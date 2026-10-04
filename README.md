@@ -32,7 +32,7 @@
 
 ## Overview
 
-**dsh-chatgpt-web** bridges an authenticated ChatGPT Web session into DeepSeek Harness (DSH), exposing the browser-backed model through a local provider/compatibility surface.
+**dsh-chatgpt-web** bridges an authenticated ChatGPT Web session into DeepSeek Harness (DSH) as a native `ctx.llm` provider. The `/v1/responses` endpoint remains a compatibility ingress for clients that need it; it is not the native provider boundary.
 
 It uses headless or visible Chrome/Chromium automation against `chatgpt.com` and translates the web session into DSH-compatible model requests, streaming responses, reasoning, usage, errors, and cancellation semantics. The browser is an implementation detail of the provider; it is not an official OpenAI API.
 
@@ -45,11 +45,11 @@ The project is designed around a clear ownership boundary:
 - **Browser automation is isolated transport machinery** that handles ChatGPT Web readiness, submission, streaming, completion, cancellation, and recovery.
 - **Compatibility surfaces converge on the same provider execution path** rather than creating separate browser execution implementations.
 
-The repository also contains optional/native integration paths that are intentionally distinct from the browser transport, including the native Codex passthrough and the local Responses compatibility surface.
+The repository also contains two intentionally separate surfaces: native Codex passthrough, which remains outside the ChatGPT Web ProviderCore, and the local `/v1/responses` compatibility ingress, which converges on that same ProviderCore for normal ChatGPT Web routes.
 
 ### Key Features
 
-- **Authenticated ChatGPT Web backend:** Reuses a local browser session instead of requiring an OpenAI API key for the browser-backed route.
+- **Native DSH provider:** Registers `chatgpt-web` through DSH's `ctx.llm` runtime and reuses the authenticated browser-backed route without an OpenAI API key.
 - **Cordis Plugin-First Lifecycle:** Managed by DSH via `ctx.effect`. DeepSeek Harness starts the background sidecar automatically on launch and shuts it down on exit.
 - **Runtime model/account discovery:** Detects the ChatGPT Web account/model surface available to the authenticated session.
 - **Streaming and provider semantics:** Exposes streamed text, reasoning, usage, errors, and cancellation through the DSH-facing transport.
@@ -144,34 +144,11 @@ The fix is to point the plugin's storage home at a **non-hidden** directory usin
 
 > **Important:** every command that touches the plugin state — `setup`, `login`, `doctor`, and the DSH process that runs the sidecar — must see the **same** `DSH_CHATGPT_WEB_HOME`. If some of them use the hidden default path and others use the non-hidden one, the sidecar will report `Configuration is missing`.
 
-### 3. Enable in DeepSeek Harness
+### 3. Select the native DSH provider
 
-Provider configuration lives in the profile's Cordis patch layer (`~/.dsh/profiles/<profile>/cordis.patch.yml`), not in a global settings file. Add the `chatgpt-web` provider under the existing `providers` map of the `llm-pi-ai` entry:
+The plugin registers the `chatgpt-web` provider directly through DSH's `ctx.llm` runtime. Native DSH calls do **not** require an `llm-pi-ai` provider entry, an OpenAI Responses URL, or a second provider configuration.
 
-```yaml
-- id: llm-pi-ai
-  name: "@deepseek-ai/dsh-llm-pi-ai"
-  config:
-    providers:
-      # ...your existing providers...
-      chatgpt-web:
-        displayName: "ChatGPT Web (Free)"
-        api: openai-responses
-        baseURL: http://127.0.0.1:17841/v1
-        headers:
-          Authorization: "Bearer chatgpt-web-free"
-        streamIdleTimeoutMs: 300000
-        models:
-          - id: chatgpt-web/luna
-            name: "ChatGPT Web — Luna (Free)"
-            contextWindow: 1050000
-            maxTokens: 32768
-            input:
-              - text
-              - image
-```
-
-Optionally, make it the agent's default model in the `agent-default-model` entry:
+To make ChatGPT Web the default model for newly created agents, configure the standard DSH default-model entry:
 
 ```yaml
 - id: agent-default-model
@@ -181,15 +158,15 @@ Optionally, make it the agent's default model in the `agent-default-model` entry
     model: chatgpt-web/luna
 ```
 
-Now start DeepSeek Harness with the profile:
+Available ChatGPT Web model routes are resolved from the authenticated product capability state. The plugin supports normal ChatGPT Web usage on supported Free and paid accounts. Routes whose usage belongs to the Codex/Work allocation are outside this provider and remain unavailable through `chatgpt-web`.
+
+Start DeepSeek Harness with the profile:
 
 ```bash
 dsh --profile <profile> web
 ```
 
-DSH will automatically start the background sidecar process, connect to your authenticated ChatGPT session, and accept prompts!
-
----
+The plugin registers the provider, starts its local browser sidecar, and connects it to the authenticated ChatGPT Web session.
 
 ## Diagnostics & Health Check
 
@@ -205,7 +182,7 @@ Example healthy output:
 ✓ Configuration is valid (~/.dsh/storages/chatgpt-web/config.json)
 ✓ Chrome executable found
 ✓ ChatGPT login state has authenticated browser evidence
-✓ Responses proxy is healthy on 127.0.0.1:17841
+✓ ChatGPT Web sidecar is healthy on 127.0.0.1:17841/healthz
 Doctor result: ready
 ```
 
@@ -222,7 +199,7 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues: browser execut
 1. **Unofficial Bridge:** Operates via local Playwright browser automation on `chatgpt.com`. Not affiliated with or endorsed by OpenAI.
 2. **Single-Session Concurrency:** Runs within a single browser tab. Sequential queries and normal DSH agent chats work seamlessly; avoid launching parallel multi-subagent swarms against the same tab simultaneously.
 3. **Capability separation:** DSH-owned tools, skills, approvals, and sandbox policy remain under DSH authority; ChatGPT-native product capabilities must not be treated as DSH permissions.
-4. **Browser/session limits:** The browser-backed route is session-bound and subject to ChatGPT Web product behavior and account-specific limits.
+4. **Product scope:** The provider supports normal authenticated ChatGPT Web model routes available to supported Free and paid accounts. Codex/Work-quota-bound routes are explicitly excluded. Availability remains subject to the current ChatGPT Web product capability state and account-specific limits.
 
 ---
 
@@ -231,5 +208,5 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues: browser execut
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development setup and contribution guidelines.
 - [SECURITY.md](./SECURITY.md) — how the plugin handles your session credentials.
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) — diagnosing setup and runtime problems.
-- [doc/architecture.md](./doc/architecture.md) — definitive provider architecture and ownership boundaries.
+- [doc/architecture.md](./doc/architecture.md) — definitive provider architecture, ownership boundaries, and product-scope rules.
 - [LICENSE](./LICENSE) — MIT.
