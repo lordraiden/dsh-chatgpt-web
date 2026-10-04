@@ -29,6 +29,7 @@ import {
   chatGptTurnExecutionKey,
   chatGptTurnRoundKey,
 } from "../src/adapters/chatgpt-web/turn-execution";
+import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -398,7 +399,7 @@ describe("native path does not enter the Responses server", () => {
     parsed._dshContext = {
       dshSessionId: "issue-127-session",
       threadId: "issue-127-thread",
-      turnId: "issue-127-turn",
+      turnId: extractChatGptTurnIdentity(parsed).turnId!,
       environment: {
         cwd: "/tmp",
         roots: ["/tmp"],
