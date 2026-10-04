@@ -168,7 +168,7 @@ describe("SidecarSupervisor", () => {
 
   test("propagates failed reconfiguration and keeps the queue usable", async () => {
     const harness = createHarness({
-      health: (_child, port) => port !== 19003,
+      health: (child, port) => Boolean(child && !child.killed && port !== 19003),
       readyTimeoutMs: 25,
     });
 
