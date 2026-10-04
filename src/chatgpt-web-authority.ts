@@ -128,9 +128,7 @@ export function availableChatGptWebRoutes(
 
   if (authority.capabilities.solAvailable === "unknown") return [];
   if (authority.capabilities.solAvailable === "unsupported") {
-    return authority.capabilities.thinkAvailable === "supported"
-      ? CHATGPT_WEB_LUNA_MODEL_ROUTES
-      : [CHATGPT_WEB_LUNA_MODEL_ROUTE];
+    return CHATGPT_WEB_LUNA_MODEL_ROUTES;
   }
 
   if (authority.capabilities.proAvailable === "supported") return CHATGPT_WEB_MODEL_ROUTES;
@@ -164,12 +162,6 @@ export function requireChatGptWebRoute(
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     if (authority.capabilities.solAvailable !== "unsupported") {
       throw new Error(`${route.displayName} is reserved for Luna-only accounts`);
-    }
-    if (route === CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE
-      && authority.capabilities.thinkAvailable !== "supported") {
-      throw new Error(
-        `${route.displayName} is unavailable because Think is not currently available on this ChatGPT Web account`,
-      );
     }
     return route;
   }
