@@ -209,7 +209,9 @@ export async function probeChatGptAccountCapabilities(
     if (composerReady && formReady && documentReady) {
       absenceSince ??= Date.now();
       if (Date.now() - absenceSince >= stableAbsenceMs) {
-        const thinkButton = composerForm
+        // Think is a ChatGPT reasoning control on the composer/model surface and may
+        // sit outside the prompt form in the web SPA. Do not infer its absence from form scope.
+        const thinkButton = page
           .getByRole("button", { name: "Think", exact: true })
           .filter({ visible: true });
         const thinkAvailable = await anyVisible(thinkButton)
