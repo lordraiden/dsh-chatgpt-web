@@ -555,6 +555,25 @@ function leaseInput(turnId: string) {
   console.log("ok retry budgets expire by TTL");
 }
 
+{
+  const core = new ChatGptWebProviderCore("chatgpt-web", undefined, 0);
+  const turn = core.begin(leaseInput("shutdown-before-settlement"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-shutdown-before-settlement",
+    browserContextId: "ctx-shutdown-before-settlement",
+    pageId: "page-shutdown-before-settlement",
+    profileId: "profile-shutdown-before-settlement",
+    accountId: "chatgpt-account:account-shutdown-before-settlement",
+  });
+  turn.markSurfaceReady();
+  await core.shutdown(new Error("test shutdown"));
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementAttached, false);
+  assert.equal(core.get("execution-shutdown-before-settlement"), undefined);
+  console.log("ok shutdown cannot hang on an unbound physical settlement");
+}
+
 console.log("Issue #9 ProviderCore contract tests passed.");
 
 
