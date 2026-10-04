@@ -8,6 +8,7 @@ import z from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
 import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
+import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
 
 export interface CordisContext {
   /**
