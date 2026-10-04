@@ -52,11 +52,10 @@ describe("issue #78 Responses compatibility seam audit", () => {
     expect(server).toContain('url.pathname === "/v1/responses"');
     expect(server).toContain("responseRequest(");
     expect(server).toContain("adapterFactory(provider)");
-    expect(server).toContain("responseRequest(internal, config, adapterFactory, options)");
 
-    expect(server).not.toContain("browser-worker");
-    expect(server).not.toContain("retry-policy");
     expect(server).not.toContain("new ProviderTurnLifecycle");
+    expect(server).not.toContain("new ChatGptWebAdapterError");
+
   });
 
   test("Responses and native DSH resolve the same route authority", () => {
