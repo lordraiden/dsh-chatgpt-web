@@ -230,6 +230,7 @@ test("concrete replay fails closed when replacement ends before readiness", asyn
     text: new ChatGptTextFeed(),
     conversationKey: "conversation-66-fail",
     conversationGeneration: 2,
+    running: Promise.resolve(),
     cancel: () => {},
   };
   const replayRuntime = createChatGptWebReplayTransport({
