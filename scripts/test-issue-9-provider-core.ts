@@ -52,7 +52,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-state",
     pageId: "page-state",
     profileId: "profile-state",
-    accountId: "account-state",
+    accountId: "chatgpt-account:account-state",
   });
   turn.markSurfaceReady();
   turn.markSendActivated();
@@ -78,7 +78,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-settlement",
     pageId: "page-settlement",
     profileId: "profile-settlement",
-    accountId: "account-settlement",
+    accountId: "chatgpt-account:account-settlement",
   });
   turn.markSurfaceReady();
   turn.markSubmitted();
@@ -113,7 +113,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-settlement-failure",
     pageId: "page-settlement-failure",
     profileId: "profile-settlement-failure",
-    accountId: "account-settlement-failure",
+    accountId: "chatgpt-account:account-settlement-failure",
   });
   turn.markSurfaceReady();
   turn.markSubmitted();
@@ -144,7 +144,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-retry",
     pageId: "page-retry",
     profileId: "profile-retry",
-    accountId: "account-retry",
+    accountId: "chatgpt-account:account-retry",
   });
   turn.markSurfaceReady();
   assert.equal(turn.canAutomaticallyRetry(), true);
@@ -212,7 +212,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-late-callback",
     pageId: "page-late-callback",
     profileId: "profile-late-callback",
-    accountId: "account-late-callback",
+    accountId: "chatgpt-account:account-late-callback",
   });
   turn.markSurfaceReady();
   turn.markSubmitted();
@@ -240,7 +240,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-replay",
     pageId: "page-replay",
     profileId: "profile-replay",
-    accountId: "account-replay",
+    accountId: "chatgpt-account:account-replay",
   });
   turn.markSurfaceReady();
   turn.markSendActivated();
@@ -267,14 +267,14 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-1",
     pageId: "page-1",
     profileId: "profile-1",
-    accountId: "account-1",
+    accountId: "chatgpt-account:account-1",
   });
   registry.bindPhysicalResource(lease, {
     resourceId: "surface-1",
     browserContextId: "ctx-1",
     pageId: "page-2",
     profileId: "profile-1",
-    accountId: "account-1",
+    accountId: "chatgpt-account:account-1",
   });
   assert.throws(
     () => lease.bindPhysicalResource({
@@ -282,11 +282,31 @@ function leaseInput(turnId: string) {
       browserContextId: "ctx-2",
       pageId: "page-3",
       profileId: "profile-2",
-      accountId: "account-2",
+      accountId: "chatgpt-account:account-2",
+    }),
+    /physical account does not match its logical account identity/i,
+  );
+  assert.throws(
+    () => lease.bindPhysicalResource({
+      resourceId: "surface-2",
+      browserContextId: "ctx-2",
+      pageId: "page-3",
+      profileId: "profile-2",
+      accountId: "chatgpt-account:account-1",
     }),
     /cannot move to a different physical resource/i,
   );
   assert.equal(lease.provenance().physicalResourceBound, true);
+  assert.throws(
+    () => lease.bindPhysicalResource({
+      resourceId: "surface-1",
+      browserContextId: "ctx-1",
+      pageId: "page-3",
+      profileId: "profile-1",
+      accountId: "chatgpt-account:wrong-account",
+    }),
+    /physical account does not match its logical account identity/i,
+  );
 
   assert.throws(
     () => registry.acquire({
@@ -309,7 +329,7 @@ function leaseInput(turnId: string) {
       browserContextId: "ctx-1",
       pageId: "page-2",
       profileId: "profile-1",
-      accountId: "account-1",
+      accountId: "chatgpt-account:account-1",
     }),
     /already leased by turn trace-1/i,
   );
@@ -327,7 +347,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-preflight",
     pageId: "page-preflight",
     profileId: "profile-preflight",
-    accountId: "account-preflight",
+    accountId: "chatgpt-account:account-preflight",
   });
   turn.markSurfaceReady();
   turn.failBeforePhysicalSettlement();
@@ -351,7 +371,7 @@ function leaseInput(turnId: string) {
     browserContextId: "ctx-side-effect-free",
     pageId: "page-side-effect-free",
     profileId: "profile-side-effect-free",
-    accountId: "account-side-effect-free",
+    accountId: "chatgpt-account:account-side-effect-free",
   });
   turn.markSurfaceReady();
   turn.markSendActivated();
@@ -478,7 +498,7 @@ console.log("Issue #9 ProviderCore contract tests passed.");
     browserContextId: "ctx-retry-budget",
     pageId: "page-retry-budget",
     profileId: "profile-retry-budget",
-    accountId: "account-retry-budget",
+    accountId: "chatgpt-account:account-retry-budget",
   });
   turn.markSurfaceReady();
   assert.equal(core.retryDecision("retry-budget", turn, 0, 2).allowed, true);
