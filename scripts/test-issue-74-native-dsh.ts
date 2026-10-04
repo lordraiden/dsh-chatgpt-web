@@ -174,6 +174,6 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
   } as CodexParsedRequest;
   assert.throws(
     () => store.resolve(noEnvironment),
-    /native DSH environment is unavailable|trusted Codex cwd/i,
+    /MissingTrustedCodexEnvironmentError|missing cwd in trusted Codex environment context/i,
   );
 }
