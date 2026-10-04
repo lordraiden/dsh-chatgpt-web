@@ -30,6 +30,7 @@ function createHarness(options: {
   health: (child: FakeChild | undefined, port: number) => boolean;
   readyTimeoutMs?: number;
   exitImmediately?: boolean;
+  identityMatches?: boolean;
 }) {
   let child: FakeChild | undefined;
   let spawnCount = 0;
@@ -41,8 +42,8 @@ function createHarness(options: {
       const port = Number(new URL(url).port);
       return Response.json({
         status: options.health(child, port) ? "ok" : "down",
-        service: "dsh-chatgpt-web",
-        version: "1.0.3",
+        service: options.identityMatches === false ? "other-service" : "dsh-chatgpt-web",
+        version: options.identityMatches === false ? "0.0.0" : "1.0.3",
         port,
       });
     }
@@ -92,6 +93,21 @@ function createHarness(options: {
 }
 
 describe("SidecarSupervisor", () => {
+  test("does not adopt a foreign healthy listener on the configured port", async () => {
+    const harness = createHarness({
+      health: () => true,
+      readyTimeoutMs: 0,
+      identityMatches: false,
+    });
+
+    await expect(harness.supervisor.start()).rejects.toThrow(
+      /did not become healthy/i,
+    );
+    assert.equal(harness.getSpawnCount(), 1);
+    assert.equal(harness.getChild()?.signalCode, "SIGTERM");
+    assert.equal(harness.supervisor.activeProcessPort, undefined);
+  });
+
   test("coalesces concurrent starts and waits for owned process exit on stop", async () => {
     const harness = createHarness({ health: child => Boolean(child && !child.killed) });
     await Promise.all([harness.supervisor.start(), harness.supervisor.start()]);
