@@ -224,24 +224,14 @@ async function runNative2Integration(): Promise<void> {
         },
       });
 
-      const [toolRequests, approvalRequest] = await Promise.all([
-        broker.nextToolBatch(token),
-        approvalSeen,
-      ]);
+      const toolRequests = await broker.nextToolBatch(token);
 
       assert.equal(toolRequests.length, 1);
       const request = toolRequests[0]!;
       assert.equal(request.wireName, "write");
       assert.equal(typeof request.callId, "string");
       assert.deepEqual(request.arguments, argumentsToSend);
-      assert.equal(approvalRequest.toolName, "write");
-      assert.equal(String(approvalRequest.callId), String(request.callId));
       assert.equal(existsSync(OUTSIDE_PATH), false);
-
-      const eventsBeforeApproval = sessionEvents(session);
-      assert.ok(eventsBeforeApproval.some(event => event.type === "approval/asked"));
-      assert.ok(!eventsBeforeApproval.some(event => event.type === "approval/decided"));
-      assert.equal(typeof resolveApproval, "function");
 
       const toolExecution = ctx.tools.execute({
         signal: new AbortController().signal,
@@ -250,6 +240,15 @@ async function runNative2Integration(): Promise<void> {
         arguments: request.arguments,
         agent,
       });
+
+      const approvalRequest = await approvalSeen;
+      assert.equal(approvalRequest.toolName, "write");
+      assert.equal(String(approvalRequest.callId), String(request.callId));
+
+      const eventsBeforeApproval = sessionEvents(session);
+      assert.ok(eventsBeforeApproval.some(event => event.type === "approval/asked"));
+      assert.ok(!eventsBeforeApproval.some(event => event.type === "approval/decided"));
+      assert.equal(typeof resolveApproval, "function");
 
       let settledBeforeApproval = false;
       void toolExecution.then(
@@ -324,7 +323,7 @@ async function runNative2Integration(): Promise<void> {
     try {
       rmSync(SOCKET_PATH, { force: true });
     } catch {}
-    await ctx.dispose();
+    await ctx.fiber.dispose();
   }
 }
 
