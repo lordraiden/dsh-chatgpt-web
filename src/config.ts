@@ -183,6 +183,10 @@ export interface AppConfig {
   headed: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
+  capabilityState?: {
+    solAvailable: "supported" | "unsupported" | "unknown";
+    proAvailable: "supported" | "unsupported" | "unknown";
+  };
   experimentalBiggerContext: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
@@ -604,8 +608,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.tuning !== undefined) {
     parsed.tuning = validateChatGptWebTuning(parsed.tuning, path);
   }
-  const solAvailable = parsed.solAvailable !== false;
+  const solAvailable = parsed.solAvailable === true;
   const proAvailable = parsed.proAvailable === true;
+  const capabilityState = parsed.capabilityState ?? {
+    solAvailable: parsed.solAvailable === undefined ? "unknown" : solAvailable ? "supported" : "unsupported",
+    proAvailable: parsed.proAvailable === undefined ? "unknown" : proAvailable ? "supported" : "unsupported",
+  };
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
@@ -623,6 +631,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     subagentProtocol,
     solAvailable,
     proAvailable,
+    capabilityState,
     experimentalBiggerContext,
     zeroRiskProEnabled,
   } as AppConfig;
@@ -677,6 +686,10 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
+      capabilityState: manual ? {
+        solAvailable: "unsupported",
+        proAvailable: "unsupported",
+      } : config.capabilityState,
       zeroRiskProEnabled: manual ? config.zeroRiskProEnabled : false,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
