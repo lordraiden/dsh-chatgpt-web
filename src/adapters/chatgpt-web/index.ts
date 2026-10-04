@@ -423,13 +423,16 @@ export function createChatGptWebAdapter(
   dependencies: {
     broker?: TurnBrokerOwner;
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
+    /** Shared lifecycle authority owned by the server process. */
+    providerCore?: ChatGptWebProviderCore;
   } = {},
 ): ProviderAdapter {
   const transport = chatGptWebSurfaceTransportForProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
-  const providerCore = new ChatGptWebProviderCore();
+  const providerCore = dependencies.providerCore ?? new ChatGptWebProviderCore();
+  const ownsProviderCore = dependencies.providerCore === undefined;
   const shutdownController = new AbortController();
   const activeRuns = new Set<Promise<void>>();
   let shutdownPromise: Promise<void> | undefined;
@@ -927,7 +930,7 @@ export function createChatGptWebAdapter(
       chatGptTurnSessions.clear(executionNamespace);
       shutdownPromise = (async () => {
         await Promise.allSettled([...activeRuns]);
-        await providerCore.shutdown();
+        if (ownsProviderCore) await providerCore.shutdown();
       })();
       return shutdownPromise;
     },

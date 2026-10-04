@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
+import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../lib/compaction";
 import type { CodexContentPart, CodexParsedRequest, CodexTool, DshNativeTurnContext } from "../../types";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
 import type { CapabilitySnapshot } from "./capability-projector";

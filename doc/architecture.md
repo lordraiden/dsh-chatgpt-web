@@ -1055,6 +1055,24 @@ It must not own:
 - independent compaction;
 - provider-private continuity authority.
 
+### 19.1.1 Responses seam audit evidence (#78)
+
+`src/dev-chat/driver.ts` is a DEV-only simulator and intentionally imports the Responses parser/server to exercise the compatibility surface end-to-end. It is test infrastructure, not a production provider entrypoint or authority.
+
+`src/adapters/chatgpt-web/rolling-checkpoint.ts` may reuse `src/responses/parser.ts` to rebuild a synthetic checkpointed `CodexParsedRequest` because this is wire translation only; the checkpoint code does not select routes, authorize capabilities, own retry/settlement state, or execute browser turns. This is an explicit dependency, not a second Responses execution path.
+
+
+
+The Responses compatibility layer is intentionally limited to translation and compatibility state. The retained components are classified as follows:
+
+- **Required public compatibility translation:** `src/responses/schema.ts`, `src/responses/parser.ts`, `src/responses/compaction.ts`, `src/responses/reasoning-envelope.ts`, and `src/bridge.ts`. They translate the Responses wire representation to/from the existing provider request/event representation.
+- **Required compatibility state:** `src/responses/state.ts` stores a bounded representation of completed Responses items so `previous_response_id` can continue across requests and process restarts. It is a cache only: it contains no browser handles, ProviderCore turn state, capability/sandbox authority, retry budget, or route decision, and it cannot initiate execution. Missing state fails closed at the Responses ingress.
+- **Required operational transport outside the Web core:** `src/native-passthrough.ts` serves first-party native Codex endpoints. It remains a separate protocol path and is not a ChatGPT Web execution authority.
+
+The executable audit in `tests/issue-78-responses-seam.test.ts` covers the seam behavior rather than only source structure: unary and streaming `/v1/responses` delegation through an injected Web adapter, Web route/capability parity and fail-closed behavior, Web catalog fallback when native Codex models are unavailable or malformed, Codex isolation for `/v1/responses` and `/v1/responses/compact`, Web compaction delegation, restart/reload and corruption behavior for the continuation cache, and a repository-wide Responses import/ownership scan. The repository-wide dependency scan explicitly permits only the ingress/bridge/native-passthrough consumers plus the Luna rolling-checkpoint parser reuse described below; every Responses module remains barred from ProviderCore, browser, retry, capability and transport authorities.
+
+No additional Responses execution core, model catalogue, capability authority, retry authority, or provider lifecycle state is retained. The existing `/v1/responses/compact` implementation calls the same `responseRequest` path rather than maintaining a second execution implementation; its extra logic is only Responses compaction representation and validation.
+
 ### 19.2 Native Codex passthrough
 
 The repository's first-party Codex passthrough is a separate upstream protocol.
@@ -1521,6 +1539,15 @@ Native Codex remains a separate first-party passthrough outside the Web Provider
 
 Contract coverage is in `tests/issue-72-responses-provider-core.test.ts`.
 
+## 31.3 Native DSH / Responses execution authority
+
+The browser execution authority is the local ChatGPT Web sidecar process. The native DSH LLM adapter is a DSH-facing translation boundary only: it resolves the trusted DSH session/sandbox context, builds the canonical provider request, and sends that request over an authenticated loopback transport to the sidecar.
+
+The sidecar creates one shared ChatGptWebProviderCore for its lifetime. Both /v1/responses and the internal native-DSH transport obtain Web adapters bound to that same ProviderCore, so leases, capability ownership, retry budget, submission/settlement state, replay and provenance cannot diverge merely because the caller used a different ingress.
+
+The native DSH transport carries the trusted _dshContext out-of-band from model-visible content. The sidecar validates the public Web route against the same ChatGPT Web authority and rejects requests whose public route/backend mapping is inconsistent. It does not infer or reconstruct DSH sandbox authority from browser state or Responses compatibility state.
+
+This is a process boundary, not a second provider authority: ChatGptWebProviderCore remains the single lifecycle/lease/retry authority for the ChatGPT Web execution process.
 ## 32. Final ownership model
 
 ~~~text

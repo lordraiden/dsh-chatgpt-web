@@ -93,6 +93,13 @@ export function isChatGptWebZeroRiskBackendModel(
     || model === CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL;
 }
 
+export function isChatGptWebInternalBackendModel(model: string): boolean {
+  return model === CHATGPT_WEB_BACKEND_MODEL
+    || model === CHATGPT_WEB_LUNA_BACKEND_MODEL
+    || isChatGptWebZeroRiskBackendModel(model);
+}
+
+
 function contextLimits(
   contextWindow: number,
   autoCompactTokenLimit: number,

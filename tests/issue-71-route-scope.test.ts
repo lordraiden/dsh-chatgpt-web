@@ -154,4 +154,21 @@ describe("issue #71 ChatGPT Web product-route scope", () => {
     const parsed = parseRequest({ model: CHATGPT_WEB_BACKEND_MODEL, input: "hello" });
     expect(() => routeChatGptWebRequest(parsed, defaultConfig())).toThrow();
   });
+  test("internal Web backend IDs fail before native Codex passthrough", async () => {
+    const config = {
+      ...defaultConfig(),
+      solAvailable: true,
+      capabilityState: { solAvailable: "supported" as const, proAvailable: "unsupported" as const },
+    };
+    const response = await import("../src/server").then(({ responseRequest }) => responseRequest(
+      new Request("http://127.0.0.1/v1/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ model: CHATGPT_WEB_BACKEND_MODEL, input: "hello", stream: false }),
+      }),
+      config,
+      () => { throw new Error("Web adapter must not be selected"); },
+    ));
+    expect(response.status).toBe(400);
+  });
 });
