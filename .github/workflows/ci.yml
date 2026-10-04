@@ -43,20 +43,13 @@ jobs:
       - name: Build bundles
         run: bun run build
 
-      - name: Sync compiled bundles for PR validation
+      - name: Upload compiled bundles for PR validation
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- lib; then
-            echo "Compiled artifacts are already current."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lib
-          git commit -m "chore: sync compiled bundles [skip ci]"
-          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-121-compiled-bundles
+          path: lib/
+          if-no-files-found: error
 
       - name: Install DSH runtime for Native2 integration test
         run: bun add --no-save @deepseek-ai/dsh@0.2.0-rc.2
