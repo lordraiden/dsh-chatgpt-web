@@ -1523,6 +1523,22 @@ MCP is treated here as a capability transport, not as the identity of the provid
 
 ---
 
+## 31.1 Route-policy enforcement evidence (#71)
+
+ChatGPT Web product eligibility is owned exclusively by `src/chatgpt-web-authority.ts`. Public Web model slugs are the only externally selectable Web identifiers; backend model IDs such as `gpt-5.6-sol`, `gpt-5.6-luna`, and Zero Risk's internal backend values are implementation details and are rejected by `requireChatGptWebRoute()`.
+
+The Web catalog, native DSH route resolution, and Responses ingestion all converge on that same authority. Native Codex/Work routes remain outside it and therefore cannot consume the ChatGPT Web ProviderCore.
+
+Issue #71 contract coverage is in `tests/issue-71-route-scope.test.ts`, including Free/Paid/Luna route matrices, unknown-capability fail-closed behavior, Codex/Work rejection, backend-model escape-hatch rejection, catalog separation, and shared DSH/Responses route resolution.
+
+## 31.2 Responses convergence evidence (#72)
+
+The `/v1/responses` compatibility ingress is not an execution authority. For ChatGPT Web models it performs wire translation, route validation, continuation expansion, streaming/output bridging, compatibility errors, and compatibility usage/state handling; execution is delegated to the existing ChatGPT Web adapter/ProviderCore path used by native DSH.
+
+Native Codex remains a separate first-party passthrough outside the Web ProviderCore. Responses continuation state remains bounded compatibility cache state and does not own DSH context, capabilities, browser resources, retries, replay policy, or settlement.
+
+Contract coverage is in `tests/issue-72-responses-provider-core.test.ts`.
+
 ## 32. Final ownership model
 
 ~~~text
