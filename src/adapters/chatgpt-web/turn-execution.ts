@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
+import type { CapabilitySnapshot } from "./capability-projector";
 import type { BrokerToolRequest } from "./turn-broker";
 import { chatGptBrowserTabClosedError } from "./adapter-error";
 import {
@@ -139,6 +140,7 @@ export class ChatGptTextFeed {
 }
 
 interface ChatGptTurnRuntimeBase {
+  readonly capabilitySnapshot: CapabilitySnapshot;
   browser: Promise<string>;
   /** Physical helper/Playwright settlement, including the launcher end/release acknowledgement. */
   physicalSettlement: Promise<void>;
@@ -150,6 +152,8 @@ interface ChatGptTurnRuntimeBase {
   /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */
   retireCapability?: () => void | Promise<void>;
   submission?: { phase: "prepared" | "send_activated" | "accepted" };
+  /** Semantic ChatGPT conversation epoch. Physical page/resource identity remains separate. */
+  conversationGeneration?: number;
   /** Present only when the visible ChatGPT tab is driven manually through the Codex Zero Risk MCP contract. */
   manualControl?: { surfaceNonce: string };
   cancel: (reason?: Error) => void;
@@ -475,12 +479,22 @@ export class ChatGptTurnSession {
   }
 }
 
+export interface ChatGptContextExhaustionRecord {
+  readonly conversationKey: string;
+  readonly handle: {
+    readonly id: string;
+    readonly generation: number;
+  };
+}
+
 export class ChatGptTurnSessions {
   private readonly entries = new Map<string, ChatGptTurnSession>();
   private readonly conversationHeads = new Map<string, ChatGptTurnSession>();
   private readonly retirements = new Map<string, Promise<void>>();
   private readonly ownerRetirements = new Map<string, Promise<void>>();
   private readonly conversationRetirements = new Map<string, Promise<void>>();
+  private readonly conversationGenerations = new Map<string, number>();
+  private readonly contextExhaustions = new Map<string, ChatGptContextExhaustionRecord>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
@@ -511,8 +525,59 @@ export class ChatGptTurnSessions {
     const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId);
     this.entries.set(key, session);
     const conversationKey = session.conversationKey();
-    if (conversationKey) this.conversationHeads.set(conversationKey, session);
+    if (conversationKey) {
+      this.conversationHeads.set(conversationKey, session);
+      if (!this.conversationGenerations.has(conversationKey)) {
+        this.conversationGenerations.set(conversationKey, session.runtime.conversationGeneration ?? 1);
+      }
+      this.pruneConversationGenerations();
+    }
     return session;
+  }
+
+  conversationGeneration(conversationKey: string): number {
+    const generation = this.conversationGenerations.get(conversationKey);
+    return generation === undefined ? 1 : generation;
+  }
+
+  setConversationGeneration(conversationKey: string, generation: number): void {
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new Error("ChatGPT conversation generation must be a positive safe integer");
+    }
+    const current = this.conversationGenerations.get(conversationKey);
+    if (current !== undefined && generation < current) {
+      throw new Error("ChatGPT conversation generation cannot move backwards");
+    }
+    this.conversationGenerations.set(conversationKey, generation);
+    this.pruneConversationGenerations();
+  }
+
+  rememberContextExhaustion(executionKey: string, record: ChatGptContextExhaustionRecord): void {
+    if (!executionKey.trim()) throw new Error("ChatGPT context exhaustion requires an execution key");
+    if (!record.conversationKey.trim()) throw new Error("ChatGPT context exhaustion requires a conversation key");
+    if (!record.handle.id.trim() || !Number.isSafeInteger(record.handle.generation) || record.handle.generation < 1) {
+      throw new Error("ChatGPT context exhaustion requires a valid conversation handle");
+    }
+    this.contextExhaustions.set(executionKey, {
+      conversationKey: record.conversationKey,
+      handle: { id: record.handle.id, generation: record.handle.generation },
+    });
+    while (this.contextExhaustions.size > this.maxEntries) {
+      const oldest = this.contextExhaustions.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.contextExhaustions.delete(oldest);
+    }
+  }
+
+  contextExhaustion(executionKey: string): ChatGptContextExhaustionRecord | undefined {
+    const record = this.contextExhaustions.get(executionKey);
+    return record
+      ? { conversationKey: record.conversationKey, handle: { ...record.handle } }
+      : undefined;
+  }
+
+  clearContextExhaustion(executionKey: string): void {
+    this.contextExhaustions.delete(executionKey);
   }
 
   async getOrCreateAfterOwnerRetirement(
@@ -693,12 +758,24 @@ export class ChatGptTurnSessions {
     return matches.length;
   }
 
-  clear(): number {
-    const cancelled = this.entries.size;
-    for (const [key, session] of this.entries) this.beginRetirement(key, session);
-    this.entries.clear();
-    this.conversationHeads.clear();
-    return cancelled;
+  clear(executionNamespace?: string): number {
+    const matches = [...this.entries].filter(([key]) => (
+      executionNamespace === undefined || key.startsWith(`${executionNamespace}:`)
+    ));
+    for (const [key, session] of matches) this.beginRetirement(key, session);
+    for (const [key] of matches) this.entries.delete(key);
+    if (executionNamespace === undefined) {
+      this.conversationHeads.clear();
+      this.contextExhaustions.clear();
+    } else {
+      for (const [key, session] of this.conversationHeads) {
+        if (session.ownerKey?.startsWith(`${executionNamespace}:`)) this.conversationHeads.delete(key);
+      }
+      for (const key of this.contextExhaustions.keys()) {
+        if (key.startsWith(`${executionNamespace}:`)) this.contextExhaustions.delete(key);
+      }
+    }
+    return matches.length;
   }
 
   async cancelTrace(traceId: string, reason = chatGptBrowserTabClosedError()): Promise<number> {
@@ -752,6 +829,16 @@ export class ChatGptTurnSessions {
     let active = 0;
     for (const session of this.entries.values()) if (session.isActive()) active += 1;
     return active;
+  }
+
+  private pruneConversationGenerations(): void {
+    const activeConversationKeys = new Set(this.conversationHeads.keys());
+    if (this.conversationGenerations.size <= this.maxEntries) return;
+    for (const conversationKey of this.conversationGenerations.keys()) {
+      if (this.conversationGenerations.size <= this.maxEntries) break;
+      if (activeConversationKeys.has(conversationKey)) continue;
+      this.conversationGenerations.delete(conversationKey);
+    }
   }
 
   private prune(): void {

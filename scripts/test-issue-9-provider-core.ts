@@ -1,0 +1,666 @@
+import { strict as assert } from "node:assert";
+import type { GenerateOptions } from "@deepseek-ai/dsh-llm";
+import {
+  BrowserAccountLeaseRegistry,
+  ChatGptWebProviderCore,
+} from "../src/adapters/chatgpt-web/provider-core";
+import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { mapStream } from "../src/adapters/chatgpt-web/llm-adapter";
+import { projectChatGptCapabilities, type CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
+import {
+  ChatGptToolProtocolError,
+  ChatGptToolStreamParser,
+} from "../src/adapters/chatgpt-web/tool-stream-parser";
+
+function leaseInput(turnId: string) {
+  const nativeTurnId = `native-${turnId}`;
+  const capabilitySnapshot: CapabilitySnapshot = projectChatGptCapabilities({
+    sessionId: `session-${turnId}`,
+    agentId: `agent-${turnId}`,
+    turnId: nativeTurnId,
+    tools: [],
+  });
+  return {
+    executionKey: `execution-${turnId}`,
+    traceId: `trace-${turnId}`,
+    nativeTurnId,
+    capabilitySnapshot,
+    nativeThreadId: "thread-1",
+    accountIdentity: `account-${turnId}`,
+    browserProfile: "managed-chrome",
+    browserContext: "context-1",
+    pageIdentity: `page-${turnId}`,
+  };
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const unbound = core.begin(leaseInput("surface-before-bind"));
+  assert.throws(
+    () => unbound.markSurfaceReady(),
+    /physical browser resource is bound/i,
+  );
+  unbound.failBeforePhysicalSettlement();
+  console.log("ok surface readiness requires physical resource");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("state"));
+  assert.equal(turn.snapshot().state, "LEASED");
+  turn.bindPhysicalResource({
+    resourceId: "surface-state",
+    browserContextId: "ctx-state",
+    pageId: "page-state",
+    profileId: "profile-state",
+    accountId: "chatgpt-account:account-state",
+  });
+  turn.markSurfaceReady();
+  turn.markSendActivated();
+  assert.equal(turn.snapshot().state, "SUBMITTED");
+  assert.equal(turn.snapshot().submission, "send_activated");
+  assert.equal(turn.canAutomaticallyRetry(), false);
+  assert.throws(() => turn.markRunning(), /before submission is accepted/i);
+  turn.markSubmitted();
+  turn.markRunning();
+  turn.markCapabilityWait();
+  assert.equal(turn.snapshot().activity, "capability_wait");
+  turn.markRunning();
+  assert.equal(turn.snapshot().state, "RUNNING");
+  await Promise.resolve();
+  console.log("ok lifecycle state machine");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("settlement"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-settlement",
+    browserContextId: "ctx-settlement",
+    pageId: "page-settlement",
+    profileId: "profile-settlement",
+    accountId: "chatgpt-account:account-settlement",
+  });
+  turn.markSurfaceReady();
+  turn.markSubmitted();
+  turn.markRunning();
+
+  let resolveSettlement!: () => void;
+  const settlement = new Promise<void>(resolve => { resolveSettlement = resolve; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+  assert.equal(turn.snapshot().physicalSettlementAttached, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "pending");
+  assert.equal(turn.snapshot().physicalSettled, false);
+  assert.equal(turn.lease.isActive(), true);
+  turn.markLogicalSettled("completed");
+  assert.equal(turn.snapshot().logicalOutcome, "completed");
+
+  resolveSettlement();
+  await turn.waitForPhysicalSettlement();
+
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "fulfilled");
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.lease.isActive(), false);
+  assert.throws(() => turn.assertCanAct(), /retired/i);
+  console.log("ok logical vs physical settlement");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("settlement-failure"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-settlement-failure",
+    browserContextId: "ctx-settlement-failure",
+    pageId: "page-settlement-failure",
+    profileId: "profile-settlement-failure",
+    accountId: "chatgpt-account:account-settlement-failure",
+  });
+  turn.markSurfaceReady();
+  turn.markSubmitted();
+  turn.markRunning();
+
+  let rejectSettlement!: (error: Error) => void;
+  const settlement = new Promise<void>((_resolve, reject) => { rejectSettlement = reject; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+
+  const settlementError = new Error("launcher /turn/end failed");
+  rejectSettlement(settlementError);
+  await assert.rejects(turn.waitForPhysicalSettlement(), /launcher \/turn\/end failed/);
+
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "rejected");
+  assert.equal(turn.snapshot().physicalSettlementError, settlementError.message);
+  assert.equal(turn.snapshot().recovery, "FAILED");
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.lease.isActive(), false);
+  console.log("ok rejected physical settlement remains observable");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("retry"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry",
+    browserContextId: "ctx-retry",
+    pageId: "page-retry",
+    profileId: "profile-retry",
+    accountId: "chatgpt-account:account-retry",
+  });
+  turn.markSurfaceReady();
+  assert.equal(turn.canAutomaticallyRetry(), true);
+  turn.authorizeSurfaceReplay();
+  turn.markSendActivated();
+  assert.equal(turn.canAutomaticallyRetry(), false);
+  console.log("ok post-submit retry boundary");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const first = core.begin(leaseInput("resume"));
+  const same = core.begin({
+    ...leaseInput("resume"),
+    capabilitySnapshot: first.snapshot().capabilitySnapshot,
+  });
+  assert.equal(first, same);
+  assert.equal(first.snapshot().capabilitySnapshot, same.snapshot().capabilitySnapshot);
+  assert.equal(first.snapshot().recovery, "NEW");
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("resume"),
+      accountIdentity: "account-2",
+      capabilitySnapshot: first.snapshot().capabilitySnapshot,
+    }),
+    /different browser\/account identity/i,
+  );
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("resume"),
+      browserContext: "context-2",
+      capabilitySnapshot: first.snapshot().capabilitySnapshot,
+    }),
+    /different browser\/account identity/i,
+  );
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("resume"),
+      retryPolicy: "side_effect_free",
+      capabilitySnapshot: first.snapshot().capabilitySnapshot,
+    }),
+    /different retry policy/i,
+  );
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("resume-conflict"),
+      nativeThreadId: "thread-1",
+    }),
+    /second provider turn for an active native DSH thread/i,
+  );
+  const oldSnapshot = first.snapshot().capabilitySnapshot;
+  first.failBeforePhysicalSettlement();
+
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("different-execution"),
+      capabilitySnapshot: oldSnapshot,
+    }),
+    /already retired under a different provider execution/i,
+  );
+
+  const resumed = core.begin({
+    ...leaseInput("resume-exact"),
+    accountIdentity: "account-2",
+    nativeThreadId: "thread-2",
+    recovery: "EXACT_RESUME",
+  });
+  assert.equal(resumed.snapshot().recovery, "EXACT_RESUME");
+  assert.throws(
+    () => resumed.markRecovery("REPLAY"),
+    /cannot downgrade exact resume to replay/i,
+  );
+  assert.equal(resumed.snapshot().recovery, "EXACT_RESUME");
+
+  resumed.failBeforePhysicalSettlement();
+
+  const replay = core.begin({
+    ...leaseInput("resume-replay"),
+    accountIdentity: "account-3",
+    nativeThreadId: "thread-3",
+    recovery: "REPLAY",
+  });
+  replay.markRecovery("FAILED");
+  assert.equal(replay.snapshot().recovery, "FAILED");
+  assert.throws(
+    () => replay.markRecovery("REPLAY"),
+    /cannot downgrade/i,
+  );
+  replay.failBeforePhysicalSettlement();
+  console.log("ok monotonic continuity classification and native-thread isolation");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("late-callback"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-late-callback",
+    browserContextId: "ctx-late-callback",
+    pageId: "page-late-callback",
+    profileId: "profile-late-callback",
+    accountId: "chatgpt-account:account-late-callback",
+  });
+  turn.markSurfaceReady();
+  turn.markSubmitted();
+  turn.markRunning();
+
+  let resolveSettlement!: () => void;
+  const settlement = new Promise<void>(resolve => { resolveSettlement = resolve; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+  resolveSettlement();
+  await turn.waitForPhysicalSettlement();
+
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.throws(() => turn.markRunning(), /cannot accept lifecycle mutations/i);
+  assert.throws(() => turn.markCapabilityWait(), /cannot accept lifecycle mutations/i);
+  assert.throws(() => turn.markRecovery("FAILED"), /cannot accept lifecycle mutations/i);
+  assert.throws(() => turn.markLogicalSettled(), /cannot accept lifecycle mutations/i);
+  console.log("ok late lifecycle callbacks fail closed");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("replay-guard"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-replay",
+    browserContextId: "ctx-replay",
+    pageId: "page-replay",
+    profileId: "profile-replay",
+    accountId: "chatgpt-account:account-replay-guard",
+  });
+  turn.markSurfaceReady();
+  turn.markSendActivated();
+  assert.equal(turn.canAutomaticallyRetry(), false);
+  assert.throws(() => turn.authorizeSurfaceReplay(), /replay is forbidden/i);
+  console.log("ok post-submit surface replay is forbidden");
+}
+
+{
+  const registry = new BrowserAccountLeaseRegistry();
+  const descriptor = {
+    serviceId: "chatgpt-web",
+    accountIdentity: "account-1",
+    browserProfile: "profile-1",
+    browserContext: "context-1",
+    pageIdentity: "page-1",
+    turnId: "trace-1",
+  };
+  const lease = registry.acquire(descriptor);
+  assert.equal(registry.activeCount(), 1);
+  assert.throws(() => registry.acquire(descriptor), /already leased/i);
+  registry.bindPhysicalResource(lease, {
+    resourceId: "surface-1",
+    browserContextId: "ctx-1",
+    pageId: "page-1",
+    profileId: "profile-1",
+    accountId: "chatgpt-account:account-1",
+  });
+  registry.bindPhysicalResource(lease, {
+    resourceId: "surface-1",
+    browserContextId: "ctx-1",
+    pageId: "page-2",
+    profileId: "profile-1",
+    accountId: "chatgpt-account:account-1",
+  });
+  assert.throws(
+    () => lease.bindPhysicalResource({
+      resourceId: "surface-2",
+      browserContextId: "ctx-2",
+      pageId: "page-3",
+      profileId: "profile-2",
+      accountId: "chatgpt-account:account-2",
+    }),
+    /physical account does not match its logical account identity/i,
+  );
+  assert.throws(
+    () => lease.bindPhysicalResource({
+      resourceId: "surface-2",
+      browserContextId: "ctx-2",
+      pageId: "page-3",
+      profileId: "profile-2",
+      accountId: "chatgpt-account:account-1",
+    }),
+    /cannot move to a different physical resource/i,
+  );
+  assert.equal(lease.provenance().physicalResourceBound, true);
+  assert.throws(
+    () => lease.bindPhysicalResource({
+      resourceId: "surface-1",
+      browserContextId: "ctx-1",
+      pageId: "page-3",
+      profileId: "profile-1",
+      accountId: "chatgpt-account:wrong-account",
+    }),
+    /physical account does not match its logical account identity/i,
+  );
+
+  assert.throws(
+    () => registry.acquire({
+      ...descriptor,
+      pageIdentity: "page-account-conflict",
+      turnId: "trace-account-conflict",
+    }),
+    /authenticated ChatGPT account is already leased/i,
+  );
+
+  const second = registry.acquire({
+    ...descriptor,
+    accountIdentity: "account-2",
+    pageIdentity: "page-2",
+    turnId: "trace-2",
+  });
+  assert.throws(
+    () => registry.bindPhysicalResource(second, {
+      resourceId: "surface-1",
+      browserContextId: "ctx-1",
+      pageId: "page-2",
+      profileId: "profile-1",
+      accountId: "chatgpt-account:account-1",
+    }),
+    /already leased by turn trace-1/i,
+  );
+  registry.release(second);
+  registry.release(lease);
+  assert.equal(registry.activeCount(), 0);
+  console.log("ok browser/account lease physical ownership");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("preflight"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-preflight",
+    browserContextId: "ctx-preflight",
+    pageId: "page-preflight",
+    profileId: "profile-preflight",
+    accountId: "chatgpt-account:account-preflight",
+  });
+  turn.markSurfaceReady();
+  turn.failBeforePhysicalSettlement();
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementOutcome, "not_started");
+  assert.equal(turn.snapshot().recovery, "FAILED");
+  assert.equal(turn.lease.isActive(), false);
+  console.log("ok pre-browser failure retirement");
+}
+
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin({
+    ...leaseInput("side-effect-free"),
+    retryPolicy: "side_effect_free",
+  });
+  turn.bindPhysicalResource({
+    resourceId: "surface-side-effect-free",
+    browserContextId: "ctx-side-effect-free",
+    pageId: "page-side-effect-free",
+    profileId: "profile-side-effect-free",
+    accountId: "chatgpt-account:account-side-effect-free",
+  });
+  turn.markSurfaceReady();
+  turn.markSendActivated();
+  assert.equal(turn.canAutomaticallyRetry(), false);
+  assert.throws(() => turn.authorizeSurfaceReplay(), /replay is forbidden/i);
+  console.log("ok side-effect-free retry remains blocked after send activation");
+}
+
+{
+  const parser = new ChatGptToolStreamParser();
+  const parsed = parser.feed(
+    'before<dsh_tool_call>{"version":1,"id":"call_12345678","name":"read","arguments":{"file_path":"README.md"}}</dsh_tool_call>after',
+  );
+  assert.equal(parsed.text, "beforeafter");
+  assert.equal(parsed.toolCalls.length, 1);
+  assert.equal(parsed.toolCalls[0]?.id, "call_12345678");
+  assert.equal(parsed.toolCalls[0]?.name, "read");
+  assert.equal(parsed.toolCalls[0]?.arguments.file_path, "README.md");
+
+  const exactArguments = new ChatGptToolStreamParser().feed(
+    '<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read","arguments":{"path":"README.md","justification":"read the file"}}</dsh_tool_call>',
+  );
+  assert.deepEqual(exactArguments.toolCalls[0]?.arguments, {
+    path: "README.md",
+    justification: "read the file",
+  });
+
+  assert.throws(
+    () => parser.feed(
+      '<dsh_tool_call>{"version":1,"id":"call_12345678","name":"read","arguments":{}}</dsh_tool_call>',
+    ),
+    ChatGptToolProtocolError,
+  );
+
+  const malformedClosed = new ChatGptToolStreamParser();
+  assert.throws(
+    () => malformedClosed.feed(
+      '<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read"}</dsh_tool_call>',
+    ),
+    ChatGptToolProtocolError,
+  );
+
+  const incomplete = new ChatGptToolStreamParser();
+  incomplete.feed('<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read","arguments":{}}');
+  assert.throws(() => incomplete.flush(), ChatGptToolProtocolError);
+
+  const wrongVersion = new ChatGptToolStreamParser();
+  assert.throws(
+    () => wrongVersion.feed(
+      '<dsh_tool_call>{"version":2,"id":"call_abcdefgh","name":"read","arguments":{}}</dsh_tool_call>',
+    ),
+    ChatGptToolProtocolError,
+  );
+
+  const oversized = new ChatGptToolStreamParser();
+  assert.throws(
+    () => oversized.feed(
+      '<dsh_tool_call>{"version":1,"id":"call_abcdefgh","name":"read","arguments":{"value":"'
+      + "x".repeat(128 * 1024)
+      + '"}}</dsh_tool_call>',
+    ),
+    ChatGptToolProtocolError,
+  );
+  console.log("ok strict tool control protocol");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("shutdown"));
+  let release!: () => void;
+  const settlement = new Promise<void>(resolve => { release = resolve; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+  let cancelled = false;
+  turn.attachCancellation(() => {
+    cancelled = true;
+    release();
+  });
+  await core.shutdown();
+  assert.equal(cancelled, true);
+  assert.equal(turn.snapshot().logicalOutcome, "cancelled");
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.lease.isActive(), false);
+  console.log("ok ProviderCore shutdown drains physical settlement");
+}
+
+{
+  const fakeBackend = {
+    name: "fake",
+    async runTurn(
+      _parsed: unknown,
+      _incoming: unknown,
+      emit: (event: Record<string, unknown>) => void,
+    ): Promise<void> {
+      emit({
+        type: "done",
+        stopReason: "stop",
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+      });
+    },
+  };
+  const chunks = [];
+  for await (const chunk of mapStream(
+    () => fakeBackend as never,
+    {} as GenerateOptions,
+    () => ({ modelId: "fake", context: { messages: [] }, stream: true, options: {} }),
+    { usageMode: "omit" },
+  )) {
+    chunks.push(chunk);
+  }
+  assert.equal(chunks.some(chunk => chunk.type === "usage"), false);
+  assert.equal(chunks.some(chunk => chunk.type === "finish"), true);
+  console.log("ok estimated usage is not emitted across native provider boundary");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("default-retry-budget"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-default-retry-budget",
+    browserContextId: "ctx-default-retry-budget",
+    pageId: "page-default-retry-budget",
+    profileId: "profile-default-retry-budget",
+    accountId: "chatgpt-account:account-default-retry-budget",
+  });
+  turn.markSurfaceReady();
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 0).attempt, 1);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 1).attempt, 2);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 2).attempt, 3);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 3).allowed, false);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 3).reason, "budget_exhausted");
+  turn.failBeforePhysicalSettlement();
+  console.log("ok default retry budget remains three automatic retries");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("retry-budget-no-allocation"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry-budget-no-allocation",
+    browserContextId: "ctx-retry-budget-no-allocation",
+    pageId: "page-retry-budget-no-allocation",
+    profileId: "profile-retry-budget-no-allocation",
+    accountId: "chatgpt-account:account-retry-budget-no-allocation",
+  });
+  turn.markSurfaceReady();
+  turn.markSendActivated();
+  assert.equal(core.retryDecision("retry-budget-no-allocation", turn, 0).allowed, false);
+  assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.size, 0);
+  turn.failBeforePhysicalSettlement();
+  console.log("ok terminal retry decisions do not allocate retry budgets");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("retry-budget-ttl"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry-budget-ttl",
+    browserContextId: "ctx-retry-budget-ttl",
+    pageId: "page-retry-budget-ttl",
+    profileId: "profile-retry-budget-ttl",
+    accountId: "chatgpt-account:account-retry-budget-ttl",
+  });
+  turn.markSurfaceReady();
+  const retryBudgetBaseTime = 1_000_000;
+  assert.equal(core.recordRetryAttempt("retry-budget-ttl", turn, retryBudgetBaseTime).attempt, 1);
+  assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.size, 1);
+
+  const fresh = core.begin({ ...leaseInput("retry-budget-ttl-trigger"), nativeThreadId: "thread-retry-budget-ttl-trigger" });
+  fresh.bindPhysicalResource({
+    resourceId: "surface-retry-budget-ttl-trigger",
+    browserContextId: "ctx-retry-budget-ttl-trigger",
+    pageId: "page-retry-budget-ttl-trigger",
+    profileId: "profile-retry-budget-ttl-trigger",
+    accountId: "chatgpt-account:account-retry-budget-ttl-trigger",
+  });
+  fresh.markSurfaceReady();
+  assert.equal(
+    core.retryDecision("retry-budget-ttl-trigger", fresh, retryBudgetBaseTime + 30 * 60_000).attempt,
+    1,
+  );
+  assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.has("retry-budget-ttl"), false);
+  turn.failBeforePhysicalSettlement();
+  fresh.failBeforePhysicalSettlement();
+  console.log("ok retry budgets expire by TTL");
+}
+
+{
+  const core = new ChatGptWebProviderCore("chatgpt-web", undefined, 0);
+  const turn = core.begin(leaseInput("shutdown-before-settlement"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-shutdown-before-settlement",
+    browserContextId: "ctx-shutdown-before-settlement",
+    pageId: "page-shutdown-before-settlement",
+    profileId: "profile-shutdown-before-settlement",
+    accountId: "chatgpt-account:account-shutdown-before-settlement",
+  });
+  turn.markSurfaceReady();
+  await core.shutdown(new Error("test shutdown"));
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(turn.snapshot().physicalSettled, true);
+  assert.equal(turn.snapshot().physicalSettlementAttached, false);
+  assert.equal(core.get("execution-shutdown-before-settlement"), undefined);
+  console.log("ok shutdown cannot hang on an unbound physical settlement");
+}
+
+{
+  const sessions = new ChatGptTurnSessions(30 * 60_000, 2);
+  sessions.setConversationGeneration("conversation-a", 1);
+  sessions.setConversationGeneration("conversation-b", 2);
+  sessions.setConversationGeneration("conversation-c", 3);
+  const generations = (sessions as unknown as { conversationGenerations: Map<string, number> }).conversationGenerations;
+  assert.equal(generations.size, 2);
+  assert.equal(generations.has("conversation-a"), false);
+  assert.equal(generations.get("conversation-b"), 2);
+  assert.equal(generations.get("conversation-c"), 3);
+  console.log("ok conversation generation history is bounded");
+}
+
+console.log("Issue #9 ProviderCore contract tests passed.");
+
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("retry-budget"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry-budget",
+    browserContextId: "ctx-retry-budget",
+    pageId: "page-retry-budget",
+    profileId: "profile-retry-budget",
+    accountId: "chatgpt-account:account-retry-budget",
+  });
+  turn.markSurfaceReady();
+  assert.equal(core.retryDecision("retry-budget", turn, 0, 2).allowed, true);
+  core.recordRetryAttempt("retry-budget", turn, 0, 2);
+  assert.equal(core.retryDecision("retry-budget", turn, 1, 2).attempt, 2);
+  core.recordRetryAttempt("retry-budget", turn, 1, 2);
+  assert.equal(core.retryDecision("retry-budget", turn, 2, 2).allowed, false);
+  assert.equal(core.retryDecision("retry-budget", turn, 2, 2).reason, "budget_exhausted");
+  turn.markSendActivated();
+  assert.equal(core.retryDecision("retry-budget", turn, 3, 2).reason, "submitted");
+  console.log("ok ProviderCore owns retry budget and submission boundary");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("provenance"));
+  const provenance = turn.snapshot().provenance;
+  assert.equal(provenance.nativeTurnId, "native-provenance");
+  assert.equal(provenance.nativeThreadId, "thread-1");
+  assert.match(turn.snapshot().lease.account, /^[a-f0-9]{12}$/);
+  assert.match(turn.snapshot().lease.browserProfile, /^[a-f0-9]{12}$/);
+  assert.match(turn.snapshot().lease.browserContext, /^[a-f0-9]{12}$/);
+  assert.match(turn.snapshot().lease.page, /^[a-f0-9]{12}$/);
+  assert.equal((turn.snapshot().lease as any).accountIdentity, undefined);
+  turn.failBeforePhysicalSettlement();
+  console.log("ok provenance fingerprints trusted account/profile context/page identity");
+}

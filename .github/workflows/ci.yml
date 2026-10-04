@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+
+jobs:
+  verify:
+    if: ${{ github.event_name != 'push' || github.ref_type == 'tag' || github.ref_name == 'main' || github.ref_name == 'integration/staging' || startsWith(github.ref_name, 'feat/') }}
+    name: Typecheck, build, contract tests and tarball smoke test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build bundles
+        run: bun run build
+
+      - name: Full regression suite
+        run: bun run test
+
+      - name: Issue #9 ProviderCore lifecycle tests
+        run: bun scripts/test-issue-9-provider-core.ts
+
+      - name: Issue #10-A capability projection tests
+        run: bun scripts/test-issue-10a-capabilities.ts
+
+      - name: Issue #10-B capability transport tests
+        run: bun scripts/test-issue-10b-capability-transport.ts
+
+      - name: Issue #10-C capability identity tests
+        run: bun scripts/test-issue-10c-capability-identity.ts
+
+      - name: Issue contract tests
+        run: node scripts/test-issue-20-settings.mjs
+
+      - name: Pack validated artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          npm pack --silent --pack-destination artifact
+
+          mapfile -t tarballs < <(find artifact -maxdepth 1 -type f -name '*.tgz' -print)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected exactly one package tarball, found ${#tarballs[@]}" >&2
+            exit 1
+          fi
+
+          tarball="${tarballs[0]}"
+          checksum="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+          echo "Validated artifact: $tarball"
+          echo "SHA-256: $checksum"
+          echo "artifact_name=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test the exact validated artifact
+        run: node scripts/smoke-tarball.mjs "$GITHUB_WORKSPACE/artifact/${{ steps.package.outputs.artifact_name }}"
+
+      - name: Publish to GitHub Packages
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          tag="$RELEASE_TAG"
+          version="$(node -p "require('./package.json').version")"
+          test "${tag#v}" = "$version"
+
+          tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+
+          printf '%s\n'             '@lordraiden:registry=https://npm.pkg.github.com/'             "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}"             > ~/.npmrc
+
+          npm publish "$tarball" --registry https://npm.pkg.github.com
+
+      - name: Publish to npmjs.com
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          tag="$RELEASE_TAG"
+          version="$(node -p "require('./package.json').version")"
+          test "${tag#v}" = "$version"
+
+          tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+
+          printf '%s\n'             '@lordraiden:registry=https://registry.npmjs.org/'             "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"             > ~/.npmrc
+
+          npm publish "$tarball" --registry https://registry.npmjs.org --access public

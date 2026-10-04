@@ -33,24 +33,27 @@ import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `dsh-chatgpt-web ${VERSION}
 
-DeepSeek Harness bridge & Cordis plugin for free ChatGPT Web (GPT 5.6 Luna) pure chat and zero API fees.
+DeepSeek Harness plugin that bridges an authenticated ChatGPT Web session into the native DSH ctx.llm runtime.
 
 Usage:
   dsh-chatgpt-web setup [options]
   dsh-chatgpt-web login
   dsh-chatgpt-web doctor [--json]
-  dsh-chatgpt-web serve
+  dsh-chatgpt-web serve [--host 127.0.0.1] [--port PORT]
   dsh-chatgpt-web browser check
-  dsh-chatgpt-web uninstall --yes
+  dsh-chatgpt-web route status|connect|disconnect
+  dsh-chatgpt-web subagents status|compatibility-v1|native
+  dsh-chatgpt-web service status|install|start|restart|stop|cancel-turns
+  dsh-chatgpt-web tunnel status|start|restart|stop|key-import
+  dsh-chatgpt-web open tunnels|runtime-keys|connectors
+  dsh-chatgpt-web uninstall --yes [--keep-data]
 
-Options:
-  --host HOST                  Host to bind (default: 127.0.0.1)
-  --port PORT                  Port to listen on (default: 17841)
-  --chrome PATH                Path to Chrome/Chromium executable
-  --home PATH                  Override config storage path (default: ~/.dsh/storages/chatgpt-web)
-  --login                      Trigger interactive browser login
-  -h, --help                   Show this help message
-  -v, --version                Show version
+Global options:
+  --home PATH                 Override config storage path
+  -h, --help                  Show this help message
+  -v, --version               Show version
+
+For the complete setup and configuration reference, see README.md.
 `;
 
 function takeOption(args: string[], name: string): string | undefined {
@@ -316,10 +319,12 @@ async function setupCommand(args: string[]): Promise<void> {
   }
 
   const result = await setup(options);
-  stdout.write(`\n✓ DSH ChatGPT Free setup complete (${result.mode})!\n`);
+  stdout.write(`\n✓ DSH ChatGPT Web setup complete (${result.mode})!\n`);
   stdout.write(`Config: ${result.configPath}\n`);
-  stdout.write("\nTo use with DeepSeek Harness, ensure your ~/.dsh/settings.yaml includes:\n\n");
-  stdout.write("  providers:\n    chatgpt-web:\n      displayName: \"ChatGPT Web (Free)\"\n      api: openai-responses\n      baseURL: http://127.0.0.1:17841/v1\n      headers:\n        Authorization: \"Bearer chatgpt-web-free\"\n      models:\n        - id: chatgpt-web/luna\n          name: \"ChatGPT Web — Luna (Free)\"\n          contextWindow: 1050000\n          maxTokens: 32768\n\n");
+  stdout.write("Native DSH usage: the plugin registers chatgpt-web through ctx.llm automatically.\n");
+  stdout.write("No OpenAI API key or openai-responses provider entry is required for native DSH calls.\n");
+  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your DSH default-model configuration.\n");
+  stdout.write("See README.md -> Configuration Reference for all setup flags, storage settings, tuning, and model routes.\n");
 }
 
 async function doctorCommand(args: string[]): Promise<void> {
@@ -543,10 +548,25 @@ async function main(): Promise<void> {
       stdout.write("Playwright can launch the configured Chrome executable.\n");
     }
   } else if (command === "serve") {
+    const hostOverride = takeOption(args, "--host");
+    const portOverride = takeOption(args, "--port");
     assertNoArgs(args);
+    if (hostOverride !== undefined && hostOverride !== "127.0.0.1") {
+      throw new Error("--host must be 127.0.0.1; the sidecar is loopback-only");
+    }
     const config = loadConfig();
-    const server = startServer(config);
-    stdout.write(`dsh-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
+    const port = portOverride === undefined ? config.port : Number(portOverride);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("--port must be an integer between 1 and 65535");
+    }
+    const activeHost = hostOverride === undefined ? config.host : "127.0.0.1";
+    const activeConfig = {
+      ...config,
+      host: activeHost,
+      ...(portOverride !== undefined ? { port } : {}),
+    };
+    const server = startServer(activeConfig);
+    stdout.write(`dsh-chatgpt-web ${VERSION} listening on http://${activeConfig.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "dev") await runDevCommand(args);
   else if (command === "mcp") await runChatGptMcpMain(args);

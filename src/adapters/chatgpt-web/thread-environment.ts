@@ -113,8 +113,9 @@ function authority(environment: ChatGptTurnEnvironment, updatedAt: number): Stor
 
 /**
  * Codex emits its trusted environment envelope when a task starts or its environment changes,
- * not on every follow-up. This store carries only that trusted authority across turns. Tool
- * declarations are always taken from the current request and are never persisted.
+ * not on every follow-up. This store carries only legacy Codex continuity across turns. Native
+ * DSH turns bypass this store and carry the current DSH-authoritative sandbox projection directly.
+ * Tool declarations are always taken from the current request and are never persisted.
  */
 export class ChatGptThreadEnvironmentStore {
   private loaded = false;
@@ -128,14 +129,30 @@ export class ChatGptThreadEnvironmentStore {
   ) {}
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
+    // Current DSH/native context is the only authoritative source for capability elevation.
+    if (parsed._dshContext) {
+      try {
+        return extractChatGptTurnEnvironment(parsed);
+      } catch (error) {
+        throw error instanceof MissingTrustedCodexEnvironmentError
+          ? error
+          : new Error(`ChatGPT Web native DSH environment is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     const identity = extractChatGptTurnIdentity(parsed);
     try {
       const environment = extractChatGptTurnEnvironment(parsed);
       if (identity.threadId) this.set(identity.threadId, environment);
       return environment;
     } catch (error) {
-      if (!(error instanceof MissingTrustedCodexEnvironmentError) || !identity.threadId) throw error;
+      // Persisted environment is continuity/cache state only. It cannot authorize a fresh turn.
+      // A missing current trusted envelope therefore fails closed, even when a matching cached
+      // environment exists. Explicit child-rollout evidence remains authoritative when available.
+      if (!(error instanceof MissingTrustedCodexEnvironmentError)) throw error;
+      if (!identity.threadId) throw error;
       if (hasRawChatGptEnvironmentContext(parsed)) throw error;
+
       const lineage = extractChatGptThreadSpawnLineage(parsed);
       if (lineage && identity.turnId) {
         const rolloutEnvironment = resolveCurrentCodexChildRolloutEnvironment({
@@ -150,38 +167,14 @@ export class ChatGptThreadEnvironmentStore {
           return rolloutEnvironment;
         }
       }
-      const sameThread = this.get(identity.threadId);
-      if (sameThread) return {
-        cwd: sameThread.cwd,
-        roots: sameThread.roots,
-        writableRoots: sameThread.writableRoots,
-        sandboxPolicy: sameThread.sandboxPolicy,
-        tools: parsed.context.tools ?? [],
-      };
 
-      if (!lineage) throw error;
-      const parent = this.get(lineage.parentThreadId);
-      if (!parent) throw error;
-      if (lineage.sandboxType !== parent.sandboxPolicy.type) {
-        throw new Error("ChatGPT Web subagent sandbox metadata conflicts with its trusted parent thread");
+      const cached = this.get(identity.threadId);
+      if (cached) {
+        throw new MissingTrustedCodexEnvironmentError(
+          "persisted ChatGPT thread environment is continuity cache only; current trusted DSH/Codex environment evidence is required",
+        );
       }
-      if (lineage.workspaceRoots.length > 0 && !lineage.workspaceRoots.some(root => contains(root, parent.cwd))) {
-        throw new Error("ChatGPT Web subagent workspace metadata does not contain its trusted parent cwd");
-      }
-      if (lineage.workspaceRoots.some(root => !parent.roots.some(parentRoot => (
-        contains(parentRoot, root) || contains(root, parentRoot)
-      )))) {
-        throw new Error("ChatGPT Web subagent workspace metadata conflicts with its trusted parent roots");
-      }
-      const inherited: ChatGptTurnEnvironment = {
-        cwd: parent.cwd,
-        roots: parent.roots,
-        writableRoots: parent.writableRoots,
-        sandboxPolicy: parent.sandboxPolicy,
-        tools: parsed.context.tools ?? [],
-      };
-      this.set(lineage.threadId, inherited);
-      return inherited;
+      throw error;
     }
   }
 

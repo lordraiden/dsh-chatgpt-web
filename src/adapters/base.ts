@@ -8,6 +8,8 @@ export interface IncomingMeta {
 
 export interface ProviderAdapter {
   name: string;
+  /** Stop accepting new work and settle owned physical browser resources before disposal. */
+  shutdown?: () => Promise<void> | void;
   runTurn(
     parsed: CodexParsedRequest,
     incoming: IncomingMeta,

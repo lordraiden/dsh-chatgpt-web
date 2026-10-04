@@ -16,7 +16,9 @@ import {
   type ResolvedChatGptWebTuning,
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
+import { safeErrorDescriptor } from "../../lib/safe-diagnostics";
 import type { CodexProviderConfig } from "../../types";
+import { accountIdentityFromStorageState, accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import { parseDataUrl } from "../image";
 import {
   ChatGptMarkdownBuffer,
@@ -31,8 +33,8 @@ import {
   type ChatGptWebModelMode,
 } from "./model";
 import {
-  CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET,
   compiledChatGptWebMaxMessageChars,
+  compiledChatGptWebMessages,
   estimateCompiledChatGptWebMessageTokens,
 } from "./input-tokens";
 import {
@@ -48,6 +50,12 @@ import {
   type ChatGptWebMultipartStage,
 } from "./prompt";
 import { estimateCompiledChatGptWebInputTokens } from "./input-tokens";
+import {
+  CONTEXT_BUDGET_EXCEEDED_CODE,
+  CONTEXT_COMPACTION_REQUIRED_CODE,
+  decideChatGptWebContextCapacity,
+  resolveChatGptWebContextBudget,
+} from "./context-budget";
 import {
   assertAuthenticatedChatGptPage,
   assertTemporaryChatPage,
@@ -82,9 +90,14 @@ import {
   ChatGptSurfaceStaleError,
   ChatGptWebAdapterError,
   chatGptBrowserTabClosedError,
+  chatGptContextExhaustedError,
   chatGptRetainedConversationUnavailableError,
   chatGptStoppedThinkingError,
 } from "./adapter-error";
+import {
+  detectChatGptContextExhaustion,
+  type ChatGptContextExhaustionObservation,
+} from "./context-exhaustion";
 import {
   ChatGptLunaCheckpointStream,
   type CapturedChatGptLunaCheckpoint,
@@ -101,6 +114,16 @@ import type {
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
 const workers = new Map<string, ChatGptBrowserWorker>();
+const physicalObjectIds = new WeakMap<object, string>();
+let nextPhysicalObjectId = 0;
+
+function physicalObjectId(value: object, prefix: string): string {
+  const existing = physicalObjectIds.get(value);
+  if (existing) return existing;
+  const id = `${prefix}:${(++nextPhysicalObjectId).toString(36)}`;
+  physicalObjectIds.set(value, id);
+  return id;
+}
 
 export async function closeChatGptBrowserWorkers(): Promise<void> {
   const active = [...workers.values()];
@@ -829,6 +852,66 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+async function throwIfChatGptContextExhausted(page: Page): Promise<void> {
+  const observations = await page.evaluate(() => {
+    const chatGptContextExhaustionActionHint = /new chat|new conversation|start(?:ing)? a new (?:chat|conversation|one)|nuevo chat|nueva conversaci|nouveau chat|nouvelle conversation|neuer chat|neue unterhaltung|nuova chat|nuova conversazione|novo chat|nova conversa|新聊天|新对话|新對話|新しいチャット|新しい会話|새 채팅|새 대화/i;
+    const visible = (element: Element): boolean => {
+      const candidate = element as HTMLElement;
+      const style = getComputedStyle(candidate);
+      return candidate.isConnected
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+        && style.opacity !== "0";
+    };
+    const compact = (value: string | null | undefined): string => (
+      (value ?? "").replace(/\s+/g, " ").trim().slice(0, 4_000)
+    );
+    const output: ChatGptContextExhaustionObservation[] = [];
+    const seen = new Set<Element>();
+    const add = (element: Element): void => {
+      if (seen.has(element) || !visible(element)) return;
+      seen.add(element);
+      const candidate = element as HTMLElement;
+      const actionLabels = [...candidate.querySelectorAll<HTMLElement>('button, a, [role="button"]')]
+        .filter(visible)
+        .map(action => compact(action.innerText || action.textContent || action.getAttribute("aria-label")))
+        .filter(Boolean)
+        .slice(-12);
+      output.push({
+        role: candidate.getAttribute("role"),
+        testId: candidate.getAttribute("data-testid"),
+        ariaLabel: candidate.getAttribute("aria-label"),
+        text: compact(candidate.innerText || candidate.textContent),
+        actionLabels,
+        withinAssistantTurn: Boolean(
+          candidate.closest('[data-message-author-role="assistant"], [data-turn="assistant"]'),
+        ),
+      });
+    };
+
+    for (const element of document.querySelectorAll<HTMLElement>(
+      '[role="alert"], [role="dialog"], [role="status"]',
+    )) {
+      add(element);
+    }
+    for (const action of document.querySelectorAll<HTMLElement>('button, a, [role="button"]')) {
+      if (!visible(action)) continue;
+      const label = compact(action.innerText || action.textContent || action.getAttribute("aria-label"));
+      if (!chatGptContextExhaustionActionHint.test(label)) continue;
+      let ancestor: Element | null = action;
+      for (let depth = 0; depth < 5 && ancestor; depth += 1) {
+        add(ancestor);
+        ancestor = ancestor.parentElement;
+      }
+    }
+    return output;
+  });
+
+  const signal = observations.find(observation => detectChatGptContextExhaustion(observation));
+  if (!signal) return;
+  throw chatGptContextExhaustedError();
+}
+
 export async function resolveChatGptToolConfirmation(
   page: Page,
   appName: string,
@@ -878,51 +961,59 @@ export function assertChatGptWebInputWithinLimits(
   capabilities: ChatGptWebCapabilities,
   promptChars?: number,
   composerCharLimitOverride?: number,
+  serializedInputBytes?: number,
+  imageCount?: number,
+  compaction = false,
 ): void {
   if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
-    throw new Error(`ChatGPT web context limit is not defined for model: ${modelId}`);
+    throw new Error("ChatGPT web context limit is not defined for model: " + modelId);
   }
-  if (
-    modelId === CHATGPT_WEB_LUNA_MODEL_ID
-    && estimatedInputTokens > CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET
-  ) {
-    throw new ChatGptWebAdapterError(
-      `This Luna turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, which exceeds the measured ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser transport budget. Completed Luna history is already replaced by its rolling checkpoint; the remaining payload is the current Codex turn and cannot be reduced by /compact.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
-    );
-  }
-  const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
-  const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
-    modelId,
-    effort,
-    capabilities,
+  const baseBudget = resolveChatGptWebContextBudget(modelId, effort, capabilities);
+  const budget = composerCharLimitOverride === undefined
+    ? baseBudget
+    : { ...baseBudget, browserComposerCharLimit: composerCharLimitOverride };
+  const decision = decideChatGptWebContextCapacity(
+    budget,
+    {
+      estimatedInputTokens,
+      estimatedMessageTokens,
+      promptChars,
+      imageCount,
+      serializedInputBytes,
+      partCount: 1,
+    },
+    {
+      compactionAvailable: compaction,
+      multipartAvailable: false,
+      canonicalStatePresent: true,
+      partCount: 1,
+    },
   );
-  // A user-configured composer limit (config.json tuning) replaces the measured route boundary;
-  // raising it beyond the measured surface is the user's explicit choice.
-  const effectiveComposerCharLimit = composerCharLimitOverride ?? browserComposerCharLimit;
-  if (
-    effectiveComposerCharLimit !== undefined
-    && promptChars !== undefined
-    && promptChars > effectiveComposerCharLimit
-  ) {
-    throw new ChatGptWebAdapterError(
-      `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the ${effectiveComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort. Run /compact, then retry this Web model.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
-    );
-  }
-  if (browserMessageTokenLimit !== undefined && estimatedMessageTokens > browserMessageTokenLimit) {
-    throw new ChatGptWebAdapterError(
-      `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The model context window is ${contextWindow.toLocaleString("en-US")} tokens; run /compact to reduce the next browser message without changing that model window.`,
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
-    );
-  }
-  if (estimatedInputTokens < contextWindow) return;
-  throw new ChatGptWebAdapterError(
-    `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token context window for this ChatGPT Web model. Switch to a model with a larger context window, run /compact, then retry this Web model.`,
-    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
-  );
-}
+  console.info(`[chatgpt-web] context-budget ${JSON.stringify(decision.diagnostics)}`);
 
+  if (decision.outcome === "fits") return;
+  if (decision.outcome === "context_exhausted") throw chatGptContextExhaustedError();
+
+  const requiresCompaction = decision.outcome === "budget_exceeded" && !compaction;
+  const code = requiresCompaction
+    ? CONTEXT_COMPACTION_REQUIRED_CODE
+    : CONTEXT_BUDGET_EXCEEDED_CODE;
+  const nextAction = requiresCompaction ? " Run /compact, then retry this Web model." : "";
+  const message = budget.browserComposerCharLimit !== undefined
+    && promptChars !== undefined
+    && promptChars > budget.browserComposerCharLimit
+    ? `This prompt contains ${promptChars.toLocaleString("en-US")} inline characters, which exceeds the ${budget.browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary for this account and effort.${nextAction}`
+    : budget.browserMessageTokenLimit !== undefined
+      && estimatedMessageTokens > budget.browserMessageTokenLimit
+      ? `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${budget.browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The model context window is ${budget.theoreticalContextWindow.toLocaleString("en-US")} tokens.${nextAction}`
+      : `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${budget.preCompactionInputBudget.toLocaleString("en-US")}-token effective ChatGPT Web input budget. The theoretical model context window is ${budget.theoreticalContextWindow.toLocaleString("en-US")} tokens and ${budget.outputHeadroomTokens.toLocaleString("en-US")} tokens are reserved as output/control headroom.${nextAction}`;
+  throw new ChatGptWebAdapterError(message, {
+    status: 400,
+    errorType: "invalid_request_error",
+    code,
+    retryable: false,
+  });
+}
 export function assertChatGptWebMultipartInputWithinLimits(
   estimatedInputTokens: number,
   estimatedMessageTokens: number,
@@ -938,71 +1029,77 @@ export function assertChatGptWebMultipartInputWithinLimits(
     finalMessageTokens: number;
     finalMessageChars: number;
   },
+  serializedInputBytes?: number,
+  imageCount?: number,
+  compaction = false,
 ): void {
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new ChatGptWebAdapterError(
-      "Bigger Context is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.",
-      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+      "Bigger Context is unavailable for Luna because its browser transport uses one accumulated transcript.",
+      { status: 400, errorType: "invalid_request_error", code: CONTEXT_BUDGET_EXCEEDED_CODE, retryable: false },
     );
   }
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
-    throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
+    throw new Error("ChatGPT Bigger Context limit is not defined for model: " + modelId);
   }
-  const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
-    modelId,
-    effort,
-    { ...capabilities, experimentalBiggerContext: false },
-  );
+  const budget = resolveChatGptWebContextBudget(modelId, effort, capabilities);
   const assertMessageBoundary = (
     label: "stage" | "final part",
     messageTokens: number,
     messageChars: number,
     messageEffort: ChatGptWebModelMode["effort"],
   ): void => {
-    const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
-      modelId,
-      messageEffort,
-      capabilities,
-    );
-    if (browserComposerCharLimit !== undefined && messageChars > browserComposerCharLimit) {
+    const messageBudget = resolveChatGptWebContextBudget(modelId, messageEffort, capabilities);
+    if (messageBudget.browserComposerCharLimit !== undefined && messageChars > messageBudget.browserComposerCharLimit) {
       throw new ChatGptWebAdapterError(
-        `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
-        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${messageBudget.browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        { status: 400, errorType: "invalid_request_error", code: CONTEXT_COMPACTION_REQUIRED_CODE, retryable: false },
       );
     }
-    if (browserMessageTokenLimit !== undefined && messageTokens > browserMessageTokenLimit) {
+    if (messageBudget.browserMessageTokenLimit !== undefined && messageTokens > messageBudget.browserMessageTokenLimit) {
       throw new ChatGptWebAdapterError(
-        `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
-        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${messageBudget.browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT message boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
+        { status: 400, errorType: "invalid_request_error", code: CONTEXT_COMPACTION_REQUIRED_CODE, retryable: false },
       );
     }
   };
   if (transport) {
-    assertMessageBoundary(
-      "stage",
-      transport.maxStageMessageTokens,
-      transport.maxStageChars,
-      transport.stagingEffort,
-    );
-    assertMessageBoundary(
-      "final part",
-      transport.finalMessageTokens,
-      transport.finalMessageChars,
-      effort,
-    );
+    assertMessageBoundary("stage", transport.maxStageMessageTokens, transport.maxStageChars, transport.stagingEffort);
+    assertMessageBoundary("final part", transport.finalMessageTokens, transport.finalMessageChars, effort);
   } else {
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
-  const experimentalContextWindow = baseContextWindow * partCount;
-  if (estimatedInputTokens < experimentalContextWindow) return;
-  const partLabel = partCount === 2 ? "two-part" : "three-part";
+  const decision = decideChatGptWebContextCapacity(
+    budget,
+    {
+      estimatedInputTokens,
+      estimatedMessageTokens,
+      promptChars: maxMessageChars,
+      imageCount,
+      serializedInputBytes,
+      partCount,
+    },
+    {
+      compactionAvailable: compaction,
+      multipartAvailable: false,
+      canonicalStatePresent: true,
+      partCount,
+    },
+  );
+  console.info(`[chatgpt-web] multipart context-budget ${JSON.stringify(decision.diagnostics)}`);
+  if (decision.outcome === "context_exhausted") throw chatGptContextExhaustedError();
+  if (decision.outcome === "fits") return;
   throw new ChatGptWebAdapterError(
-    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
-    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    `This Bigger Context transaction requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, exceeding the ${decision.effectiveInputTokenBudget.toLocaleString("en-US")}-token deterministic ${partCount}-part budget. Run /compact, then retry.`,
+    {
+      status: 400,
+      errorType: "invalid_request_error",
+      code: compaction ? CONTEXT_BUDGET_EXCEEDED_CODE : CONTEXT_COMPACTION_REQUIRED_CODE,
+      retryable: false,
+    },
   );
 }
 
-/** Select the cheapest account-visible mode that can carry every inert multipart stage. */
 export function resolveChatGptWebMultipartStagingMode(
   modelId: string,
   capabilities: ChatGptWebCapabilities,
@@ -1181,6 +1278,14 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
   });
 }
 
+export interface ChatGptBrowserPhysicalSurface {
+  resourceId: string;
+  browserContextId: string;
+  pageId: string;
+  profileId: string;
+  accountId: string;
+}
+
 export interface BrowserTurn {
   traceId: string;
   modelId: string;
@@ -1200,6 +1305,10 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void;
+  /** Bound to the concrete browser surface/context/page before the surface is declared ready. */
+  onPhysicalSurfaceBound?: (binding: ChatGptBrowserPhysicalSurface) => void | Promise<void>;
+  /** Physical ChatGPT surface has completed authentication, temporary-chat preparation, and model setup. */
+  onSurfaceReady?: () => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
   onReasoningSummary?: (text: string, continuation?: boolean) => void;
   /** Stable visible ChatGPT prose between status/tool rows. */
@@ -1884,12 +1993,12 @@ class ChatGptBrowserDiagnostics {
           + ` checkpoint=${stem} failures=${Object.keys(captureErrors).join(",")}`,
         );
       }
-      console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
+      console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem}`);
     } catch (captureError) {
       console.warn(
         `[chatgpt-web] browser diagnostic capture failed trace=${this.traceId}`
         + ` checkpoint=${browserDiagnosticCheckpoint(checkpoint)}:`
-        + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
+        + ` ${safeErrorDescriptor(captureError)}`,
       );
     }
   }
@@ -2208,7 +2317,7 @@ export class ChatGptBrowserWorker {
           }
         }
       }
-      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
+      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)} ${safeErrorDescriptor(surfacedError)}`);
       throw surfacedError;
     } finally {
       if (timer) clearTimeout(timer);
@@ -2856,6 +2965,7 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(observationPage);
       await throwIfChatGptRateLimitDialog(observationPage);
+      await throwIfChatGptContextExhausted(observationPage);
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.submissionDomState(
@@ -3482,6 +3592,7 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
       await throwIfChatGptSessionFailureAlert(page);
+      await throwIfChatGptContextExhausted(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
       let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
       if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
@@ -4265,7 +4376,7 @@ export class ChatGptBrowserWorker {
         if (now - lastHeartbeatFailureAt < 30_000) return;
         lastHeartbeatFailureAt = now;
         console.warn(
-          `[chatgpt-web] launcher turn heartbeat failed for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+          `[chatgpt-web] launcher turn heartbeat failed for ${turn.traceId} ${safeErrorDescriptor(error)}`,
         );
       }).finally(() => {
         heartbeatInFlight = false;
@@ -4312,7 +4423,7 @@ export class ChatGptBrowserWorker {
         }
         if (!originalError) throw controlError;
         console.error(
-          `[chatgpt-web] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
+          `[chatgpt-web] launcher turn-end notification failed after browser error ${safeErrorDescriptor(controlError)}`,
         );
       }
     }
@@ -4366,6 +4477,8 @@ export class ChatGptBrowserWorker {
         : undefined;
       const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
       const estimatedMessageTokens = estimateCompiledChatGptWebMessageTokens(prepared, turn.modelId);
+      const compiledMessages = compiledChatGptWebMessages(prepared);
+      const serializedInputBytes = compiledMessages.reduce((total, message) => total + Buffer.byteLength(message, "utf8"), 0);
       const maxMessageChars = compiledChatGptWebMaxMessageChars(prepared);
       const maxStageMessageTokens = multipartStages
         ? Math.max(...multipartStages.map(stage => estimateTokens(stage.text, turn.modelId)))
@@ -4401,6 +4514,9 @@ export class ChatGptBrowserWorker {
             finalMessageTokens: estimateTokens(multipartFinalPrompt, turn.modelId),
             finalMessageChars: multipartFinalPrompt.length,
           } : undefined,
+          serializedInputBytes,
+          prepared.images.length,
+          turn.compaction === true,
         );
       } else {
         assertChatGptWebInputWithinLimits(
@@ -4411,6 +4527,9 @@ export class ChatGptBrowserWorker {
           browserCapabilities,
           maxMessageChars,
           this.config.tuning.composerCharLimit,
+          serializedInputBytes,
+          prepared.images.length,
+          turn.compaction === true,
         );
       }
       const deadline = this.config.turnTimeoutMs === undefined
@@ -4442,6 +4561,29 @@ export class ChatGptBrowserWorker {
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
+      const physicalResourceId = launcherSurfaceId ?? physicalObjectId(page, "managed-surface");
+      const physicalProfileId = this.config.browserHost === "launcher"
+        ? `launcher-profile:${this.config.browserHostDescriptorPath ?? "unknown"}`
+        : `chrome-profile:${this.config.chromeExecutablePath}`;
+      let physicalAccountId = "chatgpt-account:unknown";
+      try {
+        const storageState = await page.context().storageState();
+        physicalAccountId = `chatgpt-account:${accountIdentityFromStorageState(storageState).fingerprint}`;
+      } catch {
+        physicalAccountId = `chatgpt-account:${accountIdentityFromUnknownSession().fingerprint}`;
+      }
+      let physicalPageId = physicalObjectId(page, "page");
+      let physicalContextId = physicalObjectId(page.context(), "context");
+      const bindPhysicalSurface = async (): Promise<void> => {
+        await turn.onPhysicalSurfaceBound?.({
+          resourceId: physicalResourceId,
+          browserContextId: physicalContextId,
+          pageId: physicalPageId,
+          profileId: physicalProfileId,
+          accountId: physicalAccountId,
+        });
+      };
+      await bindPhysicalSurface();
       const rebindLauncherPage = async (
         attempt: number,
         cause: Error,
@@ -4450,7 +4592,7 @@ export class ChatGptBrowserWorker {
         if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause;
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
-          + ` ${redactChatGptUiDiagnostic(cause.message)}`,
+          + ` ${safeErrorDescriptor(cause)}`,
         );
         const previousConnection = turnConnection;
         // The observation timeout races the Playwright operation but cannot cancel the underlying
@@ -4492,6 +4634,9 @@ export class ChatGptBrowserWorker {
         turnConnection = connection.browser;
         page = connection.page;
         diagnosticPage = page;
+        physicalPageId = physicalObjectId(page, "page");
+        physicalContextId = physicalObjectId(page.context(), "context");
+        await bindPhysicalSurface();
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
         );
@@ -4570,6 +4715,7 @@ export class ChatGptBrowserWorker {
         ));
       }
       await diagnostics.capture(page, "effort-selection-complete");
+      await turn.onSurfaceReady?.();
 
       let finalPrompt = prepared.text;
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
@@ -4600,8 +4746,8 @@ export class ChatGptBrowserWorker {
               stageBaseline,
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
-              undefined,
-              undefined,
+              turn.externalProgress,
+              turn,
               undefined,
               toolTurnObservationRecovery
                 ? async (...args) => {
@@ -4776,55 +4922,7 @@ export class ChatGptBrowserWorker {
         await diagnostics.capture(page, `${stagePrefix}send-accepted`);
         return responseTurn;
       };
-      // Free-plan Temporary Chat rehydrates the conversation SPA unpredictably ("Loading chats" /
-      // "Loading profile"), discarding the in-flight generation. A rehydration that outlives the
-      // stall budget fails the wait with ChatGptSurfaceStaleError; the recovery reloads a fresh
-      // Temporary Chat document and resubmits the same prompt. Retained-conversation turns cannot
-      // be replayed onto a fresh document, so they surface the error instead.
-      const surfaceStaleRecoveryAttempts = 2;
-      let responseTurn: ChatGptAssistantTurnBinding;
-      for (let surfaceStaleAttempt = 1; ; surfaceStaleAttempt++) {
-        try {
-          responseTurn = await sendAndWaitForResponse(surfaceStaleAttempt);
-          break;
-        } catch (error) {
-          if (!(error instanceof ChatGptSurfaceStaleError)
-            || surfaceStaleAttempt >= surfaceStaleRecoveryAttempts
-            || reuseConversation) {
-            throw error;
-          }
-          console.warn(
-            `[chatgpt-web] browser turn ${turn.traceId} recovered from a stale temporary-chat surface`
-            + ` (attempt ${surfaceStaleAttempt}/${surfaceStaleRecoveryAttempts}): ${redactChatGptUiDiagnostic(error.message)}`,
-          );
-          await diagnostics.capture(page, `surface-stale-recovery_${surfaceStaleAttempt}`);
-          await this.runStage(
-            turn.traceId,
-            `surface_stale_recovery_${surfaceStaleAttempt}`,
-            browserStageTimeouts.temporaryChatPreparation,
-            async () => {
-              await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-              await this.prepareTemporaryChatSurface(
-                page,
-                checkpoint => diagnostics.capture(page, checkpoint),
-              );
-              mode = await this.selectModelAndEffort(
-                page,
-                turn.modelId,
-                turn.reasoning,
-                turn.capabilities,
-                checkpoint => diagnostics.capture(page, checkpoint),
-              );
-              // Let the freshly reloaded composer finish hydrating before re-attaching, so the
-              // send button can enable once the prompt lands. Re-sending into a mid-rehydration
-              // composer leaves the button disabled and fails the recovery attempt.
-              await this.waitForRehydrationSettled(page, 15_000);
-              submissionBaseline = await this.captureSubmissionBaseline(page);
-            },
-          );
-          await diagnostics.capture(page, `surface-stale-recovery-ready_${surfaceStaleAttempt}`);
-        }
-      }
+      let responseTurn = await sendAndWaitForResponse(1);
 
       let lastHeartbeat = 0;
       let finalText = "";
@@ -4843,7 +4941,7 @@ export class ChatGptBrowserWorker {
       };
       const throwMarkdownConsistencyError = (error: unknown): { markdown: string; delta: string } => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
-        console.warn(`[chatgpt-web] consistency warning handled gracefully: ${error.message}`);
+        console.warn(`[chatgpt-web] consistency warning handled gracefully ${safeErrorDescriptor(error)}`);
         return { markdown: "", delta: "" };
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
@@ -4874,6 +4972,7 @@ export class ChatGptBrowserWorker {
           throw new Error("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
+        await throwIfChatGptContextExhausted(page);
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
@@ -5100,7 +5199,7 @@ export class ChatGptBrowserWorker {
         }
         console.warn(
           `[chatgpt-web] browser turn ${turn.traceId} tolerated internal observation fault`
-          + ` ${internalObservationFaults}/${MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS}: ${error.message}`,
+          + ` ${internalObservationFaults}/${MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS}: ${safeErrorDescriptor(error)}`,
         );
         await diagnostics.capture(page, "internal-observation-fault");
         responseDomCache.key = undefined;
@@ -5124,7 +5223,7 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
-        + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
+        + ` ${safeErrorDescriptor(error)}`,
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
@@ -5135,13 +5234,13 @@ export class ChatGptBrowserWorker {
       if (turnConnection) {
         await turnConnection.close().catch(error => {
           console.error(
-            `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId} ${safeErrorDescriptor(error)}`,
           );
         });
       } else if (managedPage && !managedPage.isClosed()) {
         await managedPage.close().catch(error => {
           console.error(
-            `[chatgpt-web] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            `[chatgpt-web] failed to close managed browser tab for ${turn.traceId} ${safeErrorDescriptor(error)}`,
           );
         });
       }

@@ -1,4 +1,5 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -31,7 +32,8 @@ import {
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
-import { augmentNativeModelCatalog } from "./model-catalog";
+import { safeErrorDescriptor } from "./lib/safe-diagnostics";
+import { augmentNativeModelCatalog, buildChatGptWebModelCatalog } from "./model-catalog";
 import {
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
@@ -39,10 +41,14 @@ import {
 } from "./codex-integration";
 import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+  isChatGptWebInternalBackendModel,
   isChatGptWebModelSlug,
-  requireChatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
+import {
+  createChatGptWebRouteAuthority,
+  requireChatGptWebRoute,
+} from "./chatgpt-web-authority";
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import {
   buildCompactV1Output,
@@ -57,7 +63,7 @@ import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
-type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified";
+type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "native-llm" | "unspecified";
 
 export interface NativeCodexTurnIdentity {
   threadId: string;
@@ -369,14 +375,20 @@ export interface ResponseRequestOptions {
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
 }
 
+function chatGptWebRouteAuthority(config: AppConfig) {
+  return createChatGptWebRouteAuthority({
+    solAvailable: config.solAvailable,
+    proAvailable: config.proAvailable,
+    capabilityState: config.capabilityState,
+    browserInteractionMode: config.browserInteractionMode,
+    zeroRiskProEnabled: config.zeroRiskProEnabled,
+  });
+}
+
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
-  const route = requireChatGptWebModelRoute(parsed.modelId, config);
+  const route = requireChatGptWebRoute(parsed.modelId, chatGptWebRouteAuthority(config));
   parsed.modelId = route.backendModel;
-  // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
-  // protocol/catalog value; the manual adapter must never reinterpret it as a ChatGPT selection.
-  parsed.options.reasoning = route.interactionMode === "automatic"
-    ? route.adapterEffort
-    : route.codexEffort;
+  parsed.options.reasoning = route.adapterEffort;
   return route;
 }
 
@@ -386,26 +398,40 @@ export async function modelsRequest(
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
 ): Promise<Response> {
-  let upstream: Response;
+  const override = contextOverride?.();
+  const webCatalog = buildChatGptWebModelCatalog(config, override);
+  let upstream: Response | undefined;
   try {
     upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
-  } catch (error) {
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+  } catch {
+    upstream = undefined;
   }
-  if (!upstream.ok) return upstream;
-  let catalog: Record<string, unknown>;
-  try {
-    catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
-  } catch (error) {
-    return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
+
+  let catalog: Record<string, unknown> = webCatalog;
+  let headers = new Headers({
+    "content-type": "application/json",
+  });
+  let status = 200;
+  let statusText = "OK";
+
+  if (upstream?.ok) {
+    try {
+      catalog = augmentNativeModelCatalog(await upstream.json(), config, override);
+      headers = new Headers(upstream.headers);
+      headers.delete("content-encoding");
+      headers.delete("content-length");
+      status = upstream.status;
+      statusText = upstream.statusText;
+    } catch {
+      // Native Codex catalog corruption must not make the independent Web catalog unavailable.
+      catalog = webCatalog;
+    }
   }
+
   const body = JSON.stringify(catalog);
-  const headers = new Headers(upstream.headers);
-  headers.delete("content-encoding");
-  headers.delete("content-length");
   headers.set("content-type", "application/json");
-  headers.set("etag", `W/\"${createHash("sha256").update(body).digest("base64url")}\"`);
-  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
+  headers.set("etag", `W/"${createHash("sha256").update(body).digest("base64url")}"`);
+  return new Response(body, { status, statusText, headers });
 }
 
 export async function nativeSearchRequest(
@@ -464,6 +490,13 @@ export async function responseRequest(
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+    if (isChatGptWebInternalBackendModel(requestedModel)) {
+      return formatErrorResponse(
+        400,
+        "invalid_request_error",
+        "ChatGPT Web backend model IDs are internal implementation identifiers and cannot be selected as public routes",
+      );
+    }
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -672,6 +705,13 @@ export async function compactRequest(
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
   if (!isChatGptWebModelSlug(raw.model)) {
+    if (isChatGptWebInternalBackendModel(raw.model)) {
+      return formatErrorResponse(
+        400,
+        "invalid_request_error",
+        "ChatGPT Web backend model IDs are internal implementation identifiers and cannot be selected as public routes",
+      );
+    }
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
@@ -680,7 +720,7 @@ export async function compactRequest(
   }
   let route: ChatGptWebModelRoute;
   try {
-    route = requireChatGptWebModelRoute(raw.model, config);
+    route = requireChatGptWebRoute(raw.model, chatGptWebRouteAuthority(config));
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -873,19 +913,116 @@ export interface RunningServer {
   stop: (closeActiveConnections?: boolean) => Promise<void> | void;
 }
 
+/**
+ * Private local transport used by the native DSH LLM adapter.
+ *
+ * The native DSH process remains the authority for session/sandbox context. It sends that
+ * already-resolved CodexParsedRequest to the sidecar over the authenticated control channel.
+ * The sidecar executes the request through the same ProviderAdapter/ProviderCore instance used by /v1/responses.
+ */
+async function nativeDshTurnRequest(
+  req: Request,
+  config: AppConfig,
+  adapterFactory: ChatGptWebAdapterFactory,
+): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await readJsonRequestBody(req);
+  } catch (error) {
+    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Native DSH request body must be valid JSON");
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return formatErrorResponse(400, "invalid_request_error", "Native DSH request must be an object");
+  }
+  const body = raw as Record<string, unknown>;
+  const publicModel = typeof body.model === "string" ? body.model : "";
+  const parsed = body.request as CodexParsedRequest | undefined;
+  if (!publicModel || !parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return formatErrorResponse(400, "invalid_request_error", "Native DSH request requires model and request");
+  }
+  if (!parsed._dshContext) {
+    return formatErrorResponse(400, "invalid_request_error", "Native DSH request is missing trusted DSH context");
+  }
+  let route: ChatGptWebModelRoute;
+  try {
+    route = requireChatGptWebRoute(publicModel, chatGptWebRouteAuthority(config));
+  } catch (error) {
+    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  if (parsed.modelId !== route.backendModel) {
+    return formatErrorResponse(400, "invalid_request_error", "Native DSH public model and routed backend model do not match");
+  }
+  const provider = providerConfig(config);
+  const adapter = adapterFactory(provider);
+  const queue = new AsyncEventQueue<AdapterEvent>();
+  const queueIterator = queue[Symbol.asyncIterator]();
+  const encoder = new TextEncoder();
+  const abort = new AbortController();
+  if (req.signal.aborted) abort.abort(req.signal.reason);
+  else req.signal.addEventListener("abort", () => abort.abort(req.signal.reason), { once: true });
+  void (async () => {
+    try {
+      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => queue.push(event));
+    } catch (error) {
+      queue.push({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof DOMException && error.name === "AbortError" ? { code: "aborted" } : {}),
+      });
+    } finally {
+      queue.close();
+    }
+  })();
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const result = await queueIterator.next();
+      if (result.done) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(encoder.encode(JSON.stringify(result.value) + "\n"));
+    },
+    cancel(reason) {
+      abort.abort(reason);
+      void queueIterator.return?.();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "application/x-ndjson",
+      "cache-control": "no-cache",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: {
+    fetchUpstream?: NativeFetch;
+    /**
+     * Test/in-process override. The production server owns the ProviderCore and supplies the
+     * exact same instance to every adapter created for this listener.
+     */
+    adapterFactory?: (provider: CodexProviderConfig, providerCore: ChatGptWebProviderCore) => ProviderAdapter;
+  } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
+  // The sidecar is the single ChatGPT Web execution authority. Responses requests and
+  // native DSH turns routed through the sidecar must share this lifecycle owner.
+  const sharedProviderCore = new ChatGptWebProviderCore();
+  const adapterFactory: ChatGptWebAdapterFactory = dependencies.adapterFactory
+    ? provider => dependencies.adapterFactory!(provider, sharedProviderCore)
+    : provider => createChatGptWebAdapter(provider, { providerCore: sharedProviderCore });
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
       console.error(
-        `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        `[chatgpt-web] turn broker endpoint is unavailable ${safeErrorDescriptor(error)}`,
       );
     });
   }
@@ -1051,7 +1188,7 @@ export function startServer(
         for (const result of results) {
           if (result.status === "rejected") {
             console.error(
-              `[chatgpt-web] interrupted turn cleanup failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+              `[chatgpt-web] interrupted turn cleanup failed ${safeErrorDescriptor(result.reason)}`,
             );
           }
         }
@@ -1098,6 +1235,16 @@ export function startServer(
       }
       setTimeout(shutdown, 0);
       return Response.json({ status: "ok", accepting_turns: false, ...current });
+    }
+    if (req.method === "POST" && url.pathname === "/internal/native-llm") {
+      if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+      if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
+      return httpTurns.track(
+        signal => nativeDshTurnRequest(new Request(req, { signal }), config, adapterFactory),
+        req.signal,
+        process.platform,
+        "native-llm",
+      );
     }
     if (req.method === "GET" && url.pathname === "/v1/models") {
       if (draining) {
@@ -1146,7 +1293,7 @@ export function startServer(
         (signal, bindIdentity) => responseRequest(
           new Request(req, { signal }),
           config,
-          dependencies.adapterFactory,
+          adapterFactory,
           { onTurnIdentity: bindIdentity },
         ),
         req.signal,
@@ -1160,7 +1307,7 @@ export function startServer(
         (signal, bindIdentity) => compactRequest(
           new Request(req, { signal }),
           config,
-          dependencies.adapterFactory,
+          adapterFactory,
           { onTurnIdentity: bindIdentity },
         ),
         req.signal,
@@ -1223,6 +1370,7 @@ export function startServer(
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
+        sharedProviderCore.shutdown(),
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -1230,13 +1378,13 @@ export function startServer(
       if (failures.length > 0) {
         process.exitCode = 1;
         for (const failure of failures) {
-          console.error(`[dsh-chatgpt-web] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+          console.error(`[dsh-chatgpt-web] shutdown cleanup failed ${safeErrorDescriptor(failure)}`);
         }
       }
       await server.stop(true);
     })().catch(error => {
       process.exitCode = 1;
-      console.error(`[dsh-chatgpt-web] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[dsh-chatgpt-web] server shutdown failed ${safeErrorDescriptor(error)}`);
     });
   }
   process.once("SIGINT", shutdown);

@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
-import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
+import { closeChatGptWebSurfaceTransports, chatGptWebSurfaceTransportForProvider, type WebSurfaceTurn, type ChatGptWebSurfaceTransport } from "./web-surface-transport";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
@@ -63,6 +63,7 @@ type InputMessage = RunMessage
   | MaintenanceMessage
   | { type: "prepared_selected_ack"; id: string; prepared: CompiledChatGptWebPrompt }
   | { type: "send_activation_ack"; id: string }
+  | { type: "surface_ready_ack"; id: string }
   | { type: "completion_fence_begin_ack"; id: string; requestId: number; revision: number | null }
   | { type: "completion_fence_commit_ack"; id: string; requestId: number; committed: boolean }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
@@ -91,6 +92,10 @@ const abortControllers = new Map<string, AbortController>();
 const turnProgress = new Map<string, ChatGptMirroredTurnProgress>();
 const preparedSelections = new Map<string, ReturnType<typeof createBrowserHelperPromptSelection>>();
 const sendActivationWaiters = new Map<string, {
+  resolve: () => void;
+  reject: (error: Error) => void;
+}>();
+const surfaceReadyWaiters = new Map<string, {
   resolve: () => void;
   reject: (error: Error) => void;
 }>();
@@ -124,6 +129,10 @@ function requestShutdown(): Promise<void> {
     waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
   }
   sendActivationWaiters.clear();
+  for (const waiter of surfaceReadyWaiters.values()) {
+    waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
+  }
+  surfaceReadyWaiters.clear();
   for (const waiter of completionFenceBeginWaiters.values()) {
     waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
   }
@@ -133,7 +142,7 @@ function requestShutdown(): Promise<void> {
   }
   completionFenceCommitWaiters.clear();
   input.close();
-  void closeChatGptBrowserWorkers().then(
+  void closeChatGptWebSurfaceTransports().then(
     () => {
       completeShutdown();
       process.exit(0);
@@ -206,7 +215,7 @@ async function run(message: RunMessage): Promise<void> {
   const promptSelection = createBrowserHelperPromptSelection();
   preparedSelections.set(message.id, promptSelection);
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
-  const turn: BrowserTurn = {
+  const turn: WebSurfaceTurn = {
     traceId: message.turn.traceId,
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
@@ -251,6 +260,22 @@ async function run(message: RunMessage): Promise<void> {
       },
     } : {}),
     onHeartbeat: () => writeProtocol({ type: "event", id: message.id, event: "heartbeat" }),
+    onPhysicalSurfaceBound: binding => {
+      if (!writeProtocol({ type: "event", id: message.id, event: "surface_bound", binding })) {
+        throw new Error("Browser helper could not persist physical surface binding");
+      }
+    },
+    onSurfaceReady: () => new Promise<void>((resolve, reject) => {
+      if (surfaceReadyWaiters.has(message.id)) {
+        reject(new Error("Browser helper surface readiness already awaits acknowledgement"));
+        return;
+      }
+      surfaceReadyWaiters.set(message.id, { resolve, reject });
+      if (!writeProtocol({ type: "event", id: message.id, event: "surface_ready" })) {
+        surfaceReadyWaiters.delete(message.id);
+        reject(new Error("Browser helper could not request surface readiness acknowledgement"));
+      }
+    }),
     onPreparedSelected: reused => {
       if (!writeProtocol({ type: "event", id: message.id, event: "prepared_selected", reused })) {
         throw new Error("Browser helper could not request prompt selection");
@@ -293,7 +318,7 @@ async function run(message: RunMessage): Promise<void> {
     } : {}),
   };
   try {
-    const text = await ChatGptBrowserWorker.forProvider(provider).run(turn);
+    const text = await chatGptWebSurfaceTransportForProvider(provider).run(turn);
     writeProtocol({ type: "result", id: message.id, text });
   } catch (error) {
     writeProtocol({
@@ -314,6 +339,9 @@ async function run(message: RunMessage): Promise<void> {
     const sendWaiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);
     sendWaiter?.reject(new DOMException("Browser helper turn ended before Send acknowledgement", "AbortError"));
+    const surfaceReadyWaiter = surfaceReadyWaiters.get(message.id);
+    surfaceReadyWaiters.delete(message.id);
+    surfaceReadyWaiter?.reject(new DOMException("Browser helper turn ended before surface readiness acknowledgement", "AbortError"));
     const beginWaiter = completionFenceBeginWaiters.get(message.id);
     completionFenceBeginWaiters.delete(message.id);
     beginWaiter?.reject(new DOMException("Browser helper turn ended before completion-fence begin", "AbortError"));
@@ -339,7 +367,7 @@ async function verify(message: VerifyMessage): Promise<void> {
   }
 }
 
-function maintenanceWorker(message: MaintenanceMessage): ChatGptBrowserWorker {
+function maintenanceWorker(message: MaintenanceMessage): ChatGptWebSurfaceTransport {
   if (!/^[A-Za-z0-9_-]{6,128}$/.test(message.id)) {
     throw new Error("Browser helper maintenance identity is invalid");
   }
@@ -353,7 +381,7 @@ function maintenanceWorker(message: MaintenanceMessage): ChatGptBrowserWorker {
     baseUrl: "https://chatgpt.com",
     chatgptWeb: { appName, browserHost: "launcher", browserHostDescriptorPath },
   };
-  return ChatGptBrowserWorker.forProvider(provider);
+  return chatGptWebSurfaceTransportForProvider(provider);
 }
 
 async function maintain(message: InspectMessage | SmokeMessage): Promise<void> {
@@ -419,6 +447,14 @@ input.on("line", line => {
     }
     sendActivationWaiters.delete(message.id);
     waiter.resolve();
+  } else if (message.type === "surface_ready_ack") {
+    const waiter = surfaceReadyWaiters.get(message.id);
+    if (!waiter) {
+      writeProtocol({ type: "error", id: message.id, message: "Browser helper has no pending surface readiness" });
+      return;
+    }
+    surfaceReadyWaiters.delete(message.id);
+    waiter.resolve();
   } else if (message.type === "completion_fence_begin_ack") {
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
       || (message.revision !== null && (!Number.isSafeInteger(message.revision) || message.revision < 0))) {
@@ -463,6 +499,9 @@ input.on("line", line => {
     const waiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);
     waiter?.reject(new DOMException("Browser helper turn aborted before Send acknowledgement", "AbortError"));
+    const surfaceReadyWaiter = surfaceReadyWaiters.get(message.id);
+    surfaceReadyWaiters.delete(message.id);
+    surfaceReadyWaiter?.reject(new DOMException("Browser helper turn aborted before surface readiness acknowledgement", "AbortError"));
     const beginWaiter = completionFenceBeginWaiters.get(message.id);
     completionFenceBeginWaiters.delete(message.id);
     beginWaiter?.reject(new DOMException("Browser helper turn aborted before completion-fence begin", "AbortError"));
@@ -510,4 +549,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "surface-lifecycle"] });

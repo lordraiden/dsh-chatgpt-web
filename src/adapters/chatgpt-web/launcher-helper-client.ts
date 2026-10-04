@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
-import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
+import type { BrowserTurn, ChatGptBrowserPhysicalSurface, ResolvedBrowserConfig } from "./browser-worker";
 import {
   parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
@@ -19,12 +19,13 @@ interface PendingTurn {
   sent?: boolean;
   prepared?: CompiledChatGptWebPrompt & { release: () => void };
   localFailure?: Error;
+  surfaceBinding?: Promise<void>;
   progressForwarding?: AbortController;
 }
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
-  | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
+  | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text" | "surface_bound" | "surface_ready"; text?: string; continuation?: boolean; binding?: ChatGptBrowserPhysicalSurface }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
@@ -100,13 +101,42 @@ function parseHelperMessage(line: string): HelperMessage {
     }
     const text = message.text;
     const continuation = message.continuation;
+    if (event === "surface_bound") {
+      const binding = message.binding;
+      if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+        throw new Error("Launcher browser helper physical surface binding is invalid");
+      }
+      const record = binding as Record<string, unknown>;
+      if (typeof record.resourceId !== "string" || !record.resourceId
+        || typeof record.browserContextId !== "string" || !record.browserContextId
+        || typeof record.pageId !== "string" || !record.pageId
+        || typeof record.profileId !== "string" || !record.profileId
+        || typeof record.accountId !== "string" || !record.accountId) {
+        throw new Error("Launcher browser helper physical surface binding is invalid");
+      }
+      return {
+        type: "event",
+        id: message.id,
+        event,
+        binding: {
+          resourceId: record.resourceId,
+          browserContextId: record.browserContextId,
+          pageId: record.pageId,
+          profileId: record.profileId,
+          accountId: record.accountId,
+        },
+      };
+    }
+    if (event === "surface_ready") {
+      return { type: "event", id: message.id, event };
+    }
     if (event === "prepared_selected") {
       if (typeof message.reused !== "boolean") {
         throw new Error("Launcher browser helper prompt selection is invalid");
       }
       return { type: "event", id: message.id, event, reused: message.reused };
     }
-    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
+    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text", "surface_bound", "surface_ready"].includes(String(event))) {
       throw new Error("Launcher browser helper emitted an unknown event");
     }
     if (text !== undefined && typeof text !== "string") {
@@ -118,7 +148,7 @@ function parseHelperMessage(line: string): HelperMessage {
     return {
       type: "event",
       id: message.id,
-      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
+      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text" | "surface_bound" | "surface_ready",
       ...(text !== undefined ? { text: text as string } : {}),
       ...(continuation !== undefined ? { continuation: continuation as boolean } : {}),
     };
@@ -203,6 +233,11 @@ export class LauncherBrowserHelperClient {
   async run(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await this.ensureChild();
+    if (!this.helperFeatures.has("surface-lifecycle")) {
+      throw new Error(
+        "Launcher browser helper does not support semantic surface lifecycle acknowledgements; update or restart the launcher",
+      );
+    }
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (turn.externalProgress && !this.helperFeatures.has("tool-boundary-ack")) {
       throw new Error(
@@ -394,7 +429,33 @@ export class LauncherBrowserHelperClient {
     const pending = this.pending.get(message.id);
     if (!pending) return;
     if (message.type === "event") {
-      if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
+      if (message.event === "surface_bound") {
+        pending.surfaceBinding = Promise.resolve()
+          .then(() => pending.turn.onPhysicalSurfaceBound?.(message.binding!))
+          .catch(error => {
+            this.abortWithLocalFailure(
+              message.id,
+              error instanceof Error ? error : new Error(String(error)),
+              pending,
+            );
+            throw error;
+          });
+      }
+      else if (message.event === "surface_ready") {
+        void Promise.resolve()
+          .then(() => pending.surfaceBinding)
+          .then(() => pending.turn.onSurfaceReady?.())
+          .then(() => {
+            if (this.pending.get(message.id) !== pending || pending.localFailure || pending.turn.abortSignal?.aborted) return;
+            return this.send({ type: "surface_ready_ack", id: message.id });
+          })
+          .catch(error => this.abortWithLocalFailure(
+            message.id,
+            error instanceof Error ? error : new Error(String(error)),
+            pending,
+          ));
+      }
+      else if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
       else if (message.event === "tool_batch_observed") {
         const progress = pending.turn.externalProgress;
         if (!progress) {

@@ -1,7 +1,7 @@
 /**
- * Client half of @lordraiden/dsh-chatgpt-web: a "ChatGPT Web" page in the DSH Web GUI settings
- * panel. It reads the sidecar control API (status, tuning config, recent browser turns) and lets
- * the user tune the browser transport limits without touching config files.
+ * Client half of @lordraiden/dsh-chatgpt-web: a "ChatGPT Web" configuration page on the DSH
+ * 0.2 Plugins surface. DSH-owned runtime settings are edited through configForms; the page also
+ * reads the loopback sidecar control API for diagnostics and advanced browser-transport tuning.
  *
  * Plain JS (no build step): React comes from the browser module table, text goes through the
  * Client locale service, and styling uses only --dsw-alias-* theme tokens rendered as a
@@ -13,18 +13,19 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    const TOKEN_KEY = 'dsh-chatgpt-web.controlToken';
-    const BASE = 'http://127.0.0.1:17841';
+    const CONFIG_ID = 'dsh-chatgpt-web';
+    const LEGACY_TOKEN_KEY = 'dsh-chatgpt-web.controlToken';
+    const LOOPBACK_HOST = '127.0.0.1';
 
     const DICT_EN = {
       'section.title': 'ChatGPT Web',
       'conn.title': 'Connection',
       'conn.token': 'Control token',
-      'conn.tokenHint': 'The sidecar control token (config.json controlToken). Stored only in this browser.',
+      'conn.tokenHint': 'The sidecar control token. Held only in this page and never persisted in browser storage.',
       'conn.reload': 'Reload',
       'status.title': 'Sidecar status',
       'status.offline': 'Sidecar offline',
-      'status.offlineHint': 'No chatgpt-web sidecar answered on 127.0.0.1:17841. Start it with "dsh-chatgpt-web serve" and reload this page.',
+      'status.offlineHint': 'No chatgpt-web sidecar answered on the configured local endpoint.',
       'tuning.title': 'Transport limits',
       'tuning.hint': 'Applied from the next browser turn; no sidecar restart needed. Blank = default.',
       'tuning.save': 'Save',
@@ -43,6 +44,19 @@ window.__ModuleLoader__.load({
       'turns.error': 'Error',
       'notice.saved': 'Saved. New limits apply from the next turn.',
       'notice.reloaded': 'Reloaded.',
+      'notice.runtimeSaved': 'Runtime configuration saved.',
+      'notice.runtimeRestored': 'Runtime defaults restored.',
+      'notice.runtimeNoop': 'No runtime changes to save.',
+      'runtime.title': 'Runtime',
+      'runtime.hint': 'Live DSH plugin configuration. Changes are applied without remounting the plugin.',
+      'runtime.port': 'Sidecar port',
+      'runtime.autoStart': 'Start sidecar automatically',
+      'runtime.readyTimeoutMs': 'Sidecar ready timeout (ms)',
+      'runtime.save': 'Save',
+      'runtime.restore': 'Restore defaults',
+      'runtime.readOnly': 'Runtime configuration is not writable in this profile.',
+      'runtime.portInvalid': 'Port must be an integer between 1 and 65535.',
+      'runtime.timeoutInvalid': 'Ready timeout must be zero or a positive number of milliseconds.',
     };
 
     const CSS = `
@@ -53,6 +67,8 @@ window.__ModuleLoader__.load({
       .cwg-card { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; padding: 14px; background: var(--dsw-alias-bg-layer-1); }
       .cwg-offline { border-color: var(--dsw-alias-border-l2); }
       .cwg-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+      .cwg-check { display: flex; align-items: center; gap: 8px; margin: 10px 0; cursor: pointer; }
+      .cwg-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--dsw-alias-brand-primary); }
       .cwg-actions { justify-content: flex-start; }
       .cwg-muted { font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.4; }
       .cwg-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
@@ -77,6 +93,12 @@ window.__ModuleLoader__.load({
     `;
 
     const NS = 'dsh-chatgpt-web';
+    const BUNDLE_CONFIG_KEY = '@lordraiden/dsh-chatgpt-web';
+    const RUNTIME_DEFAULTS = {
+      port: 17841,
+      autoStart: true,
+      readyTimeoutMs: 30000,
+    };
 
     /** Wrap the bound translate so a missing key never throws and always yields a string. */
     function makeT(translate) {
@@ -90,17 +112,32 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function readToken() {
-      try { return window.localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
-    }
-    function writeToken(value) {
-      try { window.localStorage.setItem(TOKEN_KEY, value); } catch { /* private mode */ }
+    function getConfiguredPort(configForm) {
+      try {
+        const value = configForm && typeof configForm.getSnapshot === 'function'
+          ? configForm.getSnapshot().value
+          : undefined;
+        const port = value && value.port;
+        return Number.isSafeInteger(port) && port >= 1 && port <= 65535 ? port : null;
+      } catch {
+        return null;
+      }
     }
 
-    async function api(token, path, options) {
+    function resolveSidecarBase(configForm) {
+      const port = getConfiguredPort(configForm);
+      return port === null ? null : `http://${LOOPBACK_HOST}:${port}`;
+    }
+
+    function formatEndpoint(base) {
+      return base ? base.replace(/^https?:\/\//, '') : 'configured local endpoint';
+    }
+
+    async function api(base, token, path, options) {
+      if (!base) throw new Error('Sidecar endpoint configuration is unavailable.');
       const headers = { Authorization: `Bearer ${token}` };
       if (options && options.body) headers['Content-Type'] = 'application/json';
-      const res = await fetch(BASE + path, { ...options, headers });
+      const res = await fetch(base + path, { ...options, headers });
       if (!res.ok) {
         let message = `HTTP ${res.status}`;
         try {
@@ -122,23 +159,136 @@ window.__ModuleLoader__.load({
       ['turnTimeoutMs', 'tuning.turnTimeoutMs'],
     ];
 
-    function ChatGptWebSettings(t) {
-      const [token, setToken] = React.useState(readToken);
+    function getRuntimeSnapshot(configForm) {
+      try {
+        const snapshot = configForm && typeof configForm.getSnapshot === 'function'
+          ? configForm.getSnapshot()
+          : undefined;
+        const value = snapshot && snapshot.value ? snapshot.value : {};
+        return {
+          port: Number.isSafeInteger(value.port) && value.port >= 1 && value.port <= 65535
+            ? value.port
+            : RUNTIME_DEFAULTS.port,
+          autoStart: typeof value.autoStart === 'boolean' ? value.autoStart : RUNTIME_DEFAULTS.autoStart,
+          readyTimeoutMs: typeof value.readyTimeoutMs === 'number' && Number.isFinite(value.readyTimeoutMs) && value.readyTimeoutMs >= 0
+            ? value.readyTimeoutMs
+            : RUNTIME_DEFAULTS.readyTimeoutMs,
+          ready: Boolean(snapshot && snapshot.status === 'ready'),
+          writable: Boolean(snapshot && snapshot.writable === true),
+          revision: snapshot && Number.isInteger(snapshot.revision) ? snapshot.revision : undefined,
+        };
+      } catch {
+        return { ...RUNTIME_DEFAULTS, ready: false, writable: false, revision: undefined };
+      }
+    }
+
+    function ChatGptWebSettings(t, configForm) {
+      const [token, setToken] = React.useState('');
+      const [base, setBase] = React.useState(() => resolveSidecarBase(configForm));
       const [status, setStatus] = React.useState(null);
       const [configInfo, setConfigInfo] = React.useState(null);
       const [turns, setTurns] = React.useState([]);
       const [form, setForm] = React.useState({});
       const [notice, setNotice] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
+      const [runtimeDraft, setRuntimeDraft] = React.useState(() => getRuntimeSnapshot(configForm));
+      const [runtimeDirty, setRuntimeDirty] = React.useState(false);
+      const [runtimeSaving, setRuntimeSaving] = React.useState(false);
 
-      async function loadAll(currentToken) {
+      React.useEffect(() => {
+        try {
+          window.localStorage.removeItem(LEGACY_TOKEN_KEY);
+        } catch {
+          // Browser storage may be unavailable; the token remains page-local.
+        }
+
+        const refreshEndpoint = () => {
+          const runtime = getRuntimeSnapshot(configForm);
+          setBase(resolveSidecarBase(configForm));
+          if (!runtimeDirty) setRuntimeDraft(runtime);
+        };
+        refreshEndpoint();
+        if (!configForm || typeof configForm.subscribe !== 'function') return undefined;
+        return configForm.subscribe(refreshEndpoint);
+      }, [configForm, runtimeDirty]);
+
+      async function saveRuntimeConfig() {
+        if (!configForm || typeof configForm.mutate !== 'function') return;
+        const snapshot = configForm.getSnapshot();
+        if (snapshot.status !== 'ready' || snapshot.writable !== true) {
+          setNotice({ kind: 'err', text: t('runtime.readOnly', 'Runtime configuration is not writable in this profile.') });
+          return;
+        }
+        if (!Number.isSafeInteger(runtimeDraft.port) || runtimeDraft.port < 1 || runtimeDraft.port > 65535) {
+          setNotice({ kind: 'err', text: t('runtime.portInvalid', 'Port must be an integer between 1 and 65535.') });
+          return;
+        }
+        if (!Number.isFinite(runtimeDraft.readyTimeoutMs) || runtimeDraft.readyTimeoutMs < 0) {
+          setNotice({ kind: 'err', text: t('runtime.timeoutInvalid', 'Ready timeout must be zero or a positive number of milliseconds.') });
+          return;
+        }
+        const current = snapshot.value || {};
+        const ops = [];
+        if (runtimeDraft.port !== current.port) ops.push({ op: 'set', path: ['port'], value: runtimeDraft.port });
+        if (runtimeDraft.autoStart !== current.autoStart) ops.push({ op: 'set', path: ['autoStart'], value: runtimeDraft.autoStart });
+        if (runtimeDraft.readyTimeoutMs !== current.readyTimeoutMs) ops.push({ op: 'set', path: ['readyTimeoutMs'], value: runtimeDraft.readyTimeoutMs });
+        if (ops.length === 0) {
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeNoop', 'No runtime changes to save.') });
+          return;
+        }
+        setRuntimeSaving(true);
+        try {
+          const accepted = await configForm.mutate(ops, snapshot.revision);
+          if (!accepted) throw new Error('DSH refused the runtime configuration update.');
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeSaved', 'Runtime configuration saved.') });
+        } catch (error) {
+          setNotice({ kind: 'err', text: error instanceof Error ? error.message : String(error) });
+        } finally {
+          setRuntimeSaving(false);
+        }
+      }
+
+      async function restoreRuntimeDefaults() {
+        if (!configForm || typeof configForm.mutate !== 'function') return;
+        const snapshot = configForm.getSnapshot();
+        if (snapshot.status !== 'ready' || snapshot.writable !== true) return;
+        const user = snapshot.user && typeof snapshot.user === 'object' ? snapshot.user : {};
+        const ops = ['port', 'autoStart', 'readyTimeoutMs']
+          .filter((field) => Object.prototype.hasOwnProperty.call(user, field))
+          .map((field) => ({ op: 'unset', path: [field] }));
+        if (ops.length === 0) {
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeNoop', 'No runtime overrides to clear.') });
+          return;
+        }
+        setRuntimeSaving(true);
+        try {
+          const accepted = await configForm.mutate(ops, snapshot.revision);
+          if (!accepted) throw new Error('DSH refused the runtime reset.');
+          setRuntimeDirty(false);
+          setNotice({ kind: 'ok', text: t('notice.runtimeRestored', 'Runtime defaults restored.') });
+        } catch (error) {
+          setNotice({ kind: 'err', text: error instanceof Error ? error.message : String(error) });
+        } finally {
+          setRuntimeSaving(false);
+        }
+      }
+
+            async function loadAll(currentToken, currentBase) {
         if (!currentToken) { setStatus(null); return; }
+        if (!currentBase) {
+          setStatus(null);
+          setNotice({ kind: 'err', text: 'Sidecar endpoint configuration is unavailable.' });
+          return;
+        }
         setBusy(true);
         try {
           const [st, cfg, rt] = await Promise.all([
-            api(currentToken, '/v1/control/status'),
-            api(currentToken, '/v1/control/config'),
-            api(currentToken, '/v1/control/recent-turns?limit=10'),
+            api(currentBase, currentToken, '/v1/control/status'),
+            api(currentBase, currentToken, '/v1/control/config'),
+            api(currentBase, currentToken, '/v1/control/recent-turns?limit=10'),
           ]);
           setStatus(st);
           setConfigInfo(cfg);
@@ -156,14 +306,14 @@ window.__ModuleLoader__.load({
         }
       }
 
-      React.useEffect(() => { loadAll(token); }, [token]);
+      React.useEffect(() => { loadAll(token, base); }, [token, base]);
 
       async function save(tuning) {
         setBusy(true);
         try {
-          await api(token, '/v1/control/config', { method: 'PUT', body: JSON.stringify({ tuning }) });
+          await api(base, token, '/v1/control/config', { method: 'PUT', body: JSON.stringify({ tuning }) });
           setNotice({ kind: 'ok', text: t('notice.saved', 'Saved. New limits apply from the next turn.') });
-          await loadAll(token);
+          await loadAll(token, base);
         } catch (error) {
           setNotice({ kind: 'err', text: error instanceof Error ? error.message : String(error) });
         } finally {
@@ -210,7 +360,66 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'cwg-root' },
         h('style', null, CSS),
-        h('h2', null, t('section.title', 'ChatGPT Web')),
+
+        h('section', { className: 'cwg-card' },
+          h('h3', null, t('runtime.title', 'Runtime')),
+          h('p', { className: 'cwg-muted' }, t('runtime.hint', 'These fields use DSH live plugin configuration. Changes are applied without remounting the plugin.')),
+          h('label', { className: 'cwg-field' },
+            h('span', { className: 'cwg-label' }, t('runtime.port', 'Sidecar port')),
+            h('input', {
+              className: 'cwg-input',
+              type: 'number',
+              min: 1,
+              max: 65535,
+              step: 1,
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              value: runtimeDraft.port,
+              onChange: (e) => {
+                setRuntimeDirty(true);
+                setRuntimeDraft({ ...runtimeDraft, port: Number(e.target.value) });
+              },
+            }),
+          ),
+          h('label', { className: 'cwg-check' },
+            h('input', {
+              type: 'checkbox',
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              checked: runtimeDraft.autoStart,
+              onChange: (e) => {
+                setRuntimeDirty(true);
+                setRuntimeDraft({ ...runtimeDraft, autoStart: e.target.checked });
+              },
+            }),
+            h('span', { className: 'cwg-label' }, t('runtime.autoStart', 'Start sidecar automatically')),
+          ),
+          h('label', { className: 'cwg-field' },
+            h('span', { className: 'cwg-label' }, t('runtime.readyTimeoutMs', 'Sidecar ready timeout (ms)')),
+            h('input', {
+              className: 'cwg-input',
+              type: 'number',
+              min: 0,
+              step: 100,
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              value: runtimeDraft.readyTimeoutMs,
+              onChange: (e) => {
+                setRuntimeDirty(true);
+                setRuntimeDraft({ ...runtimeDraft, readyTimeoutMs: Number(e.target.value) });
+              },
+            }),
+          ),
+          h('div', { className: 'cwg-row cwg-actions' },
+            h('button', {
+              className: 'cwg-btn',
+              disabled: runtimeSaving || !runtimeDirty || !getRuntimeSnapshot(configForm).writable,
+              onClick: saveRuntimeConfig,
+            }, t('runtime.save', 'Save')),
+            h('button', {
+              className: 'cwg-btn cwg-secondary',
+              disabled: runtimeSaving || !getRuntimeSnapshot(configForm).writable,
+              onClick: restoreRuntimeDefaults,
+            }, t('runtime.restore', 'Restore defaults')),
+          ),
+        ),
 
         h('section', { className: 'cwg-card' },
           h('h3', null, t('conn.title', 'Connection')),
@@ -221,17 +430,17 @@ window.__ModuleLoader__.load({
               type: 'password',
               value: token,
               placeholder: 'FJ86_…',
-              onChange: (e) => { setToken(e.target.value); writeToken(e.target.value); },
+              onChange: (e) => { setToken(e.target.value); },
             }),
           ),
           h('div', { className: 'cwg-row' },
-            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token (config.json controlToken). Stored only in this browser.')),
+            h('span', { className: 'cwg-muted' }, t('conn.tokenHint', 'The sidecar control token. Held only in this page and never persisted in browser storage.')),
           ),
           h('div', { className: 'cwg-row cwg-actions' },
             h('button', {
               className: 'cwg-btn',
               disabled: busy || !token,
-              onClick: () => { loadAll(token); setNotice({ kind: 'ok', text: t('notice.reloaded', 'Reloaded.') }); },
+              onClick: () => { loadAll(token, base); setNotice({ kind: 'ok', text: t('notice.reloaded', 'Reloaded.') }); },
             }, t('conn.reload', 'Reload')),
             notice ? h('span', { className: `cwg-notice cwg-${notice.kind}` }, notice.text) : null,
           ),
@@ -249,7 +458,10 @@ window.__ModuleLoader__.load({
             )
           : h('section', { className: 'cwg-card cwg-offline' },
               h('h3', null, t('status.offline', 'Sidecar offline')),
-              h('p', { className: 'cwg-muted' }, t('status.offlineHint', 'No chatgpt-web sidecar answered on 127.0.0.1:17841. Start it with "dsh-chatgpt-web serve" and reload this page.')),
+              h('p', { className: 'cwg-muted' },
+                t('status.offlineHint', 'No chatgpt-web sidecar answered on the configured local endpoint.'),
+                ` (${formatEndpoint(base)})`,
+              ),
             ),
 
         configInfo
@@ -303,9 +515,8 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'configForms'],
       apply(ctx) {
-        // Register this plugin's English dictionary; the locale service owns the active locale.
         ctx.effect(() => {
           try {
             return ctx.locale.register(NS, { en: DICT_EN });
@@ -313,6 +524,7 @@ window.__ModuleLoader__.load({
             return () => {};
           }
         }, 'dsh-chatgpt-web: dictionaries');
+
         let translate;
         try {
           translate = ctx.locale.bind(NS);
@@ -320,13 +532,17 @@ window.__ModuleLoader__.load({
           translate = undefined;
         }
         const t = makeT(translate);
-        const Page = () => ChatGptWebSettings(t);
-        return ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section',
-          id: 'chatgpt-web',
-          order: 35,
-          label: () => t('section.title', 'ChatGPT Web'),
-        }, Page));
+        const configForm = ctx.configForms.get(CONFIG_ID);
+
+        // DSH 0.2's canonical plugin configuration seat is the bundle detail page.
+        // The Host owns schema/defaults/persistence; this page only edits the plugin's
+        // volatile Config fields through configForms. No parallel settings namespace or
+        // browser-local persistence is created here.
+        return ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+          name: 'plugins.bundle.config',
+          key: BUNDLE_CONFIG_KEY,
+          locale: NS,
+        }, (props) => props && props.view === 'page' ? ChatGptWebSettings(t, configForm) : null));
       },
     };
   },

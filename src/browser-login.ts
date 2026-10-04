@@ -471,12 +471,11 @@ export async function loginToChatGpt(
     const rawState = await context.storageState();
     const state = sanitizeBrowserLoginStorageState(rawState);
 
-    let capabilities: ChatGptWebAccountCapabilities;
-    try {
-      capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
-    } catch {
-      capabilities = { solAvailable: true, proAvailable: false };
-    }
+    let capabilities: ChatGptWebAccountCapabilities = {
+      solAvailable: false,
+      proAvailable: false,
+    };
+    capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
 
     atomicWriteFile(config.storageStatePath, `${JSON.stringify(state)}\n`);
     writeVerificationMarker(config.storageStatePath, capabilities);

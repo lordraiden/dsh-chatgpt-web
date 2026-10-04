@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { SUMMARY_PREFIX } from "../../responses/compaction";
+import { SUMMARY_PREFIX } from "../../lib/compaction";
 import type { CodexParsedRequest } from "../../types";
 import { extractChatGptTurnIdentity } from "./environment";
 

@@ -4,13 +4,31 @@
 **Implementation status:** Target architecture; implementation follows the phased backlog below  
 **Document role:** Single architectural source of truth for issues #8–#14  
 **Repository:** lordraiden/dsh-chatgpt-web  
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-03
 
 > API-like outside, product-native inside.
 
 This project makes an authenticated ChatGPT Web session available to DeepSeek Harness (DSH) as a native LLM provider. The public boundary is a normal DSH provider contract. The Phase 1 implementation is ChatGPT-Web-specific, while the browser execution seams are intentionally service-neutral enough to support future browser-backed providers without creating a generic provider framework. Browser interaction, product-side tool looping, account state, and UI recovery remain provider/service internals.
 
 The architecture is intentionally conservative. Phase 1 contains only the boundaries and invariants required for a solid first pilot. Phase 2 contains compatibility convergence, cleanup, and optional hardening that does not need to block the first native provider.
+
+### 1.3 Supported account matrix: normal ChatGPT Web Free + paid
+
+The supported product target for this plugin is normal authenticated **ChatGPT Web usage through the chatgpt.com product surface**, on both **Free and paid ChatGPT accounts**. The target is the Web/product usage path and its available models, not Codex consumption.
+
+Routes whose usage is accounted against the **Codex allocation, ChatGPT Work allocation, or a shared Codex/Work credit pool are explicitly out of scope**. Native Codex passthrough remains a separate protocol boundary and must never be pulled into the ChatGPT Web ProviderCore.
+
+Eligibility is established from observable ChatGPT Web product/account capability rather than plan name, display label, or backend model ID. When the product route cannot be established, capability state is `unknown` and automatic selection fails closed.
+
+This distinction is architectural, not cosmetic:
+
+- OpenAI API model cards, API context windows, API token limits, and API pricing are **not authoritative** for this provider's browser transport budget.
+- Official ChatGPT product documentation is authoritative for current Web product availability and plan-level limits, but those limits can change independently of the API.
+- ChatGPT Web transport limits used by this adapter are provider measurements/guardrails for the Free Web surface. They must be documented as such and must not be presented as official API or model limits.
+- Any paid-account compatibility code retained elsewhere in the repository is outside the supported #11-A/#11-B contract and must not influence the Free-account context policy.
+
+The current OpenAI Free-plan documentation confirms that Free users have access to ChatGPT features through the product UI and that usage limits are plan/model dependent and mutable. The image-input documentation likewise states that the number of images that can be added depends on image size and accompanying text; therefore this provider may impose a conservative transport cap without treating that number as an OpenAI product maximum.
+
 
 ---
 
@@ -579,6 +597,8 @@ The critical rule is:
 
 A caller must be able to distinguish "the original ChatGPT continuity resumed" from "a new ChatGPT conversation was reconstructed."
 
+Replay boundaries are trusted execution-state artifacts, not caller-provided transcript interpretations. A replay boundary must be created from the canonical DSH projection plus authoritative DSH/ProviderCore settled/pending execution state, and must prove that every canonical tool call is classified exactly once. Browser transcript position cannot satisfy this proof.
+
 A replay may restore DSH-visible messages, tools, images, reasoning material needed by the provider, and other reconstructible state. It cannot restore undocumented ChatGPT hidden product state that is not represented in DSH state.
 
 Provider-private continuity must never redefine:
@@ -827,7 +847,7 @@ DSH session history remains canonical.
 
 Provider-specific compaction, rolling checkpoints, and replay handoff are optimization/transport state.
 
-They may reduce the amount of material physically re-submitted to ChatGPT Web, but they do not become a second DSH session log.
+They may reduce the amount of material physically re-submitted to ChatGPT Web, but they do not become a second DSH session log. For #11-B's deterministic transport reduction, required developer instructions, the latest user/agent/assistant continuity, and settled tool-call/result pairs are protected; older ordinary conversation may be omitted from the transport projection without mutating DSH's canonical history.
 
 If provider-private continuity is lost, replay comes from DSH state, not from a provider-owned substitute history.
 
@@ -862,6 +882,18 @@ Before submit:
 6. otherwise return a deterministic context error.
 
 Never rely on browser/editor truncation as context management.
+### 16.1 Free Web guardrails are empirical transport policy
+
+The current #11-B Free Web policy uses conservative measurements from the ChatGPT Web surface, not OpenAI API limits:
+
+- the visible browser input token ceiling is `128,000`;
+- the Luna composer boundary is `120,000` characters;
+- the transport image guardrail is `10` images per request;
+- the compaction-control envelope is capped at `110,000` JSON bytes.
+
+These values are adapter guardrails, not claims about the ChatGPT product's universal limits. OpenAI documents that Free-plan limits are mutable and that the number of image inputs depends on image size and accompanying text. When the Web surface changes, these measurements must be revalidated independently of API model documentation.
+
+The underlying model-context field used in diagnostics is informational only. It must never be used to admit a Free Web request beyond the measured browser transport budget.
 
 ---
 
@@ -923,6 +955,10 @@ A full capability cache/epoch strategy is Phase 2. Runtime detection and safe in
 ### 17.3 Completion
 
 No single UI string is a completion protocol.
+
+ChatGPT Web product context exhaustion is a transport-owned terminal condition. The browser surface may detect it from a structural error surface and localized equivalent copy, but the provider exposes only the semantic `context_exhausted` error to DSH. Detection never authorizes replay or creates a replacement conversation. Once confirmed, the retained conversation handle is invalidated while physical browser settlement remains independent and must complete before the retained resource is released.
+
+Context-exhaustion recovery consumes that semantic condition through the existing #11 replay boundary. The recovery creates a new ChatGPT conversation epoch only after the exhausted browser execution has physically settled, blocks the replacement before prompt submission until surface readiness is acknowledged, binds the replacement without changing DSH session/agent/turn/capability identity, and then releases generation from the same canonical DSH projection. The old epoch is permanently stale; a replacement retry never reuses its browser event stream. A failed replacement or readiness proof fails closed.
 
 Completion must use transport state and authoritative signals such as:
 
@@ -1018,6 +1054,24 @@ It must not own:
 - capability authority;
 - independent compaction;
 - provider-private continuity authority.
+
+### 19.1.1 Responses seam audit evidence (#78)
+
+`src/dev-chat/driver.ts` is a DEV-only simulator and intentionally imports the Responses parser/server to exercise the compatibility surface end-to-end. It is test infrastructure, not a production provider entrypoint or authority.
+
+`src/adapters/chatgpt-web/rolling-checkpoint.ts` may reuse `src/responses/parser.ts` to rebuild a synthetic checkpointed `CodexParsedRequest` because this is wire translation only; the checkpoint code does not select routes, authorize capabilities, own retry/settlement state, or execute browser turns. This is an explicit dependency, not a second Responses execution path.
+
+
+
+The Responses compatibility layer is intentionally limited to translation and compatibility state. The retained components are classified as follows:
+
+- **Required public compatibility translation:** `src/responses/schema.ts`, `src/responses/parser.ts`, `src/responses/compaction.ts`, `src/responses/reasoning-envelope.ts`, and `src/bridge.ts`. They translate the Responses wire representation to/from the existing provider request/event representation.
+- **Required compatibility state:** `src/responses/state.ts` stores a bounded representation of completed Responses items so `previous_response_id` can continue across requests and process restarts. It is a cache only: it contains no browser handles, ProviderCore turn state, capability/sandbox authority, retry budget, or route decision, and it cannot initiate execution. Missing state fails closed at the Responses ingress.
+- **Required operational transport outside the Web core:** `src/native-passthrough.ts` serves first-party native Codex endpoints. It remains a separate protocol path and is not a ChatGPT Web execution authority.
+
+The executable audit in `tests/issue-78-responses-seam.test.ts` covers the seam behavior rather than only source structure: unary and streaming `/v1/responses` delegation through an injected Web adapter, Web route/capability parity and fail-closed behavior, Web catalog fallback when native Codex models are unavailable or malformed, Codex isolation for `/v1/responses` and `/v1/responses/compact`, Web compaction delegation, restart/reload and corruption behavior for the continuation cache, and a repository-wide Responses import/ownership scan. The repository-wide dependency scan explicitly permits only the ingress/bridge/native-passthrough consumers plus the Luna rolling-checkpoint parser reuse described below; every Responses module remains barred from ProviderCore, browser, retry, capability and transport authorities.
+
+No additional Responses execution core, model catalogue, capability authority, retry authority, or provider lifecycle state is retained. The existing `/v1/responses/compact` implementation calls the same `responseRequest` path rather than maintaining a second execution implementation; its extra logic is only Responses compaction representation and validation.
 
 ### 19.2 Native Codex passthrough
 
@@ -1250,6 +1304,12 @@ Surface:
 
 ---
 
+## WebSurfaceTransport boundary
+
+ChatGPT browser and DOM mechanics are isolated behind the `WebSurfaceTransport` boundary. ProviderCore consumes only semantic turn operations and lifecycle callbacks such as physical-surface binding, surface readiness, send activation, and submission acceptance. Playwright objects, selectors, DOM traversal, and ChatGPT-specific UI structures remain implementation details of the concrete browser worker behind the boundary.
+
+This boundary is not a second lifecycle or authorization authority: DSH/ProviderCore continue to own session, turn, capability, tool, retry, and settlement semantics. The surface transport only reports and performs provider-specific browser mechanics needed by those owners.
+
 ## 26. Architecture invariants
 
 The following are non-negotiable.
@@ -1443,12 +1503,14 @@ These references were used to verify the architecture's external contracts and c
 
 - ChatGPT Free Tier FAQ:  
   https://help.openai.com/en/articles/9275245-chatgpt-free-tier-faq
+- ChatGPT image input FAQ:  
+  https://help.openai.com/en/articles/8400551-chatgpt-image-inputs-faq
 - Developer mode and MCP apps in ChatGPT:  
   https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt
 - ChatGPT Search:  
   https://help.openai.com/en/articles/9237897-chatgpt-search
 
-These pages describe mutable product behavior. They are not provider API contracts and must be re-checked when the supported account matrix changes.
+These pages describe mutable ChatGPT product behavior for the supported Free Web account matrix. They are not OpenAI API contracts. API model documentation, even when it describes the same underlying model family, MUST NOT be used to derive this browser adapter's Free Web transport budget. The supported account matrix and measured browser limits must be re-checked when ChatGPT Free product behavior changes.
 
 ### Model Context Protocol
 
@@ -1461,6 +1523,31 @@ MCP is treated here as a capability transport, not as the identity of the provid
 
 ---
 
+## 31.1 Route-policy enforcement evidence (#71)
+
+ChatGPT Web product eligibility is owned exclusively by `src/chatgpt-web-authority.ts`. Public Web model slugs are the only externally selectable Web identifiers; backend model IDs such as `gpt-5.6-sol`, `gpt-5.6-luna`, and Zero Risk's internal backend values are implementation details and are rejected by `requireChatGptWebRoute()`.
+
+The Web catalog, native DSH route resolution, and Responses ingestion all converge on that same authority. Native Codex/Work routes remain outside it and therefore cannot consume the ChatGPT Web ProviderCore.
+
+Issue #71 contract coverage is in `tests/issue-71-route-scope.test.ts`, including Free/Paid/Luna route matrices, unknown-capability fail-closed behavior, Codex/Work rejection, backend-model escape-hatch rejection, catalog separation, and shared DSH/Responses route resolution.
+
+## 31.2 Responses convergence evidence (#72)
+
+The `/v1/responses` compatibility ingress is not an execution authority. For ChatGPT Web models it performs wire translation, route validation, continuation expansion, streaming/output bridging, compatibility errors, and compatibility usage/state handling; execution is delegated to the existing ChatGPT Web adapter/ProviderCore path used by native DSH.
+
+Native Codex remains a separate first-party passthrough outside the Web ProviderCore. Responses continuation state remains bounded compatibility cache state and does not own DSH context, capabilities, browser resources, retries, replay policy, or settlement.
+
+Contract coverage is in `tests/issue-72-responses-provider-core.test.ts`.
+
+## 31.3 Native DSH / Responses execution authority
+
+The browser execution authority is the local ChatGPT Web sidecar process. The native DSH LLM adapter is a DSH-facing translation boundary only: it resolves the trusted DSH session/sandbox context, builds the canonical provider request, and sends that request over an authenticated loopback transport to the sidecar.
+
+The sidecar creates one shared ChatGptWebProviderCore for its lifetime. Both /v1/responses and the internal native-DSH transport obtain Web adapters bound to that same ProviderCore, so leases, capability ownership, retry budget, submission/settlement state, replay and provenance cannot diverge merely because the caller used a different ingress.
+
+The native DSH transport carries the trusted _dshContext out-of-band from model-visible content. The sidecar validates the public Web route against the same ChatGPT Web authority and rejects requests whose public route/backend mapping is inconsistent. It does not infer or reconstruct DSH sandbox authority from browser state or Responses compatibility state.
+
+This is a process boundary, not a second provider authority: ChatGptWebProviderCore remains the single lifecycle/lease/retry authority for the ChatGPT Web execution process.
 ## 32. Final ownership model
 
 ~~~text

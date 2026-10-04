@@ -3,65 +3,190 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Volatile } from "@deepseek-ai/cordis";
+import z from "@deepseek-ai/schemastery";
+import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
+import { loadConfig } from "./config";
+import type { DshNativeTurnContext } from "./types";
+import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
 
 export interface CordisContext {
+  /**
+   * Cordis service lookup. The native provider uses this only to consume
+   * DSH-owned session and sandbox policy state; it never creates a parallel authority.
+   */
+  get?: (name: string) => unknown;
   effect?: (cb: () => void | Promise<void> | (() => void) | (() => Promise<void>)) => void;
+  on?: (event: string, callback: () => void | Promise<void>) => unknown;
   logger?: (name: string) => {
     info(msg: string): void;
     warn(msg: string): void;
     error(msg: string): void;
     debug(msg: string): void;
   };
+  /**
+   * Native DSH LLM runtime (augmented onto the Cordis context by
+   * `@deepseek-ai/dsh-llm`). Structural on purpose: the plugin only needs to
+   * register the ChatGPT Web provider and dispose the registration.
+   */
+  llm: {
+    registerAdapter(providers: string[], adapter: ChatGptWebLlmAdapter): { (): void };
+  };
 }
 
 export const name = "dsh-chatgpt-web";
-export const inject = [];
+export const inject = ["llm"];
+export const DEFAULT_HOST = "127.0.0.1";
+export const DEFAULT_PORT = 17841;
 
-export interface ChatGPTWebPluginConfig {
-  /** Host to bind or check for health (default: 127.0.0.1). */
-  host?: string;
-  /** Port the sidecar listens on (default: 17841). */
-  port?: number;
-  /** Automatically start the sidecar daemon if not running (default: true). */
-  autoStart?: boolean;
-  /** Maximum milliseconds to wait for the sidecar to report ready (default: 30000). */
-  readyTimeoutMs?: number;
-  /** Explicit path to the bun executable (optional). */
+export interface Config {
+  /** Loopback sidecar port. Live because the WebUI may update it without rebuilding the plugin. */
+  port: Volatile<number>;
+  /** Whether the plugin owns starting/stopping the sidecar. Live configuration. */
+  autoStart: Volatile<boolean>;
+  /** Maximum time the plugin waits for a newly started sidecar to become healthy. */
+  readyTimeoutMs: Volatile<number>;
+  /** Advanced runtime override; intentionally not exposed as a live user setting. */
   bunPath?: string;
 }
+
+export const Config = z.object({
+  port: z.number().step(1).min(1).max(65535).default(DEFAULT_PORT)
+    .description("Loopback ChatGPT Web sidecar port.").volatile(),
+  autoStart: z.boolean().default(true)
+    .description("Start and stop the local ChatGPT Web sidecar automatically.").volatile(),
+  readyTimeoutMs: z.number().step(1).min(0).default(30_000)
+    .description("Milliseconds to wait for a newly started sidecar to become healthy.").volatile(),
+  bunPath: z.string().default(undefined as unknown as string),
+});
+
+type ChatGPTWebPluginConfig = {
+  port?: number | Volatile<number>;
+  autoStart?: boolean | Volatile<boolean>;
+  readyTimeoutMs?: number | Volatile<number>;
+  bunPath?: string;
+};
 
 import { pathToFileURL } from "node:url";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-function resolveLauncher(customBunPath?: string): { cmd: string; args: string[] } {
+function resolveLauncher(customBunPath: string | undefined, port: number): { cmd: string; args: string[] } {
+  const serveArgs = ["serve", "--host", DEFAULT_HOST, "--port", String(port)];
   const libCliPath = resolve(ROOT_DIR, "lib", "cli.js");
   if (existsSync(libCliPath)) {
     return {
       cmd: process.execPath,
-      args: [libCliPath, "serve"],
+      args: [libCliPath, ...serveArgs],
     };
   }
 
   // Development fallback: check for bun or tsx
   if (customBunPath && existsSync(customBunPath)) {
-    return { cmd: customBunPath, args: ["run", "src/cli.ts", "serve"] };
+    return { cmd: customBunPath, args: ["run", "src/cli.ts", ...serveArgs] };
   }
 
   const winBun = join(homedir(), ".bun", "bin", "bun.exe");
   if (existsSync(winBun)) {
-    return { cmd: winBun, args: ["run", "src/cli.ts", "serve"] };
+    return { cmd: winBun, args: ["run", "src/cli.ts", ...serveArgs] };
   }
 
   const tsxPath = resolve(ROOT_DIR, "../deepseek-harness/node_modules/tsx/dist/esm/index.mjs");
   if (existsSync(tsxPath)) {
     return {
       cmd: process.execPath,
-      args: ["--import", pathToFileURL(tsxPath).href, "src/cli.ts", "serve"],
+      args: ["--import", pathToFileURL(tsxPath).href, "src/cli.ts", ...serveArgs],
     };
   }
 
-  return { cmd: process.execPath, args: ["src/cli.ts", "serve"] };
+  return { cmd: process.execPath, args: ["src/cli.ts", ...serveArgs] };
+}
+
+interface DshSessionLike {
+  readonly header: {
+    readonly cwd?: string;
+  };
+}
+
+interface DshSessionsLike {
+  get(id: string): DshSessionLike | undefined;
+}
+
+interface DshSandboxPolicyLike {
+  resolve(request?: { session?: DshSessionLike }): {
+    mode: "read-only" | "workspace-write" | "danger-full-access";
+    workspaceRoot: string;
+  };
+}
+
+/**
+ * Resolve trusted native DSH state at the plugin boundary. The provider adapter
+ * receives a detached projection; it never reads or mutates DSH services itself.
+ */
+function resolveNativeDshContext(
+  ctx: CordisContext,
+  options: import("@deepseek-ai/dsh-llm").GenerateOptions,
+  turnId: string,
+  threadId: string,
+): DshNativeTurnContext {
+  const dshSessionId = options.sessionId !== undefined ? String(options.sessionId) : undefined;
+  let session: DshSessionLike | undefined;
+  if (dshSessionId !== undefined) {
+    const sessions = ctx.get?.("sessions") as DshSessionsLike | undefined;
+    if (!sessions) {
+      throw new Error("DSH session service is unavailable for a session-bound native LLM request");
+    }
+    session = sessions.get(dshSessionId);
+    if (!session) {
+      throw new Error(`DSH session "${dshSessionId}" is unavailable for the native LLM request`);
+    }
+  }
+
+  const base: DshNativeTurnContext = {
+    ...(dshSessionId !== undefined ? { dshSessionId } : {}),
+    threadId,
+    turnId,
+    ...(options.purpose !== undefined ? { purpose: options.purpose } : {}),
+  };
+
+  const sandboxPolicy = ctx.get?.("sandboxPolicy") as DshSandboxPolicyLike | undefined;
+  if (!sandboxPolicy) {
+    if (options.tools?.length) {
+      throw new Error("DSH sandbox policy service is required for native ChatGPT Web tool execution");
+    }
+    return base;
+  }
+
+  const policy = sandboxPolicy.resolve(session ? { session } : {});
+  const root = policy.workspaceRoot;
+  const writableRoots = policy.mode === "read-only" ? [] : [root];
+  return {
+    ...base,
+    environment: {
+      cwd: root,
+      roots: [root],
+      writableRoots,
+      sandboxMode: policy.mode,
+      // DSH sandbox-policy intentionally has no network capability bit.
+      // Native Web product capabilities remain outside this local-tool authority.
+      networkAccess: false,
+    },
+  };
+}
+
+function readPort(value: number | Volatile<number> | undefined): number {
+  const raw = typeof value === "number" ? value : value?.get() ?? DEFAULT_PORT;
+  return Number.isSafeInteger(raw) && raw >= 1 && raw <= 65535 ? raw : DEFAULT_PORT;
+}
+
+function readBoolean(value: boolean | Volatile<boolean> | undefined, fallback: boolean): boolean {
+  const raw = typeof value === "boolean" ? value : value?.get() ?? fallback;
+  return typeof raw === "boolean" ? raw : fallback;
+}
+
+function readReadyTimeout(value: number | Volatile<number> | undefined): number {
+  const raw = typeof value === "number" ? value : value?.get() ?? 30_000;
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
 }
 
 async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
@@ -81,18 +206,23 @@ async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
 }
 
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
-  const host = config.host || "127.0.0.1";
-  const port = config.port || 17841;
-  const autoStart = config.autoStart !== false;
-  const readyTimeoutMs = config.readyTimeoutMs || 30_000;
+  const host = DEFAULT_HOST;
+  let port = readPort(config.port);
+  let autoStart = readBoolean(config.autoStart, true);
+  let readyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
 
   let spawnedProcess: ChildProcess | undefined;
+  let spawnedPort: number | undefined;
+  let startGeneration = 0;
+  let reconfiguration = Promise.resolve();
 
   const startDaemon = async () => {
-    const alreadyHealthy = await isSidecarHealthy(host, port);
+    const generation = ++startGeneration;
+    const targetPort = port;
+    const alreadyHealthy = await isSidecarHealthy(host, targetPort);
     if (alreadyHealthy) {
-      logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${port}/v1`);
+      logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1`);
       return;
     }
 
@@ -101,8 +231,8 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       return;
     }
 
-    const launcher = resolveLauncher(config.bunPath);
-    logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${port}/v1...`);
+    const launcher = resolveLauncher(config.bunPath, targetPort);
+    logger.info(`[dsh-chatgpt-web] Starting dsh-chatgpt-web daemon via ${launcher.cmd} at http://${host}:${targetPort}/v1...`);
 
     const child = spawn(launcher.cmd, launcher.args, {
       cwd: ROOT_DIR,
@@ -114,33 +244,38 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     });
 
     spawnedProcess = child;
+    spawnedPort = targetPort;
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString().trim();
-      if (text && typeof logger.debug === "function") logger.debug(`[sidecar] ${text}`);
+      if (text && typeof logger.debug === "function") logger.debug(`[sidecar] ${safeTextDescriptor(text)}`);
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString().trim();
-      if (text && typeof logger.debug === "function") logger.debug(`[sidecar:err] ${text}`);
+      if (text && typeof logger.debug === "function") logger.debug(`[sidecar:err] ${safeTextDescriptor(text)}`);
     });
 
     child.on("error", (err) => {
-      logger.error(`[dsh-chatgpt-web] Failed to launch sidecar process: ${err.message}`);
+      logger.error(`[dsh-chatgpt-web] Failed to launch sidecar process ${safeErrorDescriptor(err)}`);
     });
 
     child.on("exit", (code, signal) => {
       if (code !== 0 && code !== null) {
         logger.warn(`[dsh-chatgpt-web] Sidecar process exited with code ${code} (signal: ${signal})`);
       }
-      spawnedProcess = undefined;
+      if (spawnedProcess === child) {
+        spawnedProcess = undefined;
+        spawnedPort = undefined;
+      }
     });
 
     // Wait for healthcheck
     const deadline = Date.now() + readyTimeoutMs;
     while (Date.now() < deadline) {
-      if (await isSidecarHealthy(host, port)) {
-        logger.info(`[dsh-chatgpt-web] Sidecar ready and accepting turns at http://${host}:${port}/v1`);
+      if (generation !== startGeneration) return;
+      if (await isSidecarHealthy(host, targetPort)) {
+        logger.info(`[dsh-chatgpt-web] Sidecar ready and accepting turns at http://${host}:${targetPort}/v1`);
         return;
       }
       await new Promise((r) => setTimeout(r, 500));
@@ -150,13 +285,16 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
   };
 
   const stopDaemon = async () => {
-    if (!spawnedProcess) return;
+    ++startGeneration;
+    const child = spawnedProcess;
+    const childPort = spawnedPort;
+    if (!child) return;
 
     logger.info("[dsh-chatgpt-web] Stopping sidecar daemon...");
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 2000);
-      await fetch(`http://${host}:${port}/admin/shutdown`, {
+      await fetch(`http://${host}:${childPort ?? port}/admin/shutdown`, {
         method: "POST",
         signal: controller.signal,
       }).catch(() => {});
@@ -165,27 +303,96 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       // ignore
     }
 
-    if (spawnedProcess && !spawnedProcess.killed) {
-      spawnedProcess.kill("SIGTERM");
+    if (!child.killed) {
+      child.kill("SIGTERM");
     }
-    spawnedProcess = undefined;
+    if (spawnedProcess === child) {
+      spawnedProcess = undefined;
+      spawnedPort = undefined;
+    }
+  };
+
+  if (typeof ctx.on === "function") {
+    ctx.on("loader/volatile-update", () => {
+      reconfiguration = reconfiguration
+        .then(async () => {
+          const nextPort = readPort(config.port);
+          const nextAutoStart = readBoolean(config.autoStart, true);
+          const nextReadyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
+          const portChanged = nextPort !== port;
+          const autoStartChanged = nextAutoStart !== autoStart;
+          const readyTimeoutChanged = nextReadyTimeoutMs !== readyTimeoutMs;
+
+          if (!portChanged && !autoStartChanged && !readyTimeoutChanged) return;
+
+          // The plugin only stops processes it spawned itself. A healthy external sidecar is
+          // detected on the next start and is left untouched.
+          if (portChanged || (autoStartChanged && !nextAutoStart)) {
+            await stopDaemon();
+          }
+
+          port = nextPort;
+          autoStart = nextAutoStart;
+          readyTimeoutMs = nextReadyTimeoutMs;
+
+          if (nextAutoStart && (portChanged || autoStartChanged)) {
+            await startDaemon();
+          } else {
+            const changes = [];
+            if (portChanged) changes.push(`port=${port}`);
+            if (autoStartChanged) changes.push(`autoStart=${autoStart}`);
+            if (readyTimeoutChanged) changes.push(`readyTimeoutMs=${readyTimeoutMs}`);
+            logger.info(`[dsh-chatgpt-web] Live configuration applied (${changes.join(", ")}).`);
+          }
+        })
+        .catch((error) => {
+          logger.error(`[dsh-chatgpt-web] Failed to apply live configuration ${safeErrorDescriptor(error)}`);
+        });
+    });
+  }
+  const registerAdapter = (): { adapter: ChatGptWebLlmAdapter; dispose: () => void } => {
+    const adapter = new ChatGptWebLlmAdapter({
+      resolveNativeDshContext: (options, turnId, threadId) =>
+        resolveNativeDshContext(ctx, options, turnId, threadId),
+      resolveNativeDshTransport: () => {
+        const appConfig = loadConfig();
+        return {
+          baseUrl: "http://" + host + ":" + port,
+          controlToken: appConfig.controlToken,
+        };
+      },
+    });
+    const dispose = ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], adapter);
+    logger.info(`[dsh-chatgpt-web] Registered native DSH provider "${CHATGPT_WEB_PROVIDER_ID}"`);
+    return { adapter, dispose };
   };
 
   if (typeof ctx.effect === "function") {
     ctx.effect(() => {
+      const { adapter, dispose } = registerAdapter();
       void startDaemon();
-      return () => {
-        void stopDaemon();
+      return async () => {
+        await adapter.shutdown();
+        await stopDaemon();
+        dispose();
       };
     });
   } else {
+    const { adapter, dispose } = registerAdapter();
     void startDaemon();
-    process.once("beforeExit", () => void stopDaemon());
+    process.once("beforeExit", () => {
+      void (async () => {
+        await adapter.shutdown();
+        await stopDaemon();
+        dispose();
+      })();
+    });
   }
 }
 
 export default {
   name,
   inject,
+  Config,
   apply,
 };

@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import {
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
+  resolveChatGptWebContextLimits,
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
+import { accountIdentityFromStorageState } from "./chatgpt-web-authority";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
@@ -170,7 +172,11 @@ export interface AppConfig {
   subagentProtocol: SubagentProtocol;
   host: "127.0.0.1";
   port: number;
-  contextWindow: number;
+  /**
+   * Legacy serialized field kept only so older v3 config files remain readable.
+   * New configurations do not write it; providerConfig resolves route-specific capacity.
+   */
+  contextWindow?: number;
   appName: string;
   automaticAppName: string;
   manualAppName: typeof ZERO_RISK_CHATGPT_CONNECTOR_NAME;
@@ -183,6 +189,10 @@ export interface AppConfig {
   headed: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
+  capabilityState?: {
+    solAvailable: "supported" | "unsupported" | "unknown";
+    proAvailable: "supported" | "unsupported" | "unknown";
+  };
   experimentalBiggerContext: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
@@ -303,7 +313,6 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     subagentProtocol: "compatibility-v1",
     host: "127.0.0.1",
     port: 17841,
-    contextWindow: 256_000,
     appName: CHATGPT_CONNECTOR_NAME,
     automaticAppName: CHATGPT_CONNECTOR_NAME,
     manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
@@ -313,8 +322,12 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
     headed: false,
-    solAvailable: true,
+    solAvailable: false,
     proAvailable: false,
+    capabilityState: {
+      solAvailable: "unsupported",
+      proAvailable: "unsupported",
+    },
     experimentalBiggerContext: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
@@ -495,8 +508,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Zero Risk requires the launcher browser host in ${path}`);
   }
   if (!Number.isInteger(parsed.port) || parsed.port! < 1 || parsed.port! > 65_535) throw new Error(`Invalid port in ${path}`);
-  if (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow! <= 0) {
-    throw new Error(`Invalid contextWindow in ${path}`);
+  if (parsed.contextWindow !== undefined
+    && (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow <= 0)) {
+    throw new Error(`Invalid legacy contextWindow in ${path}`);
   }
   if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
@@ -587,6 +601,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
+  if (parsed.capabilityState !== undefined) {
+    const state = parsed.capabilityState;
+    const valid = state
+      && (state.solAvailable === "supported" || state.solAvailable === "unsupported" || state.solAvailable === "unknown")
+      && (state.proAvailable === "supported" || state.proAvailable === "unsupported" || state.proAvailable === "unknown");
+    if (!valid) throw new Error(`Invalid capabilityState in ${path}`);
+  }
   if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
     throw new Error(`Invalid solAvailable in ${path}`);
   }
@@ -604,8 +625,22 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.tuning !== undefined) {
     parsed.tuning = validateChatGptWebTuning(parsed.tuning, path);
   }
-  const solAvailable = parsed.solAvailable !== false;
+  const solAvailable = parsed.solAvailable === true;
   const proAvailable = parsed.proAvailable === true;
+  const capabilityState = parsed.capabilityState ?? {
+    solAvailable: parsed.solAvailable === undefined ? "unknown" : solAvailable ? "supported" : "unsupported",
+    proAvailable: parsed.proAvailable === undefined ? "unknown" : proAvailable ? "supported" : "unsupported",
+  };
+  if (capabilityState.solAvailable === "unknown") {
+    // Keep the boolean compatibility field conservative; route authority uses the tri-state value.
+    if (parsed.solAvailable !== undefined) throw new Error(`Invalid Sol capability state in ${path}`);
+  }
+  if (capabilityState.proAvailable === "unknown") {
+    if (parsed.proAvailable !== undefined) throw new Error(`Invalid Pro capability state in ${path}`);
+  }
+  if (capabilityState.proAvailable === "supported" && capabilityState.solAvailable !== "supported") {
+    throw new Error(`Invalid ChatGPT account capabilityState in ${path}: Pro requires supported Sol`);
+  }
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
@@ -623,6 +658,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     subagentProtocol,
     solAvailable,
     proAvailable,
+    capabilityState,
     experimentalBiggerContext,
     zeroRiskProEnabled,
   } as AppConfig;
@@ -632,6 +668,17 @@ export function saveConfig(config: AppConfig): void {
   const path = getConfigPath();
   const original = existsSync(path) ? readFileSync(path, "utf8") : "";
   atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, original));
+}
+
+function accountIdentityFingerprint(config: AppConfig): string {
+  try {
+    if (!existsSync(config.storageStatePath)) return "unknown";
+    return accountIdentityFromStorageState(
+      JSON.parse(readFileSync(config.storageStatePath, "utf8")),
+    ).fingerprint;
+  } catch {
+    return "unknown";
+  }
 }
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
@@ -650,13 +697,25 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     : config.solAvailable
     ? ["low", "medium", "high", "xhigh", ...(config.proAvailable ? ["max"] : [])]
     : ["low", "medium"];
+  const defaultEffort = manual ? "low" : config.solAvailable ? "high" : "low";
+  const resolvedContextWindow = resolveChatGptWebContextLimits(
+    model as Parameters<typeof resolveChatGptWebContextLimits>[0],
+    defaultEffort as Parameters<typeof resolveChatGptWebContextLimits>[1],
+    {
+      solAvailable: manual ? false : config.solAvailable,
+      proAvailable: manual ? false : config.proAvailable,
+      experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
+      browserInteractionMode: config.browserInteractionMode,
+      zeroRiskProEnabled: config.zeroRiskProEnabled,
+    },
+  ).contextWindow;
   return {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
     models,
     liveModels: false,
     defaultModel: model,
-    contextWindow: config.contextWindow,
+    contextWindow: resolvedContextWindow,
     modelInputModalities: Object.fromEntries(models.map(model => [model, manual ? ["text"] : ["text", "image"]])),
     modelReasoningEfforts: Object.fromEntries(models.map(modelId => [modelId, efforts])),
     modelDefaultReasoningEfforts: Object.fromEntries(
@@ -677,6 +736,12 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
+      capabilityState: manual ? {
+        solAvailable: "unsupported",
+        proAvailable: "unsupported",
+      } : config.capabilityState,
+      accountIdentityFingerprint: accountIdentityFingerprint(config),
+      zeroRiskProEnabled: manual ? config.zeroRiskProEnabled : false,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       ...(config.tuning !== undefined ? { tuning: config.tuning } : {}),
