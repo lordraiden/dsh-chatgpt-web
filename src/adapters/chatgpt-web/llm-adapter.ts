@@ -721,7 +721,7 @@ export function mapStream(
           type: "error",
           message: errorMessage(error),
           ...(error instanceof LlmError
-            ? { code: error.code, ...((error as { status?: number }).status !== undefined ? { status: (error as { status?: number }).status } : {}) }
+            ? { code: error.code, ...((error.status !== undefined) ? { status: error.status } : {}) }
             : isAbortLikeError(error) ? { code: "aborted" } : {}),
         });
       } finally {
