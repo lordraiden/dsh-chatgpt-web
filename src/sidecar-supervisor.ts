@@ -222,7 +222,7 @@ export class SidecarSupervisor {
     }
 
     if (generation !== this.generation) {
-      await this.terminateChild(child, targetPort);
+      await this.terminateChild(child);
       return;
     }
 
