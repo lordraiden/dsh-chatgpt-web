@@ -27,8 +27,9 @@ class FakeChild extends EventEmitter {
 }
 
 function createHarness(options: {
-  health: (child: FakeChild | undefined) => boolean;
+  health: (child: FakeChild | undefined, port: number) => boolean;
   readyTimeoutMs?: number;
+  exitImmediately?: boolean;
 }) {
   let child: FakeChild | undefined;
   let spawnCount = 0;
@@ -37,7 +38,8 @@ function createHarness(options: {
   const fetchImpl = async (input: URL | Request | string) => {
     const url = String(input);
     if (url.endsWith("/healthz")) {
-      return Response.json({ status: options.health(child) ? "ok" : "down" });
+      const port = Number(new URL(url).port);
+      return Response.json({ status: options.health(child, port) ? "ok" : "down" });
     }
     throw new Error("unexpected request " + url);
   };
@@ -54,6 +56,13 @@ function createHarness(options: {
       spawn: () => {
         spawnCount += 1;
         child = new FakeChild();
+        if (options.exitImmediately) {
+          setImmediate(() => {
+            if (!child || child.exitCode !== null || child.signalCode !== null) return;
+            child.exitCode = 1;
+            child.emit("exit", 1, null);
+          });
+        }
         return child as unknown as ChildProcess;
       },
       fetch: fetchImpl as typeof fetch,
@@ -140,6 +149,43 @@ describe("SidecarSupervisor", () => {
     assert.equal(harness.getSpawnCount(), 1);
     assert.equal(harness.getChild()?.signalCode, "SIGTERM");
     assert.equal(harness.supervisor.activeProcessPort, undefined);
+  });
+
+  test("rejects when the owned child exits before readiness", async () => {
+    const harness = createHarness({
+      health: () => false,
+      readyTimeoutMs: 100,
+      exitImmediately: true,
+    });
+
+    await expect(harness.supervisor.start()).rejects.toThrow(
+      /exited before becoming healthy/i,
+    );
+    assert.equal(harness.supervisor.activeProcessPort, undefined);
+  });
+
+  test("propagates failed reconfiguration and keeps the queue usable", async () => {
+    const harness = createHarness({
+      health: (_child, port) => port !== 19003,
+      readyTimeoutMs: 25,
+    });
+
+    await harness.supervisor.start();
+    await expect(harness.supervisor.reconfigure({
+      host: "127.0.0.1",
+      port: 19003,
+      autoStart: true,
+      readyTimeoutMs: 25,
+    })).rejects.toThrow(/did not become healthy/i);
+
+    await harness.supervisor.reconfigure({
+      host: "127.0.0.1",
+      port: 19004,
+      autoStart: true,
+      readyTimeoutMs: 100,
+    });
+    assert.equal(harness.supervisor.activeProcessPort, 19004);
+    assert.equal(harness.getSpawnCount(), 3);
   });
 
 });
