@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
+import { safeErrorDescriptor } from "../../lib/safe-diagnostics";
 import {
   CompactionTransactionStore,
   type CompactionTransactionHandle,
@@ -783,8 +784,7 @@ export class TurnBroker implements TurnBrokerOwner {
         if (encodedLength > MAX_UNIX_SOCKET_PATH_BYTES) {
           rejectStart(new Error(
             `ChatGPT web broker socket path is ${encodedLength} bytes, over the`
-            + ` ${MAX_UNIX_SOCKET_PATH_BYTES}-byte limit this platform allows for a Unix socket:`
-            + ` ${this.socketPath}. Choose a shorter runtime directory.`,
+            + ` ${MAX_UNIX_SOCKET_PATH_BYTES}-byte limit this platform allows for a Unix socket. Choose a shorter runtime directory.`,
           ));
           return;
         }
@@ -796,7 +796,7 @@ export class TurnBroker implements TurnBrokerOwner {
         server.once("error", rejectStart);
         server.on("error", error => {
           console.error(
-            `[chatgpt-web] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
+            `[chatgpt-web] turn broker server error ${safeErrorDescriptor(errorOf(error))}`,
           );
         });
         server.listen(this.socketPath, () => {
