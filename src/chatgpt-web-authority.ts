@@ -15,6 +15,7 @@ export type ChatGptWebCapabilityState = "supported" | "unsupported" | "unknown";
 export interface ChatGptWebCapabilityStateSet {
   solAvailable: ChatGptWebCapabilityState;
   proAvailable: ChatGptWebCapabilityState;
+  thinkAvailable: ChatGptWebCapabilityState;
 }
 
 export interface ChatGptWebAccountIdentity {
@@ -41,14 +42,16 @@ function stateFromBoolean(value: boolean | undefined): ChatGptWebCapabilityState
 export function resolveChatGptWebCapabilityState(input: {
   solAvailable?: boolean;
   proAvailable?: boolean;
+  thinkAvailable?: boolean;
   capabilityState?: Partial<ChatGptWebCapabilityStateSet>;
 }): ChatGptWebCapabilityStateSet {
   const solAvailable = input.capabilityState?.solAvailable ?? stateFromBoolean(input.solAvailable);
   const proAvailable = input.capabilityState?.proAvailable ?? stateFromBoolean(input.proAvailable);
+  const thinkAvailable = input.capabilityState?.thinkAvailable ?? stateFromBoolean(input.thinkAvailable);
   if (proAvailable === "supported" && solAvailable !== "supported") {
     throw new Error("ChatGPT Web Pro capability is inconsistent with Sol capability");
   }
-  return { solAvailable, proAvailable };
+  return { solAvailable, proAvailable, thinkAvailable };
 }
 
 export function accountIdentityFromStorageState(storageState: unknown): ChatGptWebAccountIdentity {
@@ -72,6 +75,7 @@ export function accountIdentityFromUnknownSession(): ChatGptWebAccountIdentity {
 export function createChatGptWebRouteAuthority(input: {
   solAvailable?: boolean;
   proAvailable?: boolean;
+  thinkAvailable?: boolean;
   capabilityState?: Partial<ChatGptWebCapabilityStateSet>;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
@@ -92,6 +96,7 @@ export function createChatGptWebRouteAuthorityFromProvider(
   return createChatGptWebRouteAuthority({
     solAvailable: config?.solAvailable,
     proAvailable: config?.proAvailable,
+    thinkAvailable: config?.thinkAvailable,
     capabilityState: config?.capabilityState,
     browserInteractionMode: config?.browserInteractionMode,
     zeroRiskProEnabled: config?.zeroRiskProEnabled,
