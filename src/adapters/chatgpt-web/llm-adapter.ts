@@ -59,6 +59,8 @@ export interface LlmAdapterDeps {
   loadProvider?: () => ReturnType<typeof providerConfig>;
   /** Build the provider backend. Defaults to `createChatGptWebAdapter`. */
   createBackend?: (provider: ReturnType<typeof providerConfig>) => ProviderAdapter;
+  /** Resolve the authenticated local sidecar transport used by production native DSH turns. */
+  resolveNativeDshTransport?: () => { baseUrl: string; controlToken: string };
   /**
    * Resolve trusted DSH session/sandbox context for the current native LLM call.
    * The resolver is supplied by the plugin boundary, not by the backend.
@@ -73,6 +75,7 @@ export interface LlmAdapterDeps {
 export class ChatGptWebLlmAdapter extends LlmAdapter {
   private readonly loadProvider: () => ReturnType<typeof providerConfig>;
   private readonly createBackend: (provider: ReturnType<typeof providerConfig>) => ProviderAdapter;
+  private readonly resolveNativeDshTransport?: () => { baseUrl: string; controlToken: string };
   private readonly resolveNativeDshContext: NonNullable<LlmAdapterDeps["resolveNativeDshContext"]>;
   private providerMemo: ReturnType<typeof providerConfig> | undefined;
   private backendMemo: ProviderAdapter | undefined;
@@ -83,6 +86,7 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
     super();
     this.loadProvider = deps.loadProvider ?? (() => providerConfig(loadConfig()));
     this.createBackend = deps.createBackend ?? (provider => createChatGptWebAdapter(provider));
+    this.resolveNativeDshTransport = deps.resolveNativeDshTransport;
     this.resolveNativeDshContext = deps.resolveNativeDshContext ?? ((options, turnId, threadId) => ({
       ...(options.sessionId !== undefined ? { dshSessionId: String(options.sessionId) } : {}),
       threadId,
@@ -211,7 +215,12 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
     // Resolution is deferred into the stream so missing config/auth become a
     // terminal `finish` chunk with a stable code, never a synchronous throw.
     return mapStream(
-      () => this.resolveBackend(),
+      () => {
+        const transport = this.resolveNativeDshTransport?.();
+        return transport
+          ? createNativeDshRemoteBackend(options.model, transport)
+          : this.resolveBackend();
+      },
       options,
       () => {
         try {
@@ -249,6 +258,54 @@ function requireRouteList(provider: ReturnType<typeof providerConfig>) {
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
+}
+
+function createNativeDshRemoteBackend(
+  publicModel: string,
+  transport: { baseUrl: string; controlToken: string },
+): ProviderAdapter {
+  return {
+    name: "chatgpt-web",
+    async runTurn(parsed, incoming, emit) {
+      const response = await fetch(transport.baseUrl.replace(/\\/$/, "") + "/internal/native-llm", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer " + transport.controlToken,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: publicModel, request: parsed }),
+        signal: incoming.abortSignal,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(body || ("ChatGPT Web sidecar rejected native DSH turn (HTTP " + response.status + ")."));
+      }
+      if (!response.body) throw new Error("ChatGPT Web sidecar returned an empty native DSH stream.");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          for (;;) {
+            const newline = buffer.indexOf("\\n");
+            if (newline < 0) break;
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            if (!line) continue;
+            emit(JSON.parse(line) as AdapterEvent);
+          }
+        }
+        buffer += decoder.decode();
+        const tail = buffer.trim();
+        if (tail) emit(JSON.parse(tail) as AdapterEvent);
+      } finally {
+        await reader.cancel().catch(() => {});
+      }
+    },
+  };
 }
 
 /**
