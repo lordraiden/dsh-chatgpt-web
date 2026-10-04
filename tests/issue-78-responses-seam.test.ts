@@ -11,7 +11,7 @@ import {
   expandPreviousResponseInput,
   rememberResponseState,
 } from "../src/responses/state";
-import { routeChatGptWebRequest } from "../src/codex-integration-route";
+import { routeChatGptWebRequest } from "../src/server";
 
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
