@@ -12,20 +12,25 @@ This project makes an authenticated ChatGPT Web session available to DeepSeek Ha
 
 The architecture is intentionally conservative. Phase 1 contains only the boundaries and invariants required for a solid first pilot. Phase 2 contains compatibility convergence, cleanup, and optional hardening that does not need to block the first native provider.
 
-### 1.3 Supported account matrix: ChatGPT Free Web only
+### 1.3 Supported account matrix: ChatGPT Web Free and Paid
 
-The supported product target for this plugin is an authenticated **ChatGPT Free account using the ChatGPT Web surface at chatgpt.com**. Paid ChatGPT plans and the OpenAI API are not part of the supported account matrix for this pilot.
+The supported product target for this plugin is an authenticated **ChatGPT account using the normal ChatGPT Web surface at chatgpt.com**, including **Free and paid plans**.
+
+The plugin deliberately does **not** target models or model modes whose Web usage is accounted against a **Codex/ChatGPT Work allocation or shared Codex/Work credit pool**. Those routes belong to the separate Codex/Work product boundary and are not a supported backend for this plugin.
 
 This distinction is architectural, not cosmetic:
 
+- **Normal ChatGPT Web usage is the product surface this plugin exploits.**
+- **Codex/Work usage is a separate upstream product boundary** and remains outside the plugin's supported model/account matrix.
 - OpenAI API model cards, API context windows, API token limits, and API pricing are **not authoritative** for this provider's browser transport budget.
-- Official ChatGPT Free documentation is authoritative for current Free-plan product availability and plan-level limits, but those limits can change independently of the API.
-- ChatGPT Web transport limits used by this adapter are provider measurements/guardrails for the Free Web surface. They must be documented as such and must not be presented as official API or model limits.
-- Any paid-account compatibility code retained elsewhere in the repository is outside the supported #11-A/#11-B contract and must not influence the Free-account context policy.
+- Official ChatGPT product documentation is authoritative for current plan/model availability and usage-accounting behavior, but those limits and allocations can change independently of the API and of Codex.
+- A Web model is eligible only when the current ChatGPT product/account surface exposes it as normal ChatGPT usage rather than usage charged to the Codex/Work allocation.
+- Account capability discovery must therefore determine the currently usable **ChatGPT Web model routes**, not merely whether the account is Free, Plus, Pro, Business, or another plan.
+- The plugin must fail closed rather than silently route a request through a Codex/Work-quota-bound model when eligibility cannot be established.
+- Paid-account support is first-class. A paid account may provide different model availability, context, reasoning, or product features; those capabilities are usable only to the extent they remain part of normal ChatGPT Web and outside the excluded Codex/Work allocation.
+- The repository's native Codex passthrough remains separate and is not part of this provider's model catalogue.
 
-The current OpenAI Free-plan documentation confirms that Free users have access to ChatGPT features through the product UI and that usage limits are plan/model dependent and mutable. The image-input documentation likewise states that the number of images that can be added depends on image size and accompanying text; therefore this provider may impose a conservative transport cap without treating that number as an OpenAI product maximum.
-
-
+The practical goal is to consume the account's **ChatGPT Web allowance/capability independently of the Codex/Work path**, while respecting the limits that apply to the selected ChatGPT Web route. This project must never describe such usage as bypassing, resetting, or evading OpenAI limits.
 ---
 
 ## 1. Goals and non-goals
@@ -878,18 +883,22 @@ Before submit:
 6. otherwise return a deterministic context error.
 
 Never rely on browser/editor truncation as context management.
-### 16.1 Free Web guardrails are empirical transport policy
+### 16.1 ChatGPT Web guardrails are empirical transport policy
 
-The current #11-B Free Web policy uses conservative measurements from the ChatGPT Web surface, not OpenAI API limits:
+The browser transport budget is a **provider measurement/guardrail**, not an OpenAI API contract and not a claim about a universal ChatGPT context limit.
+
+The current Free Web policy uses conservative measurements from the ChatGPT Web surface:
 
 - the visible browser input token ceiling is `128,000`;
 - the Luna composer boundary is `120,000` characters;
 - the transport image guardrail is `10` images per request;
 - the compaction-control envelope is capped at `110,000` JSON bytes.
 
-These values are adapter guardrails, not claims about the ChatGPT product's universal limits. OpenAI documents that Free-plan limits are mutable and that the number of image inputs depends on image size and accompanying text. When the Web surface changes, these measurements must be revalidated independently of API model documentation.
+These values apply to the corresponding measured Web route and must not be generalized to all ChatGPT models or plans. Paid Web routes may expose different limits and capabilities. Their effective transport budgets must be derived from observed/account-specific Web behavior and documented separately from any Codex/Work allocation.
 
-The underlying model-context field used in diagnostics is informational only. It must never be used to admit a Free Web request beyond the measured browser transport budget.
+OpenAI documents that ChatGPT usage limits, model availability, and feature limits can change by plan and model. When the Web surface changes, these measurements must be revalidated against the current ChatGPT product behavior rather than inferred from API or Codex documentation.
+
+The underlying model-context field used in diagnostics is informational only. It must never be used to admit a Web request beyond the effective measured transport budget of the selected **eligible ChatGPT Web route**.
 
 ---
 
@@ -941,6 +950,14 @@ The transport must distinguish, at minimum:
 ### 17.2 Capability detection
 
 Account/product capability detection is dynamic.
+
+For model routing, the transport must distinguish at least:
+
+- account/plan availability;
+- normal ChatGPT Web model availability;
+- whether the selected model/mode is accounted against ChatGPT Web usage or the Codex/Work allocation.
+
+Only the normal ChatGPT Web class is exposed through this provider. A route that is visible in the product UI but belongs to the Codex/Work allocation is not an eligible ChatGPT Web backend.
 
 Do not treat today's UI or account limits as a permanent provider contract.
 
@@ -1053,9 +1070,9 @@ It must not own:
 
 ### 19.2 Native Codex passthrough
 
-The repository's first-party Codex passthrough is a separate upstream protocol.
+The repository's first-party Codex passthrough is a separate upstream protocol and a separate product/usage boundary.
 
-It must remain outside ChatGPTWebProviderCore.
+It must remain outside ChatGPTWebProviderCore and **must not be used as a backend route for the ChatGPT Web provider**. Models or modes whose ChatGPT UI usage is accounted against the Codex/Work allocation are therefore explicitly excluded from the ChatGPT Web provider's supported model catalogue.
 
 It may share transport-independent utilities such as:
 
@@ -1308,10 +1325,13 @@ The following are non-negotiable.
 14. ChatGPT Web provider entrypoints share one ProviderCore.
 15. Native Codex passthrough remains outside that core.
 16. Browser transport capacity is not the same as theoretical model context.
-17. A provider-owned turn may re-enter DSH, but cannot synchronously re-enter itself.
-18. Compatibility is an ingress concern, not a second execution core.
-19. Browser execution seams must not require ChatGPT-specific semantics when a service-neutral contract is sufficient.
-20. Additional browser-backed providers reuse proven execution seams but provide their own service profile and WebSurfaceTransport.
+17. A supported ChatGPT Web route must be normal ChatGPT usage and must not be a model/mode whose usage is accounted against the Codex/Work allocation.
+18. Account plan name alone does not establish model-route eligibility; eligibility is determined from current ChatGPT product/account capabilities.
+19. The provider fails closed when it cannot establish that the selected route belongs to the supported ChatGPT Web usage class.
+20. A provider-owned turn may re-enter DSH, but cannot synchronously re-enter itself.
+21. Compatibility is an ingress concern, not a second execution core.
+22. Browser execution seams must not require ChatGPT-specific semantics when a service-neutral contract is sufficient.
+23. Additional browser-backed providers reuse proven execution seams but provide their own service profile and WebSurfaceTransport.
 
 ---
 
@@ -1383,7 +1403,7 @@ Isolate DOM/browser mechanics, readiness, capability detection, submission, comp
 
 **#13 Compatibility convergence**
 
-Make Responses compatibility a thin adapter over ProviderCore. Keep native Codex separate.
+Make Responses compatibility a thin adapter over ProviderCore. Keep native Codex separate. Align model/account capability resolution with the supported matrix: Free and Paid ChatGPT Web are supported, while model/mode routes accounted against the Codex/Work allocation are excluded. Responses compatibility must not reintroduce or expose an excluded Codex/Work route as a ChatGPT Web backend.
 
 **#14 Verification and retirement**
 
@@ -1417,6 +1437,7 @@ ChatGPT Web
 
 and:
 
+- the supported account matrix is Free + Paid ChatGPT Web, excluding Codex/Work-quota-bound model routes;
 - no Responses server is required for native DSH calls;
 - browser/DOM details do not leak into the DSH adapter;
 - DSH remains the authority for DSH-projected execution;
@@ -1479,6 +1500,10 @@ These references were used to verify the architecture's external contracts and c
 
 ### OpenAI / ChatGPT product constraints
 
+- Using Codex with your ChatGPT plan / Codex usage limits:  
+  https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan
+- GPT-5.6 and GPT-6 Pro in ChatGPT / current ChatGPT model and plan limits:  
+  https://help.openai.com/en/articles/20001354-gpt-56-and-gpt-6-pro-in-chatgpt
 - ChatGPT Free Tier FAQ:  
   https://help.openai.com/en/articles/9275245-chatgpt-free-tier-faq
 - ChatGPT image input FAQ:  
@@ -1488,7 +1513,7 @@ These references were used to verify the architecture's external contracts and c
 - ChatGPT Search:  
   https://help.openai.com/en/articles/9237897-chatgpt-search
 
-These pages describe mutable ChatGPT product behavior for the supported Free Web account matrix. They are not OpenAI API contracts. API model documentation, even when it describes the same underlying model family, MUST NOT be used to derive this browser adapter's Free Web transport budget. The supported account matrix and measured browser limits must be re-checked when ChatGPT Free product behavior changes.
+These pages describe mutable ChatGPT product behavior for the supported Free + Paid Web account matrix and the separate Codex/Work usage boundary. They are not OpenAI API contracts. API model documentation, even when it describes the same underlying model family, MUST NOT be used to derive this browser adapter's Web transport budget or to determine whether a route is eligible for this provider. The supported account matrix, usage-accounting class, and measured browser limits must be re-checked when ChatGPT product behavior changes.
 
 ### Model Context Protocol
 
