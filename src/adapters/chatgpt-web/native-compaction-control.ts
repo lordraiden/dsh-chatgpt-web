@@ -1,4 +1,4 @@
-import { COMPACT_PROMPT } from "../../responses/compaction";
+import { COMPACT_PROMPT } from "../../lib/compaction";
 import type { CompactionTransactionHandle } from "./compaction-transaction";
 
 export const CODEX_COMPACTION_CONTROL_WIRE_NAME = "codex.control.compaction_handoff";
