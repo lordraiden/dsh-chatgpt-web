@@ -429,7 +429,7 @@ describe("native path does not enter the Responses server", () => {
           callId: "call-127",
           wireName: "fs.read",
           freeform: false,
-          arguments: JSON.stringify({ file_path: ".dsh121-local-test.txt" }),
+          arguments: { file_path: ".dsh121-local-test.txt" },
         }];
       },
       completeTool: () => {},
