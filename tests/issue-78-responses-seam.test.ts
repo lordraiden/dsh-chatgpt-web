@@ -6,6 +6,8 @@ import {
   createChatGptWebRouteAuthority,
   requireChatGptWebRoute,
 } from "../src/chatgpt-web-authority";
+import type { IncomingMeta, ProviderAdapter } from "../src/adapters/base";
+import type { AdapterEvent, CodexParsedRequest } from "../src/types";
 import { defaultConfig } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
 import {
@@ -90,9 +92,9 @@ describe("issue #78 Responses compatibility seam audit", () => {
       capabilityState: { solAvailable: "supported" as const, proAvailable: "unsupported" as const },
     };
     const calls: unknown[] = [];
-    const adapterFactory = () => ({
+    const adapterFactory = (): ProviderAdapter => ({
       name: "test-chatgpt-web",
-      runTurn: async (parsed: unknown, _incoming: unknown, emit: (event: unknown) => void) => {
+      runTurn: async (parsed: CodexParsedRequest, _incoming: IncomingMeta, emit: (event: AdapterEvent) => void) => {
         calls.push(parsed);
         emit({ type: "text_delta", text: "parity answer", phase: "final_answer" });
         emit({ type: "done", stopReason: "stop", endTurn: true });
@@ -215,10 +217,11 @@ describe("issue #78 Responses compatibility seam audit", () => {
       throw new Error("Web adapter must not be selected for native Codex passthrough");
     };
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (request: Request) => {
+    const mockedFetch = (async (request: Request) => {
       const body = request.method === "POST" ? await request.text() : "";
       return Response.json({ ok: true, endpoint: new URL(request.url).pathname, ...(body ? { body } : {}) });
-    };
+    }) as typeof globalThis.fetch;
+    globalThis.fetch = mockedFetch;
     try {
       for (const model of ["gpt-5.6-codex", "gpt-5.6-codex-mini", "chatgpt-work/pro", "work/pro"]) {
         const response = await responseRequest(
@@ -259,9 +262,9 @@ describe("issue #78 Responses compatibility seam audit", () => {
       capabilityState: { solAvailable: "supported" as const, proAvailable: "unsupported" as const },
     };
     let calls = 0;
-    const adapterFactory = () => ({
+    const adapterFactory = (): ProviderAdapter => ({
       name: "test-chatgpt-web",
-      runTurn: async (_parsed: unknown, _incoming: unknown, emit: (event: unknown) => void) => {
+      runTurn: async (_parsed: CodexParsedRequest, _incoming: IncomingMeta, emit: (event: AdapterEvent) => void) => {
         calls += 1;
         emit({ type: "text_delta", text: "compaction summary", phase: "final_answer" });
         emit({ type: "done", stopReason: "stop", endTurn: true });
