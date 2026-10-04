@@ -1799,23 +1799,21 @@ export function createChatGptWebAdapter(
           if (session.runtime.mode === "tools") {
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
-          if (handledError instanceof ChatGptWebAdapterError) {
+          if (retryCandidate instanceof ChatGptWebAdapterError) {
             providerTurn.markLogicalSettled("failed");
             emitRoundEvent({
               type: "error",
-              message: handledError.message,
-              status: handledError.status,
-              errorType: handledError.errorType,
-              code: handledError.code,
-              retryable: handledError.retryable,
+              message: retryCandidate.message,
+              status: retryCandidate.status,
+              errorType: retryCandidate.errorType,
+              code: retryCandidate.code,
+              retryable: retryCandidate.retryable,
             });
             session.completeRound(roundKey);
             return;
           }
-          providerTurn.markRecovery("FAILED");
           providerTurn.markLogicalSettled("failed");
           session.failRound(roundKey, turnError);
-          chatGptWebTurnRetryPolicy.clear(retryKey);
           throw turnError;
         }
       };
