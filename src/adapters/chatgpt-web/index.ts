@@ -1744,7 +1744,7 @@ export function createChatGptWebAdapter(
 
               void chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey).catch(retirementError => {
                 console.error(
-                  `[chatgpt-web] failed to invalidate exhausted conversation: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
+                  `[chatgpt-web] failed to invalidate exhausted conversation ${safeErrorDescriptor(retirementError)}`,
                 );
               });
             }
