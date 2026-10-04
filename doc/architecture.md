@@ -12,14 +12,18 @@ This project makes an authenticated ChatGPT Web session available to DeepSeek Ha
 
 The architecture is intentionally conservative. Phase 1 contains only the boundaries and invariants required for a solid first pilot. Phase 2 contains compatibility convergence, cleanup, and optional hardening that does not need to block the first native provider.
 
-### 1.3 Supported account matrix: ChatGPT Free Web only
+### 1.3 Supported account matrix: normal ChatGPT Web Free + paid
 
-The supported product target for this plugin is an authenticated **ChatGPT Free account using the ChatGPT Web surface at chatgpt.com**. Paid ChatGPT plans and the OpenAI API are not part of the supported account matrix for this pilot.
+The supported product target for this plugin is normal authenticated **ChatGPT Web usage through the chatgpt.com product surface**, on both **Free and paid ChatGPT accounts**. The target is the Web/product usage path and its available models, not Codex consumption.
+
+Routes whose usage is accounted against the **Codex allocation, ChatGPT Work allocation, or a shared Codex/Work credit pool are explicitly out of scope**. Native Codex passthrough remains a separate protocol boundary and must never be pulled into the ChatGPT Web ProviderCore.
+
+Eligibility is established from observable ChatGPT Web product/account capability rather than plan name, display label, or backend model ID. When the product route cannot be established, capability state is `unknown` and automatic selection fails closed.
 
 This distinction is architectural, not cosmetic:
 
 - OpenAI API model cards, API context windows, API token limits, and API pricing are **not authoritative** for this provider's browser transport budget.
-- Official ChatGPT Free documentation is authoritative for current Free-plan product availability and plan-level limits, but those limits can change independently of the API.
+- Official ChatGPT product documentation is authoritative for current Web product availability and plan-level limits, but those limits can change independently of the API.
 - ChatGPT Web transport limits used by this adapter are provider measurements/guardrails for the Free Web surface. They must be documented as such and must not be presented as official API or model limits.
 - Any paid-account compatibility code retained elsewhere in the repository is outside the supported #11-A/#11-B contract and must not influence the Free-account context policy.
 
