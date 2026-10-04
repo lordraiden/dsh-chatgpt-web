@@ -393,10 +393,16 @@ async function executeRead(
     ? lines.slice(offset, offset + maxLines)
     : lines.slice(offset);
   const endLine = selected.length === 0 ? offset : offset + selected.length;
+  const separator = text.includes("\r\n") ? "\r\n" : "\n";
+  const content = selected.join(separator)
+    + (selected.length > 0
+      && (endLine < lines.length || text.endsWith(separator))
+      ? separator
+      : "");
 
   return {
     path: target.displayPath,
-    content: selected.join("\n"),
+    content,
     start_line: offset + 1,
     end_line: endLine,
     total_lines: lines.length,
