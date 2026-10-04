@@ -189,6 +189,8 @@ export interface AppConfig {
   headed: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
+  /** Whether the authenticated web session exposes the Luna Think control. */
+  thinkAvailable?: boolean;
   capabilityState?: {
     solAvailable: "supported" | "unsupported" | "unknown";
     proAvailable: "supported" | "unsupported" | "unknown";
@@ -601,6 +603,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
+  if (parsed.thinkAvailable !== undefined && typeof parsed.thinkAvailable !== "boolean") {
+    throw new Error(`Invalid thinkAvailable in ${path}`);
+  }
   if (parsed.capabilityState !== undefined) {
     const state = parsed.capabilityState;
     const valid = state
@@ -736,6 +741,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
+      ...(manual ? { thinkAvailable: false } : config.thinkAvailable !== undefined ? { thinkAvailable: config.thinkAvailable } : {}),
       capabilityState: manual ? {
         solAvailable: "unsupported",
         proAvailable: "unsupported",
