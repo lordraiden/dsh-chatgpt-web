@@ -170,8 +170,8 @@ test("atomic message overflow remains unrecoverable even when compaction is avai
     budget,
     {
       estimatedInputTokens: 1_000,
-      estimatedMessageTokens: 1_000,
-      promptChars: budget.browserComposerCharLimit! + 1,
+      estimatedMessageTokens: budget.browserMessageTokenLimit! + 1,
+      promptChars: 1_000,
     },
     { compactionAvailable: true, multipartAvailable: true },
   );
