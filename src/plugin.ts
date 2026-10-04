@@ -8,6 +8,7 @@ import z from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
 import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
+import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
 
 export interface CordisContext {
   /**
@@ -230,16 +231,16 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString().trim();
-      if (text && typeof logger.debug === "function") logger.debug(`[sidecar] ${text}`);
+      if (text && typeof logger.debug === "function") logger.debug(`[sidecar] ${safeTextDescriptor(text)}`);
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString().trim();
-      if (text && typeof logger.debug === "function") logger.debug(`[sidecar:err] ${text}`);
+      if (text && typeof logger.debug === "function") logger.debug(`[sidecar:err] ${safeTextDescriptor(text)}`);
     });
 
     child.on("error", (err) => {
-      logger.error(`[dsh-chatgpt-web] Failed to launch sidecar process: ${err.message}`);
+      logger.error(`[dsh-chatgpt-web] Failed to launch sidecar process ${safeErrorDescriptor(err)}`);
     });
 
     child.on("exit", (code, signal) => {
@@ -309,7 +310,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
           }
         })
         .catch((error) => {
-          logger.error(`[dsh-chatgpt-web] Failed to apply live sidecar port change: ${error instanceof Error ? error.message : String(error)}`);
+          logger.error(`[dsh-chatgpt-web] Failed to apply live sidecar port change ${safeErrorDescriptor(error)}`);
         });
     });
   }

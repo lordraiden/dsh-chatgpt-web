@@ -32,6 +32,7 @@ import {
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
+import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import { augmentNativeModelCatalog, buildChatGptWebModelCatalog } from "./model-catalog";
 import {
   readCodexModelContextOverride,
@@ -1021,7 +1022,7 @@ export function startServer(
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
       console.error(
-        `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        `[chatgpt-web] turn broker endpoint is unavailable ${safeErrorDescriptor(error)}`,
       );
     });
   }
@@ -1187,7 +1188,7 @@ export function startServer(
         for (const result of results) {
           if (result.status === "rejected") {
             console.error(
-              `[chatgpt-web] interrupted turn cleanup failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+              `[chatgpt-web] interrupted turn cleanup failed ${safeErrorDescriptor(result.reason)}`,
             );
           }
         }
@@ -1377,13 +1378,13 @@ export function startServer(
       if (failures.length > 0) {
         process.exitCode = 1;
         for (const failure of failures) {
-          console.error(`[dsh-chatgpt-web] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+          console.error(`[dsh-chatgpt-web] shutdown cleanup failed ${safeErrorDescriptor(failure)}`);
         }
       }
       await server.stop(true);
     })().catch(error => {
       process.exitCode = 1;
-      console.error(`[dsh-chatgpt-web] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[dsh-chatgpt-web] server shutdown failed ${safeErrorDescriptor(error)}`);
     });
   }
   process.once("SIGINT", shutdown);

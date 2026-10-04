@@ -20,6 +20,7 @@ import {
   type LauncherManualTurnStart,
 } from "../../launcher-browser-host";
 import { type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
+import { safeErrorDescriptor, toolCallDiagnosticSummary } from "../../lib/safe-diagnostics";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
@@ -735,9 +736,7 @@ export function createChatGptWebAdapter(
             // The broker result is already authoritative. A launcher acknowledgement failure may
             // leave UI cleanup pending, but it must not replace a completed Codex answer with an
             // error or trigger a contradictory failed terminal mutation.
-            console.error(
-              `[chatgpt-web] completed Zero Risk turn but could not confirm launcher cleanup: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
-            );
+            console.error(`[chatgpt-web] completed Zero Risk turn but could not confirm launcher cleanup ${safeErrorDescriptor(controlError)}`);
           }
           return answer;
         } catch (error) {
@@ -750,9 +749,7 @@ export function createChatGptWebAdapter(
           try {
             await finishLauncher(externallyAborted ? "aborted" : "failed");
           } catch (controlError) {
-            console.error(
-              `[chatgpt-web] failed to release Zero Risk launcher turn: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
-            );
+            console.error(`[chatgpt-web] failed to release Zero Risk launcher turn ${safeErrorDescriptor(controlError)}`);
           }
           throw normalized;
         }
@@ -785,7 +782,7 @@ export function createChatGptWebAdapter(
           browserTurn.cancel(reason);
           if (activeToken) {
             void Promise.resolve(broker.revoke(activeToken, reason)).catch(error => {
-              console.error(`[chatgpt-web] failed to revoke cancelled Zero Risk request: ${error instanceof Error ? error.message : String(error)}`);
+              console.error(`[chatgpt-web] failed to revoke cancelled Zero Risk request ${safeErrorDescriptor(error)}`);
             });
           }
         },
@@ -914,7 +911,7 @@ export function createChatGptWebAdapter(
         browserTurn.cancel(reason);
         if (activeToken) {
           void Promise.resolve(broker.revoke(activeToken, reason)).catch(error => {
-            console.error(`[chatgpt-web] failed to revoke cancelled turn token: ${error instanceof Error ? error.message : String(error)}`);
+            console.error(`[chatgpt-web] failed to revoke cancelled turn token ${safeErrorDescriptor(error)}`);
           });
         }
       },
@@ -1220,7 +1217,7 @@ export function createChatGptWebAdapter(
                 throw error;
               }
               const handoffError = error instanceof Error ? error : new Error(String(error));
-              console.error("[chatgpt-web] structured context handoff failed:", handoffError);
+              console.error(`[chatgpt-web] structured context handoff failed ${safeErrorDescriptor(handoffError)}`);
               emit({
                 type: "error",
                 message: "ChatGPT did not complete the context handoff. Retry the task.",
@@ -1432,7 +1429,7 @@ export function createChatGptWebAdapter(
                 }
 
                 if (turnCapabilities.localToolsEnabled && collectedToolCalls.length > 0) {
-                  console.info(`[chatgpt-web] collectedToolCalls:`, JSON.stringify(collectedToolCalls));
+                  console.info(`[chatgpt-web] collectedToolCalls ${toolCallDiagnosticSummary(collectedToolCalls)}`);
                   const requests: BrokerToolRequest[] = collectedToolCalls.map(tc => ({
                     callId: `dsh_${randomBytes(18).toString("base64url")}`,
                     wireName: tc.name,
@@ -1613,7 +1610,7 @@ export function createChatGptWebAdapter(
                 }
 
                 if (collectedToolCalls.length > 0) {
-                  console.info(`[chatgpt-web] collectedToolCalls:`, JSON.stringify(collectedToolCalls));
+                  console.info(`[chatgpt-web] collectedToolCalls ${toolCallDiagnosticSummary(collectedToolCalls)}`);
                   const requests: BrokerToolRequest[] = collectedToolCalls.map(tc => ({
                     callId: tc.id,
                     wireName: tc.name,
@@ -1747,7 +1744,7 @@ export function createChatGptWebAdapter(
 
               void chatGptTurnSessions.retireConversationAndWait(exhaustedConversationKey).catch(retirementError => {
                 console.error(
-                  `[chatgpt-web] failed to invalidate exhausted conversation: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
+                  `[chatgpt-web] failed to invalidate exhausted conversation ${safeErrorDescriptor(retirementError)}`,
                 );
               });
             }
