@@ -35,7 +35,6 @@ function webCapabilities(config: AppConfig): {
   const authority = createChatGptWebRouteAuthority({
     solAvailable: config.solAvailable,
     proAvailable: config.proAvailable,
-    thinkAvailable: config.thinkAvailable,
     capabilityState: config.capabilityState,
     browserInteractionMode: config.browserInteractionMode,
     zeroRiskProEnabled: config.zeroRiskProEnabled,
@@ -108,7 +107,6 @@ export function buildChatGptWebModelCatalog(
   const routes = availableChatGptWebRoutes(createChatGptWebRouteAuthority({
     solAvailable: config.solAvailable,
     proAvailable: config.proAvailable,
-    thinkAvailable: config.thinkAvailable,
     capabilityState: config.capabilityState,
     browserInteractionMode: config.browserInteractionMode,
     zeroRiskProEnabled: config.zeroRiskProEnabled,
