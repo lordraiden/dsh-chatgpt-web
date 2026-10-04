@@ -703,7 +703,7 @@ export async function compactRequest(
   }
   let route: ChatGptWebModelRoute;
   try {
-    route = requireChatGptWebModelRoute(raw.model, config);
+    route = requireChatGptWebRoute(raw.model, chatGptWebRouteAuthority(config));
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
