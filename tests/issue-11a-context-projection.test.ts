@@ -151,6 +151,110 @@ test("superseded model-switch contracts are removed without losing current histo
   ]);
 });
 
+
+
+test("canonical projection never infers a missing write.file_path from user text", () => {
+  const source: CodexMessage[] = [
+    { role: "user", content: "Please update src/inferred.ts and read docs/README.md", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "write-1",
+        name: "write",
+        arguments: {
+          contents: "keep this payload unchanged",
+          nested: { file_path: "user-authored/nested.txt", value: "untouched" },
+        },
+      }],
+      timestamp: 2,
+    },
+  ];
+  const projected = projectCanonicalChatGptWebContext([], source);
+  expect(projected.messages[1]!.content).toEqual([{
+    type: "tool_call",
+    id: "write-1",
+    name: "write",
+    arguments: {
+      contents: "keep this payload unchanged",
+      nested: { file_path: "user-authored/nested.txt", value: "untouched" },
+    },
+  }]);
+});
+
+test("missing write.file_path remains missing even when user text contains a filename", () => {
+  const source: CodexMessage[] = [
+    { role: "user", content: "Edit AGENTS.md before continuing.", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "write-2",
+        name: "write",
+        arguments: { contents: "payload" },
+      }],
+      timestamp: 2,
+    },
+  ];
+  const projected = projectCanonicalChatGptWebContext([], source);
+  const call = (projected.messages[1]!.content as Array<Record<string, unknown>>)[0]!;
+  expect(call.arguments).toEqual({ contents: "payload" });
+});
+
+test("retired-handle scrubbing does not mutate similarly named user data", () => {
+  const raw = JSON.stringify({
+    metadata: {
+      handle: "__turn_handle",
+      value: "__request_handle",
+    },
+    userPayload: {
+      fieldName: "__turn_handle",
+      literal: "turn_transport_abcdefghijklmnopqrstuvwxyz",
+    },
+    __turn_handle: "owned-turn-handle",
+  });
+  const sanitized = JSON.parse(withoutRetiredTurnHandles(raw)) as Record<string, any>;
+  expect(sanitized.metadata).toEqual({
+    handle: "__turn_handle",
+    value: "__request_handle",
+  });
+  expect(sanitized.userPayload).toEqual({
+    fieldName: "__turn_handle",
+    literal: "turn_transport_abcdefghijklmnopqrstuvwxyz",
+  });
+  expect(sanitized.__turn_handle).toBe("[retired transport handle]");
+});
+
+test("nested tool arguments survive canonical projection without semantic mutation", () => {
+  const argumentsValue = {
+    request: {
+      file_path: "keep/me.txt",
+      nested: { arbitrary: ["a", { handle: "__surface_handle", file_path: "nested.md" }] },
+    },
+    __turn_handle: "user-authored-field",
+  };
+  const source: CodexMessage[] = [{
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: "nested-1",
+      name: "custom_tool",
+      arguments: structuredClone(argumentsValue),
+    }],
+    timestamp: 1,
+  }];
+  const projected = projectCanonicalChatGptWebContext([], source);
+  const call = (projected.messages[0]!.content as Array<Record<string, unknown>>)[0]!;
+  expect(call.arguments).toEqual(argumentsValue);
+});
+
+test("reprojecting the same canonical DSH history is replay-stable", () => {
+  const source = sampleMessages();
+  const first = serializeCanonicalChatGptWebContext(projectCanonicalChatGptWebContext(["sys"], source));
+  const second = serializeCanonicalChatGptWebContext(projectCanonicalChatGptWebContext(["sys"], structuredClone(source)));
+  expect(second).toBe(first);
+});
+
 test("replay fixture is generated entirely from canonical DSH state", () => {
   const projected = projectCanonicalChatGptWebContext(["system instruction"], sampleMessages());
   const replayFixture = serializeCanonicalChatGptWebContext(projected);
