@@ -34,8 +34,10 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 class TestProviderCore extends ChatGptWebProviderCore {
-  override bindPhysicalSettlement(_executionKey: string, _settlement: Promise<void>): ReturnType<ChatGptWebProviderCore["bindPhysicalSettlement"]> {
-    throw new Error("TestProviderCore must not bind physical settlement in capability-wait ordering tests");
+  override bindPhysicalSettlement(executionKey: string, _settlement: Promise<void>): ReturnType<ChatGptWebProviderCore["bindPhysicalSettlement"]> {
+    const turn = this.get(executionKey);
+    if (!turn) throw new Error(`TestProviderCore turn missing: ${executionKey}`);
+    return turn;
   }
 }
 
