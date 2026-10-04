@@ -267,10 +267,11 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
 
   const workspaceTools = readWorkspaceToolConfig(config);
   if (workspaceTools.enabled) {
-    if (!ctx.tools) {
+    const toolsContext = ctx.tools;
+    if (!toolsContext) {
       throw new Error("DSH tools service is required when workspace tools are enabled");
     }
-    const registered = registerWorkspaceTools(ctx, workspaceTools);
+    const registered = registerWorkspaceTools({ tools: toolsContext }, workspaceTools);
     logger.info(`[dsh-chatgpt-web] Registered bounded workspace tools: ${registered.join(", ")}`);
   }
 
