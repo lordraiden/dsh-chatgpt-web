@@ -424,8 +424,13 @@ describe("native path does not enter the Responses server", () => {
       confirmSafeTurnSent: () => ({ confirmed: true, duplicate: false }),
       nextToolBatch: async (_token: string, _signal?: AbortSignal): Promise<BrokerToolRequest[]> => {
         nextToolBatchCalled = true;
-        setTimeout(releaseBrowser, 0);
-        return [];
+        setTimeout(releaseBrowser, 5);
+        return [{
+          callId: "call-127",
+          wireName: "fs.read",
+          freeform: false,
+          arguments: JSON.stringify({ file_path: ".dsh121-local-test.txt" }),
+        }];
       },
       completeTool: () => {},
       waitForSafeStart: async () => {},
