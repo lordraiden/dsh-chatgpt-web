@@ -81,10 +81,9 @@ export class SidecarSupervisor {
 
   async reconfigure(next: SidecarSupervisorConfig): Promise<void> {
     if (this.closed) return;
-    this.reconfiguration = this.reconfiguration
-      .then(async () => {
-        if (this.closed) return;
-        const previous = this.config;
+    const operation = this.reconfiguration.then(async () => {
+      if (this.closed) return;
+      const previous = this.config;
         const portChanged = next.port !== previous.port;
         const autoStartChanged = next.autoStart !== previous.autoStart;
         const readyTimeoutChanged = next.readyTimeoutMs !== previous.readyTimeoutMs;
@@ -108,14 +107,9 @@ export class SidecarSupervisor {
             `[dsh-chatgpt-web] Live configuration applied (${changes.join(", ")}).`,
           );
         }
-      })
-      .catch((error) => {
-        this.dependencies.logger.error(
-          `[dsh-chatgpt-web] Failed to apply live configuration ${this.dependencies.safeErrorDescriptor(error)}`,
-        );
       });
-
-    await this.reconfiguration;
+    this.reconfiguration = operation.then(() => undefined, () => undefined);
+    await operation;
   }
 
   async shutdown(): Promise<void> {
@@ -183,7 +177,9 @@ export class SidecarSupervisor {
       }
     });
 
+    let spawnError: unknown;
     child.on("error", (error) => {
+      spawnError = error;
       this.dependencies.logger.error(
         `[dsh-chatgpt-web] Failed to launch sidecar process ${this.dependencies.safeErrorDescriptor(error)}`,
       );
@@ -218,7 +214,17 @@ export class SidecarSupervisor {
         new Promise<void>((resolve) => setTimeout(resolve, 500)),
         exitPromise,
       ]);
-      if (child.exitCode !== null || child.signalCode !== null) return;
+      if (spawnError) {
+        await this.terminateChild(child);
+        throw new Error(
+          `ChatGPT Web sidecar failed to start: ${this.dependencies.safeErrorDescriptor(spawnError)}`,
+          { cause: spawnError },
+        );
+      }
+      if (child.exitCode !== null || child.signalCode !== null) {
+        await this.terminateChild(child);
+        throw new Error("ChatGPT Web sidecar exited before becoming healthy");
+      }
     }
 
     if (generation !== this.generation) {
@@ -229,7 +235,10 @@ export class SidecarSupervisor {
     this.dependencies.logger.error(
       `[dsh-chatgpt-web] Sidecar did not become healthy within ${targetReadyTimeoutMs}ms`,
     );
-    await this.terminateChild(child, targetPort);
+    await this.terminateChild(child);
+    throw new Error(
+      `ChatGPT Web sidecar did not become healthy within ${targetReadyTimeoutMs}ms`,
+    );
   }
 
   private async isHealthy(host: string, port: number): Promise<boolean> {
