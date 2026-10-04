@@ -374,7 +374,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     }
   };
 
-  if (typeof ctx.on === "function" {
+  if (typeof ctx.on === "function") {
     ctx.on("loader/volatile-update", () => {
       reconfiguration = reconfiguration
         .then(async () => {
