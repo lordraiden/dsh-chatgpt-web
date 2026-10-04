@@ -685,6 +685,19 @@ export class ChatGptWebProviderCore {
       if (input.nativeThreadId && provenance.nativeThreadId !== input.nativeThreadId) {
         throw new Error("Provider execution key is already bound to a different native DSH thread");
       }
+      const existingLease = existing.lease.descriptor;
+      if (
+        existingLease.accountIdentity !== input.accountIdentity
+        || existingLease.browserProfile !== input.browserProfile
+        || existingLease.browserContext !== input.browserContext
+      ) {
+        throw new Error("Provider execution key is already bound to a different browser/account identity");
+      }
+      const existingRetryPolicy = existingSnapshot.retryPolicy;
+      const requestedRetryPolicy = input.retryPolicy ?? "strict";
+      if (existingRetryPolicy !== requestedRetryPolicy) {
+        throw new Error("Provider execution key is already bound to a different retry policy");
+      }
       return existing;
     }
 
