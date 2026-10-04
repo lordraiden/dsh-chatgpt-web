@@ -113,8 +113,9 @@ function authority(environment: ChatGptTurnEnvironment, updatedAt: number): Stor
 
 /**
  * Codex emits its trusted environment envelope when a task starts or its environment changes,
- * not on every follow-up. This store carries only that trusted authority across turns. Tool
- * declarations are always taken from the current request and are never persisted.
+ * not on every follow-up. This store carries only legacy Codex continuity across turns. Native
+ * DSH turns bypass this store and carry the current DSH-authoritative sandbox projection directly.
+ * Tool declarations are always taken from the current request and are never persisted.
  */
 export class ChatGptThreadEnvironmentStore {
   private loaded = false;
@@ -128,6 +129,18 @@ export class ChatGptThreadEnvironmentStore {
   ) {}
 
   resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
+    // Native DSH calls carry the authoritative sandbox/session projection directly.
+    // Never fall back to persisted Codex-derived environment state for this path.
+    if (parsed._dshContext) {
+      try {
+        return extractChatGptTurnEnvironment(parsed);
+      } catch (error) {
+        throw error instanceof MissingTrustedCodexEnvironmentError
+          ? error
+          : new Error(`ChatGPT Web native DSH environment is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     const identity = extractChatGptTurnIdentity(parsed);
     try {
       const environment = extractChatGptTurnEnvironment(parsed);
