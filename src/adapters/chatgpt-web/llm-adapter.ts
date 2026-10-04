@@ -14,7 +14,7 @@
  * Missing configuration/auth are surfaced at call time as stable, typed
  * `LlmError`s translated into terminal `error`/`aborted` StreamChunks.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   LlmAdapter,
   LlmError,
@@ -46,6 +46,7 @@ import {
   type CodexParsedRequest,
   type CodexTool,
   type CodexUsage,
+  type DshNativeTurnContext,
 } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { createChatGptWebAdapter } from "./index";
@@ -57,11 +58,21 @@ export interface LlmAdapterDeps {
   loadProvider?: () => ReturnType<typeof providerConfig>;
   /** Build the provider backend. Defaults to `createChatGptWebAdapter`. */
   createBackend?: (provider: ReturnType<typeof providerConfig>) => ProviderAdapter;
+  /**
+   * Resolve trusted DSH session/sandbox context for the current native LLM call.
+   * The resolver is supplied by the plugin boundary, not by the backend.
+   */
+  resolveNativeDshContext?: (
+    options: GenerateOptions,
+    turnId: string,
+    threadId: string,
+  ) => DshNativeTurnContext;
 }
 
 export class ChatGptWebLlmAdapter extends LlmAdapter {
   private readonly loadProvider: () => ReturnType<typeof providerConfig>;
   private readonly createBackend: (provider: ReturnType<typeof providerConfig>) => ProviderAdapter;
+  private readonly resolveNativeDshContext: NonNullable<LlmAdapterDeps["resolveNativeDshContext"]>;
   private providerMemo: ReturnType<typeof providerConfig> | undefined;
   private backendMemo: ProviderAdapter | undefined;
   private shuttingDown = false;
@@ -71,6 +82,12 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
     super();
     this.loadProvider = deps.loadProvider ?? (() => providerConfig(loadConfig()));
     this.createBackend = deps.createBackend ?? (provider => createChatGptWebAdapter(provider));
+    this.resolveNativeDshContext = deps.resolveNativeDshContext ?? ((options, turnId, threadId) => ({
+      ...(options.sessionId !== undefined ? { dshSessionId: String(options.sessionId) } : {}),
+      threadId,
+      turnId,
+      ...(options.purpose !== undefined ? { purpose: options.purpose } : {}),
+    }));
   }
 
   private resolveProvider(): ReturnType<typeof providerConfig> {
@@ -183,7 +200,7 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
       options,
       () => {
         try {
-          return toCodexParsedRequest(options, this.resolveProvider());
+          return toCodexParsedRequest(options, this.resolveProvider(), this.resolveNativeDshContext);
         } catch (error) {
           if (error instanceof LlmError) throw error;
           throw new LlmError(
@@ -238,13 +255,19 @@ function errorMessage(value: unknown): string {
 }
 
 /**
- * Translate a DSH `GenerateOptions` request into the existing backend's
- * `CodexParsedRequest`. Rejections of unsupported input are thrown as typed
- * `LlmError`s (not silently discarded).
+ * Project a DSH `GenerateOptions` request into the existing internal backend request shape.
+ * `CodexParsedRequest` is transport compatibility only; native DSH authority is carried
+ * separately in `_dshContext`.
  */
 export function toCodexParsedRequest(
   options: GenerateOptions,
   provider: ReturnType<typeof providerConfig>,
+  resolveNativeDshContext: NonNullable<LlmAdapterDeps["resolveNativeDshContext"]> = (request, turnId, threadId) => ({
+    ...(request.sessionId !== undefined ? { dshSessionId: String(request.sessionId) } : {}),
+    threadId,
+    turnId,
+    ...(request.purpose !== undefined ? { purpose: request.purpose } : {}),
+  }),
 ): CodexParsedRequest {
   const capabilities = accountCapabilities(provider);
   let route;
@@ -290,12 +313,6 @@ export function toCodexParsedRequest(
   })) {
     throw new LlmError(
       "ChatGPT Web native provider does not support freeform or tool-search tool semantics in this phase.",
-      "UNSUPPORTED_OPTION",
-    );
-  }
-    if (options.toolHistory?.updates.length) {
-    throw new LlmError(
-      "ChatGPT Web native provider does not support dynamic tool updates in this phase; refusing to discard tool history.",
       "UNSUPPORTED_OPTION",
     );
   }
@@ -349,9 +366,11 @@ export function toCodexParsedRequest(
 
   const turnId = randomUUID();
   const dshSessionId = options.sessionId !== undefined ? String(options.sessionId) : undefined;
-  // ChatGPT thread affinity is provider-private. Preserve the canonical DSH session identity separately.
-  const threadId = dshSessionId ?? randomUUID();
+  const threadId = dshSessionId
+    ? `dsh-${createHash("sha256").update(dshSessionId).digest("hex").slice(0, 24)}`
+    : `dsh-request-${turnId}`;
   const purpose = options.purpose;
+  const dshContext = resolveNativeDshContext(options, turnId, threadId);
   const input = nativeInputFromMessages(messages, systemPrompt, turnId, purpose);
 
   const contextMessages = [...messages];
@@ -375,17 +394,10 @@ export function toCodexParsedRequest(
       ...(reasoning !== undefined ? { reasoning } : {}),
       ...(purpose === "session-title" || purpose === "compaction" ? { hideThinkingSummary: true } : {}),
     },
-    _rawBody: {
-      input,
-      client_metadata: {
-        "x-codex-turn-metadata": {
-          thread_id: threadId,
-          turn_id: turnId,
-          ...(dshSessionId !== undefined ? { dsh_session_id: dshSessionId } : {}),
-          ...(purpose !== undefined ? { purpose } : {}),
-        },
-      },
-    },
+    _dshContext: dshContext,
+    // Internal transport projection for the existing browser backend. It is deliberately
+    // metadata-free: DSH authority comes from `_dshContext`, never from this raw body.
+    _rawBody: { input },
     ...(purpose === "compaction" ? { _compactionRequest: true } : {}),
   };
 }
@@ -639,6 +651,7 @@ export function mapStream(
     let openBlock: { index: number; kind: "text" | "reasoning"; text: string } | { index: number; kind: "tool"; id: string; name?: string; arguments: string } | undefined;
     let usageEmitted = false;
     let finishYielded = false;
+    let outputObserved = false;
     const closeBlock = (): StreamChunk | undefined => {
       if (!openBlock) return undefined;
       const block = openBlock;
@@ -658,6 +671,7 @@ export function mapStream(
               openBlock = { index: blockIndex++, kind: "text", text: "" };
               yield { type: "block-start", index: openBlock.index, blockType: "text" };
             }
+            if (event.text.length > 0) outputObserved = true;
             openBlock.text += event.text;
             yield { type: "text-delta", index: openBlock.index, text: event.text };
             break;
@@ -670,12 +684,14 @@ export function mapStream(
               openBlock = { index: blockIndex++, kind: "reasoning", text: "" };
               yield { type: "block-start", index: openBlock.index, blockType: "reasoning" };
             }
+            if (text.length > 0) outputObserved = true;
             openBlock.text += text;
             yield { type: "reasoning-delta", index: openBlock.index, text };
             break;
           }
           case "tool_call_start": {
             const end = closeBlock(); if (end) yield end;
+            outputObserved = true;
             openBlock = { index: blockIndex++, kind: "tool", id: event.id, name: event.name, arguments: "" };
             yield { type: "block-start", index: openBlock.index, blockType: "tool-call" };
             yield { type: "tool-call-delta", index: openBlock.index, id: ToolCallId(event.id), name: event.name, argumentsDelta: "" };
@@ -704,7 +720,20 @@ export function mapStream(
             const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             const kind = event.stopReason === "tool_use" ? "tool-calls" : event.stopReason === "max_tokens" ? "max-tokens" : "stop";
-            yield { type: "finish", reason: { kind } };
+            if (kind === "stop" && !outputObserved) {
+              yield {
+                type: "finish",
+                reason: {
+                  kind: "error",
+                  failure: failureFromEvent(
+                    "ChatGPT Web completed without any response content.",
+                    "EMPTY_RESPONSE",
+                  ),
+                },
+              };
+            } else {
+              yield { type: "finish", reason: { kind } };
+            }
             finishYielded = true;
             return;
           }
