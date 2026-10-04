@@ -320,6 +320,10 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     headed: false,
     solAvailable: false,
     proAvailable: false,
+    capabilityState: {
+      solAvailable: "unsupported",
+      proAvailable: "unsupported",
+    },
     experimentalBiggerContext: false,
     zeroRiskProEnabled: false,
     autoApproveToolCalls: false,
