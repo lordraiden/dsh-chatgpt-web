@@ -21,7 +21,7 @@ describe("issue #75 ChatGPT Web authority", () => {
       "chatgpt-web/medium",
       "chatgpt-web/high",
     ]);
-    expect(requireChatGptWebRoute("chatgpt-web/pro", authority)).toThrow;
+    expect(() => requireChatGptWebRoute("chatgpt-web/pro", authority)).toThrow(/unavailable/);
   });
 
   test("paid Web capability exposes Pro-gated routes", () => {
