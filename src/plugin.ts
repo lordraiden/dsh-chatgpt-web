@@ -6,8 +6,14 @@ import { fileURLToPath } from "node:url";
 import type { Volatile } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
+import type { DshNativeTurnContext } from "./types";
 
 export interface CordisContext {
+  /**
+   * Cordis service lookup. The native provider uses this only to consume
+   * DSH-owned session and sandbox policy state; it never creates a parallel authority.
+   */
+  get?: (name: string) => unknown;
   effect?: (cb: () => void | Promise<void> | (() => void) | (() => Promise<void>)) => void;
   on?: (event: string, callback: () => void | Promise<void>) => unknown;
   logger?: (name: string) => {
@@ -85,6 +91,78 @@ function resolveLauncher(customBunPath: string | undefined, port: number): { cmd
   }
 
   return { cmd: process.execPath, args: ["src/cli.ts", ...serveArgs] };
+}
+
+interface DshSessionLike {
+  readonly header: {
+    readonly cwd?: string;
+  };
+}
+
+interface DshSessionsLike {
+  get(id: string): DshSessionLike | undefined;
+}
+
+interface DshSandboxPolicyLike {
+  resolve(request?: { session?: DshSessionLike }): {
+    mode: "read-only" | "workspace-write" | "danger-full-access";
+    workspaceRoot: string;
+  };
+}
+
+/**
+ * Resolve trusted native DSH state at the plugin boundary. The provider adapter
+ * receives a detached projection; it never reads or mutates DSH services itself.
+ */
+function resolveNativeDshContext(
+  ctx: CordisContext,
+  options: import("@deepseek-ai/dsh-llm").GenerateOptions,
+  turnId: string,
+  threadId: string,
+): DshNativeTurnContext {
+  const dshSessionId = options.sessionId !== undefined ? String(options.sessionId) : undefined;
+  let session: DshSessionLike | undefined;
+  if (dshSessionId !== undefined) {
+    const sessions = ctx.get?.("sessions") as DshSessionsLike | undefined;
+    if (!sessions) {
+      throw new Error("DSH session service is unavailable for a session-bound native LLM request");
+    }
+    session = sessions.get(dshSessionId);
+    if (!session) {
+      throw new Error(`DSH session "${dshSessionId}" is unavailable for the native LLM request`);
+    }
+  }
+
+  const base: DshNativeTurnContext = {
+    ...(dshSessionId !== undefined ? { dshSessionId } : {}),
+    threadId,
+    turnId,
+    ...(options.purpose !== undefined ? { purpose: options.purpose } : {}),
+  };
+
+  const sandboxPolicy = ctx.get?.("sandboxPolicy") as DshSandboxPolicyLike | undefined;
+  if (!sandboxPolicy) {
+    if (options.tools?.length) {
+      throw new Error("DSH sandbox policy service is required for native ChatGPT Web tool execution");
+    }
+    return base;
+  }
+
+  const policy = sandboxPolicy.resolve(session ? { session } : {});
+  const root = policy.workspaceRoot;
+  const writableRoots = policy.mode === "read-only" ? [] : [root];
+  return {
+    ...base,
+    environment: {
+      cwd: root,
+      roots: [root],
+      writableRoots,
+      sandboxMode: policy.mode,
+      // DSH sandbox-policy intentionally has no network capability bit.
+      // Native Web product capabilities remain outside this local-tool authority.
+      networkAccess: false,
+    },
+  };
 }
 
 function readPort(value: number | Volatile<number> | undefined): number {
@@ -235,7 +313,10 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     });
   }
   const registerAdapter = (): { adapter: ChatGptWebLlmAdapter; dispose: () => void } => {
-    const adapter = new ChatGptWebLlmAdapter();
+    const adapter = new ChatGptWebLlmAdapter({
+      resolveNativeDshContext: (options, turnId, threadId) =>
+        resolveNativeDshContext(ctx, options, turnId, threadId),
+    });
     const dispose = ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], adapter);
     logger.info(`[dsh-chatgpt-web] Registered native DSH provider "${CHATGPT_WEB_PROVIDER_ID}"`);
     return { adapter, dispose };
