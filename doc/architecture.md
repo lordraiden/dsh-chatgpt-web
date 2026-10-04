@@ -1057,6 +1057,8 @@ It must not own:
 
 ### 19.1.1 Responses seam audit evidence (#78)
 
+`src/dev-chat/driver.ts` is a DEV-only simulator and intentionally imports the Responses parser/server to exercise the compatibility surface end-to-end. It is test infrastructure, not a production provider entrypoint or authority.
+
 `src/adapters/chatgpt-web/rolling-checkpoint.ts` may reuse `src/responses/parser.ts` to rebuild a synthetic checkpointed `CodexParsedRequest` because this is wire translation only; the checkpoint code does not select routes, authorize capabilities, own retry/settlement state, or execute browser turns. This is an explicit dependency, not a second Responses execution path.
 
 
