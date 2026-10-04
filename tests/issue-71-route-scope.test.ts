@@ -125,7 +125,6 @@ describe("issue #71 ChatGPT Web product-route scope", () => {
   });
 
   test("there is no public parser-side backend-model escape hatch", () => {
-    expect(() => parseRequest({ model: CHATGPT_WEB_BACKEND_MODEL, input: "hello" })).not.toThrow();
     const parsed = parseRequest({ model: CHATGPT_WEB_BACKEND_MODEL, input: "hello" });
     expect(() => routeChatGptWebRequest(parsed, defaultConfig())).toThrow();
   });
