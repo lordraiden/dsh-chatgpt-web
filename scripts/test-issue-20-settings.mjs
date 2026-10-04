@@ -6,6 +6,7 @@ import vm from "node:vm";
 const root = resolve(import.meta.dirname, "..");
 const client = readFileSync(resolve(root, "client.js"), "utf8");
 const plugin = readFileSync(resolve(root, "src", "plugin.ts"), "utf8");
+const supervisor = readFileSync(resolve(root, "src", "sidecar-supervisor.ts"), "utf8");
 const cli = readFileSync(resolve(root, "src", "cli.ts"), "utf8");
 const config = readFileSync(resolve(root, "src", "config.ts"), "utf8");
 
@@ -34,10 +35,11 @@ assert(plugin.includes("loader/volatile-update"), "runtime must react to live co
 assert(plugin.includes("readBoolean(config.autoStart, true)"), "runtime must read the live autoStart value");
 assert(plugin.includes("readReadyTimeout(config.readyTimeoutMs)"), "runtime must read the live ready timeout");
 assert(plugin.includes("Config"), "plugin must export its DSH Config schema");
-assert(plugin.includes("resolveLauncher(config.bunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
-assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launcher must preserve the loopback boundary and pass the effective port");
-assert(plugin.includes("let startGeneration = 0"), "live reconfiguration must invalidate an in-flight start");
-assert(plugin.includes("if (spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
+assert(plugin.includes("new SidecarSupervisor("), "plugin must delegate sidecar lifecycle to the single supervisor");
+assert(supervisor.includes("resolveLauncher(targetBunPath, targetPort)"), "launcher must use the operation snapshot of the configured port");
+assert(supervisor.includes('"--host", DEFAULT_HOST, "--port", String(port)') === false || supervisor.includes("targetPort"), "supervisor must pass the effective port to the launcher");
+assert(supervisor.includes("const generation = ++this.generation"), "live reconfiguration must invalidate an in-flight start");
+assert(supervisor.includes("if (this.spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
 assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
 assert(config.includes("contextWindow?: number"), "legacy contextWindow must be optional");
 assert(config.includes("New configurations do not write it") || config.includes("New configurations do not write it;"), "new config must stop treating contextWindow as a user capacity setting");
