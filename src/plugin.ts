@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -7,7 +8,7 @@ import schemastery from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
 import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
-import { safeErrorDescriptor } from "./lib/safe-diagnostics";
+import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
 import { SidecarSupervisor } from "./sidecar-supervisor";
 
 export interface CordisContext {
@@ -189,30 +190,14 @@ function readReadyTimeout(value: number | Volatile<number> | undefined): number 
   return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
 }
 
-async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
-    const res = await fetch(`http://${host}:${port}/healthz`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return false;
-    const body = (await res.json()) as { status?: string };
-    return body.status === "ok";
-  } catch {
-    return false;
-  }
-}
-
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
   const host = DEFAULT_HOST;
   let port = readPort(config.port);
-  let autoStart = readBoolean(config.autoStart, true);
-  let readyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
+  const autoStart = readBoolean(config.autoStart, true);
+  const readyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
   const logger = typeof ctx.logger === "function" ? ctx.logger("chatgpt-web") : console;
 
-  let spawnedProcess: Chi  const supervisor = new SidecarSupervisor(
+  const supervisor = new SidecarSupervisor(
     {
       host,
       port,
@@ -236,19 +221,17 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       const nextPort = readPort(config.port);
       const nextAutoStart = readBoolean(config.autoStart, true);
       const nextReadyTimeoutMs = readReadyTimeout(config.readyTimeoutMs);
+      port = nextPort;
       void supervisor.reconfigure({
         host,
         port: nextPort,
         autoStart: nextAutoStart,
         readyTimeoutMs: nextReadyTimeoutMs,
         bunPath: config.bunPath,
-      }).then(() => {
-        port = nextPort;
-        autoStart = nextAutoStart;
-        readyTimeoutMs = nextReadyTimeoutMs;
       });
     });
   }
+
   const registerAdapter = (): { adapter: ChatGptWebLlmAdapter; dispose: () => void } => {
     const adapter = new ChatGptWebLlmAdapter({
       resolveNativeDshContext: (options, turnId, threadId) =>
