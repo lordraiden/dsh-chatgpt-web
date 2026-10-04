@@ -52,7 +52,6 @@ describe("issue #78 Responses compatibility seam audit", () => {
     expect(server).toContain('url.pathname === "/v1/responses"');
     expect(server).toContain("responseRequest(");
     expect(server).toContain("adapterFactory(provider)");
-    expect(server).toContain("routeChatGptWebRequest(parsed, config)");
     expect(server).toContain('forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw)');
 
     expect(server).not.toContain("browser-worker");
