@@ -2403,9 +2403,9 @@ export class ChatGptBrowserWorker {
   }
 
   /**
-   * A Codex turn owns one isolated Temporary Chat document. Reusing the same
-   * ChatGPT SPA page can retain the previous transcript and autocomplete DOM,
-   * so an @app lookup may select stale UI from the preceding turn.
+   * A new ChatGPT conversation owns an isolated Temporary Chat document. Retained
+   * conversations reuse their leased Launcher surface instead; fresh turns still
+   * get a new page so stale transcript/autocomplete DOM cannot bleed across conversations.
    */
   private async pageForNewTurn(): Promise<Page> {
     if (this.config.browserHost === "launcher") {
