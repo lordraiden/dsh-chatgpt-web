@@ -72,6 +72,9 @@ describe("issue #78 Responses compatibility seam audit", () => {
       // Provider-private Luna checkpoint reconstruction reuses Responses parsing as a translation
       // helper only; the parser cannot own route, capability, retry, browser or settlement authority.
       resolve(root, "src/adapters/chatgpt-web/rolling-checkpoint.ts"),
+      // DEV-only simulator intentionally exercises the Responses wire/proxy path; it is not
+      // production execution authority and is excluded from the production layering contract.
+      resolve(root, "src/dev-chat/driver.ts"),
     ]);
 
     for (const file of sourceFiles) {
