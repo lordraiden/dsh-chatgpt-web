@@ -7,8 +7,10 @@ import {
   requireChatGptWebRoute,
 } from "../src/chatgpt-web-authority";
 import type { IncomingMeta, ProviderAdapter } from "../src/adapters/base";
-import type { AdapterEvent, CodexParsedRequest } from "../src/types";
-import { defaultConfig } from "../src/config";
+import type { AdapterEvent, CodexParsedRequest, DshNativeTurnContext } from "../src/types";
+import { defaultConfig, providerConfig } from "../src/config";
+import { ChatGptWebLlmAdapter } from "../src/adapters/chatgpt-web/llm-adapter";
+import type { GenerateOptions, StreamChunk } from "@deepseek-ai/dsh-llm";
 import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import { startServer } from "../src/server";
 import { parseRequest } from "../src/responses/parser";
@@ -492,6 +494,80 @@ describe("issue #78 Responses compatibility seam audit", () => {
 
       expect(seenCores).toHaveLength(2);
       expect(seenCores[0]).toBe(seenCores[1]);
+    } finally {
+      await running.stop(true);
+    }
+  });
+
+  test("real DSH LlmAdapter crosses the private native loopback and returns DSH chunks", async () => {
+    const config = {
+      ...defaultConfig(),
+      port: 0,
+      controlToken: "issue-78-native-adapter-test-token",
+      solAvailable: true,
+      proAvailable: false,
+      capabilityState: {
+        solAvailable: "supported" as const,
+        proAvailable: "unsupported" as const,
+      },
+    };
+    let seenParsed: CodexParsedRequest | undefined;
+    const seenCores: ChatGptWebProviderCore[] = [];
+
+    const running = startServer(config, {
+      adapterFactory: (_provider, providerCore) => {
+        seenCores.push(providerCore);
+        return {
+          name: "issue-78-native-adapter-test",
+          runTurn: async (parsed, _incoming, emit) => {
+            seenParsed = parsed;
+            emit({ type: "text_delta", text: "native adapter e2e", phase: "final_answer" });
+            emit({ type: "done", stopReason: "stop", endTurn: true });
+          },
+        };
+      },
+    });
+
+    try {
+      const nativeContext: DshNativeTurnContext = {
+        dshSessionId: "issue-78-native-session",
+        threadId: "issue-78-native-thread",
+        turnId: "issue-78-native-turn",
+      };
+      const adapter = new ChatGptWebLlmAdapter({
+        loadProvider: () => providerConfig(config),
+        resolveNativeDshContext: () => nativeContext,
+        resolveNativeDshTransport: () => ({
+          baseUrl: `http://127.0.0.1:${running.port}`,
+          controlToken: config.controlToken,
+        }),
+      });
+
+      const options = {
+        provider: "chatgpt-web",
+        model: "chatgpt-web/light",
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: "hello from native adapter" }],
+        }],
+      } as GenerateOptions;
+      const chunks: StreamChunk[] = [];
+      for await (const chunk of adapter.stream(options)) {
+        chunks.push(chunk);
+      }
+
+      expect(seenCores).toHaveLength(1);
+      expect(seenParsed?._dshContext).toEqual(nativeContext);
+      expect(seenParsed?._rawBody).not.toHaveProperty("client_metadata");
+      expect(chunks).toContainEqual({
+        type: "text-delta",
+        index: 0,
+        text: "native adapter e2e",
+      });
+      expect(chunks.at(-1)).toEqual({
+        type: "finish",
+        reason: { kind: "stop" },
+      });
     } finally {
       await running.stop(true);
     }

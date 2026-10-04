@@ -157,19 +157,21 @@ try {
         `const req = createRequire(process.cwd() + '/node_modules/${packageName}/lib/cli.js');`,
         "console.log(req.resolve('playwright-core/package.json'));",
         "console.log(req.resolve('tiktoken'));",
+        "console.log(req.resolve('@deepseek-ai/dsh-llm/package.json'));",
+        "console.log(req.resolve('@deepseek-ai/schemastery/package.json'));",
       ].join("\n"),
     ],
     { cwd: cleanDir },
   );
   const depLines = (depCheck.stdout || "").trim().split("\n").filter(Boolean);
-  if (depCheck.status !== 0 || depLines.length !== 2) {
+  if (depCheck.status !== 0 || depLines.length !== 4) {
     fail(`dependency resolution check failed: ${(depCheck.stderr || depCheck.stdout).trim().slice(-400)}`);
   } else {
-    const [pwPath, twPath] = depLines;
-    if (!pwPath.startsWith(cleanDir) || !twPath.startsWith(cleanDir)) {
-      fail(`dependencies resolve outside the clean install: ${pwPath} | ${twPath}`);
+    const [pwPath, twPath, dshLlmPath, schemasteryPath] = depLines;
+    if (![pwPath, twPath, dshLlmPath, schemasteryPath].every(path => path.startsWith(cleanDir))) {
+      fail(`dependencies resolve outside the clean install: ${depLines.join(" | ")}`);
     } else {
-      ok("playwright-core and tiktoken resolve from the clean install");
+      ok("browser, tokenizer, DSH LLM, and schema runtime dependencies resolve from the clean install");
     }
   }
 
