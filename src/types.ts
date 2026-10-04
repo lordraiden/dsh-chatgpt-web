@@ -350,8 +350,6 @@ export interface CodexProviderConfig {
     solAvailable?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     proAvailable?: boolean;
-    /** Account capability proven by the authenticated browser probe; absent means not yet verified. */
-    thinkAvailable?: boolean;
     /** Tri-state capability authority. Unknown means the route must not be selected. */
     capabilityState?: {
       solAvailable: "supported" | "unsupported" | "unknown";
