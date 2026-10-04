@@ -26,7 +26,7 @@ Run the interactive browser login:
 ```bash
 dsh-chatgpt-web login
 ```
-A browser window will open. Log into your OpenAI / ChatGPT account (Free or Plus/Team). Once the ChatGPT composer loads, the session cookies are safely saved to `~/.dsh/storages/chatgpt-web/`.
+A browser window will open. Log into your OpenAI / ChatGPT account (Free or paid). Once the ChatGPT composer loads, the authenticated browser state is saved to the plugin's local storage directory (default `~/.dsh/storages/chatgpt-web/`). Treat that directory as sensitive credential material.
 
 ---
 
@@ -65,12 +65,12 @@ dsh-chatgpt-web setup --chrome "C:\Program Files\Google\Chrome\Application\chrom
 - Run `dsh-chatgpt-web doctor` to check proxy and session status.
 - Restart the daemon if needed: `dsh-chatgpt-web serve`.
 
-### 6. ChatGPT Rate Limits (HTTP 429)
-**Cause:** Hourly prompt limit reached on the ChatGPT Free tier.
+### 6. ChatGPT Web Rate Limits (HTTP 429)
+**Cause:** The authenticated ChatGPT Web account or selected product route has reached a product-specific limit.
 **Solution:**
-- OpenAI Free accounts have hourly message limits for GPT 5.6 Luna.
-- Wait for the rate-limit window to reset (typically 1–2 hours).
-- Avoid spawning parallel multi-subagent requests against a single ChatGPT browser tab.
+- Treat availability and limits as account/model-specific; do not assume a fixed hourly quota.
+- Wait until ChatGPT makes the route available again, or select another supported Web route.
+- Avoid spawning parallel multi-agent requests against a single ChatGPT browser session.
 
 ## Update and Uninstall
 
@@ -90,9 +90,9 @@ To remove or disable `dsh-chatgpt-web` in DeepSeek Harness:
 
 When opening an issue or bug report on GitHub:
 - Specify your OS and architecture (e.g., Windows 11 x64, macOS arm64, Linux x64).
-- ChatGPT account tier (Free Tier Luna or Plus/Team).
+- ChatGPT account tier (Free or paid) and the selected Web model route.
 - Node.js and Bun versions.
-- Output from `dsh-chatgpt-web doctor`.
+- Output from `dsh-chatgpt-web doctor` (after redacting sensitive values).
 - Clear reproduction steps and console error traces.
 
 Before sharing logs or screenshots, ensure all personal session cookies, authentication tokens, and private prompts are redacted.
