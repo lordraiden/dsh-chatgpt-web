@@ -487,6 +487,74 @@ function leaseInput(turnId: string) {
   console.log("ok estimated usage is not emitted across native provider boundary");
 }
 
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("default-retry-budget"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-default-retry-budget",
+    browserContextId: "ctx-default-retry-budget",
+    pageId: "page-default-retry-budget",
+    profileId: "profile-default-retry-budget",
+    accountId: "chatgpt-account:account-default-retry-budget",
+  });
+  turn.markSurfaceReady();
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 0).attempt, 1);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 1).attempt, 2);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 2).attempt, 3);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 3).allowed, false);
+  assert.equal(core.recordRetryAttempt("default-retry-budget", turn, 3).reason, "budget_exhausted");
+  turn.failBeforePhysicalSettlement();
+  console.log("ok default retry budget remains three automatic retries");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("retry-budget-no-allocation"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry-budget-no-allocation",
+    browserContextId: "ctx-retry-budget-no-allocation",
+    pageId: "page-retry-budget-no-allocation",
+    profileId: "profile-retry-budget-no-allocation",
+    accountId: "chatgpt-account:account-retry-budget-no-allocation",
+  });
+  turn.markSurfaceReady();
+  turn.markSendActivated();
+  assert.equal(core.retryDecision("retry-budget-no-allocation", turn, 0).allowed, false);
+  assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.size, 0);
+  turn.failBeforePhysicalSettlement();
+  console.log("ok terminal retry decisions do not allocate retry budgets");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("retry-budget-ttl"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-retry-budget-ttl",
+    browserContextId: "ctx-retry-budget-ttl",
+    pageId: "page-retry-budget-ttl",
+    profileId: "profile-retry-budget-ttl",
+    accountId: "chatgpt-account:account-retry-budget-ttl",
+  });
+  turn.markSurfaceReady();
+  assert.equal(core.recordRetryAttempt("retry-budget-ttl", turn, 0).attempt, 1);
+  assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.size, 1);
+
+  const fresh = core.begin(leaseInput("retry-budget-ttl-trigger"));
+  fresh.bindPhysicalResource({
+    resourceId: "surface-retry-budget-ttl-trigger",
+    browserContextId: "ctx-retry-budget-ttl-trigger",
+    pageId: "page-retry-budget-ttl-trigger",
+    profileId: "profile-retry-budget-ttl-trigger",
+    accountId: "chatgpt-account:account-retry-budget-ttl-trigger",
+  });
+  fresh.markSurfaceReady();
+  assert.equal(core.retryDecision("retry-budget-ttl-trigger", fresh, 30 * 60_000).attempt, 1);
+  assert.equal((core as unknown as { retryBudgets: Map<string, unknown> }).retryBudgets.has("retry-budget-ttl"), false);
+  turn.failBeforePhysicalSettlement();
+  fresh.failBeforePhysicalSettlement();
+  console.log("ok retry budgets expire by TTL");
+}
+
 console.log("Issue #9 ProviderCore contract tests passed.");
 
 
