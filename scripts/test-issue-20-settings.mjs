@@ -176,7 +176,7 @@ async function exerciseClient(port) {
 
   tokenInput.props.onChange({ target: { value: "ephemeral-token" } });
   cursor = 0;
-  page();
+  page({ view: "page" });
   await new Promise(resolve => setImmediate(resolve));
 
   assert(requests.includes("http://127.0.0.1:" + port + "/v1/control/status"));
