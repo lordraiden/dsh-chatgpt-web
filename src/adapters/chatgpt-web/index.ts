@@ -24,7 +24,7 @@ import { safeErrorDescriptor, toolCallDiagnosticSummary } from "../../lib/safe-d
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
-import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface } from "./web-surface-transport";
+import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface, type WebSurfaceTransport } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -440,9 +440,11 @@ export function createChatGptWebAdapter(
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
     /** Shared lifecycle authority owned by the server process. */
     providerCore?: ChatGptWebProviderCore;
+    /** Injectable transport boundary for deterministic provider lifecycle tests. */
+    transport?: WebSurfaceTransport;
   } = {},
 ): ProviderAdapter {
-  const transport = chatGptWebSurfaceTransportForProvider(provider);
+  const transport = dependencies.transport ?? chatGptWebSurfaceTransportForProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
@@ -914,6 +916,7 @@ export function createChatGptWebAdapter(
       } : {}),
     }))), browserAbort);
     void browserTurn.browser.catch(error => {
+      running.reject(error instanceof Error ? error : new Error(String(error)));
       if (!tokenSettled) {
         tokenSettled = true;
         token.reject(error instanceof Error ? error : new Error(String(error)));
@@ -936,6 +939,7 @@ export function createChatGptWebAdapter(
         if (activeToken) await broker.revoke(activeToken);
       },
       submission,
+      running: running.promise,
       cancel: (reason?: Error) => {
         browserTurn.cancel(reason);
         if (activeToken) {
