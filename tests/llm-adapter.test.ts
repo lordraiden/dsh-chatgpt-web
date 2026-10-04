@@ -25,12 +25,19 @@ import {
 import type { AdapterEvent, CodexParsedRequest } from "../src/types";
 import type { ProviderAdapter } from "../src/adapters/base";
 import type { CodexProviderConfig } from "../src/types";
+import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import {
   chatGptTurnExecutionKey,
   chatGptTurnRoundKey,
 } from "../src/adapters/chatgpt-web/turn-execution";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+class TestProviderCore extends ChatGptWebProviderCore {
+  override bindPhysicalSettlement(_executionKey: string, _settlement: Promise<void>): ReturnType<ChatGptWebProviderCore["bindPhysicalSettlement"]> {
+    throw new Error("TestProviderCore must not bind physical settlement in capability-wait ordering tests");
+  }
+}
 
 function providerConfigFixture(overrides: Partial<CodexProviderConfig["chatgptWeb"]> = {}): CodexProviderConfig {
   return {
@@ -471,7 +478,7 @@ describe("native path does not enter the Responses server", () => {
       close: async () => {},
     };
 
-    const adapter = createChatGptWebAdapter(provider, { broker, transport });
+    const adapter = createChatGptWebAdapter(provider, { broker, transport, providerCore: new TestProviderCore() });
     const run = adapter.runTurn!(parsed, { headers: new Headers(), abortSignal: controller.signal }, () => {});
 
     await new Promise(resolve => setTimeout(resolve, 0));
