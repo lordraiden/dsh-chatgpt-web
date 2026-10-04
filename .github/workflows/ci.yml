@@ -55,6 +55,14 @@ jobs:
       - name: Issue #10-C capability identity tests
         run: bun scripts/test-issue-10c-capability-identity.ts
 
+      - name: Install DSH runtime for Native2 integration test
+        run: bun add --no-save @deepseek-ai/dsh@0.2.0-rc.2
+
+      - name: Native2 to DSH runtime integration
+        env:
+          DSH_RUNTIME_ROOT: ${{ github.workspace }}/node_modules/@deepseek-ai/dsh
+        run: bun run test:native2-dsh-runtime
+
       - name: Issue contract tests
         run: node scripts/test-issue-20-settings.mjs
 
