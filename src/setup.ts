@@ -103,7 +103,8 @@ export function launcherCapabilityProbeRequired(
     || existing?.browserInteractionMode === "manual"
     || existing?.browserHost !== "launcher"
     || typeof existing.solAvailable !== "boolean"
-    || typeof existing.proAvailable !== "boolean";
+    || typeof existing.proAvailable !== "boolean"
+    || (existing?.browserHost !== "launcher" && typeof existing.thinkAvailable !== "boolean");
 }
 
 export function existingFullSetupCredentials(
@@ -144,6 +145,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     headed: before.headed,
     solAvailable: before.solAvailable,
     proAvailable: before.proAvailable,
+    thinkAvailable: before.thinkAvailable,
     capabilityState: before.capabilityState,
     experimentalBiggerContext: before.experimentalBiggerContext,
     zeroRiskProEnabled: before.zeroRiskProEnabled,
@@ -172,6 +174,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     headed: after.headed,
     solAvailable: after.solAvailable,
     proAvailable: after.proAvailable,
+    thinkAvailable: after.thinkAvailable,
     capabilityState: after.capabilityState,
     experimentalBiggerContext: after.experimentalBiggerContext,
     zeroRiskProEnabled: after.zeroRiskProEnabled,
@@ -491,6 +494,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   let loginCreated = false;
   let solAvailable: boolean | undefined = config.solAvailable;
   let proAvailable: boolean | undefined = config.proAvailable;
+  let thinkAvailable: boolean | undefined = config.thinkAvailable;
   if (config.browserInteractionMode === "manual") {
     // The generic manual route is independent of account capabilities. The launcher may open the
     // authenticated surface, but setup must not inspect its model selector or infer availability.
@@ -508,6 +512,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     const stored = storedBrowserLoginCapabilities(config);
     solAvailable = stored.solAvailable;
     proAvailable = stored.proAvailable;
+    thinkAvailable = stored.thinkAvailable;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
     const capabilityProbeRequired = !loginRequired
       && (options.refreshAccountCapabilities === true
@@ -525,15 +530,20 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       const login = await loginToChatGpt(config);
       solAvailable = login.solAvailable;
       proAvailable = login.proAvailable;
+      thinkAvailable = login.thinkAvailable;
       loginCreated = true;
     } else if (capabilityProbeRequired) {
       const inspected = await inspectBrowserLoginCapabilities(config);
       solAvailable = inspected.solAvailable;
       proAvailable = inspected.proAvailable;
+      thinkAvailable = inspected.thinkAvailable;
     }
   }
   config.solAvailable = solAvailable === true;
   config.proAvailable = config.solAvailable && proAvailable === true;
+  config.thinkAvailable = config.browserInteractionMode === "manual"
+    ? false
+    : thinkAvailable === true;
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {
