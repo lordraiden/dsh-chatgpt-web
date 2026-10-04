@@ -76,7 +76,7 @@ export class SidecarSupervisor {
     const child = this.spawnedProcess;
     const childPort = this.spawnedPort;
     if (!child) return;
-    await this.terminateChild(child, childPort ?? this.config.port);
+    await this.terminateChild(child);
   }
 
   async reconfigure(next: SidecarSupervisorConfig): Promise<void> {
@@ -205,7 +205,7 @@ export class SidecarSupervisor {
     const deadline = Date.now() + targetReadyTimeoutMs;
     while (Date.now() < deadline) {
       if (generation !== this.generation) {
-        await this.terminateChild(child, targetPort);
+        await this.terminateChild(child);
         return;
       }
       if (await this.isHealthy(targetHost, targetPort)) {
@@ -266,7 +266,7 @@ export class SidecarSupervisor {
     });
   }
 
-  private async terminateChild(child: ChildProcess, port: number): Promise<void> {
+  private async terminateChild(child: ChildProcess): Promise<void> {
     const existing = this.terminationPromises.get(child);
     if (existing) return existing;
     const promise = this.terminateChildOnce(child).finally(() => {
@@ -313,6 +313,6 @@ export class SidecarSupervisor {
   private async terminationForCurrentProcess(): Promise<void> {
     const child = this.spawnedProcess;
     if (!child) return;
-    await this.terminateChild(child, this.spawnedPort ?? this.config.port);
+    await this.terminateChild(child);
   }
 }
