@@ -39,7 +39,12 @@ function createHarness(options: {
     const url = String(input);
     if (url.endsWith("/healthz")) {
       const port = Number(new URL(url).port);
-      return Response.json({ status: options.health(child, port) ? "ok" : "down" });
+      return Response.json({
+        status: options.health(child, port) ? "ok" : "down",
+        service: "dsh-chatgpt-web",
+        version: "1.0.3",
+        port,
+      });
     }
     throw new Error("unexpected request " + url);
   };
