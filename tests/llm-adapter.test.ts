@@ -414,7 +414,9 @@ describe("native path does not enter the Responses server", () => {
 
     let nextToolBatchCalled = false;
     let releaseSubmission!: () => void;
+    let releaseBrowser!: () => void;
     const submissionGate = new Promise<void>(resolve => { releaseSubmission = resolve; });
+    const browserGate = new Promise<void>(resolve => { releaseBrowser = resolve; });
     const broker: TurnBrokerOwner = {
       register: async () => "tool-turn-token",
       registerSafe: async () => "safe-turn-token",
@@ -422,6 +424,7 @@ describe("native path does not enter the Responses server", () => {
       confirmSafeTurnSent: () => ({ confirmed: true, duplicate: false }),
       nextToolBatch: async (_token: string, _signal?: AbortSignal): Promise<BrokerToolRequest[]> => {
         nextToolBatchCalled = true;
+        setTimeout(releaseBrowser, 0);
         return [];
       },
       completeTool: () => {},
@@ -449,6 +452,7 @@ describe("native path does not enter the Responses server", () => {
         await turn.onSendActivated?.();
         await submissionGate;
         turn.onSubmitted?.();
+        await browserGate;
         return "answer";
       },
       verifyConnector: async () => "verified",
