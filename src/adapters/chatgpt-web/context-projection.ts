@@ -29,16 +29,8 @@ export function projectCanonicalChatGptWebContext(
 ): CanonicalChatGptWebContext {
   const messages = withoutSupersededModelSwitchContracts(sourceMessages);
   const images: ChatGptWebPromptImage[] = [];
-  const userContext = messages
-    .filter(message => message.role === "user")
-    .map(message => {
-      if (typeof message.content === "string") return message.content;
-      return message.content.map(part => part.type === "text" ? part.text : "").join(" ");
-    })
-    .join(" ");
-
   const projectedMessages = messages.map(message =>
-    messageEnvelope(message, images, userContext)
+    messageEnvelope(message, images)
   );
 
   return Object.freeze({
@@ -68,6 +60,10 @@ const RETIRED_TRANSPORT_HANDLE_KEYS = new Set([
   "__surface_handle",
 ]);
 
+/**
+ * Remove only metadata keys that this plugin historically created as retired transport handles.
+ * This is not a semantic normalization or repair pass.
+ */
 function sanitizeRetiredTransportFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeRetiredTransportFields);
   if (!value || typeof value !== "object") return value;
@@ -184,7 +180,6 @@ function inputContent(
 
 function assistantContent(
   content: CodexAssistantContentPart[],
-  userContext?: string,
 ): unknown[] {
   return content.map(part => {
     if (part.type === "text") return { type: "text", text: part.text };
@@ -203,26 +198,12 @@ function assistantContent(
         ...(part.redacted?.length ? { redacted: [...part.redacted] } : {}),
       };
     }
-    let args = part.arguments;
-    if (part.name === "write" && args && typeof args === "object") {
-      const rec = { ...(args as Record<string, unknown>) };
-      if ((typeof rec.file_path !== "string" || !rec.file_path.trim()) && userContext) {
-        const cleaned = userContext
-          .replace(/https?:\/\/[^\s]+/g, "")
-          .replace(/\b(?:AGENTS|CLAUDE)\.md\b/gi, "");
-        const match = cleaned.match(/\b([a-zA-Z0-9_.\-\\/]+\.[a-zA-Z0-9]{1,10})\b/);
-        if (match?.[1]) {
-          rec.file_path = match[1];
-          args = rec;
-        }
-      }
-    }
     return {
       type: "tool_call",
       id: part.id,
       name: part.name,
       ...(part.namespace ? { namespace: part.namespace } : {}),
-      arguments: args,
+      arguments: part.arguments,
       ...(part.thoughtSignature ? { thought_signature: part.thoughtSignature } : {}),
     };
   }).filter(Boolean);
@@ -268,7 +249,6 @@ export function withoutSupersededModelSwitchContracts(
 function messageEnvelope(
   message: CodexMessage,
   images: ChatGptWebPromptImage[],
-  userContext?: string,
 ): Record<string, unknown> {
   if (message.role === "toolResult") {
     return {
@@ -292,7 +272,7 @@ function messageEnvelope(
     return {
       role: "assistant",
       ...(message.phase ? { phase: message.phase } : {}),
-      content: assistantContent(message.content, userContext),
+      content: assistantContent(message.content),
     };
   }
   return { role: message.role, content: inputContent(message.content, images) };
