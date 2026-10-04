@@ -32,6 +32,16 @@ export interface ProviderTurnPhysicalResourceBinding {
 
 type RetryPolicy = "strict" | "side_effect_free";
 
+export interface ProviderRetryDecision {
+  readonly allowed: boolean;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly reason?: "submitted" | "budget_exhausted" | "retired" | "policy";
+}
+
+const DEFAULT_MAX_RETRY_ATTEMPTS = 4;
+const RETRY_BUDGET_TTL_MS = 30 * 60_000;
+
 const TRANSITIONS: Record<ProviderTurnState, readonly ProviderTurnState[]> = {
   PREPARING: ["LEASED", "SETTLING"],
   LEASED: ["SURFACE_READY", "SETTLING"],
@@ -249,6 +259,8 @@ export class ProviderTurnLifecycle {
   private physicalSettlementOutcome: PhysicalSettlementOutcome = "not_started";
   private physicalSettlementError?: Error;
   private retirementScheduled = false;
+  private retryAttempts = 0;
+  private lastRetryAt = 0;
   private shutdownRequested = false;
   private cancelExecution?: (reason: Error) => void;
 
@@ -410,20 +422,44 @@ export class ProviderTurnLifecycle {
     this.cancelExecution?.(reason);
   }
 
-  canAutomaticallyRetry(): boolean {
-    if (this.submission !== "prepared") return false;
-    return this.state !== "SUBMITTED"
-      && this.state !== "RUNNING"
-      && this.state !== "SETTLING"
-      && this.state !== "RETIRED"
-      && (this.retryPolicy === "strict" || this.retryPolicy === "side_effect_free");
+  retryDecision(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): ProviderRetryDecision {
+    if (this.submission !== "prepared") {
+      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "submitted" };
+    }
+    if (this.state === "SETTLING" || this.state === "RETIRED") {
+      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "retired" };
+    }
+    if (this.retryPolicy !== "strict" && this.retryPolicy !== "side_effect_free") {
+      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "policy" };
+    }
+    if (this.lastRetryAt > 0 && now - this.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
+      this.retryAttempts = 0;
+    }
+    if (this.retryAttempts >= maxAttempts) {
+      return { allowed: false, attempt: this.retryAttempts, maxAttempts, reason: "budget_exhausted" };
+    }
+    return { allowed: true, attempt: this.retryAttempts + 1, maxAttempts };
   }
 
-  authorizeSurfaceReplay(): void {
+  recordRetryAttempt(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): ProviderRetryDecision {
     this.assertMutable();
-    if (!this.canAutomaticallyRetry()) {
+    const decision = this.retryDecision(now, maxAttempts);
+    if (!decision.allowed) return decision;
+    this.retryAttempts += 1;
+    this.lastRetryAt = now;
+    return { allowed: true, attempt: this.retryAttempts, maxAttempts };
+  }
+
+  canAutomaticallyRetry(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): boolean {
+    return this.retryDecision(now, maxAttempts).allowed;
+  }
+
+  authorizeSurfaceReplay(now = Date.now(), maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): void {
+    this.assertMutable();
+    const decision = this.recordRetryAttempt(now, maxAttempts);
+    if (!decision.allowed) {
       throw new Error(
-        `Automatic browser surface replay is forbidden after physical submission has started (submission=${this.submission}, state=${this.state})`,
+        `Automatic browser surface replay is forbidden (reason=${decision.reason}, submission=${this.submission}, state=${this.state})`,
       );
     }
     if (!this.lease.physicalResourceBinding()) {

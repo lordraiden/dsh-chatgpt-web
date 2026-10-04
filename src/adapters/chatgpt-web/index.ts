@@ -31,9 +31,9 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt
 import { projectCanonicalChatGptWebContext } from "./context-projection";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
-import { chatGptWebTurnRetryPolicy } from "./retry-policy";
+import { classifyChatGptWebRetry } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
@@ -967,19 +967,6 @@ export function createChatGptWebAdapter(
           ? undefined
           : createChatGptStructuredOutputValidator(parsed.options.outputFormat);
         const bufferStructuredOutput = structuredOutputValidator !== undefined;
-        const retryKey = `${executionNamespace}:${chatGptTurnRetryKey(parsed)}`;
-        const exhaustedRetry = chatGptWebTurnRetryPolicy.exhaustedError(retryKey);
-        if (exhaustedRetry) {
-          emit({
-            type: "error",
-            message: exhaustedRetry.message,
-            status: exhaustedRetry.status,
-            errorType: exhaustedRetry.errorType,
-            code: exhaustedRetry.code,
-            retryable: false,
-          });
-          return;
-        }
         let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
         if (mode.localTools) {
           try {
@@ -1247,7 +1234,6 @@ export function createChatGptWebAdapter(
               estimateChatGptWebUsage(parsed, { answer: summary, reasoning: [] }, turnCapabilities),
               emit,
             );
-            chatGptWebTurnRetryPolicy.clear(retryKey);
             return;
           }
           const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
@@ -1457,7 +1443,6 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
-                  chatGptWebTurnRetryPolicy.clear(retryKey);
                   return;
                 }
 
@@ -1482,7 +1467,6 @@ export function createChatGptWebAdapter(
               ));
               providerTurn.markLogicalSettled();
               session.completeRound(roundKey);
-              chatGptWebTurnRetryPolicy.clear(retryKey);
               return;
             }
 
@@ -1641,7 +1625,6 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
-                  chatGptWebTurnRetryPolicy.clear(retryKey);
                   return;
                 }
 
@@ -1658,8 +1641,7 @@ export function createChatGptWebAdapter(
                 ));
                 providerTurn.markLogicalSettled();
                 session.completeRound(roundKey);
-                chatGptWebTurnRetryPolicy.clear(retryKey);
-              };
+                  };
               const waitForTrace = () => session.runtime.trace.wait(toolWaitAbort.signal)
                 .then(() => ({ type: "trace" as const }))
                 .catch(error => toolWaitAbort.signal.aborted
@@ -1767,38 +1749,43 @@ export function createChatGptWebAdapter(
               });
             }
           }
-          const retryAllowed = providerTurn.canAutomaticallyRetry();
-          const retryCandidate = turnError instanceof ChatGptWebAdapterError && turnError.retryable
-            ? (
-              retryAllowed
-                ? turnError
-                : new ChatGptWebAdapterError(
-                  turnError.message,
-                  {
-                    status: turnError.status,
-                    errorType: turnError.errorType,
-                    code: turnError.code,
-                    retryable: false,
-                    cause: turnError,
-                  },
-                )
-            )
+          const retryCandidate = turnError instanceof ChatGptWebAdapterError
+            ? classifyChatGptWebRetry(turnError)
             : turnError;
-          const handledError = retryCandidate instanceof ChatGptWebAdapterError && retryCandidate.retryable
-            ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, retryCandidate)
-            : retryCandidate;
-          if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
-            chatGptWebTurnRetryPolicy.clear(retryKey);
+          const retryDecision = retryCandidate instanceof ChatGptWebAdapterError
+            ? providerTurn.retryDecision()
+            : { allowed: false as const, attempt: 0, maxAttempts: 4 };
+          const retryAllowed = retryCandidate instanceof ChatGptWebAdapterError
+            && retryCandidate.retryable
+            && retryDecision.allowed;
+
+          if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed && retryCandidate.retryable) {
+            const exhausted = new ChatGptWebAdapterError(
+              retryCandidate.message + " ChatGPT remained unavailable after the ProviderCore retry budget was exhausted.",
+              {
+                status: retryCandidate.status,
+                errorType: retryCandidate.errorType,
+                code: retryCandidate.code,
+                retryable: false,
+                cause: retryCandidate,
+              },
+            );
+            providerTurn.markRecovery("FAILED");
+            providerTurn.markLogicalSettled("failed");
+            emitRoundEvent({
+              type: "error",
+              message: exhausted.message,
+              status: exhausted.status,
+              errorType: exhausted.errorType,
+              code: exhausted.code,
+              retryable: false,
+            });
+            session.completeRound(roundKey);
+            return;
           }
-          // Every terminal browser-attempt failure must be classified as FAILED before the
-          // session is retired. A later explicit retry starts a new physical attempt and is therefore
-          // a replay, never an implicit downgrade of this failed execution.
+
           providerTurn.markRecovery("FAILED");
-          if (handledError instanceof ChatGptWebAdapterError && !handledError.retryable) {
-            // A deterministic request failure remains replayable so a native reconnect cannot burn
-            // another browser attempt. Every other failure retires the browser session: client
-            // disconnects, stage failures, and retryable ChatGPT errors must start a fresh surface
-            // instead of replaying one rejected browser outcome for the registry's full TTL.
+          if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed) {
             session.cancel();
           } else {
             chatGptTurnSessions.retire(executionKey, session);
@@ -1806,23 +1793,21 @@ export function createChatGptWebAdapter(
           if (session.runtime.mode === "tools") {
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
-          if (handledError instanceof ChatGptWebAdapterError) {
+          if (retryCandidate instanceof ChatGptWebAdapterError) {
             providerTurn.markLogicalSettled("failed");
             emitRoundEvent({
               type: "error",
-              message: handledError.message,
-              status: handledError.status,
-              errorType: handledError.errorType,
-              code: handledError.code,
-              retryable: handledError.retryable,
+              message: retryCandidate.message,
+              status: retryCandidate.status,
+              errorType: retryCandidate.errorType,
+              code: retryCandidate.code,
+              retryable: retryCandidate.retryable,
             });
             session.completeRound(roundKey);
             return;
           }
-          providerTurn.markRecovery("FAILED");
           providerTurn.markLogicalSettled("failed");
           session.failRound(roundKey, turnError);
-          chatGptWebTurnRetryPolicy.clear(retryKey);
           throw turnError;
         }
       };
