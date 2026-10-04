@@ -270,6 +270,13 @@ async function runNative2Integration(): Promise<void> {
       assert.equal(dshResult.isError, false);
       assert.equal(existsSync(OUTSIDE_PATH), true);
 
+      const eventsAfterApproval = sessionEvents(session);
+      const approvalDecision = eventsAfterApproval.find(event => event.type === "approval/decided");
+      assert.deepEqual(approvalDecision?.data, {
+        id: (eventsBeforeApproval.find(event => event.type === "approval/asked")?.data as Record<string, unknown>).id,
+        outcome: "allowed-once",
+      });
+
       const brokerResult: BrokerToolResult = {
         content: dshResult.content,
         ...(dshResult.isError ? { isError: true } : {}),
