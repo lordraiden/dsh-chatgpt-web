@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Volatile } from "@deepseek-ai/cordis";
-import z from "@deepseek-ai/schemastery";
+import schemastery from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
 import { loadConfig } from "./config";
 import type { DshNativeTurnContext } from "./types";
@@ -50,14 +50,14 @@ export interface Config {
   bunPath?: string;
 }
 
-export const Config = z.object({
-  port: z.number().step(1).min(1).max(65535).default(DEFAULT_PORT)
+export const Config = schemastery.object({
+  port: schemastery.number().step(1).min(1).max(65535).default(DEFAULT_PORT)
     .description("Loopback ChatGPT Web sidecar port.").volatile(),
-  autoStart: z.boolean().default(true)
+  autoStart: schemastery.boolean().default(true)
     .description("Start and stop the local ChatGPT Web sidecar automatically.").volatile(),
-  readyTimeoutMs: z.number().step(1).min(0).default(30_000)
+  readyTimeoutMs: schemastery.number().step(1).min(0).default(30_000)
     .description("Milliseconds to wait for a newly started sidecar to become healthy.").volatile(),
-  bunPath: z.string().default(undefined as unknown as string),
+  bunPath: schemastery.string().default(undefined as unknown as string),
 });
 
 type ChatGPTWebPluginConfig = {
