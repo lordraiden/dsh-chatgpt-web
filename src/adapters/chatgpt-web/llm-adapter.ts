@@ -277,7 +277,24 @@ function createNativeDshRemoteBackend(
       });
       if (!response.ok) {
         const body = await response.text().catch(() => "");
-        throw new Error(body || ("ChatGPT Web sidecar rejected native DSH turn (HTTP " + response.status + ")."));
+        let message = body || ("ChatGPT Web sidecar rejected native DSH turn (HTTP " + response.status + ").");
+        let code = "PROVIDER_ERROR";
+        try {
+          const payload = JSON.parse(body) as {
+            error?: { message?: unknown; code?: unknown };
+          };
+          if (payload.error && typeof payload.error === "object") {
+            if (typeof payload.error.message === "string" && payload.error.message.length > 0) {
+              message = payload.error.message;
+            }
+            if (typeof payload.error.code === "string" && payload.error.code.length > 0) {
+              code = payload.error.code;
+            }
+          }
+        } catch {
+          // Keep the raw response text when the sidecar returns a non-JSON failure.
+        }
+        throw new LlmError(message, code, { status: response.status });
       }
       if (!response.body) throw new Error("ChatGPT Web sidecar returned an empty native DSH stream.");
       const reader = response.body.getReader();

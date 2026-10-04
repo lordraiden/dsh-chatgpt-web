@@ -137,6 +137,47 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
 }
 
 {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      error: {
+        type: "server_error",
+        code: "server_is_overloaded",
+        message: "dsh-chatgpt-web is draining for a requested service operation",
+      },
+    }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+
+    const adapter = new ChatGptWebLlmAdapter({
+      loadProvider: () => provider,
+      resolveNativeDshTransport: () => ({
+        baseUrl: "http://127.0.0.1:17841",
+        controlToken: "test-token",
+      }),
+      resolveNativeDshContext: () => nativeContext,
+    });
+    const chunks = [];
+    for await (const chunk of adapter.stream(baseOptions())) {
+      chunks.push(chunk);
+    }
+    const finish = chunks.findLast((chunk) => chunk.type === "finish");
+    assert.ok(finish && finish.type === "finish");
+    assert.deepEqual(finish.reason, {
+      kind: "error",
+      failure: {
+        message: "dsh-chatgpt-web is draining for a requested service operation",
+        code: "server_is_overloaded",
+        status: 503,
+      },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+{
   const backend = {
     runTurn: async (
       _parsed: CodexParsedRequest,
