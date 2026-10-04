@@ -59,7 +59,7 @@ function createHarness(options: {
         child = new FakeChild();
         return child as unknown as ChildProcess;
       },
-      fetch: fetchImpl,
+      fetch: fetchImpl as typeof fetch,
       cwd: process.cwd(),
       logger: {
         info: message => logs.push("info:" + message),
