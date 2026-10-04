@@ -11,6 +11,20 @@ export interface DshNativeTurnContext {
   turnId: string;
   /** DSH auxiliary-call classification, when present. */
   purpose?: "compaction" | "session-title";
+  /** DSH-owned self-development policy projection for this native turn. */
+  selfDevelopment?: {
+    workspaceRoot: string;
+    sandboxMode: "read-only" | "workspace-write" | "danger-full-access";
+    networkAccess: boolean;
+    approvalPolicy: "ask" | "never";
+    capabilities: Array<
+      "filesystem-read"
+      | "filesystem-write"
+      | "execution"
+      | "git-read"
+      | "diagnostics-read"
+    >;
+  };
   /** DSH-authoritative sandbox projection used by the ChatGPT capability bridge. */
   environment?: {
     cwd: string;
