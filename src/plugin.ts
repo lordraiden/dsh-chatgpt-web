@@ -37,11 +37,11 @@ export interface CordisContext {
   llm: {
     registerAdapter(providers: string[], adapter: ChatGptWebLlmAdapter): { (): void };
   };
-  tools: WorkspaceToolsContext["tools"];
+  tools?: WorkspaceToolsContext["tools"];
 }
 
 export const name = "dsh-chatgpt-web";
-export const inject = ["llm", "tools"];
+export const inject = ["llm"];
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 17841;
 
@@ -267,6 +267,9 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
 
   const workspaceTools = readWorkspaceToolConfig(config);
   if (workspaceTools.enabled) {
+    if (!ctx.tools) {
+      throw new Error("DSH tools service is required when workspace tools are enabled");
+    }
     const registered = registerWorkspaceTools(ctx, workspaceTools);
     logger.info(`[dsh-chatgpt-web] Registered bounded workspace tools: ${registered.join(", ")}`);
   }
