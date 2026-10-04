@@ -4376,7 +4376,7 @@ export class ChatGptBrowserWorker {
         if (now - lastHeartbeatFailureAt < 30_000) return;
         lastHeartbeatFailureAt = now;
         console.warn(
-          `[chatgpt-web] launcher turn heartbeat failed for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+          `[chatgpt-web] launcher turn heartbeat failed for ${turn.traceId} ${safeErrorDescriptor(error)}`,
         );
       }).finally(() => {
         heartbeatInFlight = false;
@@ -4423,7 +4423,7 @@ export class ChatGptBrowserWorker {
         }
         if (!originalError) throw controlError;
         console.error(
-          `[chatgpt-web] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
+          `[chatgpt-web] launcher turn-end notification failed after browser error ${safeErrorDescriptor(controlError)}`,
         );
       }
     }
