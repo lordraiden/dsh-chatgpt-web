@@ -207,7 +207,7 @@ export function assertCapabilitySnapshotIntegrity(snapshot: CapabilitySnapshot):
     snapshot.expiresAt,
   );
   if (snapshot.snapshotId !== expectedSnapshotId) {
-    throw new Error("Capability snapshot identity check failed");
+    throw new Error("Capability snapshot integrity check failed");
   }
   const expectedIntegrityHash = canonicalIntegrityHash(
     snapshot.sessionId,
