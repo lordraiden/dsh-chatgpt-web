@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import type { ChatGptWebCapabilityState } from "./chatgpt-web-authority";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 export const CHATGPT_COMPOSER_SELECTOR = [
@@ -172,9 +173,114 @@ export async function assertTemporaryChatPage(page: Page): Promise<void> {
   }
 }
 
+export interface ChatGptAccountCapabilityProbe {
+  solAvailable: ChatGptWebCapabilityState;
+  proAvailable: ChatGptWebCapabilityState;
+}
+
+export async function probeChatGptAccountCapabilities(
+  page: Page,
+  options: { selectorTimeoutMs?: number; stableAbsenceMs?: number } = {},
+): Promise<ChatGptAccountCapabilityProbe> {
+  const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+  const composer = composers.last();
+  const composerForm = composer.locator("xpath=ancestor::form[1]");
+  const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
+  const deadline = Date.now() + (options.selectorTimeoutMs ?? 30_000);
+  const stableAbsenceMs = options.stableAbsenceMs ?? 3_000;
+  let absenceSince: number | undefined;
+  let presenceObservations = 0;
+  while (true) {
+    const effortVisible = await effortButton.isVisible().catch(() => false);
+    if (effortVisible) {
+      presenceObservations += 1;
+      absenceSince = undefined;
+      if (presenceObservations >= 2) break;
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+      continue;
+    }
+    presenceObservations = 0;
+    const composerReady = await composers.count().then(count => count === 1).catch(() => false);
+    const formReady = await composerForm.count().then(count => count === 1).catch(() => false);
+    const documentReady = await page.evaluate(() => document.readyState === "complete").catch(() => false);
+    if (composerReady && formReady && documentReady) {
+      absenceSince ??= Date.now();
+      if (Date.now() - absenceSince >= stableAbsenceMs) {
+        return { solAvailable: "unsupported", proAvailable: "unsupported" };
+      }
+    } else {
+      absenceSince = undefined;
+    }
+    if (Date.now() >= deadline) {
+      return { solAvailable: "unknown", proAvailable: "unknown" };
+    }
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+  }
+
+  const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
+  const menuVisible = await menu.isVisible().catch(() => false);
+  const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
+  if (!menuVisible && menuExpanded !== "true") {
+    try {
+      await effortButton.press("Enter");
+    } catch {
+      return { solAvailable: "unknown", proAvailable: "unknown" };
+    }
+  }
+
+  try {
+    const slider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true }).last();
+    const waitAbort = new AbortController();
+    try {
+      const ready = await Promise.race([
+        page.locator(CHATGPT_EFFORT_MENU_SELECTOR).filter({ visible: true }).last()
+          .waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
+          .then(() => "menu" as const),
+        slider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
+          .then(() => "slider" as const),
+      ]);
+      const sliderVisible = ready === "slider" || await slider.isVisible().catch(() => false);
+      if (!sliderVisible) {
+        // An established model selector proves the Sol-capable product surface. Without the
+        // structural slider, Pro availability is not verifiable and must remain unknown.
+        return { solAvailable: "supported", proAvailable: "unknown" };
+      }
+
+      const state = parseChatGptEffortSliderState(
+        await slider.getAttribute("aria-valuemin"),
+        await slider.getAttribute("aria-valuemax"),
+        await slider.getAttribute("aria-valuenow"),
+      );
+      if (!state) {
+        return { solAvailable: "supported", proAvailable: "unknown" };
+      }
+      return {
+        solAvailable: "supported",
+        proAvailable: state.max - state.min + 1 >= 5 ? "supported" : "unsupported",
+      };
+    } finally {
+      waitAbort.abort();
+    }
+  } finally {
+    await page.keyboard.press("Escape").catch(() => {});
+  }
+}
+
 export async function detectChatGptAccountCapabilities(
   page: Page,
   options: { selectorTimeoutMs?: number; stableAbsenceMs?: number } = {},
+): Promise<ChatGptWebAccountCapabilities> {
+  const result = await probeChatGptAccountCapabilities(page, options);
+  if (result.solAvailable === "unknown" || result.proAvailable === "unknown") {
+    throw new Error(
+      `ChatGPT account capability is unknown or unverifiable (Sol=${result.solAvailable}, Pro=${result.proAvailable}); refusing model selection`,
+    );
+  }
+  return {
+    solAvailable: result.solAvailable === "supported",
+    proAvailable: result.proAvailable === "supported",
+  };
+} = {},
 ): Promise<ChatGptWebAccountCapabilities> {
   const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
   const composer = composers.last();
