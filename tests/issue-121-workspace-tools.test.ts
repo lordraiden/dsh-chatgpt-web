@@ -93,7 +93,7 @@ describe("issue #121 bounded workspace filesystem tools", () => {
 
   test("reads a valid UTF-8 file inside the workspace", async () => {
     const root = await createRoot();
-    await writeFile(join(root, "hello.txt"), "one\\ntwo\\nthree\\n", "utf8");
+    await writeFile(join(root, "hello.txt"), "one\ntwo\nthree\n", "utf8");
 
     const result = await tool(tools(root), "fs.read").execute(
       { file_path: "hello.txt", start_line: 2, max_lines: 2 },
@@ -102,7 +102,7 @@ describe("issue #121 bounded workspace filesystem tools", () => {
 
     expect(result).toMatchObject({
       path: "hello.txt",
-      content: "two\\nthree\\n",
+      content: "two\nthree\n",
       start_line: 2,
       end_line: 3,
       total_lines: 4,
@@ -127,7 +127,7 @@ describe("issue #121 bounded workspace filesystem tools", () => {
   test("edits an existing file with unique-match protection", async () => {
     const root = await createRoot();
     const path = join(root, "edit.txt");
-    await writeFile(path, "alpha\\nbeta\\ngamma\\n", "utf8");
+    await writeFile(path, "alpha\nbeta\ngamma\n", "utf8");
 
     const edit = tool(tools(root), "fs.edit");
     const result = await edit.execute(
@@ -140,14 +140,14 @@ describe("issue #121 bounded workspace filesystem tools", () => {
       operation: "edit",
       replacements: 1,
     });
-    expect(await readFile(path, "utf8")).toBe("alpha\\ndelta\\ngamma\\n");
+    expect(await readFile(path, "utf8")).toBe("alpha\ndelta\ngamma\n");
 
-    await writeFile(path, "x\\nx\\n", "utf8");
+    await writeFile(path, "x\nx\n", "utf8");
     await expectWorkspaceError(
       () => edit.execute({ file_path: "edit.txt", old_string: "x", new_string: "y" }, exec()),
       "WORKSPACE_MATCH_AMBIGUOUS",
     );
-    expect(await readFile(path, "utf8")).toBe("x\\nx\\n");
+    expect(await readFile(path, "utf8")).toBe("x\nx\n");
   });
 
   test("rejects parent traversal before filesystem access", async () => {
@@ -218,9 +218,9 @@ describe("issue #121 bounded workspace filesystem tools", () => {
 
   test("searches paths and file contents with bounded results", async () => {
     const root = await createRoot();
-    await writeFile(join(root, "alpha.ts"), "const needle = true;\\n", "utf8");
-    await writeFile(join(root, "beta.md"), "nothing here\\n", "utf8");
-    await writeFile(join(root, "needle-name.txt"), "other\\n", "utf8");
+    await writeFile(join(root, "alpha.ts"), "const needle = true;\n", "utf8");
+    await writeFile(join(root, "beta.md"), "nothing here\n", "utf8");
+    await writeFile(join(root, "needle-name.txt"), "other\n", "utf8");
 
     const result = await tool(tools(root), "fs.search").execute(
       { query: "needle", max_results: 10 },
