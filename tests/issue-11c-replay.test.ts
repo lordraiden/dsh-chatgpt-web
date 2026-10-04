@@ -9,6 +9,7 @@ import {
 } from "../src/adapters/chatgpt-web/replay";
 import { projectCanonicalChatGptWebContext } from "../src/adapters/chatgpt-web/context-projection";
 import { BrowserAccountLease, ProviderTurnLifecycle } from "../src/adapters/chatgpt-web/provider-core";
+import { projectChatGptCapabilities } from "../src/adapters/chatgpt-web/capability-projector";
 
 const identity: ChatGptReplayIdentity = {
   sessionId: "dsh-session-1",
@@ -321,15 +322,12 @@ test("EXACT_RESUME cannot be silently reclassified as REPLAY", () => {
     pageIdentity: "page-1",
     turnId: identity.turnId,
   });
-  const capabilitySnapshot = {
-    snapshotId: "snapshot-1",
+  const capabilitySnapshot = projectChatGptCapabilities({
     sessionId: identity.sessionId,
     agentId: identity.agentId,
     turnId: identity.turnId,
-    createdAt: Date.now(),
-    lifecycle: "active" as const,
     tools: [],
-  };
+  });
   const lifecycle = new ProviderTurnLifecycle(
     lease,
     { serviceId: "chatgpt-web", traceId: "trace-1", executionKey: "exec-1", nativeTurnId: identity.turnId },
