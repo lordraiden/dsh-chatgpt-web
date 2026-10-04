@@ -17,7 +17,7 @@ jobs:
     name: ChatGPT Web Native2 -> DSH tool approval E2E
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e6139d1aa7bc8d1b07a8c6a4dd6d8c57e7 # pinned
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
