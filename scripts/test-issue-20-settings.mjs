@@ -7,6 +7,7 @@ const root = resolve(import.meta.dirname, "..");
 const client = readFileSync(resolve(root, "client.js"), "utf8");
 const plugin = readFileSync(resolve(root, "src", "plugin.ts"), "utf8");
 const cli = readFileSync(resolve(root, "src", "cli.ts"), "utf8");
+const config = readFileSync(resolve(root, "src", "config.ts"), "utf8");
 
 assert(!client.includes("localStorage.getItem"), "client must not read a persisted control token");
 assert(!client.includes("localStorage.setItem"), "client must not write a persisted control token");
@@ -38,6 +39,10 @@ assert(plugin.includes('"--host", DEFAULT_HOST, "--port", String(port)'), "launc
 assert(plugin.includes("let startGeneration = 0"), "live reconfiguration must invalidate an in-flight start");
 assert(plugin.includes("if (spawnedProcess === child)"), "old sidecar exits must not clear ownership of a newer child");
 assert(!plugin.includes("host?: string"), "host must not become a configurable plugin field");
+assert(config.includes("contextWindow?: number"), "legacy contextWindow must be optional");
+assert(config.includes("New configurations do not write it") || config.includes("New configurations do not write it;"), "new config must stop treating contextWindow as a user capacity setting");
+assert(config.includes("resolveChatGptWebContextLimits("), "provider config must derive context from route limits");
+assert(!config.includes("contextWindow: 256_000"), "default config must not invent a 256K user capacity");
 assert(cli.includes('takeOption(args, "--host")'), "serve must accept a host override");
 assert(cli.includes('takeOption(args, "--port")'), "serve must accept a port override");
 assert(cli.includes("--host must be 127.0.0.1; the sidecar is loopback-only"), "serve must preserve loopback-only access");
