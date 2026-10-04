@@ -152,6 +152,8 @@ interface ChatGptTurnRuntimeBase {
   /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */
   retireCapability?: () => void | Promise<void>;
   submission?: { phase: "prepared" | "send_activated" | "accepted" };
+  /** Resolves only after the browser submission has been accepted and the provider turn is RUNNING. */
+  running: Promise<void>;
   /** Semantic ChatGPT conversation epoch. Physical page/resource identity remains separate. */
   conversationGeneration?: number;
   /** Present only when the visible ChatGPT tab is driven manually through the Codex Zero Risk MCP contract. */
