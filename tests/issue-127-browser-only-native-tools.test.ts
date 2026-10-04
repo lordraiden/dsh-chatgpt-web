@@ -105,9 +105,23 @@ describe("issue #127 browser-only native DSH tool handoff", () => {
         threadId: "issue-127-thread",
         turnId: "issue-127-turn",
       };
-      nativeParsed.context.tools = [FS_READ];
 
       const baseUrl = `http://127.0.0.1:${running.port}`;
+      const plainNativeResponse = await fetch(`${baseUrl}/internal/native-llm`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${config.controlToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "chatgpt-web/light",
+          request: nativeParsed,
+        }),
+      });
+      expect(plainNativeResponse.status).toBe(200);
+      await plainNativeResponse.text();
+
+      nativeParsed.context.tools = [FS_READ];
       const nativeResponse = await fetch(`${baseUrl}/internal/native-llm`, {
         method: "POST",
         headers: {
@@ -139,7 +153,7 @@ describe("issue #127 browser-only native DSH tool handoff", () => {
       expect(responseIngress.status).toBe(200);
       await responseIngress.text();
 
-      expect(localToolsSeen).toEqual([true, false]);
+      expect(localToolsSeen).toEqual([false, true, false]);
       expect(toolNamesSeen[0]).toEqual(["fs.read"]);
       expect(toolNamesSeen[1]).toEqual([]);
     } finally {
