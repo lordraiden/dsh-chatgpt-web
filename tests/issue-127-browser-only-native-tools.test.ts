@@ -161,3 +161,4 @@ describe("issue #127 browser-only native DSH tool handoff", () => {
     }
   });
 });
+// CI validation marker: native turns without tools must remain outside capability wait.
