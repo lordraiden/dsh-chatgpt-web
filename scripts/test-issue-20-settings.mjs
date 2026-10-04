@@ -167,7 +167,7 @@ async function exerciseClient(port) {
   sandbox.plugin.factory(require).apply(context);
 
   cursor = 0;
-  const firstTree = page();
+  const firstTree = page({ view: "page" });
   const tokenInput = findNode(firstTree, node => node.type === "input");
   assert(tokenInput, "control-token input must render");
   assert.equal(tokenInput.props.value, "");
