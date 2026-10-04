@@ -26,7 +26,7 @@ test("Free Web budget separates theoretical window from measured browser transpo
   expect(budget.preCompactionInputBudget).toBe(128_000);
   expect(budget.outputHeadroomTokens).toBe(922_000);
   expect(budget.browserMessageTokenLimit).toBe(128_000);
-  expect(budget.browserComposerCharLimit).toBe(120_000);
+  expect(budget.browserComposerCharLimit).toBeUndefined();
   expect(budget.platformReserveTokens).toBe(8_192);
   expect(budget.imageLimit).toBe(CHATGPT_WEB_MAX_INPUT_IMAGES);
 });
@@ -56,6 +56,16 @@ test("capacity decision is deterministic and prefers compaction before multipart
     compactionAvailable: true,
     multipartAvailable: true,
   }).outcome).toBe("fits");
+});
+
+test("Luna does not preflight-reject prompts only because they exceed the measured composer character boundary", () => {
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low", capabilities);
+  expect(budget.browserComposerCharLimit).toBeUndefined();
+  expect(decideChatGptWebContextCapacity(
+    budget,
+    { estimatedInputTokens: 100_000, estimatedMessageTokens: 100_000, promptChars: 140_000 },
+    { compactionAvailable: false, multipartAvailable: false },
+  ).outcome).toBe("fits");
 });
 
 test("context exhaustion is independent of token overflow and exposes a stable semantic code", () => {

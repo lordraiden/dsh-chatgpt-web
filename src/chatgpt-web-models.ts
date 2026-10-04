@@ -68,13 +68,10 @@ export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
 export const CHATGPT_WEB_LUNA_CONTEXT_WINDOW = 1_050_000;
 export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
 /**
- * Measured Free-account composer boundary for the Luna route: a 119,341-character prompt enables
- * the send button within a second, while a 139,231-character prompt leaves it disabled
- * indefinitely. Above this boundary ChatGPT accepts the text into the ProseMirror composer but
- * never arms the send button, so the boundary must be enforced before the browser turn starts.
+ * The measured Free-account Luna composer boundary is intentionally not enforced here.
+ * Browser behavior above that boundary is part of the experimental transport surface and should
+ * be observed directly rather than preflight-rejected by the bridge.
  */
-export const CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT = 120_000;
-
 export interface ChatGptWebContextLimits {
   contextWindow: number;
   effectiveContextWindowPercent: number;
@@ -177,7 +174,7 @@ export function resolveChatGptWebTransportLimits(
 ): ChatGptWebTransportLimits {
   if (isChatGptWebZeroRiskBackendModel(backendModel)) return {};
   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
-    return { browserComposerCharLimit: CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT };
+    return {};
   }
   if (!capabilities.proAvailable) {
     if (effort === "low") {

@@ -1,6 +1,5 @@
 import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
-  CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT,
   CHATGPT_WEB_LUNA_CONTEXT_WINDOW,
   CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
   type ChatGptWebAdapterEffort,
@@ -115,7 +114,6 @@ export function resolveChatGptWebContextBudget(
     outputHeadroomTokens,
     platformReserveTokens: CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
     browserMessageTokenLimit: CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET,
-    browserComposerCharLimit: CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT,
     imageLimit: CHATGPT_WEB_DEFAULT_IMAGE_LIMIT,
   };
 }
