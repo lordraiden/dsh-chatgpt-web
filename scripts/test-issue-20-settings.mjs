@@ -171,7 +171,7 @@ async function exerciseClient(port) {
 
   cursor = 0;
   const firstTree = renderPage();
-  const tokenInput = findNode(firstTree, node => node.type === "input");
+  const tokenInput = findNode(firstTree, node => node.type === "input" && node.props?.type === "password");
   assert(tokenInput, "control-token input must render");
   assert.equal(tokenInput.props.value, "");
 
