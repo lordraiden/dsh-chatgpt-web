@@ -645,7 +645,6 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
       ...(native.dshSessionId ? { dshSessionId: native.dshSessionId } : {}),
       threadId: native.threadId,
       turnId: native.turnId,
-      ...(native.purpose ? { promptCacheKey: `dsh-purpose:${native.purpose}` } : {}),
     };
   }
   const body = record(parsed._rawBody);
