@@ -379,7 +379,6 @@ function chatGptWebRouteAuthority(config: AppConfig) {
   return createChatGptWebRouteAuthority({
     solAvailable: config.solAvailable,
     proAvailable: config.proAvailable,
-    thinkAvailable: config.thinkAvailable,
     capabilityState: config.capabilityState,
     browserInteractionMode: config.browserInteractionMode,
     zeroRiskProEnabled: config.zeroRiskProEnabled,
