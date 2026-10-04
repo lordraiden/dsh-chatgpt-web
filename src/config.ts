@@ -591,6 +591,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
+  if (parsed.capabilityState !== undefined) {
+    const state = parsed.capabilityState;
+    const valid = state
+      && (state.solAvailable === "supported" || state.solAvailable === "unsupported" || state.solAvailable === "unknown")
+      && (state.proAvailable === "supported" || state.proAvailable === "unsupported" || state.proAvailable === "unknown");
+    if (!valid) throw new Error(`Invalid capabilityState in ${path}`);
+  }
   if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
     throw new Error(`Invalid solAvailable in ${path}`);
   }
@@ -614,6 +621,16 @@ function parseConfig(value: unknown, path: string): AppConfig {
     solAvailable: parsed.solAvailable === undefined ? "unknown" : solAvailable ? "supported" : "unsupported",
     proAvailable: parsed.proAvailable === undefined ? "unknown" : proAvailable ? "supported" : "unsupported",
   };
+  if (capabilityState.solAvailable === "unknown") {
+    // Keep the boolean compatibility field conservative; route authority uses the tri-state value.
+    if (parsed.solAvailable !== undefined) throw new Error(`Invalid Sol capability state in ${path}`);
+  }
+  if (capabilityState.proAvailable === "unknown") {
+    if (parsed.proAvailable !== undefined) throw new Error(`Invalid Pro capability state in ${path}`);
+  }
+  if (capabilityState.proAvailable === "supported" && capabilityState.solAvailable !== "supported") {
+    throw new Error(`Invalid ChatGPT account capabilityState in ${path}: Pro requires supported Sol`);
+  }
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
   if (browserInteractionMode === "manual" && experimentalBiggerContext) {
