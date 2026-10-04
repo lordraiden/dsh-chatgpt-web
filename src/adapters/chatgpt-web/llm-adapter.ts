@@ -31,11 +31,12 @@ import {
   type ResolvedRetryPolicy,
   resolveRetryPolicy,
 } from "@deepseek-ai/dsh-llm";
+import { resolveChatGptWebContextLimits } from "../../chatgpt-web-models";
 import {
-  availableChatGptWebModelRoutes,
-  resolveChatGptWebContextLimits,
-  requireChatGptWebModelRoute,
-} from "../../chatgpt-web-models";
+  availableChatGptWebRoutes,
+  createChatGptWebRouteAuthorityFromProvider,
+  requireChatGptWebRoute,
+} from "../../chatgpt-web-authority";
 import { loadConfig, providerConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../responses/compaction";
 import {
@@ -157,7 +158,8 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
     const config = this.resolveProvider();
     let route;
     try {
-      route = requireChatGptWebModelRoute(model, accountCapabilities(config));
+      const authority = createChatGptWebRouteAuthorityFromProvider(config);
+      route = requireChatGptWebRoute(model, authority);
     } catch (error) {
       throw new LlmError(
         `ChatGPT Web model is not available: ${model} (${errorMessage(error)})`,
@@ -165,7 +167,20 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
         { cause: error },
       );
     }
-    const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, accountCapabilities(config));
+    const authority = createChatGptWebRouteAuthorityFromProvider(config);
+    const limits = resolveChatGptWebContextLimits(
+      route.backendModel,
+      route.adapterEffort,
+      {
+        solAvailable: authority.capabilities.solAvailable === "supported",
+        proAvailable: authority.capabilities.proAvailable === "supported",
+        experimentalBiggerContext: authority.browserInteractionMode === "automatic"
+          ? config.chatgptWeb?.experimentalBiggerContext
+          : false,
+        browserInteractionMode: authority.browserInteractionMode,
+        zeroRiskProEnabled: authority.zeroRiskProEnabled,
+      },
+    );
     return {
       provider,
       id: route.slug,
@@ -185,7 +200,7 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
   /** Whether `model` is a resolvable ChatGPT Web model (slug or backend id). */
   isSupportedModel(model: string): boolean {
     try {
-      requireChatGptWebModelRoute(model, accountCapabilities(this.resolveProvider()));
+      requireChatGptWebRoute(model, createChatGptWebRouteAuthorityFromProvider(this.resolveProvider()));
       return true;
     } catch {
       return false;
@@ -229,25 +244,7 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 
 /** Resolve the resolvable model routes for a provider configuration. */
 function requireRouteList(provider: ReturnType<typeof providerConfig>) {
-  return availableChatGptWebModelRoutes(accountCapabilities(provider));
-}
-
-function accountCapabilities(provider: ReturnType<typeof providerConfig>): {
-  solAvailable: boolean;
-  proAvailable: boolean;
-  experimentalBiggerContext?: boolean;
-  browserInteractionMode?: "automatic" | "manual";
-  zeroRiskProEnabled?: boolean;
-} {
-  const config = provider.chatgptWeb;
-  const manual = config?.browserInteractionMode === "manual";
-  return {
-    solAvailable: config?.solAvailable !== false && !manual,
-    proAvailable: config?.proAvailable === true && !manual,
-    experimentalBiggerContext: config?.experimentalBiggerContext,
-    browserInteractionMode: config?.browserInteractionMode,
-    zeroRiskProEnabled: config?.zeroRiskProEnabled === true && manual,
-  };
+  return availableChatGptWebRoutes(createChatGptWebRouteAuthorityFromProvider(provider));
 }
 
 function errorMessage(value: unknown): string {
@@ -269,10 +266,10 @@ export function toCodexParsedRequest(
     ...(request.purpose !== undefined ? { purpose: request.purpose } : {}),
   }),
 ): CodexParsedRequest {
-  const capabilities = accountCapabilities(provider);
+  const authority = createChatGptWebRouteAuthorityFromProvider(provider);
   let route;
   try {
-    route = requireChatGptWebModelRoute(options.model, capabilities);
+    route = requireChatGptWebRoute(options.model, authority);
   } catch (error) {
     throw new LlmError(`ChatGPT Web model is not available: ${options.model} (${errorMessage(error)})`, "NO_MODEL", { cause: error });
   }
