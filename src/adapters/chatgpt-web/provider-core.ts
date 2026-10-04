@@ -558,8 +558,9 @@ export class ChatGptWebProviderCore {
    * keeping the budget here prevents that replacement from resetting the retry limit.
    */
   private readonly retryBudgets = new Map<string, ProviderRetryBudget>();
-  // A snapshot is a capability binding for one logical provider execution, not a reusable tool-set token.
-  // Keep the ownership record after retirement so an old immutable snapshot cannot be attached to a new turn.
+  // Active snapshots are owned by active logical provider executions. Retired snapshot tombstones
+  // are retained only with the bounded retired-execution history so an old snapshot cannot be
+  // attached to an unrelated new execution forever growing ProviderCore state.
   private readonly capabilitySnapshotOwners = new Map<string, string>();
   private readonly retiredExecutions = new Map<string, number>();
   private readonly retiredCapabilitySnapshots = new Map<string, CapabilitySnapshot>();
@@ -705,6 +706,14 @@ export class ChatGptWebProviderCore {
     if (capabilityOwner !== undefined && capabilityOwner !== input.executionKey) {
       throw new Error("Capability snapshot is already bound to a different provider execution");
     }
+    for (const [retiredExecutionKey, retiredSnapshot] of this.retiredCapabilitySnapshots) {
+      if (
+        retiredExecutionKey !== input.executionKey
+        && retiredSnapshot.snapshotId === input.capabilitySnapshot.snapshotId
+      ) {
+        throw new Error("Capability snapshot is already retired under a different provider execution");
+      }
+    }
 
     if (input.nativeThreadId) {
       for (const [executionKey, activeTurn] of this.turns) {
@@ -744,6 +753,9 @@ export class ChatGptWebProviderCore {
         const finalSnapshot = turn.snapshot();
         this.turns.delete(input.executionKey);
         this.rememberRetired(input.executionKey);
+        if (this.capabilitySnapshotOwners.get(input.capabilitySnapshot.snapshotId) === input.executionKey) {
+          this.capabilitySnapshotOwners.delete(input.capabilitySnapshot.snapshotId);
+        }
         this.retiredCapabilitySnapshots.set(input.executionKey, input.capabilitySnapshot);
         if (finalSnapshot.logicalOutcome === "completed") {
           this.retryBudgets.delete(input.executionKey);

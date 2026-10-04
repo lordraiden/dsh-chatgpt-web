@@ -195,7 +195,16 @@ function leaseInput(turnId: string) {
     }),
     /second provider turn for an active native DSH thread/i,
   );
+  const oldSnapshot = first.snapshot().capabilitySnapshot;
   first.failBeforePhysicalSettlement();
+
+  assert.throws(
+    () => core.begin({
+      ...leaseInput("different-execution"),
+      capabilitySnapshot: oldSnapshot,
+    }),
+    /already retired under a different provider execution/i,
+  );
 
   const resumed = core.begin({
     ...leaseInput("resume-exact"),
