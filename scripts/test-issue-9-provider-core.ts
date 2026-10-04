@@ -481,14 +481,14 @@ console.log("Issue #9 ProviderCore contract tests passed.");
     accountId: "account-retry-budget",
   });
   turn.markSurfaceReady();
-  assert.equal(turn.retryDecision(0, 2).allowed, true);
-  turn.authorizeSurfaceReplay(0, 2);
-  assert.equal(turn.retryDecision(1, 2).attempt, 2);
-  turn.authorizeSurfaceReplay(1, 2);
-  assert.equal(turn.retryDecision(2, 2).allowed, false);
-  assert.equal(turn.retryDecision(2, 2).reason, "budget_exhausted");
+  assert.equal(core.retryDecision("retry-budget", turn, 0, 2).allowed, true);
+  core.recordRetryAttempt("retry-budget", turn, 0, 2);
+  assert.equal(core.retryDecision("retry-budget", turn, 1, 2).attempt, 2);
+  core.recordRetryAttempt("retry-budget", turn, 1, 2);
+  assert.equal(core.retryDecision("retry-budget", turn, 2, 2).allowed, false);
+  assert.equal(core.retryDecision("retry-budget", turn, 2, 2).reason, "budget_exhausted");
   turn.markSendActivated();
-  assert.equal(turn.retryDecision(3, 2).reason, "submitted");
+  assert.equal(core.retryDecision("retry-budget", turn, 3, 2).reason, "submitted");
   console.log("ok ProviderCore owns retry budget and submission boundary");
 }
 
