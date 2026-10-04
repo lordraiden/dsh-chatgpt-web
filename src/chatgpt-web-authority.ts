@@ -6,7 +6,6 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
-  CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE,
   chatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
