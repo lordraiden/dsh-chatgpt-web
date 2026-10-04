@@ -189,22 +189,84 @@ function readReadyTimeout(value: number | Volatile<number> | undefined): number 
   return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
 }
 
-async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
+const SIDECAR_TERM_GRACE_MS = 3_000;
+const SIDECAR_KILL_GRACE_MS = 2_000;
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return true;
+  return new Promise<boolean>((resolveWait) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (exited: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      child.off("exit", onExit);
+      child.off("error", onError);
+      resolveWait(exited);
+    };
+    const onExit = () => finish(true);
+    const onError = () => finish(true);
+    timer = setTimeout(() => finish(childHasExited(child)), timeoutMs);
+    child.once("exit", onExit);
+    child.once("error", onError);
+    if (childHasExited(child)) finish(true);
+  });
+}
+
+async function terminateSpawnedChild(child: ChildProcess, host: string, port: number): Promise<void> {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    await fetch(`http://${host}:${port}/admin/shutdown`, {
+      method: "POST",
+      signal: controller.signal,
+    }).catch(() => {});
+    clearTimeout(timer);
+  } catch {
+    // The child may be starting or unhealthy; process termination below remains authoritative.
+  }
+
+  if (childHasExited(child)) return;
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // The exit state below determines whether termination actually succeeded.
+  }
+  if (await waitForChildExit(child, SIDECAR_TERM_GRACE_MS)) return;
+
+  if (!childHasExited(child)) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The final wait below reports failure if the process remains alive.
+    }
+  }
+  if (!await waitForChildExit(child, SIDECAR_KILL_GRACE_MS)) {
+    throw new Error("Spawned ChatGPT Web sidecar did not exit after SIGTERM/SIGKILL");
+  }
+}
+
+async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1_500);
+  try {
     const res = await fetch(`http://${host}:${port}/healthz`, {
       signal: controller.signal,
     });
-    clearTimeout(timer);
     if (!res.ok) return false;
     const body = (await res.json()) as { status?: string };
     return body.status === "ok";
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
-
 export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
   const host = DEFAULT_HOST;
   let port = readPort(config.port);
@@ -221,6 +283,7 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     const generation = ++startGeneration;
     const targetPort = port;
     const alreadyHealthy = await isSidecarHealthy(host, targetPort);
+    if (generation !== startGeneration) return;
     if (alreadyHealthy) {
       logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1`);
       return;
@@ -282,6 +345,19 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     }
 
     logger.error(`[dsh-chatgpt-web] Sidecar did not become healthy within ${readyTimeoutMs}ms`);
+    if (generation === startGeneration && spawnedProcess === child) {
+      try {
+        await terminateSpawnedChild(child, host, targetPort);
+      } catch (error) {
+        logger.error(
+          `[dsh-chatgpt-web] Failed to terminate unhealthy sidecar ${safeErrorDescriptor(error)}`,
+        );
+      }
+      if (spawnedProcess === child && childHasExited(child)) {
+        spawnedProcess = undefined;
+        spawnedPort = undefined;
+      }
+    }
   };
 
   const stopDaemon = async () => {
@@ -291,26 +367,12 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     if (!child) return;
 
     logger.info("[dsh-chatgpt-web] Stopping sidecar daemon...");
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2000);
-      await fetch(`http://${host}:${childPort ?? port}/admin/shutdown`, {
-        method: "POST",
-        signal: controller.signal,
-      }).catch(() => {});
-      clearTimeout(timer);
-    } catch {
-      // ignore
-    }
-
-    if (!child.killed) {
-      child.kill("SIGTERM");
-    }
+    await terminateSpawnedChild(child, host, childPort ?? port);
     if (spawnedProcess === child) {
       spawnedProcess = undefined;
       spawnedPort = undefined;
     }
-  };
+  };  };
 
   if (typeof ctx.on === "function") {
     ctx.on("loader/volatile-update", () => {
@@ -373,8 +435,11 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
       void startDaemon();
       return async () => {
         await adapter.shutdown();
-        await stopDaemon();
-        dispose();
+        try {
+          await stopDaemon();
+        } finally {
+          dispose();
+        }
       };
     });
   } else {
@@ -383,8 +448,11 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     process.once("beforeExit", () => {
       void (async () => {
         await adapter.shutdown();
-        await stopDaemon();
-        dispose();
+        try {
+          await stopDaemon();
+        } finally {
+          dispose();
+        }
       })();
     });
   }
