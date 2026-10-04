@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   createChatGptWebRouteAuthority,
   requireChatGptWebRoute,
@@ -11,7 +12,12 @@ import {
   expandPreviousResponseInput,
   rememberResponseState,
 } from "../src/responses/state";
-import { routeChatGptWebRequest } from "../src/server";
+import {
+  compactRequest,
+  modelsRequest,
+  responseRequest,
+  routeChatGptWebRequest,
+} from "../src/server";
 
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -42,40 +48,113 @@ describe("issue #78 Responses compatibility seam audit", () => {
     for (const file of responseFiles) {
       const source = read(file);
       for (const moduleName of forbiddenImports) {
-        expect(source).not.toMatch(new RegExp(`from ["'].*${moduleName}`));
+        expect(source).not.toContain('from "' + moduleName);
+        expect(source).not.toContain("from '" + moduleName);
+        expect(source).not.toContain("/" + moduleName + '"');
+        expect(source).not.toContain("/" + moduleName + "'");
       }
     }
   });
 
-  test("/v1/responses is an ingress over the shared ChatGPT Web adapter", () => {
-    const server = read("src/server.ts");
-    expect(server).toContain('url.pathname === "/v1/responses"');
-    expect(server).toContain("responseRequest(");
-    expect(server).toContain("adapterFactory(provider)");
+  test("repository-wide Responses imports remain confined to explicit ingress/bridge/transport consumers", () => {
+    const walk = (directory: string): string[] => readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+      const path = join(directory, entry.name);
+      return entry.isDirectory() ? walk(path) : path.endsWith(".ts") ? [path] : [];
+    });
+    const sourceFiles = walk(resolve(root, "src"));
+    const responseDir = resolve(root, "src/responses");
+    const allowedConsumers = new Set([
+      resolve(root, "src/server.ts"),
+      resolve(root, "src/bridge.ts"),
+      resolve(root, "src/native-passthrough.ts"),
+    ]);
 
-    expect(server).not.toContain("new ProviderTurnLifecycle");
-    expect(server).not.toContain("new ChatGptWebAdapterError");
+    for (const file of sourceFiles) {
+      const source = readFileSync(file, "utf8");
+      if (file.startsWith(responseDir)) continue;
+      if (allowedConsumers.has(file)) continue;
+      expect(source).not.toMatch(/from ["'][^"']*\/responses\//);
+    }
 
+    for (const file of sourceFiles.filter(path => path.startsWith(responseDir))) {
+      const source = readFileSync(file, "utf8");
+      expect(source).not.toMatch(/from ["'][^"']*(?:provider-core|browser-worker|turn-execution|turn-broker|retry-policy|capability-projector|capability-transport|thread-environment|web-surface-transport)/);
+    }
+  });
+
+  test("Responses is an ingress over the shared ChatGPT Web adapter", async () => {
+    const config = {
+      ...defaultConfig(),
+      solAvailable: true,
+      proAvailable: false,
+      capabilityState: { solAvailable: "supported" as const, proAvailable: "unsupported" as const },
+    };
+    const calls: unknown[] = [];
+    const adapterFactory = () => ({
+      name: "test-chatgpt-web",
+      runTurn: async (parsed: unknown, _incoming: unknown, emit: (event: unknown) => void) => {
+        calls.push(parsed);
+        emit({ type: "text_delta", text: "parity answer", phase: "final_answer" });
+        emit({ type: "done", stopReason: "stop", endTurn: true });
+      },
+    });
+
+    const unary = await responseRequest(
+      new Request("http://127.0.0.1/v1/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ model: "chatgpt-web/light", input: "hello", stream: false }),
+      }),
+      config,
+      adapterFactory,
+    );
+    expect(unary.status).toBe(200);
+    expect((await unary.json()).status).toBe("completed");
+
+    const streamed = await responseRequest(
+      new Request("http://127.0.0.1/v1/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ model: "chatgpt-web/light", input: "hello", stream: true }),
+      }),
+      config,
+      adapterFactory,
+    );
+    expect(streamed.status).toBe(200);
+    expect(streamed.headers.get("content-type")).toContain("text/event-stream");
+    expect(await streamed.text()).toContain("parity answer");
+    expect(calls).toHaveLength(2);
   });
 
   test("Responses and native DSH resolve the same route authority", () => {
-    const config = defaultConfig();
-    const authority = createChatGptWebRouteAuthority(config);
-    for (const model of [
-      "chatgpt-web/light",
-      "chatgpt-web/medium",
-      "chatgpt-web/high",
-      "chatgpt-web/luna",
-      "chatgpt-web/pro",
-    ]) {
+    const matrix = [
+      { model: "chatgpt-web/light", sol: true, pro: false },
+      { model: "chatgpt-web/medium", sol: true, pro: false },
+      { model: "chatgpt-web/high", sol: true, pro: false },
+      { model: "chatgpt-web/extra-high", sol: true, pro: true },
+      { model: "chatgpt-web/pro", sol: true, pro: true },
+      { model: "chatgpt-web/luna", sol: false, pro: false },
+      { model: "chatgpt-web/think", sol: false, pro: false },
+    ] as const;
+
+    for (const entry of matrix) {
+      const config = {
+        ...defaultConfig(),
+        solAvailable: entry.sol,
+        proAvailable: entry.pro,
+        capabilityState: {
+          solAvailable: (entry.sol ? "supported" : "unsupported") as "supported" | "unsupported",
+          proAvailable: (entry.pro ? "supported" : "unsupported") as "supported" | "unsupported",
+        },
+      };
+      const authority = createChatGptWebRouteAuthority(config);
       const expected = (() => {
-        try { return requireChatGptWebRoute(model, authority).slug; }
+        try { return requireChatGptWebRoute(entry.model, authority).slug; }
         catch { return "rejected"; }
       })();
-
       let native = "rejected";
       try {
-        const parsed = parseRequest({ model, input: "hello" });
+        const parsed = parseRequest({ model: entry.model, input: "hello" });
         native = routeChatGptWebRequest(parsed, config).slug;
       } catch {
         native = "rejected";
@@ -84,7 +163,157 @@ describe("issue #78 Responses compatibility seam audit", () => {
     }
   });
 
-  test("previous_response_id state is compatibility cache only", () => {
+  test("Unknown Web capability fails closed before the adapter is selected", async () => {
+    const config = {
+      ...defaultConfig(),
+      capabilityState: { solAvailable: "unknown" as const, proAvailable: "unknown" as const },
+    };
+    let adapterCalls = 0;
+    const response = await responseRequest(
+      new Request("http://127.0.0.1/v1/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ model: "chatgpt-web/light", input: "hello", stream: false }),
+      }),
+      config,
+      () => {
+        adapterCalls += 1;
+        return { name: "must-not-run", runTurn: async () => {} };
+      },
+    );
+    expect(response.status).toBe(400);
+    expect(adapterCalls).toBe(0);
+  });
+
+  test("Web model catalog remains available when native Codex models are unavailable or malformed", async () => {
+    const config = defaultConfig();
+    const unavailable = await modelsRequest(
+      new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer test-token" } }),
+      config,
+      async () => { throw new Error("native Codex unavailable"); },
+    );
+    expect(unavailable.status).toBe(200);
+    const unavailableBody = await unavailable.json() as { models?: Array<{ slug?: string }> };
+    expect(unavailableBody.models?.length).toBeGreaterThan(0);
+    expect(unavailableBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+
+    const malformed = await modelsRequest(
+      new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer test-token" } }),
+      config,
+      async () => new Response("{not-json", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    expect(malformed.status).toBe(200);
+    const malformedBody = await malformed.json() as { models?: Array<{ slug?: string }> };
+    expect(malformedBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+  });
+
+  test("Native Codex requests stay outside the Web adapter on Responses and compact", async () => {
+    const config = defaultConfig();
+    let adapterCalls = 0;
+    const adapterFactory = () => {
+      adapterCalls += 1;
+      throw new Error("Web adapter must not be selected for native Codex passthrough");
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (request: Request) => {
+      const body = request.method === "POST" ? await request.text() : "";
+      return Response.json({ ok: true, endpoint: new URL(request.url).pathname, ...(body ? { body } : {}) });
+    };
+    try {
+      for (const model of ["gpt-5.6-codex", "gpt-5.6-codex-mini", "chatgpt-work/pro", "work/pro"]) {
+        const response = await responseRequest(
+          new Request("http://127.0.0.1/v1/responses", {
+            method: "POST",
+            headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+            body: JSON.stringify({ model, input: "hello", stream: false }),
+          }),
+          config,
+          adapterFactory,
+        );
+        expect(response.status).toBe(200);
+        expect((await response.json()).endpoint).toBe("/v1/responses");
+      }
+
+      const compact = await compactRequest(
+        new Request("http://127.0.0.1/v1/responses/compact", {
+          method: "POST",
+          headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+          body: JSON.stringify({ model: "gpt-5.6-codex", input: [] }),
+        }),
+        config,
+        adapterFactory,
+      );
+      expect(compact.status).toBe(200);
+      expect((await compact.json()).endpoint).toBe("/v1/responses/compact");
+      expect(adapterCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("previous_response_id state survives restart only as compatibility input", () => {
+    const home = mkdtempSync(join(tmpdir(), "dsh-chatgpt-web-78-"));
+    try {
+      const writer = Bun.spawnSync(
+        [
+          "bun", "-e",
+          [
+            'import { rememberResponseState, flushResponseState } from "./src/responses/state.ts";',
+            'rememberResponseState({input:[{type:"message",role:"user",content:[{type:"input_text",text:"first"}]}],store:false},{id:"resp_persist_78",status:"completed",output:[{type:"message",role:"assistant",content:[{type:"output_text",text:"answer"}]}]},{force:true});',
+            "flushResponseState();",
+          ].join("\n"),
+        ],
+        { cwd: root, env: { ...process.env, DSH_CHATGPT_FREE_HOME: home }, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(writer.exitCode).toBe(0);
+
+      const reader = Bun.spawnSync(
+        [
+          "bun", "-e",
+          [
+            'import { expandPreviousResponseInput } from "./src/responses/state.ts";',
+            'const body={model:"chatgpt-web/luna",previous_response_id:"resp_persist_78",input:[{type:"message",role:"user",content:[{type:"input_text",text:"next"}]}]};',
+            "console.log(JSON.stringify(expandPreviousResponseInput(body)));",
+          ].join("\n"),
+        ],
+        { cwd: root, env: { ...process.env, DSH_CHATGPT_FREE_HOME: home }, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(reader.exitCode).toBe(0);
+      const expanded = JSON.parse(new TextDecoder().decode(reader.stdout)) as { input?: unknown[] };
+      expect(expanded.input).toHaveLength(2);
+      expect(JSON.stringify(expanded.input)).toContain("first");
+      expect(JSON.stringify(expanded.input)).toContain("next");
+      expect(expanded).not.toHaveProperty("capabilities");
+      expect(expanded).not.toHaveProperty("sandbox");
+      expect(expanded).not.toHaveProperty("provider");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("Malformed persisted continuation state fails closed", () => {
+    const home = mkdtempSync(join(tmpdir(), "dsh-chatgpt-web-78-corrupt-"));
+    try {
+      writeFileSync(join(home, "responses-state.json"), "{corrupt", "utf8");
+      const result = Bun.spawnSync(
+        [
+          "bun", "-e",
+          [
+            'import { expandPreviousResponseInput } from "./src/responses/state.ts";',
+            'const body={model:"chatgpt-web/luna",previous_response_id:"resp_corrupt",input:"next"};',
+            'console.log(JSON.stringify({same:expandPreviousResponseInput(body)===body}));',
+          ].join("\n"),
+        ],
+        { cwd: root, env: { ...process.env, DSH_CHATGPT_FREE_HOME: home }, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode).toBe(0);
+      expect(new TextDecoder().decode(result.stdout).trim()).toBe('{"same":true}');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("previous_response_id state remains cache-only and cannot carry authority fields", () => {
     const request = {
       model: "chatgpt-web/luna",
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "next" }] }],
@@ -92,12 +321,22 @@ describe("issue #78 Responses compatibility seam audit", () => {
     };
     rememberResponseState(
       { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "first" }] }], store: false },
-      { id: "resp_issue_78", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] }] },
+      {
+        id: "resp_issue_78",
+        status: "completed",
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "answer" }],
+          provider: "attacker",
+          capabilities: ["root"],
+          sandbox: "dangerFullAccess",
+        }],
+      },
       { force: true },
     );
     const expanded = expandPreviousResponseInput({ ...request, previous_response_id: "resp_issue_78" }) as Record<string, unknown>;
     expect(Array.isArray(expanded.input)).toBe(true);
-    expect(expanded).not.toHaveProperty("_dshContext");
     expect(expanded).not.toHaveProperty("provider");
     expect(expanded).not.toHaveProperty("capabilities");
     expect(expanded).not.toHaveProperty("sandbox");
