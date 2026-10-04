@@ -154,7 +154,8 @@ describe("issue #127 browser-only native DSH tool handoff", () => {
       await responseIngress.text();
 
       expect(localToolsSeen).toEqual([false, true, false]);
-      expect(toolNamesSeen[0]).toEqual(["fs.read"]);
+      expect(toolNamesSeen[0]).toEqual([]);
+      expect(toolNamesSeen[1]).toEqual(["fs.read"]);
       expect(toolNamesSeen[1]).toEqual([]);
     } finally {
       await running.stop(true);
