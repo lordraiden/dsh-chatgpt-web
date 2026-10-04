@@ -530,6 +530,7 @@ export class ChatGptTurnSessions {
       if (!this.conversationGenerations.has(conversationKey)) {
         this.conversationGenerations.set(conversationKey, session.runtime.conversationGeneration ?? 1);
       }
+      this.pruneConversationGenerations();
     }
     return session;
   }
@@ -548,6 +549,7 @@ export class ChatGptTurnSessions {
       throw new Error("ChatGPT conversation generation cannot move backwards");
     }
     this.conversationGenerations.set(conversationKey, generation);
+    this.pruneConversationGenerations();
   }
 
   rememberContextExhaustion(executionKey: string, record: ChatGptContextExhaustionRecord): void {
@@ -827,6 +829,16 @@ export class ChatGptTurnSessions {
     let active = 0;
     for (const session of this.entries.values()) if (session.isActive()) active += 1;
     return active;
+  }
+
+  private pruneConversationGenerations(): void {
+    const activeConversationKeys = new Set(this.conversationHeads.keys());
+    if (this.conversationGenerations.size <= this.maxEntries) return;
+    for (const conversationKey of this.conversationGenerations.keys()) {
+      if (this.conversationGenerations.size <= this.maxEntries) break;
+      if (activeConversationKeys.has(conversationKey)) continue;
+      this.conversationGenerations.delete(conversationKey);
+    }
   }
 
   private prune(): void {

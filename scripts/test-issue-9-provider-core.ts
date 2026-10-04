@@ -4,6 +4,7 @@ import {
   BrowserAccountLeaseRegistry,
   ChatGptWebProviderCore,
 } from "../src/adapters/chatgpt-web/provider-core";
+import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { mapStream } from "../src/adapters/chatgpt-web/llm-adapter";
 import { projectChatGptCapabilities, type CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 import {
@@ -605,6 +606,19 @@ function leaseInput(turnId: string) {
   assert.equal(turn.snapshot().physicalSettlementAttached, false);
   assert.equal(core.get("execution-shutdown-before-settlement"), undefined);
   console.log("ok shutdown cannot hang on an unbound physical settlement");
+}
+
+{
+  const sessions = new ChatGptTurnSessions(30 * 60_000, 2);
+  sessions.setConversationGeneration("conversation-a", 1);
+  sessions.setConversationGeneration("conversation-b", 2);
+  sessions.setConversationGeneration("conversation-c", 3);
+  const generations = (sessions as unknown as { conversationGenerations: Map<string, number> }).conversationGenerations;
+  assert.equal(generations.size, 2);
+  assert.equal(generations.has("conversation-a"), false);
+  assert.equal(generations.get("conversation-b"), 2);
+  assert.equal(generations.get("conversation-c"), 3);
+  console.log("ok conversation generation history is bounded");
 }
 
 console.log("Issue #9 ProviderCore contract tests passed.");
