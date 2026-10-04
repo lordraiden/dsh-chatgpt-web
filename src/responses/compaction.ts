@@ -1,3 +1,5 @@
+import { COMPACT_PROMPT } from "../lib/compaction";
+export { COMPACT_PROMPT } from "../lib/compaction";
 import { isOnePixelPngDataUrl } from "../lib/image";
 /**
  * Remote compaction v2 support for ROUTED providers.
