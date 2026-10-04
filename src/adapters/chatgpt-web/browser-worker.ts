@@ -1435,11 +1435,15 @@ export function chatGptEffortSelectionRequired(
 }
 
 export async function setChatGptThinkMode(
-  composerForm: Locator,
+  page: Page,
   enabled: boolean,
   captureDiagnostic?: (checkpoint: string) => Promise<void>,
 ): Promise<void> {
-  const controls = composerForm
+  // On Free/Go, Think is a reasoning control attached to the ChatGPT composer/model
+  // surface, not necessarily a descendant of the <form> that owns the prompt textbox.
+  // Scope this lookup to the page so SPA layout changes do not make a valid Think
+  // control invisible merely because it moved outside the form subtree.
+  const controls = page
     .getByRole("button", { name: "Think", exact: true })
     .filter({ visible: true });
   const count = await controls.count();
@@ -2436,7 +2440,7 @@ export class ChatGptBrowserWorker {
           "ChatGPT Luna was selected from a Luna-only capability probe, but the account now exposes a model selector; rerun setup",
         );
       }
-      await setChatGptThinkMode(composerForm, mode.thinkEnabled, captureDiagnostic);
+      await setChatGptThinkMode(page, mode.thinkEnabled, captureDiagnostic);
       return mode;
     }
     const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();

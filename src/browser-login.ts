@@ -17,7 +17,6 @@ export interface BrowserLoginResult {
   accountSurfaceUrl: string;
   solAvailable: boolean;
   proAvailable: boolean;
-  thinkAvailable: boolean;
 }
 
 export type BrowserLoginStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
@@ -45,7 +44,6 @@ interface LoginVerificationMarker {
   verifiedAt: string;
   solAvailable?: boolean;
   proAvailable?: boolean;
-  thinkAvailable?: boolean;
 }
 
 const SYSTEM_LOGIN_TIMEOUT_MS = 10 * 60_000;
@@ -186,7 +184,6 @@ export async function inspectBrowserLoginCapabilities(config: AppConfig): Promis
   return {
     solAvailable: inspected.solAvailable,
     proAvailable: inspected.proAvailable,
-    thinkAvailable: inspected.thinkAvailable,
   };
 }
 
@@ -199,7 +196,6 @@ export function storedBrowserLoginCapabilities(
     return {
       ...(typeof marker.solAvailable === "boolean" ? { solAvailable: marker.solAvailable } : {}),
       ...(typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {}),
-      ...(typeof marker.thinkAvailable === "boolean" ? { thinkAvailable: marker.thinkAvailable } : {}),
     };
   } catch {
     return {};
@@ -491,7 +487,6 @@ export async function loginToChatGpt(
       accountSurfaceUrl: activePage.url(),
       solAvailable: capabilities.solAvailable,
       proAvailable: capabilities.proAvailable,
-      thinkAvailable: capabilities.thinkAvailable === true,
     };
   } finally {
     await context.close().catch(() => {});

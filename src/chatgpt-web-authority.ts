@@ -6,7 +6,6 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
-  CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE,
   chatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -17,7 +16,6 @@ export type ChatGptWebCapabilityState = "supported" | "unsupported" | "unknown";
 export interface ChatGptWebCapabilityStateSet {
   solAvailable: ChatGptWebCapabilityState;
   proAvailable: ChatGptWebCapabilityState;
-  thinkAvailable: ChatGptWebCapabilityState;
 }
 
 export interface ChatGptWebAccountIdentity {
@@ -44,16 +42,14 @@ function stateFromBoolean(value: boolean | undefined): ChatGptWebCapabilityState
 export function resolveChatGptWebCapabilityState(input: {
   solAvailable?: boolean;
   proAvailable?: boolean;
-  thinkAvailable?: boolean;
   capabilityState?: Partial<ChatGptWebCapabilityStateSet>;
 }): ChatGptWebCapabilityStateSet {
   const solAvailable = input.capabilityState?.solAvailable ?? stateFromBoolean(input.solAvailable);
   const proAvailable = input.capabilityState?.proAvailable ?? stateFromBoolean(input.proAvailable);
-  const thinkAvailable = input.capabilityState?.thinkAvailable ?? stateFromBoolean(input.thinkAvailable);
   if (proAvailable === "supported" && solAvailable !== "supported") {
     throw new Error("ChatGPT Web Pro capability is inconsistent with Sol capability");
   }
-  return { solAvailable, proAvailable, thinkAvailable };
+    return { solAvailable, proAvailable };
 }
 
 export function accountIdentityFromStorageState(storageState: unknown): ChatGptWebAccountIdentity {
@@ -77,7 +73,6 @@ export function accountIdentityFromUnknownSession(): ChatGptWebAccountIdentity {
 export function createChatGptWebRouteAuthority(input: {
   solAvailable?: boolean;
   proAvailable?: boolean;
-  thinkAvailable?: boolean;
   capabilityState?: Partial<ChatGptWebCapabilityStateSet>;
   browserInteractionMode?: "automatic" | "manual";
   zeroRiskProEnabled?: boolean;
@@ -98,7 +93,6 @@ export function createChatGptWebRouteAuthorityFromProvider(
   return createChatGptWebRouteAuthority({
     solAvailable: config?.solAvailable,
     proAvailable: config?.proAvailable,
-    thinkAvailable: config?.thinkAvailable,
     capabilityState: config?.capabilityState,
     browserInteractionMode: config?.browserInteractionMode,
     zeroRiskProEnabled: config?.zeroRiskProEnabled,
@@ -128,9 +122,7 @@ export function availableChatGptWebRoutes(
 
   if (authority.capabilities.solAvailable === "unknown") return [];
   if (authority.capabilities.solAvailable === "unsupported") {
-    return authority.capabilities.thinkAvailable === "supported"
-      ? CHATGPT_WEB_LUNA_MODEL_ROUTES
-      : [CHATGPT_WEB_LUNA_MODEL_ROUTE];
+    return CHATGPT_WEB_LUNA_MODEL_ROUTES;
   }
 
   if (authority.capabilities.proAvailable === "supported") return CHATGPT_WEB_MODEL_ROUTES;
@@ -164,12 +156,6 @@ export function requireChatGptWebRoute(
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     if (authority.capabilities.solAvailable !== "unsupported") {
       throw new Error(`${route.displayName} is reserved for Luna-only accounts`);
-    }
-    if (route === CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE
-      && authority.capabilities.thinkAvailable !== "supported") {
-      throw new Error(
-        `${route.displayName} is unavailable because Think is not currently available on this ChatGPT Web account`,
-      );
     }
     return route;
   }
