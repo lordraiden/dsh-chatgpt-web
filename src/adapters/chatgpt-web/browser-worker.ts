@@ -3440,7 +3440,13 @@ export class ChatGptBrowserWorker {
       if (remainingText.length > 0 || selectedConnectorCount > 0) {
         throw new Error(
           `ChatGPT connector cleanup did not produce an empty composer`
-          + ` (visi  private async selectConnector(
+          + ` (visibleCharacters=${remainingText.length}, selectedConnectorCount=${selectedConnectorCount})`,
+        );
+      }
+    });
+  }
+
+  private async selectConnector(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     catalogRefreshAvailable = false,
@@ -3532,7 +3538,8 @@ export class ChatGptBrowserWorker {
           break;
         } catch (error) {
           if (!(error instanceof ChatGptConnectorPickerTimeoutError)) throw error;
-          const visibleRows = await this.connectorMentionRowTitles(this.connectorPickerRows(page), abortSignal);
+          const pickerRows = this.connectorPickerRows(page);
+          const visibleRows = await this.connectorMentionRowTitles(pickerRows, abortSignal);
           const knownIdentityMismatch = this.config.appName === CHATGPT_CONNECTOR_NAME
             && (
               visibleRows.includes(DEV_CHATGPT_CONNECTOR_NAME)
@@ -3541,7 +3548,7 @@ export class ChatGptBrowserWorker {
           if (knownIdentityMismatch) {
             await capture("connector-picker-missing");
             throw chatGptConnectorUnavailableError(
-              await this.connectorMentionFailure(this.connectorPickerRows(page), attemptBudget.triggerAttempts, abortSignal),
+              await this.connectorMentionFailure(pickerRows, attemptBudget.triggerAttempts, abortSignal),
             );
           }
           if (
@@ -3615,7 +3622,7 @@ export class ChatGptBrowserWorker {
               } else {
                 const searchBoxes = page
                   .getByRole("textbox", { name: /search/i })
-                  .or(page.locator("input[placeholder*=\"search\" i], textarea[placeholder*=\"search\" i]"))
+                  .or(page.locator('input[placeholder*="search" i], textarea[placeholder*="search" i]'))
                   .filter({ visible: true });
                 const searchCount = await withBrowserTurnAbort(
                   withChatGptBrowserObservationTimeout(searchBoxes.count()),
