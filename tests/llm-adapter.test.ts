@@ -409,7 +409,7 @@ describe("native path does not enter the Responses server", () => {
         await turn.onSendActivated?.();
         turn.onSubmitted?.();
         turn.onTextDelta("ok");
-        signalStarted();
+        signalStarted!();
         await new Promise<void>(resolve => { releaseBrowser = resolve; });
         return "ok";
       },
@@ -424,7 +424,7 @@ describe("native path does not enter the Responses server", () => {
     const run = adapter.runTurn!(parsed, { headers: new Headers() }, event => events.push(event));
 
     await browserStarted;
-    releaseBrowser();
+    releaseBrowser!();
     await expect(run).resolves.toBeUndefined();
 
     expect(events.some(event => event.type === "done" && event.stopReason === "stop")).toBe(true);
