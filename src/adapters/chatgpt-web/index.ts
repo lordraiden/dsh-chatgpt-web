@@ -612,18 +612,6 @@ export function createChatGptWebAdapter(
     };
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
     const running = deferred<void>();
-    const activeProviderTurn = providerTurn;
-    const logicalSettlement = activeProviderTurn
-      ? (outcome: ChatGptBrowserOutcome): void => {
-        if (outcome.type === "final") {
-          activeProviderTurn.markLogicalSettled("completed");
-          return;
-        }
-        const cancelled = (outcome.error instanceof DOMException && outcome.error.name === "AbortError")
-          || (outcome.error instanceof ChatGptWebAdapterError && outcome.error.code === "client_cancelled");
-        activeProviderTurn.markLogicalSettled(cancelled ? "cancelled" : "failed");
-      }
-      : undefined;
     // A canonical compaction request is side-effect free and remains safe to rebuild after an
     // ambiguous browser send. Normal task prompts must never be replayed after Send activation.
     const submissionLifecycle = {
@@ -817,7 +805,6 @@ export function createChatGptWebAdapter(
         },
         submission,
         running: running.promise,
-        ...(logicalSettlement ? { logicalSettlement } : {}),
         cancel: (reason?: Error) => {
           browserTurn.cancel(reason);
           if (activeToken) {
@@ -869,7 +856,6 @@ export function createChatGptWebAdapter(
         ...(conversationGeneration !== undefined ? { conversationGeneration } : {}),
         submission,
         running: running.promise,
-        ...(logicalSettlement ? { logicalSettlement } : {}),
         cancel: browserTurn.cancel,
       };
     }
@@ -954,7 +940,6 @@ export function createChatGptWebAdapter(
       },
       submission,
       running: running.promise,
-      ...(logicalSettlement ? { logicalSettlement } : {}),
       cancel: (reason?: Error) => {
         browserTurn.cancel(reason);
         if (activeToken) {
@@ -1299,7 +1284,15 @@ export function createChatGptWebAdapter(
         if (contextExhaustion) {
           await providerCore.waitForRetirement(executionKey);
         }
-        const previousProviderTurn = providerCore.get(executionKey);
+        let previousProviderTurn = providerCore.get(executionKey);
+        // A reconnect can race the physical retirement callback. Never reuse a ProviderTurn that
+        // has entered SETTLING: wait for its physical owner to finish, then bind the new request
+        // to a fresh lifecycle instead of allowing the browser surface to mutate a turn that is
+        // about to become RETIRED.
+        if (previousProviderTurn?.snapshot().state === "SETTLING") {
+          await providerCore.waitForRetirement(executionKey);
+          previousProviderTurn = providerCore.get(executionKey);
+        }
         const recovery = contextExhaustion
           ? "REPLAY" as const
           : previousProviderTurn
@@ -1513,6 +1506,7 @@ export function createChatGptWebAdapter(
                 estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities),
                 buffer,
               ));
+              providerTurn.markLogicalSettled();
               session.completeRound(roundKey);
               return;
             }
@@ -1686,7 +1680,8 @@ export function createChatGptWebAdapter(
                   estimateChatGptWebUsage(currentUsageInput(parsed), { answer: completedOutcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   buffer,
                 ));
-                  session.completeRound(roundKey);
+                providerTurn.markLogicalSettled();
+                session.completeRound(roundKey);
                   };
               const waitForTrace = () => session.runtime.trace.wait(toolWaitAbort.signal)
                 .then(() => ({ type: "trace" as const }))
