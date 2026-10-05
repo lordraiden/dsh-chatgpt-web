@@ -40,6 +40,21 @@ jobs:
       - name: Build bundles
         run: bun run build
 
+      - name: Synchronize built bundles to main
+        if: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- lib; then
+            echo "Checked-in lib is already synchronized with src"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib
+          git commit -m "chore: regenerate checked-in lib [skip ci]"
+          git push origin HEAD:main
+
       - name: Install DSH runtime for Native2 integration test
         run: bun add --no-save @deepseek-ai/dsh@0.2.0-rc.2
 
