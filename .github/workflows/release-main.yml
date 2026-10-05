@@ -16,6 +16,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 concurrency:
   group: release-main
@@ -49,6 +50,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.19.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Update npm for trusted publishing
+        run: npm install --global npm@^11.15.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -95,21 +101,8 @@ jobs:
       - name: Pack and smoke test exact release artifact
         run: node scripts/smoke-tarball.mjs
 
-      - name: Configure npm registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > ~/.npmrc <<EOF
-          @lordraiden:registry=https://registry.npmjs.org/
-          //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
-          EOF
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish to npmjs.com
         run: npm publish --registry https://registry.npmjs.org --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to GitHub Packages
         shell: bash
