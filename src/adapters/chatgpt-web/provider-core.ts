@@ -538,6 +538,14 @@ export class ProviderTurnLifecycle {
 
 }
 
+
+export function markProviderTurnRecoveryFailedIfMutable(turn: ProviderTurnLifecycle): boolean {
+  const state = turn.snapshot().state;
+  if (state === "SETTLING" || state === "RETIRED") return false;
+  turn.markRecovery("FAILED");
+  return true;
+}
+
 export interface ChatGptWebProviderCoreTurnInput {
   executionKey: string;
   traceId: string;
