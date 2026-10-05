@@ -57,7 +57,6 @@
     "test": "bun test ./tests/issue-121-workspace-tools.test.ts ./tests/issue-127-browser-only-native-tools.test.ts ./tests/issue-12a-surface-transport.test.ts && node scripts/test-issue-20-settings.mjs && bun test ./scripts/test-issue-74-native-dsh.ts && bun test ./scripts/test-issue-75-authority.ts && bun test ./tests/issue-71-route-scope.test.ts && bun test ./tests/luna-think-ui.test.ts && bun test ./tests/issue-76-canonical-context.test.ts && bun test ./tests/issue-77-continuity-retry.test.ts && node scripts/smoke-tarball.mjs && bun test ./tests/issue-72-responses-provider-core.test.ts && bun test ./tests/issue-78-responses-seam.test.ts && bun test ./tests/issue-79-security-observability.test.ts",
     "typecheck": "tsc --noEmit",
     "test:native2-dsh-runtime": "bun ./scripts/test-native2-dsh-runtime.ts",
-    "prepare": "bun run build",
     "prepack": "bun run build"
   },
   "dependencies": {
