@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import {
@@ -1375,6 +1375,8 @@ interface ChatGptSubmissionDomCache {
 export interface ResolvedBrowserConfig {
   appName: string;
   browserHost: "managed-chrome" | "launcher";
+  /** Stable logical identity of the authenticated ChatGPT session used to create this browser context. */
+  accountIdentityFingerprint: string;
   browserHostDescriptorPath?: string;
   browserHelperScriptPath?: string;
   browserDiagnosticsPath?: string;
@@ -2017,6 +2019,20 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   const browserDiagnosticsPath = resolve(expandUserPath(
     configured.browserDiagnosticsPath?.trim() || join(getConfigDir(), "diagnostics", "browser-turns"),
   ));
+  const storageStatePath = resolve(expandUserPath(
+    configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"),
+  ));
+  const accountIdentityFingerprint = configured.accountIdentityFingerprint?.trim()
+    || (() => {
+      try {
+        if (!existsSync(storageStatePath)) return "unknown";
+        return accountIdentityFromStorageState(
+          JSON.parse(readFileSync(storageStatePath, "utf8")),
+        ).fingerprint;
+      } catch {
+        return "unknown";
+      }
+    })();
   // The direct turnTimeoutMs field wins over the tuning block; an absent deadline means no ceiling.
   const tuning = resolveChatGptWebTuning(configured.tuning);
   const turnTimeoutMs = configured.turnTimeoutMs ?? tuning.turnTimeoutMs;
@@ -2042,10 +2058,11 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   return {
     appName,
     browserHost,
+    accountIdentityFingerprint,
     ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
     ...(resolvedBrowserHelperScriptPath ? { browserHelperScriptPath: resolvedBrowserHelperScriptPath } : {}),
     browserDiagnosticsPath,
-    storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
+    storageStatePath,
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     tuning,
@@ -4569,13 +4586,12 @@ export class ChatGptBrowserWorker {
       const physicalProfileId = this.config.browserHost === "launcher"
         ? `launcher-profile:${this.config.browserHostDescriptorPath ?? "unknown"}`
         : `chrome-profile:${this.config.chromeExecutablePath}`;
-      let physicalAccountId = "chatgpt-account:unknown";
-      try {
-        const storageState = await page.context().storageState();
-        physicalAccountId = `chatgpt-account:${accountIdentityFromStorageState(storageState).fingerprint}`;
-      } catch {
-        physicalAccountId = `chatgpt-account:${accountIdentityFromUnknownSession().fingerprint}`;
-      }
+      // The browser context is mutable after navigation: cookies can rotate and ChatGPT may
+      // materialize/update origin storage. Hashing context.storageState() here therefore produces
+      // a different identity from the stable storage-state snapshot that created the ProviderTurn.
+      // Physical account binding must use that stable logical identity; resource/page/context IDs
+      // already identify the concrete browser surface separately.
+      const physicalAccountId = `chatgpt-account:${this.config.accountIdentityFingerprint}`;
       let physicalPageId = physicalObjectId(page, "page");
       let physicalContextId = physicalObjectId(page.context(), "context");
       const bindPhysicalSurface = async (): Promise<void> => {
