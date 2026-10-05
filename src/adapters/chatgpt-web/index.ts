@@ -1300,16 +1300,32 @@ export function createChatGptWebAdapter(
             : providerCore.wasRetired(executionKey)
               ? "REPLAY" as const
               : "NEW" as const;
-        const providerTurn = providerCore.begin({
-          executionKey,
-          traceId,
-          nativeTurnId,
-          ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
-          ...browserAccountLeaseInput(provider, traceId),
-          capabilitySnapshot,
-          retryPolicy: parsed._compactionRequest ? "side_effect_free" : "strict",
-          recovery,
-        });
+        const accountLeaseInput = browserAccountLeaseInput(provider, traceId);
+        let providerTurn: ProviderTurnLifecycle;
+        for (;;) {
+          try {
+            providerTurn = providerCore.begin({
+              executionKey,
+              traceId,
+              nativeTurnId,
+              ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
+              ...accountLeaseInput,
+              capabilitySnapshot,
+              retryPolicy: parsed._compactionRequest ? "side_effect_free" : "strict",
+              recovery,
+            });
+            break;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!message.includes("Authenticated ChatGPT account is already leased by turn")) throw error;
+            const waited = await providerCore.waitForSettlingAccount(
+              accountLeaseInput.accountIdentity,
+              accountLeaseInput.browserProfile,
+              accountLeaseInput.browserContext,
+            );
+            if (!waited) throw error;
+          }
+        }
         let session: ChatGptTurnSession;
         if (contextExhaustion) {
           let replaySession: ChatGptTurnSession | undefined;
@@ -1817,6 +1833,7 @@ export function createChatGptWebAdapter(
               },
             );
             markProviderTurnRecoveryFailedIfMutable(providerTurn);
+            providerTurn.beginSettlement();
             providerTurn.markLogicalSettled("failed");
             emitRoundEvent({
               type: "error",
@@ -1831,6 +1848,10 @@ export function createChatGptWebAdapter(
           }
 
           markProviderTurnRecoveryFailedIfMutable(providerTurn);
+          // Move the provider lifecycle into an explicit settlement state before asking the browser
+          // session to unwind. A concurrent request for the same authenticated account can then
+          // safely wait for physical release instead of failing with a stale account lease.
+          providerTurn.beginSettlement();
           if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed) {
             session.cancel();
           } else {
