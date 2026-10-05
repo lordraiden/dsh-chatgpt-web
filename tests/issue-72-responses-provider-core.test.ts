@@ -6,11 +6,101 @@ import { createChatGptWebRouteAuthority, requireChatGptWebRoute } from "../src/c
 import { parseRequest } from "../src/responses/parser";
 import { expandPreviousResponseInput, rememberResponseState } from "../src/responses/state";
 import { responseRequest, routeChatGptWebRequest } from "../src/server";
+import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
+import type { CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 
 describe("issue #72 Responses -> single Web ProviderCore", () => {
+  test("a failed browser turn becomes explicitly settling so the next same-account turn waits for physical release", async () => {
+    const snapshot = (id: string): CapabilitySnapshot => ({
+      snapshotId: id,
+      sessionId: "session-lease",
+      agentId: "agent-lease",
+      turnId: id,
+      createdAt: Date.now(),
+      lifecycle: "active",
+      tools: [],
+    });
+    const core = new ChatGptWebProviderCore();
+    const first = core.begin({
+      executionKey: "execution-lease-first",
+      traceId: "trace-lease-first",
+      nativeTurnId: "turn-lease-first",
+      nativeThreadId: "thread-lease",
+      accountIdentity: "account-lease",
+      browserProfile: "managed-chrome",
+      browserContext: "default-context",
+      pageIdentity: "page-lease-first",
+      capabilitySnapshot: snapshot("snapshot-lease-first"),
+    });
+    let releasePhysical!: () => void;
+    const physical = new Promise<void>(resolve => { releasePhysical = resolve; });
+    core.bindPhysicalSettlement("execution-lease-first", physical);
+    first.beginSettlement();
+
+    let waited = false;
+    const waiting = core.waitForSettlingAccount("account-lease", "managed-chrome", "default-context")
+      .then(() => { waited = true; });
+    await Promise.resolve();
+    expect(waited).toBe(false);
+
+    releasePhysical();
+    await waiting;
+    expect(waited).toBe(true);
+
+    const second = core.begin({
+      executionKey: "execution-lease-second",
+      traceId: "trace-lease-second",
+      nativeTurnId: "turn-lease-second",
+      nativeThreadId: "thread-lease",
+      accountIdentity: "account-lease",
+      browserProfile: "managed-chrome",
+      browserContext: "default-context",
+      pageIdentity: "page-lease-second",
+      capabilitySnapshot: snapshot("snapshot-lease-second"),
+    });
+    expect(second.snapshot().state).toBe("LEASED");
+    second.failBeforePhysicalSettlement();
+    await core.shutdown();
+  });
+
+  test("a genuinely active same-account turn is still rejected rather than silently serialized", () => {
+    const snapshot = (id: string): CapabilitySnapshot => ({
+      snapshotId: id,
+      sessionId: "session-live",
+      agentId: "agent-live",
+      turnId: id,
+      createdAt: Date.now(),
+      lifecycle: "active",
+      tools: [],
+    });
+    const core = new ChatGptWebProviderCore();
+    core.begin({
+      executionKey: "execution-live-first",
+      traceId: "trace-live-first",
+      nativeTurnId: "turn-live-first",
+      accountIdentity: "account-live",
+      browserProfile: "managed-chrome",
+      browserContext: "default-context",
+      pageIdentity: "page-live-first",
+      capabilitySnapshot: snapshot("snapshot-live-first"),
+    });
+    expect(() => core.begin({
+      executionKey: "execution-live-second",
+      traceId: "trace-live-second",
+      nativeTurnId: "turn-live-second",
+      accountIdentity: "account-live",
+      browserProfile: "managed-chrome",
+      browserContext: "default-context",
+      pageIdentity: "page-live-second",
+      capabilitySnapshot: snapshot("snapshot-live-second"),
+    })).toThrow("Authenticated ChatGPT account is already leased");
+    core.get("execution-live-first")!.failBeforePhysicalSettlement();
+  });
+
+
   test("Responses ingress delegates Web execution to the same ProviderAdapter entrypoint used by native DSH", () => {
     const server = read("src/server.ts");
     expect(server).toContain("route = routeChatGptWebRequest(parsed, config)");
