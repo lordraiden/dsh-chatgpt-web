@@ -19,10 +19,18 @@ describe("persistent ChatGPT surface", () => {
 describe("DSH text tool protocol", () => {
   test("parses a tool frame split across stream chunks", () => {
     const parser = new ChatGptToolStreamParser();
+    let text = "";
 
-    expect(parser.feed("Before <dsh_tool_call>{\"version\":1,").toolCalls).toEqual([]);
-    expect(parser.feed("\"id\":\"call_12345678\",\"name\":\"fs.read\",").toolCalls).toEqual([]);
+    const first = parser.feed("Before <dsh_tool_call>{\"version\":1,");
+    text += first.text;
+    expect(first.toolCalls).toEqual([]);
+
+    const second = parser.feed("\"id\":\"call_12345678\",\"name\":\"fs.read\",");
+    text += second.text;
+    expect(second.toolCalls).toEqual([]);
+
     const result = parser.feed("\"arguments\":{\"path\":\"README.md\"}}</dsh_tool_call> after");
+    text += result.text;
 
     expect(result.toolCalls).toEqual([
       {
@@ -31,7 +39,7 @@ describe("DSH text tool protocol", () => {
         arguments: { path: "README.md" },
       },
     ]);
-    expect(result.text).toBe("Before  after");
+    expect(text).toBe("Before  after");
   });
 
   test("fails closed on duplicate model correlation ids", () => {
