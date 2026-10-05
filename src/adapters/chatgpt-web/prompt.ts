@@ -16,6 +16,16 @@ import {
 
 export type { ChatGptWebPromptImage } from "./context-projection";
 
+export function formatDshToolCapabilities(tools: readonly CodexTool[] | undefined): string {
+  if (!tools || tools.length === 0) return "";
+  const capabilities = tools.map(tool => ({
+    name: namespacedToolName(tool.namespace, tool.name),
+    description: tool.description,
+    parameters: tool.parameters,
+  }));
+  return JSON.stringify(capabilities);
+}
+
 export interface CompiledChatGptWebPrompt {
   text: string;
   images: ChatGptWebPromptImage[];
@@ -333,12 +343,23 @@ export function compileChatGptWebPrompt(
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to the harness.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
+    ...(mode.localTools && parsed.context.tools?.length
+      ? [
+        "The following JSON is the complete DSH tool capability set authorized for this turn.",
+        "<dsh_tool_capabilities_json>",
+        formatDshToolCapabilities(parsed.context.tools),
+        "</dsh_tool_capabilities_json>",
+        "Use only the exact advertised tool names and satisfy their JSON parameter schemas.",
+        "A tool result will be supplied by DeepSeek Harness after execution; never fabricate a tool result.",
+      ]
+      : []),
     ...(mode.localTools
       ? [
         "Codex Native tool calls are strict control frames, not prose or Markdown. Emit exactly one <dsh_tool_call>...</dsh_tool_call> frame when a local tool must be called.",
         "The control-frame JSON must contain exactly these fields and no others: version, id, name, arguments. Set version to 1; id must be a fresh opaque correlation id matching call_<token>; name must be the exact advertised tool name; arguments must be a JSON object.",
         "Never synthesize or reuse a tool-call id, never emit a tool call in XML parameter tags, fenced JSON, prose, or legacy tool-call formats, and never emit more than one frame with the same id.",
         "The tool frame is a protocol message for the outer harness. Do not discuss it, quote it, or place ordinary user-facing prose inside the frame.",
+        "After emitting a tool frame, stop the current response; the Harness will execute the tool and provide the result in a subsequent model turn.",
       ]
       : []),
   ];
