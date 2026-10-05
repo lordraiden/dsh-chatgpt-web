@@ -1,6 +1,6 @@
 {
   "name": "@lordraiden/dsh-chatgpt-web",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "DeepSeek Harness Cordis plugin that bridges an authenticated ChatGPT Web session into DSH.",
   "repository": {
     "type": "git",
