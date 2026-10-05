@@ -6,11 +6,41 @@ import { createChatGptWebRouteAuthority, requireChatGptWebRoute } from "../src/c
 import { parseRequest } from "../src/responses/parser";
 import { expandPreviousResponseInput, rememberResponseState } from "../src/responses/state";
 import { responseRequest, routeChatGptWebRequest } from "../src/server";
+import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 
 describe("issue #72 Responses -> single Web ProviderCore", () => {
+
+  test("keeps the provider turn mutable for logical settlement when physical cleanup wins the race", async () => {
+    const core = new ChatGptWebProviderCore();
+    const physical = Promise.resolve();
+    const turn = core.begin({
+      executionKey: "race-execution",
+      traceId: "race-trace",
+      nativeTurnId: "turn-race",
+      nativeThreadId: "thread-race",
+      accountIdentity: "account-race",
+      browserProfile: "profile-race",
+      browserContext: "context-race",
+      pageIdentity: "page-race",
+      capabilitySnapshot: {
+        snapshotId: "snapshot-race",
+        sessionId: "session-race",
+        agentId: "agent-race",
+        turnId: "turn-race",
+      },
+    });
+    core.bindPhysicalSettlement("race-execution", physical);
+    await physical;
+
+    expect(turn.snapshot().state).toBe("SETTLING");
+    expect(() => turn.markLogicalSettled("completed")).not.toThrow();
+    expect(turn.snapshot().state).toBe("RETIRED");
+    expect(turn.snapshot().logicalOutcome).toBe("completed");
+  });
+
   test("Responses ingress delegates Web execution to the same ProviderAdapter entrypoint used by native DSH", () => {
     const server = read("src/server.ts");
     expect(server).toContain("route = routeChatGptWebRequest(parsed, config)");
