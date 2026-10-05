@@ -6,6 +6,8 @@ import {
   type WebSurfaceTransportBackend,
   type WebSurfaceTurn,
 } from "../src/adapters/chatgpt-web/web-surface-transport";
+import { resolveBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
+import type { CodexProviderConfig } from "../src/types";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -184,4 +186,38 @@ test("WebSurfaceTransport exposes all Phase 1 lifecycle evidence without owning 
     ]);
     expect(states).not.toContain("completed");
   });
+});
+
+test("browser surface account binding uses the stable provider identity, not mutable context storage", () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: "https://chatgpt.com",
+    defaultModel: "gpt-5.6-luna",
+    models: ["gpt-5.6-luna"],
+    liveModels: false,
+    contextWindow: 1_050_000,
+    modelInputModalities: { "gpt-5.6-luna": ["text", "image"] },
+    modelReasoningEfforts: { "gpt-5.6-luna": ["low"] },
+    modelDefaultReasoningEfforts: { "gpt-5.6-luna": "low" },
+    noReasoningModels: [],
+    chatgptWeb: {
+      browserInteractionMode: "automatic",
+      browserHost: "managed-chrome",
+      storageStatePath: "/tmp/chatgpt-stable-identity.json",
+      chromeExecutablePath: "/usr/bin/chromium",
+      accountIdentityFingerprint: "stable-account-fingerprint",
+    },
+  };
+
+  const resolved = resolveBrowserConfig(provider);
+  expect(resolved.accountIdentityFingerprint).toBe("stable-account-fingerprint");
+
+  const source = readFileSync(
+    join(ROOT, "src", "adapters", "chatgpt-web", "browser-worker.ts"),
+    "utf8",
+  );
+  const bindingStart = source.indexOf("const physicalAccountId = `chatgpt-account:${this.config.accountIdentityFingerprint}`");
+  expect(bindingStart).toBeGreaterThanOrEqual(0);
+  const bindingWindow = source.slice(bindingStart, source.indexOf("const bindPhysicalSurface", bindingStart));
+  expect(bindingWindow).not.toContain("page.context().storageState()");
 });
