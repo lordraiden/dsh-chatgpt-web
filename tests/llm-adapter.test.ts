@@ -391,7 +391,7 @@ describe("ChatGptWebLlmAdapter cancellation", () => {
 
 describe("native path does not enter the Responses server", () => {
   test("records browser logical completion before physical settlement retires the ProviderTurn", async () => {
-    const provider = providerConfigFixture();
+    const provider = providerConfigFixture({ accountIdentityFingerprint: "test-account" });
     const parsed = toCodexParsedRequest(userRequest("hello"), provider);
     let releaseBrowser!: () => void;
     let signalStarted!: () => void;
@@ -403,7 +403,7 @@ describe("native path does not enter the Responses server", () => {
           browserContextId: "context-lifecycle",
           pageId: "page-lifecycle",
           profileId: "profile-lifecycle",
-          accountId: "chatgpt-account:unknown",
+          accountId: "chatgpt-account:test-account",
         });
         await turn.onSurfaceReady?.();
         await turn.onSendActivated?.();
