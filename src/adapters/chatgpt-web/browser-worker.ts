@@ -3257,7 +3257,7 @@ export class ChatGptBrowserWorker {
         pluginName: element.getAttribute("data-plugin-name"),
         ariaLabel: element.getAttribute("aria-label"),
         title: element.getAttribute("title"),
-      }))),
+      })))),
       abortSignal,
     );
     if (records.length === 0) return false;
