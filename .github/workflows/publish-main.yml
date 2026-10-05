@@ -69,6 +69,23 @@ jobs:
           set -euo pipefail
           bun run build
           npm version patch --no-git-tag-version
+          version="$(node -p "require('./package.json').version")"
+          python3 - "$version" <<'PY'
+import sys
+from pathlib import Path
+
+version = sys.argv[1]
+path = Path("src/version.ts")
+text = path.read_text()
+updated = __import__("re").sub(
+    r"export const VERSION = ['\"][^'\"]+['\"];",
+    f"export const VERSION = '{version}';",
+    text,
+)
+if updated == text:
+    raise SystemExit("src/version.ts VERSION declaration not found")
+path.write_text(updated)
+PY
           bun run build
           mkdir -p artifact
           npm pack --silent --pack-destination artifact
@@ -138,7 +155,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json
+          git add package.json src/version.ts
           git commit -m "chore(release): v${VERSION} [skip ci]"
           git push origin HEAD:main
 
