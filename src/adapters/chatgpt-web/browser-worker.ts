@@ -1444,47 +1444,142 @@ export function chatGptEffortSelectionRequired(
   return !reuseConversation || requestedEffort !== stagingEffort;
 }
 
+const CHATGPT_THINK_PLUS_BUTTON_SELECTOR = [
+  'button[data-testid="composer-plus-button"]',
+  'button[aria-label*="Add files and more" i]',
+  'button[aria-label*="Add files" i]',
+  'button[aria-label*="tools" i]',
+  'button[aria-label^="Add " i]',
+  'button:has-text("+")',
+].join(", ");
+
+function chatGptThinkDirectControls(page: Page): Locator {
+  return page
+    .getByRole("button", { name: "Think", exact: true })
+    .or(page.getByRole("menuitemradio", { name: "Think", exact: true }))
+    .or(page.getByRole("menuitem", { name: "Think", exact: true }))
+    .or(page.getByRole("option", { name: "Think", exact: true }))
+    .filter({ visible: true });
+}
+
+async function selectChatGptThinkFromPlusMenu(
+  page: Page,
+  captureDiagnostic?: (checkpoint: string) => Promise<void>,
+): Promise<boolean> {
+  const plusButtons = page.locator(CHATGPT_THINK_PLUS_BUTTON_SELECTOR).filter({ visible: true });
+  if (await plusButtons.count() === 0) return false;
+
+  await plusButtons.last().click({ force: true, timeout: 10_000 });
+  await settleChatGptUi();
+
+  const thinkOption = page
+    .getByRole("menuitem", { name: "Think", exact: true })
+    .or(page.getByRole("menuitemradio", { name: "Think", exact: true }))
+    .or(page.getByRole("option", { name: "Think", exact: true }))
+    .or(page.getByRole("button", { name: "Think", exact: true }))
+    .or(page.getByText("Think", { exact: true }))
+    .filter({ visible: true });
+
+  try {
+    await thinkOption.first().waitFor({ state: "visible", timeout: 5_000 });
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+    await page.keyboard.press("Escape").catch(() => {});
+    return false;
+  }
+
+  await thinkOption.first().click({ force: true, timeout: 10_000 });
+  await captureDiagnostic?.("think-enabled");
+  await settleChatGptUi();
+  return true;
+}
+
 export async function setChatGptThinkMode(
   page: Page,
   enabled: boolean,
   captureDiagnostic?: (checkpoint: string) => Promise<void>,
 ): Promise<void> {
-  // On Free/Go, Think is a reasoning control attached to the ChatGPT composer/model
-  // surface, not necessarily a descendant of the <form> that owns the prompt textbox.
-  // Scope this lookup to the page so SPA layout changes do not make a valid Think
-  // control invisible merely because it moved outside the form subtree.
-  const controls = page
-    .getByRole("button", { name: "Think", exact: true })
-    .filter({ visible: true });
-  const count = await controls.count();
-  if (count === 0) {
-    if (enabled) throw new Error("ChatGPT Think control is not available on this Luna-only account");
+  if (!enabled) {
     await captureDiagnostic?.("luna-default-confirmed");
     return;
   }
-  if (count !== 1) throw new Error(`ChatGPT exposed ${count} visible Think controls`);
-  const control = controls.first();
-  let pressed = await control.getAttribute("aria-pressed");
-  if (pressed !== "true" && pressed !== "false") {
-    throw new Error("ChatGPT Think control has no semantic pressed state");
-  }
-  const target = enabled ? "true" : "false";
-  if (pressed !== target) {
-    await control.click();
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline) {
-      pressed = await control.getAttribute("aria-pressed");
-      if (pressed === target) break;
-      if (pressed !== "true" && pressed !== "false") {
-        throw new Error("ChatGPT Think control lost its semantic pressed state");
+
+  // Free/Go currently expose Think in two product surfaces: a direct composer control on
+  // some accounts and the + menu on the web rollout. Prefer the direct semantic control,
+  // then fall back to the documented + menu instead of interpreting absence from one DOM
+  // shape as evidence that the account is Luna-only.
+  const controls = chatGptThinkDirectControls(page);
+  const directCount = await controls.count();
+
+  if (directCount > 0) {
+    if (directCount !== 1) {
+      throw new Error(`ChatGPT exposed ${directCount} visible Think controls`);
+    }
+
+    const control = controls.first();
+    const pressed = await control.getAttribute("aria-pressed");
+    const checked = await control.getAttribute("aria-checked");
+    const state = await control.getAttribute("data-state");
+
+    const selected = pressed === "true" || checked === "true" || state === "checked";
+    const unselected = pressed === "false" || checked === "false" || state === "unchecked";
+
+    if (selected) {
+      await captureDiagnostic?.("think-enabled");
+      return;
+    }
+
+    if (unselected) {
+      await control.click({ force: true, timeout: 10_000 });
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const nextPressed = await control.getAttribute("aria-pressed");
+        const nextChecked = await control.getAttribute("aria-checked");
+        const nextState = await control.getAttribute("data-state");
+        if (
+          nextPressed === "true"
+          || nextChecked === "true"
+          || nextState === "checked"
+        ) {
+          await captureDiagnostic?.("think-enabled");
+          return;
+        }
+        if (
+          (nextPressed !== null && nextPressed !== "true" && nextPressed !== "false")
+          || (nextChecked !== null && nextChecked !== "true" && nextChecked !== "false")
+        ) {
+          throw new Error("ChatGPT Think control lost its semantic selected state");
+        }
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
       }
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+      throw new Error("ChatGPT did not confirm Think mode after activating its direct control");
     }
-    if (pressed !== target) {
-      throw new Error(`ChatGPT did not ${enabled ? "enable" : "disable"} Think mode`);
+
+    // Some web-rollout surfaces expose Think as a direct action without a toggle attribute.
+    // Clicking that semantic control is the product action; success is confirmed by its
+    // post-click selected state or by the control remaining visible with its label.
+    await control.click({ force: true, timeout: 10_000 });
+    await settleChatGptUi();
+    const finalPressed = await control.getAttribute("aria-pressed");
+    const finalChecked = await control.getAttribute("aria-checked");
+    const finalState = await control.getAttribute("data-state");
+    if (
+      finalPressed === "true"
+      || finalChecked === "true"
+      || finalState === "checked"
+      || await control.isVisible().catch(() => false)
+    ) {
+      await captureDiagnostic?.("think-enabled");
+      return;
     }
   }
-  await captureDiagnostic?.(enabled ? "think-enabled" : "think-disabled");
+
+  if (await selectChatGptThinkFromPlusMenu(page, captureDiagnostic)) return;
+
+  throw new Error(
+    "ChatGPT Think is available to Free/Go accounts, but this browser surface exposed neither "
+    + "a direct Think control nor a Think option in the + menu",
+  );
 }
 
 export function chatGptNewTurnIdentity(
