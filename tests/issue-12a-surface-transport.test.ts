@@ -221,3 +221,19 @@ test("browser surface account binding uses the stable provider identity, not mut
   const bindingWindow = source.slice(bindingStart, source.indexOf("const bindPhysicalSurface", bindingStart));
   expect(bindingWindow).not.toContain("page.context().storageState()");
 });
+
+
+test("ChatGPT connector selection keeps app identity separate from the UI activation mechanism", () => {
+  const source = readFileSync(
+    join(ROOT, "src", "adapters", "chatgpt-web", "browser-worker.ts"),
+    "utf8",
+  );
+  expect(source).toContain('const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";');
+  expect(source).toContain('button[data-testid="composer-plus-button"]');
+  expect(source).toContain('button[aria-label*="Add files and more" i]');
+  expect(source).toContain("connector-plus-triggered");
+  expect(source).not.toContain("const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string): string => `@" + "${appName}`;");
+  expect(source).not.toContain(
+    "const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY(this.config.appName);",
+  );
+});
