@@ -8,7 +8,7 @@
  * so no browser is started.
  */
 import { describe, expect, test } from "bun:test";
-import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import { chatGptWebExecutionNamespace, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import type { TurnBrokerOwner, BrokerToolRequest } from "../src/adapters/chatgpt-web/turn-broker";
 import type { WebSurfaceTransport } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { readFileSync } from "node:fs";
@@ -390,6 +390,81 @@ describe("ChatGptWebLlmAdapter cancellation", () => {
 });
 
 describe("native path does not enter the Responses server", () => {
+  test("logical settlement remains writable after physical retirement", async () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-136-logical-settlement";
+    const capabilitySnapshot = {
+      snapshotId: "snapshot-136-logical-settlement",
+      sessionId: "session-136-logical-settlement",
+      agentId: "session-136-logical-settlement",
+      turnId: "turn-136-logical-settlement",
+      createdAt: Date.now(),
+      lifecycle: "active" as const,
+      tools: [],
+    };
+    const turn = core.begin({
+      executionKey,
+      traceId: "trace-136-logical-settlement",
+      nativeTurnId: capabilitySnapshot.turnId,
+      nativeThreadId: "thread-136-logical-settlement",
+      accountIdentity: "account-136-logical-settlement",
+      browserProfile: "profile-136-logical-settlement",
+      browserContext: "context-136-logical-settlement",
+      pageIdentity: "page-136-logical-settlement",
+      capabilitySnapshot,
+    });
+    let releasePhysical!: () => void;
+    const physicalSettlement = new Promise<void>(resolve => { releasePhysical = resolve; });
+    core.bindPhysicalSettlement(executionKey, physicalSettlement);
+    releasePhysical();
+    await core.waitForRetirement(executionKey);
+
+    expect(turn.snapshot().state).toBe("RETIRED");
+    expect(turn.snapshot().physicalSettled).toBe(true);
+    expect(turn.snapshot().logicalSettled).toBe(false);
+    expect(turn.snapshot().logicalOutcome).toBe("pending");
+    expect(() => turn.markLogicalSettled("completed")).not.toThrow();
+    expect(turn.snapshot().logicalSettled).toBe(true);
+    expect(turn.snapshot().logicalOutcome).toBe("completed");
+    await core.shutdown();
+  });
+
+  test("an immediately completed browser turn can settle logically after physical retirement", async () => {
+    const provider = providerConfigFixture({ accountIdentityFingerprint: "test-account" });
+    const parsed = toCodexParsedRequest(userRequest("hello"), provider);
+    const executionKey = `${chatGptWebExecutionNamespace(provider)}:${chatGptTurnExecutionKey(parsed)}`;
+    const core = new ChatGptWebProviderCore();
+    const transport: WebSurfaceTransport = {
+      async run(turn) {
+        await turn.prepare();
+        await turn.onPhysicalSurfaceBound?.({
+          resourceId: "surface-immediate",
+          browserContextId: "context-immediate",
+          pageId: "page-immediate",
+          profileId: "profile-immediate",
+          accountId: "chatgpt-account:test-account",
+        });
+        await turn.onSurfaceReady?.();
+        await turn.onSendActivated?.();
+        turn.onSubmitted?.();
+        turn.onTextDelta("ok");
+        return "ok";
+      },
+      verifyConnector: async () => "verified",
+      inspectSession: async () => ({ authenticated: true, temporary: true, url: "https://chatgpt.com/" }),
+      smokeTest: async () => ({ effort: "low", response: "ok" }),
+      close: async () => {},
+    };
+    const adapter = createChatGptWebAdapter(provider, { providerCore: core, transport });
+    await expect(
+      adapter.runTurn!(parsed, { headers: new Headers() }, () => {}),
+    ).resolves.toBeUndefined();
+    await core.waitForRetirement(executionKey);
+    expect(core.get(executionKey)).toBeUndefined();
+    expect(core.wasRetired(executionKey)).toBe(true);
+    await core.shutdown();
+  });
+
   test("waitForRetirement waits for ProviderCore retirement", async () => {
     const core = new ChatGptWebProviderCore();
     const executionKey = "issue-136-retirement-wait";
