@@ -2,7 +2,7 @@ import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 import type { ChatGptWebCapabilityState } from "./chatgpt-web-authority";
 
-export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+export const CHATGPT_CHAT_URL = "https://chatgpt.com/";
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -165,11 +165,20 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
   }
 }
 
-export async function assertTemporaryChatPage(page: Page): Promise<void> {
-  const url = new URL(page.url());
-  const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
-  if (url.origin !== expected.origin || url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
-    throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
+export function isChatGptConversationUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.origin !== new URL(CHATGPT_CHAT_URL).origin) return false;
+    if (url.pathname === "/" || url.pathname === "") return true;
+    return /^\\/c\\/[^/?#]+$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export async function assertChatGptPage(page: Page): Promise<void> {
+  if (!isChatGptConversationUrl(page.url())) {
+    throw new Error(`ChatGPT left the persistent conversation surface (${page.url()})`);
   }
 }
 
