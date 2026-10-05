@@ -8,7 +8,7 @@
  * so no browser is started.
  */
 import { describe, expect, test } from "bun:test";
-import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import { chatGptWebExecutionNamespace, createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import type { TurnBrokerOwner, BrokerToolRequest } from "../src/adapters/chatgpt-web/turn-broker";
 import type { WebSurfaceTransport } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { readFileSync } from "node:fs";
@@ -432,7 +432,7 @@ describe("native path does not enter the Responses server", () => {
   test("an immediately completed browser turn can settle logically after physical retirement", async () => {
     const provider = providerConfigFixture({ accountIdentityFingerprint: "test-account" });
     const parsed = toCodexParsedRequest(userRequest("hello"), provider);
-    const executionKey = chatGptTurnExecutionKey(parsed);
+    const executionKey = `${chatGptWebExecutionNamespace(provider)}:${chatGptTurnExecutionKey(parsed)}`;
     const core = new ChatGptWebProviderCore();
     const transport: WebSurfaceTransport = {
       async run(turn) {
