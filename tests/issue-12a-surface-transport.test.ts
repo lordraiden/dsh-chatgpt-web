@@ -232,7 +232,7 @@ test("ChatGPT connector selection keeps app identity separate from the UI activa
   expect(source).toContain('button[data-testid="composer-plus-button"]');
   expect(source).toContain('button[aria-label*="Add files and more" i]');
   expect(source).toContain("connector-plus-triggered");
-  expect(source).not.toContain("const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string): string => `@" + "${appName}`;");
+  expect(source).not.toContain("const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string)");
   expect(source).not.toContain(
     "const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY(this.config.appName);",
   );
