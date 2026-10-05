@@ -238,6 +238,8 @@ test("ChatGPT connector selection separates app identity from the UI activation 
   expect(source).toContain("connectorPickerRows");
   expect(source).toContain('[data-mention-list-scroll-area] button[data-list-navigation-item="true"]');
   expect(source).toContain("chooseChatGptConnectorCandidate");
+  expect(source).toContain("element.querySelector(`[${name}]`)?.getAttribute(name)");
+  expect(source).toContain("page.getByText(this.config.appName, { exact: true }).filter({ visible: true })");
   expect(source).toContain("selectedConnectorControls");
   expect(source).toContain('[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]');
   expect(source).toContain('composer.press(CHATGPT_COMPOSER_SELECT_ALL_KEY');
