@@ -67,14 +67,15 @@ jobs:
             IFS='.' read -r major minor patch <<<"$base"
             version="$major.$minor.$((patch + 1))"
           fi
-          node -e '
-            const fs = require("fs");
-            const version = process.argv[1];
-            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-            pkg.version = version;
-            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
-            fs.writeFileSync("src/version.ts", "export const VERSION = \'" + version + "\';\n");
-          ' "$version"
+          VERSION="$version" node <<'NODE'
+          const fs = require("fs");
+          const version = process.env.VERSION;
+          if (!version) throw new Error("Release version is missing");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          pkg.version = version;
+          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          fs.writeFileSync("src/version.ts", "export const VERSION = '" + version + "';\n");
+          NODE
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Verify version consistency
