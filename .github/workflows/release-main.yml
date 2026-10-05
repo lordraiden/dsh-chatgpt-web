@@ -1,0 +1,138 @@
+name: Release main
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact package version to publish (leave empty to increment the current patch version)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Bump, validate and publish main
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (
+        github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_branch == 'main'
+        && github.event.workflow_run.conclusion == 'success'
+        && !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.version }}"
+          current="$(node -p "require('./package.json').version")"
+          if [[ -n "$requested" ]]; then
+            version="$requested"
+          else
+            base="${current%%-*}"
+            IFS='.' read -r major minor patch <<<"$base"
+            version="$major.$minor.$((patch + 1))"
+          fi
+          node -e '
+            const fs = require("fs");
+            const version = process.argv[1];
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = version;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            fs.writeFileSync("src/version.ts", "export const VERSION = \'" + version + "\';\n");
+          ' "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version consistency
+        run: |
+          test "$(node -p "require('./package.json').version")" = "${{ steps.version.outputs.version }}"
+          grep -Fx "export const VERSION = '${{ steps.version.outputs.version }}';" src/version.ts
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build bundles
+        run: bun run build
+
+      - name: Full regression suite
+        run: bun run test
+
+      - name: Pack and smoke test exact release artifact
+        run: node scripts/smoke-tarball.mjs
+
+      - name: Configure npm registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > ~/.npmrc <<EOF
+          @lordraiden:registry=https://registry.npmjs.org/
+          //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+          EOF
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npmjs.com
+        run: npm publish --registry https://registry.npmjs.org --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to GitHub Packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > ~/.npmrc <<EOF
+          @lordraiden:registry=https://npm.pkg.github.com/
+          //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+          EOF
+          npm publish --registry https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit published version to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src/version.ts lib
+          git commit -m "chore(release): ${{ steps.version.outputs.version }} [skip ci]"
+          git push origin HEAD:main
+
+      - name: Tag published version
+        run: |
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
