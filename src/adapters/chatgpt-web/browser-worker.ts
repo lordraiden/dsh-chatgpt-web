@@ -4595,13 +4595,43 @@ export class ChatGptBrowserWorker {
       let physicalPageId = physicalObjectId(page, "page");
       let physicalContextId = physicalObjectId(page.context(), "context");
       const bindPhysicalSurface = async (): Promise<void> => {
-        await turn.onPhysicalSurfaceBound?.({
-          resourceId: physicalResourceId,
-          browserContextId: physicalContextId,
-          pageId: physicalPageId,
-          profileId: physicalProfileId,
-          accountId: physicalAccountId,
-        });
+        try {
+          await turn.onPhysicalSurfaceBound?.({
+            resourceId: physicalResourceId,
+            browserContextId: physicalContextId,
+            pageId: physicalPageId,
+            profileId: physicalProfileId,
+            accountId: physicalAccountId,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const code = message.includes("does not match its logical account identity")
+            ? "browser_surface_account_mismatch"
+            : message.includes("already leased by turn")
+              ? "browser_surface_resource_conflict"
+              : message.includes("inactive browser lease") || message.includes("not owned by the registry")
+                ? "browser_surface_lease_inactive"
+                : message.includes("must be a non-empty string")
+                  ? "browser_surface_binding_invalid"
+                  : message.includes("cannot move to a different physical resource")
+                    ? "browser_surface_resource_changed"
+                    : "browser_surface_binding_failed";
+          const surfaced = new ChatGptWebAdapterError(
+            "ChatGPT browser surface binding failed",
+            {
+              status: 502,
+              errorType: "server_error",
+              code,
+              retryable: false,
+              cause: error,
+            },
+          );
+          console.error(
+            `[chatgpt-web] browser turn ${turn.traceId} physical-surface binding failed code=${code}`
+            + ` ${safeErrorDescriptor(error)}`,
+          );
+          throw surfaced;
+        }
       };
       await bindPhysicalSurface();
       const rebindLauncherPage = async (
