@@ -8,7 +8,7 @@
  * so no browser is started.
  */
 import { describe, expect, test } from "bun:test";
-import { createChatGptWebAdapter, resolveChatGptCapabilitySnapshotForTurn } from "../src/adapters/chatgpt-web/index";
+import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
 import type { TurnBrokerOwner, BrokerToolRequest } from "../src/adapters/chatgpt-web/turn-broker";
 import type { WebSurfaceTransport } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { readFileSync } from "node:fs";
@@ -30,7 +30,6 @@ import {
   chatGptTurnExecutionKey,
   chatGptTurnRoundKey,
 } from "../src/adapters/chatgpt-web/turn-execution";
-import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -391,59 +390,46 @@ describe("ChatGptWebLlmAdapter cancellation", () => {
 });
 
 describe("native path does not enter the Responses server", () => {
-  test("waits for a SETTLING ProviderTurn before creating a reconnect surface", async () => {
-    const provider = providerConfigFixture({ accountIdentityFingerprint: "test-account" });
-    const parsed = toCodexParsedRequest(userRequest("hello"), provider);
-    const executionKey = chatGptTurnExecutionKey(parsed);
+  test("waitForRetirement waits for ProviderCore retirement", async () => {
     const core = new ChatGptWebProviderCore();
-    const identity = extractChatGptTurnIdentity(parsed);
-    const snapshot = resolveChatGptCapabilitySnapshotForTurn(core, executionKey, parsed, identity);
-    const previous = core.begin({
+    const executionKey = "issue-136-retirement-wait";
+    const capabilitySnapshot = {
+      snapshotId: "snapshot-136-retirement-wait",
+      sessionId: "session-136-retirement-wait",
+      agentId: "session-136-retirement-wait",
+      turnId: "turn-136-retirement-wait",
+      createdAt: Date.now(),
+      lifecycle: "active" as const,
+      tools: [],
+    };
+    const turn = core.begin({
       executionKey,
-      traceId: "trace-settling-reconnect",
-      nativeTurnId: identity.turnId!,
-      nativeThreadId: identity.threadId,
-      accountIdentity: "test-account",
-      browserProfile: "/usr/bin/chromium",
-      browserContext: "test-context",
-      pageIdentity: "old-page",
-      capabilitySnapshot: snapshot,
+      traceId: "trace-136-retirement-wait",
+      nativeTurnId: capabilitySnapshot.turnId,
+      nativeThreadId: "thread-136-retirement-wait",
+      accountIdentity: "account-136-retirement-wait",
+      browserProfile: "profile-136-retirement-wait",
+      browserContext: "context-136-retirement-wait",
+      pageIdentity: "page-136-retirement-wait",
+      capabilitySnapshot,
     });
-    previous.transition("SETTLING");
+    turn.transition("SETTLING");
     let releasePhysical!: () => void;
     const physicalSettlement = new Promise<void>(resolve => { releasePhysical = resolve; });
     core.bindPhysicalSettlement(executionKey, physicalSettlement);
 
-    let transportRuns = 0;
-    const transport: WebSurfaceTransport = {
-      async run(turn) {
-        transportRuns += 1;
-        await turn.onPhysicalSurfaceBound?.({
-          resourceId: "surface-reconnect",
-          browserContextId: "context-reconnect",
-          pageId: "page-reconnect",
-          profileId: "profile-reconnect",
-          accountId: "chatgpt-account:test-account",
-        });
-        await turn.onSurfaceReady?.();
-        await turn.onSendActivated?.();
-        turn.onSubmitted?.();
-        turn.onTextDelta("ok");
-        return "ok";
-      },
-      verifyConnector: async () => "verified",
-      inspectSession: async () => ({ authenticated: true, temporary: true, url: "https://chatgpt.com/" }),
-      smokeTest: async () => ({ effort: "low", response: "ok" }),
-      close: async () => {},
-    };
-
-    const adapter = createChatGptWebAdapter(provider, { providerCore: core, transport });
-    const run = adapter.runTurn!(parsed, { headers: new Headers() }, () => {});
+    const retirement = core.waitForRetirement(executionKey);
+    let retired = false;
+    void retirement.then(() => { retired = true; });
     await Promise.resolve();
+    expect(retired).toBe(false);
+    expect(core.get(executionKey)).toBe(turn);
+
     releasePhysical();
-    await run;
-    expect(transportRuns).toBe(1);
-    await core.shutdown();
+    await retirement;
+    expect(retired).toBe(true);
+    expect(core.get(executionKey)).toBeUndefined();
+    expect(core.wasRetired(executionKey)).toBe(true);
   });
 
   test("tool-capable native turns wait for accepted submission before broker capability wait", async () => {
