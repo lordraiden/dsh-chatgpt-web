@@ -1632,7 +1632,7 @@ export function createChatGptWebAdapter(
                 if (collectedToolCalls.length > 0) {
                   console.info(`[chatgpt-web] collectedToolCalls ${toolCallDiagnosticSummary(collectedToolCalls)}`);
                   const requests: BrokerToolRequest[] = collectedToolCalls.map(tc => ({
-                    callId: tc.id,
+                    callId: `dsh_${randomBytes(18).toString("base64url")}`,
                     wireName: tc.name,
                     freeform: false,
                     arguments: tc.arguments,
