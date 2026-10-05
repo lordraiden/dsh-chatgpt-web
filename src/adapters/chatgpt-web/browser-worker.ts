@@ -3428,7 +3428,7 @@ export class ChatGptBrowserWorker {
     reuseConnector = false,
   ): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
-    const connectorMode = chatGptConnectorAttachmentMode(localTools, reuseConnector);
+    const connectorMode = chatGptConnectorAttachmentMode(localTools, nativeConnector, reuseConnector);
     let composerMutationStarted = false;
     try {
       if (connectorMode !== "mention") {
