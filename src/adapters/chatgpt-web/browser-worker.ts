@@ -3801,7 +3801,7 @@ export class ChatGptBrowserWorker {
 
   private async inspectSessionExclusive(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    temporary: false;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
@@ -3809,7 +3809,7 @@ export class ChatGptBrowserWorker {
     const page = await this.ensurePage();
     await this.prepareChatSurface(page);
     const url = page.url();
-    if (!detectCapabilities) return { authenticated: true, temporary: true, url };
+    if (!detectCapabilities) return { authenticated: true, temporary: false, url };
     const capabilities = await detectChatGptAccountCapabilities(page);
     return { authenticated: true, temporary: false, url, ...capabilities };
   }
