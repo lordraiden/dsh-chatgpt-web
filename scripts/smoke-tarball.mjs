@@ -86,6 +86,22 @@ try {
   const pkgDir = join(cleanDir, "node_modules", ...packageName.split("/"));
   const binPath = join(cleanDir, "node_modules", ".bin", "dsh-chatgpt-web");
 
+  // Verify that the executable bundle version matches package.json. This catches stale committed
+  // or manually published lib/ output even when the package metadata was bumped correctly.
+  if (existsSync(join(pkgDir, "lib", "cli.js"))) {
+    const installedCli = readFileSync(join(pkgDir, "lib", "cli.js"), "utf8");
+    const runtimeVersion =
+      installedCli.match(/VERSION\\s*=\\s*["']([^"']+)["']/)?.[1] ??
+      installedCli.match(/var VERSION = ["']([^"']+)["']/)?.[1];
+    if (runtimeVersion !== repoPackage.version) {
+      fail(`installed runtime version ${runtimeVersion ?? "unknown"} does not match package.json ${repoPackage.version}`);
+    } else {
+      ok(`installed runtime version matches package.json (${repoPackage.version})`);
+    }
+  } else {
+    fail("installed CLI bundle missing while checking runtime version");
+  }
+
   // 4. Locate the installed binary and run --help from it.
   if (!existsSync(binPath)) {
     fail(`installed binary not found at ${binPath}`);
