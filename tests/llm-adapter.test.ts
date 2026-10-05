@@ -459,6 +459,8 @@ describe("native path does not enter the Responses server", () => {
     await expect(
       adapter.runTurn!(parsed, { headers: new Headers() }, () => {}),
     ).resolves.toBeUndefined();
+    await core.waitForRetirement(executionKey);
+    expect(core.get(executionKey)).toBeUndefined();
     expect(core.wasRetired(executionKey)).toBe(true);
     await core.shutdown();
   });
