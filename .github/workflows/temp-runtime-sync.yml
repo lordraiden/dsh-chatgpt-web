@@ -1,9 +1,9 @@
 name: Temporary runtime sync
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/connector-semantic-discovery
+      - main
 
 permissions:
   contents: write
