@@ -227,7 +227,7 @@ test("browser surface account binding uses the stable provider identity, not mut
 });
 
 
-test("ChatGPT connector selection keeps app identity separate from the UI activation mechanism", () => {
+test("ChatGPT connector selection separates app identity from the UI activation mechanism", () => {
   const source = readFileSync(
     join(ROOT, "src", "adapters", "chatgpt-web", "browser-worker.ts"),
     "utf8",
@@ -235,17 +235,15 @@ test("ChatGPT connector selection keeps app identity separate from the UI activa
   expect(source).toContain('const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";');
   expect(source).toContain('button[data-testid="composer-plus-button"]');
   expect(source).toContain('button[aria-label*="Add files and more" i]');
-  expect(source).toContain('[data-keyword="\' + escapedAppName + \'"]');
-  expect(source).toContain('[data-app-name="\' + escapedAppName + \'"]');
-  expect(source).toContain('[aria-label="\' + escapedAppName + \'"]');
-  expect(source).toContain('menuRows.filter({ hasText: this.config.appName, visible: true })');
-  expect(source).toContain('getByRole("button", { name: /^(More|Apps|Plugins)$/i })');
-  expect(source).toContain('input[placeholder*="search" i], textarea[placeholder*="search" i]');
+  expect(source).toContain("connectorPickerRows");
+  expect(source).toContain("chooseChatGptConnectorCandidate");
+  expect(source).toContain("selectedConnectorControls");
   expect(source).toContain("connector-plus-triggered");
-  expect(source).not.toContain("const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string)");
+  expect(source).not.toContain('const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string)');
   expect(source).not.toContain(
     "const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY(this.config.appName);",
   );
+  expect(source).not.toContain("keyword === this.config.appName");
 });
 
 test("ChatGPT connector discovery separates configured display names from semantic picker identity", () => {
