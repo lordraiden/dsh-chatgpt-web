@@ -261,6 +261,7 @@ test("ChatGPT connector discovery separates configured display names from semant
     ariaLabel: null,
     title: null,
     mentionDisplayName: "Codex Native2",
+    dataListNavigationItem: "true",
   };
   const semanticExact = {
     rawIndex: 1,
@@ -272,6 +273,7 @@ test("ChatGPT connector discovery separates configured display names from semant
     ariaLabel: null,
     title: null,
     mentionDisplayName: null,
+    dataListNavigationItem: null,
   };
   const genericCodex = {
     rawIndex: 2,
@@ -283,6 +285,7 @@ test("ChatGPT connector discovery separates configured display names from semant
     ariaLabel: null,
     title: null,
     mentionDisplayName: null,
+    dataListNavigationItem: null,
   };
   expect(scoreChatGptConnectorCandidate(exactDisplay, "Codex Native2")).toBe(100);
   expect(scoreChatGptConnectorCandidate(semanticExact, "Codex Native2")).toBe(95);
