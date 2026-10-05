@@ -22,12 +22,17 @@ export function safeErrorDescriptor(error: unknown): string {
   const status = typeof candidate.status === "number" && Number.isSafeInteger(candidate.status)
     ? candidate.status
     : undefined;
+  const rawMessage = candidate.message;
+  const message = typeof rawMessage === "string"
+    ? rawMessage.replace(/[\\r\\n\\t]+/g, " ").trim().slice(0, 240)
+    : "";
 
   return [
     `name=${name}`,
     `code=${code}`,
     ...(errorType ? [`type=${errorType}`] : []),
     ...(status === undefined ? [] : [`status=${status}`]),
+    ...(message ? [`message=${JSON.stringify(message)}`] : []),
   ].join(" ");
 }
 
