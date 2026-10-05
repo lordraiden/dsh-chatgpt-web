@@ -1284,7 +1284,15 @@ export function createChatGptWebAdapter(
         if (contextExhaustion) {
           await providerCore.waitForRetirement(executionKey);
         }
-        const previousProviderTurn = providerCore.get(executionKey);
+        let previousProviderTurn = providerCore.get(executionKey);
+        // A reconnect can race the physical retirement callback. Never reuse a ProviderTurn that
+        // has entered SETTLING: wait for its physical owner to finish, then bind the new request
+        // to a fresh lifecycle instead of allowing the browser surface to mutate a turn that is
+        // about to become RETIRED.
+        if (previousProviderTurn?.snapshot().state === "SETTLING") {
+          await providerCore.waitForRetirement(executionKey);
+          previousProviderTurn = providerCore.get(executionKey);
+        }
         const recovery = contextExhaustion
           ? "REPLAY" as const
           : previousProviderTurn
