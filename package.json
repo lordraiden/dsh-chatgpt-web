@@ -1,6 +1,6 @@
 {
   "name": "@lordraiden/dsh-chatgpt-web",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "DeepSeek Harness Cordis plugin that bridges an authenticated ChatGPT Web session into DSH.",
   "repository": {
     "type": "git",
@@ -56,7 +56,8 @@
     "doctor": "node lib/cli.js doctor",
     "test": "node scripts/test-issue-20-settings.mjs && bun test ./scripts/test-issue-74-native-dsh.ts && bun test ./scripts/test-issue-75-authority.ts && bun test ./tests/issue-71-route-scope.test.ts && bun test ./tests/luna-think-ui.test.ts && bun test ./tests/issue-76-canonical-context.test.ts && bun test ./tests/issue-77-continuity-retry.test.ts && node scripts/smoke-tarball.mjs && bun test ./tests/issue-72-responses-provider-core.test.ts && bun test ./tests/issue-78-responses-seam.test.ts && bun test ./tests/issue-79-security-observability.test.ts && bun test ./tests/text-tools-contract.test.ts",
     "typecheck": "tsc --noEmit",
-    "test:native2-dsh-runtime": "bun ./scripts/test-native2-dsh-runtime.ts"
+    "test:native2-dsh-runtime": "bun ./scripts/test-native2-dsh-runtime.ts",
+    "prepare": "bun run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
