@@ -2231,7 +2231,7 @@ export class ChatGptBrowserWorker {
 
   inspectSession(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    temporary: false;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
