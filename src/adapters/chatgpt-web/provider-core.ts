@@ -388,6 +388,18 @@ export class ProviderTurnLifecycle {
     this.activity = "capability_wait";
   }
 
+  /**
+   * Enter physical settlement before cancelling/retiring the browser session.
+   * The lease remains owned until physical settlement completes, but other turns can now
+   * distinguish this safe-to-wait state from a genuinely active browser generation.
+   */
+  beginSettlement(): void {
+    if (this.state === "RETIRED" || this.state === "SETTLING") return;
+    if (!this.lease.isActive()) throw new Error("Provider turn lease is no longer active");
+    this.transition("SETTLING");
+    this.activity = "idle";
+  }
+
   markRecovery(value: Exclude<ProviderRecovery, "NEW">): void {
     this.assertMutable();
     const currentOrder = RECOVERY_ORDER[this.recovery];
@@ -678,6 +690,32 @@ export class ChatGptWebProviderCore {
     // ProviderCore has completed that continuation so callers cannot immediately race a still-owned
     // SETTLING turn when they create the replacement lifecycle.
     while (this.turns.get(executionKey) === turn) {
+      await Promise.resolve();
+    }
+  }
+
+  /**
+   * Wait for a failed/cancelled turn that is already in physical settlement for the same
+   * authenticated ChatGPT account and browser surface. A live RUNNING/SURFACE_READY turn is
+   * intentionally not waited on: concurrent turns must still fail closed.
+   */
+  async waitForSettlingAccount(
+    accountIdentity: string,
+    browserProfile: string,
+    browserContext: string,
+  ): Promise<boolean> {
+    for (;;) {
+      const candidate = [...this.turns.values()].find(turn => {
+        const snapshot = turn.snapshot();
+        const descriptor = turn.lease.descriptor;
+        return snapshot.state === "SETTLING"
+          && snapshot.physicalSettled === false
+          && descriptor.accountIdentity === accountIdentity
+          && descriptor.browserProfile === browserProfile
+          && descriptor.browserContext === browserContext;
+      });
+      if (!candidate) return false;
+      await candidate.waitForPhysicalSettlement();
       await Promise.resolve();
     }
   }
