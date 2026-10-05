@@ -71,32 +71,34 @@ The repository also contains two intentionally separate surfaces: native Codex p
 
 ### 1. Installation
 
-Install the plugin from the npm registry:
+For the continuous development channel, install directly from the repository's default branch:
+
+```bash
+dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
+```
+
+The repository commits its generated `lib/` runtime automatically after every `main` update. Git-hosted installs therefore do **not** execute a `prepare` build, so pnpm does not require SHA-specific `allowBuilds` exceptions when the plugin revision changes.
+
+For an immutable released artifact, install the package from npm instead:
 
 ```bash
 dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
 ```
 
-Every validated merge to `main` is published automatically as the next patch version, so a registry-installed profile can update normally:
-
-```bash
-dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
-```
-
-GitHub-hosted installs are intended only for development. They require pnpm build-script authorization tied to the resolved Git revision. Use the registry package for normal runtime deployments so updates do not require SHA-specific `allowBuilds` entries.
+Use the GitHub/default-branch installation when you want the latest merged `main` changes immediately. Use npm when you want a versioned release.
 
 This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
 
-### Migrating an existing Git installation
+### Migrating an existing Git-pinned installation
 
-An existing Git-pinned installation needs a one-time migration to the registry package:
+Existing profiles may still contain an old Git SHA plus pnpm `allowBuilds` entries. Migrate the dependency once to the repository default branch:
 
 ```bash
 dsh plugin --profile <profile> remove @lordraiden/dsh-chatgpt-web
-dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
+dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
 ```
 
-After that migration, future merges to `main` are ordinary package updates; no SHA changes or `allowBuilds` edits are required.
+After that one-time migration, future updates follow `main`; no SHA replacement or `allowBuilds` edit is required.
 
 ### 2. One-Time Browser Sign-In
 
