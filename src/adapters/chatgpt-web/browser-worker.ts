@@ -3333,17 +3333,19 @@ export class ChatGptBrowserWorker {
           .normalize("NFKC")
           .toLocaleLowerCase()
           .replace(/[^a-z0-9]+/g, "");
+        const readIdentityAttribute = (element: Element, name: string): string | null =>
+          element.getAttribute(name) ?? element.querySelector(`[${name}]`)?.getAttribute(name) ?? null;
         return elements.map((element, rawIndex) => ({
           rawIndex,
-          text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 240),
-          keyword: element.getAttribute("data-keyword"),
-          dataId: element.getAttribute("data-id"),
-          appName: element.getAttribute("data-app-name"),
-          pluginName: element.getAttribute("data-plugin-name"),
-          ariaLabel: element.getAttribute("aria-label"),
-          title: element.getAttribute("title"),
-          mentionDisplayName: element.getAttribute("app-mention-display-name"),
-          dataListNavigationItem: element.getAttribute("data-list-navigation-item"),
+          text: (element.textContent ?? "").replace(/\\s+/g, " ").trim().slice(0, 240),
+          keyword: readIdentityAttribute(element, "data-keyword"),
+          dataId: readIdentityAttribute(element, "data-id"),
+          appName: readIdentityAttribute(element, "data-app-name"),
+          pluginName: readIdentityAttribute(element, "data-plugin-name"),
+          ariaLabel: readIdentityAttribute(element, "aria-label"),
+          title: readIdentityAttribute(element, "title"),
+          mentionDisplayName: readIdentityAttribute(element, "app-mention-display-name"),
+          dataListNavigationItem: readIdentityAttribute(element, "data-list-navigation-item"),
         })).filter(candidate => {
           const values = [
             candidate.text,
@@ -3371,10 +3373,54 @@ export class ChatGptBrowserWorker {
       abortSignal,
     );
     const candidate = chooseChatGptConnectorCandidate(candidates, this.config.appName);
-    if (!candidate) return undefined;
-    return { row: rows.nth(candidate.rawIndex), candidate };
-  }
+    if (candidate) return { row: rows.nth(candidate.rawIndex), candidate };
 
+    // Some current ChatGPT surfaces put the semantic connector name on a child node that is not
+    // itself matched by the picker-row selector. Fall back to one exact visible text match, but only
+    // when it belongs to an app/menu/list surface; this prevents unrelated page text from being selected.
+    const exactMatches = page.getByText(this.config.appName, { exact: true }).filter({ visible: true });
+    const exactCount = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(exactMatches.count()),
+      abortSignal,
+    );
+    if (exactCount !== 1) return undefined;
+    const exactRow = exactMatches.first();
+    const inPickerSurface = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(exactRow.evaluate(element => {
+        let current: Element | null = element;
+        for (let depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+          if (current.matches([
+            "[data-mention-list-scroll-area]",
+            "[data-list-navigation-item=\"true\"]",
+            '[role="menu"]',
+            '[role="listbox"]',
+            '[role="option"]',
+            '[role="menuitem"]',
+            '[role="menuitemradio"]',
+            '[data-id^="plugin:"]',
+          ].join(", "))) return true;
+        }
+        return false;
+      })),
+      abortSignal,
+    );
+    if (!inPickerSurface) return undefined;
+    return {
+      row: exactRow,
+      candidate: {
+        rawIndex: 0,
+        text: this.config.appName,
+        keyword: null,
+        dataId: null,
+        appName: this.config.appName,
+        pluginName: null,
+        ariaLabel: null,
+        title: null,
+        mentionDisplayName: this.config.appName,
+        dataListNavigationItem: null,
+      },
+    };
+  }
   private async waitForConnectorCandidate(
     page: Page,
     timeoutMs: number,
