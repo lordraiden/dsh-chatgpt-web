@@ -205,7 +205,7 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
-const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
+const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string): string => `@${appName}`;
 const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
@@ -3193,7 +3193,8 @@ export class ChatGptBrowserWorker {
   ): Promise<string> {
     const titles = await this.connectorMentionRowTitles(menuRows, abortSignal);
     if (titles.length === 0) {
-      return `ChatGPT connector menu did not open after ${triggerAttempts} complete mention trigger attempt(s)`;
+      return `ChatGPT connector picker did not expose any recognized menu row after ${triggerAttempts} complete mention trigger attempt(s)`
+        + ` (the picker may have changed its internal DOM contract)`;
     }
     if (this.config.appName === CHATGPT_CONNECTOR_NAME && titles.includes(DEV_CHATGPT_CONNECTOR_NAME)) {
       return `ChatGPT exposes the isolated DEV connector ${JSON.stringify(DEV_CHATGPT_CONNECTOR_NAME)},`
@@ -3249,10 +3250,18 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
     };
     let composer: Locator;
-    const menuRows = page.locator('.__menu-item[tabindex="0"]');
-    const appResult = menuRows.filter({
-      has: page.getByText(this.config.appName, { exact: true }),
-    });
+    // ChatGPT's app picker DOM is not a stable public API. Keep the role-based fallbacks only
+    // for keyboard navigation; the exact configured connector identity is detected by its visible
+    // text instead of the retired internal .__menu-item[tabindex="0"] implementation detail.
+    const menuRows = page.locator([
+      '.__menu-item[tabindex="0"]',
+      '[role="menuitem"]',
+      '[role="option"]',
+      '[role="menuitemradio"]',
+    ].join(", ")).filter({ visible: true });
+    const appResult = page.getByText(this.config.appName, { exact: true }).filter({ visible: true });
+    const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY(this.config.appName);
+
     await ensureChatGptPersonalizedConnectorAccess(
       page,
       capture,
@@ -3270,7 +3279,7 @@ export class ChatGptBrowserWorker {
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
           });
           await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
-          await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
+          await composer.pressSequentially(mentionQuery, {
             delay: 25,
             signal: personalizationSignal,
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
@@ -3301,6 +3310,7 @@ export class ChatGptBrowserWorker {
       },
       abortSignal,
     );
+
     try {
       composer = await this.activeComposer(page, 30_000, abortSignal);
       await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
@@ -3316,7 +3326,7 @@ export class ChatGptBrowserWorker {
         await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
-        await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
+        await composer.pressSequentially(mentionQuery, {
           delay: 25,
           signal: abortSignal,
           timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
@@ -3336,6 +3346,10 @@ export class ChatGptBrowserWorker {
         } catch (error) {
           if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
           const visibleRows = await this.connectorMentionRowTitles(menuRows, abortSignal);
+          const visibleConfiguredConnector = await withBrowserTurnAbort(
+            withChatGptBrowserObservationTimeout(appResult.count()),
+            abortSignal,
+          );
           const knownIdentityMismatch = this.config.appName === CHATGPT_CONNECTOR_NAME
             && (
               visibleRows.includes(DEV_CHATGPT_CONNECTOR_NAME)
@@ -3346,6 +3360,12 @@ export class ChatGptBrowserWorker {
             throw chatGptConnectorUnavailableError(
               await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts, abortSignal),
             );
+          }
+          if (visibleConfiguredConnector > 0) {
+            // The picker is present but ChatGPT no longer exposes its result through the old
+            // internal menu-item selector. The exact visible app identity is the source of truth.
+            await capture("connector-menu-visible");
+            break;
           }
           if (
             catalogRefreshAvailable
@@ -3366,44 +3386,87 @@ export class ChatGptBrowserWorker {
           }
         }
       }
+
       const exactResultCount = await withBrowserTurnAbort(
         withChatGptBrowserObservationTimeout(appResult.count()),
         abortSignal,
       );
       if (exactResultCount !== 1) {
         throw chatGptConnectorUnavailableError(
-          `ChatGPT connector menu did not expose one exact ${JSON.stringify(this.config.appName)} row`
+          `ChatGPT connector picker did not expose one exact visible ${JSON.stringify(this.config.appName)} entry`
           + ` after ${attemptBudget.triggerAttempts} complete mention trigger attempt(s)`,
         );
       }
-      // Hidden launcher maintenance keeps a 1x1 Chromium viewport, so pointer activation cannot
-      // reach this menu. Require the exact row to own ChatGPT's keyboard highlight first;
-      // otherwise move the menu highlight until it does. Keep
-      // focus on the composer, activate through the menu's real keyboard owner, then prove the exact
-      // selected connector pill below.
-      const rowHighlighted = async () => await appResult.getAttribute("data-highlighted", {
-        signal: abortSignal,
-        timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-      }) !== null;
-      if (!await rowHighlighted()) {
-        const visibleRowCount = await withBrowserTurnAbort(
-          withChatGptBrowserObservationTimeout(menuRows.filter({ visible: true }).count()),
-          abortSignal,
-        );
-        for (let step = 0; step < visibleRowCount && !await rowHighlighted(); step += 1) {
-          await composer.press("ArrowDown", {
+
+      const appTarget = appResult.first();
+      let activated = false;
+
+      // Prefer direct activation whenever ChatGPT gives the result a real visible box. This handles
+      // current app-picker/listbox implementations without depending on private highlight attributes.
+      const box = await appTarget.boundingBox().catch(() => null);
+      if (box && box.width > 1 && box.height > 1) {
+        try {
+          await appTarget.click({
+            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+            signal: abortSignal,
+          });
+          activated = true;
+        } catch {
+          // Fall through to the keyboard path used by the 1x1 Launcher maintenance browser.
+        }
+      }
+
+      if (!activated) {
+        // Hidden launcher maintenance keeps a 1x1 Chromium viewport, so pointer activation cannot
+        // reach this menu. Prefer the exact current result and use ChatGPT's keyboard owner.
+        const rowHighlighted = async () => {
+          const attributes = ["data-highlighted", "aria-selected", "data-active"];
+          for (const attribute of attributes) {
+            if (await appTarget.getAttribute(attribute).then(value => value !== null).catch(() => false)) {
+              return true;
+            }
+          }
+          return false;
+        };
+
+        if (!await rowHighlighted()) {
+          const visibleRowCount = await withBrowserTurnAbort(
+            withChatGptBrowserObservationTimeout(menuRows.count()),
+            abortSignal,
+          );
+          for (let step = 0; step < visibleRowCount && !await rowHighlighted(); step += 1) {
+            await composer.press("ArrowDown", {
+              signal: abortSignal,
+              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+            });
+          }
+        }
+
+        if (await rowHighlighted()) {
+          await composer.press("Enter", {
             signal: abortSignal,
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
           });
+          activated = true;
+        } else {
+          try {
+            await appTarget.press("Enter", {
+              signal: abortSignal,
+              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+            });
+            activated = true;
+          } catch {
+            // Let the stable semantic error below report that no activation path succeeded.
+          }
         }
       }
-      if (!await rowHighlighted()) {
-        throw new Error(`ChatGPT connector menu could not highlight ${JSON.stringify(this.config.appName)}`);
+
+      if (!activated) {
+        throw new Error(
+          `ChatGPT connector picker exposed ${JSON.stringify(this.config.appName)} but it could not be activated`,
+        );
       }
-      await composer.press("Enter", {
-        signal: abortSignal,
-        timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-      });
+
       await capture("connector-choice-activated");
       // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
       // again instead of returning the pre-selection locator, otherwise the real turn can focus a
