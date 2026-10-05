@@ -152,8 +152,6 @@ interface ChatGptTurnRuntimeBase {
   /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */
   retireCapability?: () => void | Promise<void>;
   submission?: { phase: "prepared" | "send_activated" | "accepted" };
-  /** Records browser completion on ProviderCore before physical settlement can retire the lifecycle. */
-  logicalSettlement?: (outcome: ChatGptBrowserOutcome) => void;
   /** Resolves only after the browser submission has been accepted and the provider turn is RUNNING. */
   running: Promise<void>;
   /** Semantic ChatGPT conversation epoch. Physical page/resource identity remains separate. */
@@ -290,34 +288,20 @@ export class ChatGptTurnSession {
     readonly nativeThreadId?: string,
   ) {
     this.attachedConversationKey = runtime.conversationKey;
-    this.browserOutcome = runtime.browser
-      .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
-      .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
-      .then(outcome => {
-      try {
-        runtime.logicalSettlement?.(outcome);
-      } catch (error) {
-        console.error(
-          `[chatgpt-web] failed to record logical browser settlement: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      this.settledBrowserOutcome = outcome;
-      return outcome;
-    });
-    // ProviderCore retirement must not outrun the browser outcome observer. Physical helper
-    // cleanup still defines the earliest release point, but lifecycle retirement waits for the
-    // logical browser result to be classified first.
     this.physicalSettlement = runtime.physicalSettlement.then(
-      async () => {
-        await this.browserOutcome;
-        this.settledPhysical = true;
-      },
-      async error => {
-        await this.browserOutcome.catch(() => {});
+      () => { this.settledPhysical = true; },
+      error => {
         this.settledPhysical = true;
         throw error;
       },
     );
+    this.browserOutcome = runtime.browser
+      .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
+      .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
+      .then(outcome => {
+      this.settledBrowserOutcome = outcome;
+      return outcome;
+    });
   }
 
   runExclusive<T>(task: () => Promise<T>): Promise<T> {
