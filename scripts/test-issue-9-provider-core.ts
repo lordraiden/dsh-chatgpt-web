@@ -262,8 +262,9 @@ function leaseInput(turnId: string) {
   assert.throws(() => turn.markRunning(), /cannot accept lifecycle mutations/i);
   assert.throws(() => turn.markCapabilityWait(), /cannot accept lifecycle mutations/i);
   assert.throws(() => turn.markRecovery("FAILED"), /cannot accept lifecycle mutations/i);
-  assert.throws(() => turn.markLogicalSettled(), /cannot accept lifecycle mutations/i);
-  console.log("ok late lifecycle callbacks fail closed");
+  assert.doesNotThrow(() => turn.markLogicalSettled("completed"));
+  assert.equal(turn.snapshot().logicalOutcome, "completed");
+  console.log("ok late lifecycle callbacks keep physical mutations fail closed while logical settlement remains valid");
 }
 
 {
