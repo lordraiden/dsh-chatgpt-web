@@ -439,6 +439,7 @@ describe("native path does not enter the Responses server", () => {
 
     const adapter = createChatGptWebAdapter(provider, { providerCore: core, transport });
     const run = adapter.runTurn!(parsed, { headers: new Headers() }, () => {});
+    await Promise.resolve();
     releasePhysical();
     await expect(run).resolves.toBeUndefined();
     expect(transportRuns).toBe(1);
