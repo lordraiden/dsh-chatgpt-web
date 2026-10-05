@@ -89,3 +89,150 @@ jobs:
 
       - name: Smoke test the exact validated artifact
         run: node scripts/smoke-tarball.mjs "$GITHUB_WORKSPACE/artifact/${{ steps.package.outputs.artifact_name }}"
+
+  publish_main:
+    if: >-
+      ${{ github.event_name == 'push'
+          && github.ref_name == 'main'
+          && !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    needs: verify
+    name: Publish validated main release
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build release artifact
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm version patch --no-git-tag-version
+          version="$(node -p "require('./package.json').version")"
+
+          python3 - "$version" <<'PY'
+          import sys
+          from pathlib import Path
+          import re
+
+          version = sys.argv[1]
+          path = Path("src/version.ts")
+          text = path.read_text()
+          updated = re.sub(
+              r"export const VERSION = ['\"][^'\"]+['\"];",
+              f"export const VERSION = '{version}';",
+              text,
+          )
+          if updated == text:
+              raise SystemExit("src/version.ts VERSION declaration not found")
+          path.write_text(updated)
+          PY
+
+          bun run build
+
+          rm -rf release-artifact
+          mkdir -p release-artifact
+          npm pack --silent --pack-destination release-artifact
+
+          tarball="$(find "$GITHUB_WORKSPACE/release-artifact" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+          test -f "$tarball"
+
+          node scripts/smoke-tarball.mjs "$tarball"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Configure npmjs authentication
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          printf '%s\n' \
+            '@lordraiden:registry=https://registry.npmjs.org/' \
+            "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" \
+            > ~/.npmrc
+
+      - name: Publish npmjs package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          tarball="${{ steps.release.outputs.tarball }}"
+
+          if npm view "@lordraiden/dsh-chatgpt-web@${version}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "npmjs already contains ${version}; continuing."
+          else
+            npm publish "$tarball" --registry https://registry.npmjs.org --access public
+          fi
+
+      - name: Configure GitHub Packages authentication
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s\n' \
+            '@lordraiden:registry=https://npm.pkg.github.com/' \
+            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
+            > ~/.npmrc
+
+      - name: Publish GitHub Packages package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          tarball="${{ steps.release.outputs.tarball }}"
+
+          if npm view "@lordraiden/dsh-chatgpt-web@${version}" version --registry https://npm.pkg.github.com/ >/dev/null 2>&1; then
+            echo "GitHub Packages already contains ${version}; continuing."
+          else
+            npm publish "$tarball" --registry https://npm.pkg.github.com
+          fi
+
+      - name: Commit published version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src/version.ts
+          git commit -m "chore(release): v${VERSION} [skip ci]"
+          git push origin HEAD:main
+
+      - name: Tag published version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists; continuing."
+          else
+            git tag "${tag}"
+            git push origin "$tag"
+          fi
+
