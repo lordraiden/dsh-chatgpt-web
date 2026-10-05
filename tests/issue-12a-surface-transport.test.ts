@@ -6,7 +6,11 @@ import {
   type WebSurfaceTransportBackend,
   type WebSurfaceTurn,
 } from "../src/adapters/chatgpt-web/web-surface-transport";
-import { resolveBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
+import {
+  chooseChatGptConnectorCandidate,
+  resolveBrowserConfig,
+  scoreChatGptConnectorCandidate,
+} from "../src/adapters/chatgpt-web/browser-worker";
 import type { CodexProviderConfig } from "../src/types";
 
 const ROOT = join(import.meta.dir, "..");
@@ -223,7 +227,7 @@ test("browser surface account binding uses the stable provider identity, not mut
 });
 
 
-test("ChatGPT connector selection keeps app identity separate from the UI activation mechanism", () => {
+test("ChatGPT connector selection separates app identity from the UI activation mechanism", () => {
   const source = readFileSync(
     join(ROOT, "src", "adapters", "chatgpt-web", "browser-worker.ts"),
     "utf8",
@@ -231,15 +235,61 @@ test("ChatGPT connector selection keeps app identity separate from the UI activa
   expect(source).toContain('const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";');
   expect(source).toContain('button[data-testid="composer-plus-button"]');
   expect(source).toContain('button[aria-label*="Add files and more" i]');
-  expect(source).toContain('[data-keyword="\' + escapedAppName + \'"]');
-  expect(source).toContain('[data-app-name="\' + escapedAppName + \'"]');
-  expect(source).toContain('[aria-label="\' + escapedAppName + \'"]');
-  expect(source).toContain('menuRows.filter({ hasText: this.config.appName, visible: true })');
-  expect(source).toContain('getByRole("button", { name: /^(More|Apps|Plugins)$/i })');
-  expect(source).toContain('input[placeholder*="search" i], textarea[placeholder*="search" i]');
+  expect(source).toContain("connectorPickerRows");
+  expect(source).toContain("chooseChatGptConnectorCandidate");
+  expect(source).toContain("selectedConnectorControls");
   expect(source).toContain("connector-plus-triggered");
-  expect(source).not.toContain("const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string)");
+  expect(source).not.toContain('const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string)');
   expect(source).not.toContain(
     "const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY(this.config.appName);",
   );
+  expect(source).not.toContain("keyword === this.config.appName");
+});
+
+test("ChatGPT connector discovery separates configured display names from semantic picker identity", () => {
+  const exactDisplay = {
+    rawIndex: 0,
+    text: "Codex Native2",
+    keyword: "codex-native2",
+    dataId: "plugin:prod",
+    appName: null,
+    pluginName: null,
+    ariaLabel: null,
+    title: null,
+  };
+  const semanticExact = {
+    rawIndex: 1,
+    text: "Codex",
+    keyword: "Codex-Native2",
+    dataId: "plugin:prod",
+    appName: null,
+    pluginName: null,
+    ariaLabel: null,
+    title: null,
+  };
+  const genericCodex = {
+    rawIndex: 2,
+    text: "Codex",
+    keyword: "codex",
+    dataId: "plugin:only",
+    appName: null,
+    pluginName: null,
+    ariaLabel: null,
+    title: null,
+  };
+  expect(scoreChatGptConnectorCandidate(exactDisplay, "Codex Native2")).toBe(100);
+  expect(scoreChatGptConnectorCandidate(semanticExact, "Codex Native2")).toBe(95);
+  expect(chooseChatGptConnectorCandidate([semanticExact], "Codex Native2")).toEqual(semanticExact);
+  expect(chooseChatGptConnectorCandidate([genericCodex], "Codex Native2")).toEqual(genericCodex);
+  expect(chooseChatGptConnectorCandidate([genericCodex, { ...genericCodex, rawIndex: 3 }], "Codex Native2")).toBeUndefined();
+});
+
+test("ChatGPT connector verification does not require data-keyword to equal the configured display name", () => {
+  const source = readFileSync(
+    join(ROOT, "src", "adapters", "chatgpt-web", "browser-worker.ts"),
+    "utf8",
+  );
+  expect(source).not.toContain("keyword === this.config.appName");
+  expect(source).toContain("selectedConnectorControls");
+  expect(source).toContain("chooseChatGptConnectorCandidate");
 });
