@@ -152,6 +152,8 @@ interface ChatGptTurnRuntimeBase {
   /** Idempotently retire the turn-bound MCP capability after browser and observer settlement. */
   retireCapability?: () => void | Promise<void>;
   submission?: { phase: "prepared" | "send_activated" | "accepted" };
+  /** Records browser completion on ProviderCore before physical settlement can retire the lifecycle. */
+  logicalSettlement?: (outcome: ChatGptBrowserOutcome) => void;
   /** Resolves only after the browser submission has been accepted and the provider turn is RUNNING. */
   running: Promise<void>;
   /** Semantic ChatGPT conversation epoch. Physical page/resource identity remains separate. */
@@ -299,6 +301,13 @@ export class ChatGptTurnSession {
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
       .then(outcome => {
+      try {
+        runtime.logicalSettlement?.(outcome);
+      } catch (error) {
+        console.error(
+          `[chatgpt-web] failed to record logical browser settlement: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       this.settledBrowserOutcome = outcome;
       return outcome;
     });
