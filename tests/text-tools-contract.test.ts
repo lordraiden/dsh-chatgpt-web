@@ -10,7 +10,7 @@ describe("persistent ChatGPT surface", () => {
   });
 
   test("rejects Temporary Chat and unrelated ChatGPT routes", () => {
-    expect(isChatGptConversationUrl("https://chatgpt.com/?temporary-chat=true")).toBe(true);
+    expect(isChatGptConversationUrl("https://chatgpt.com/?temporary-chat=true")).toBe(false);
     expect(isChatGptConversationUrl("https://chatgpt.com/share/abc123")).toBe(false);
     expect(isChatGptConversationUrl("https://example.com/")).toBe(false);
   });
