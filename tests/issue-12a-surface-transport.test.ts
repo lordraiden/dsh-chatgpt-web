@@ -52,7 +52,7 @@ function fakeBackend(calls: string[]): WebSurfaceTransportBackend {
       calls.push(`inspect:${detectCapabilities}`);
       return Promise.resolve({
         authenticated: true,
-        temporary: true,
+        temporary: false,
         url: "https://chatgpt.com/",
         solAvailable: false,
         proAvailable: false,
@@ -97,7 +97,7 @@ test("WebSurfaceTransport preserves owning-turn cancellation semantics", async (
     verifyConnector: () => Promise.resolve("verified"),
     inspectSession: async () => ({
       authenticated: true,
-      temporary: true,
+      temporary: false,
       url: "https://chatgpt.com/",
     }),
     smokeTest: async () => ({ effort: "low", response: "ok" }),
@@ -119,7 +119,7 @@ test("WebSurfaceTransport is not a second lifecycle or authorization authority",
   const inspection = await transport.inspectSession(true);
   expect(inspection).toEqual({
     authenticated: true,
-    temporary: true,
+    temporary: false,
     url: "https://chatgpt.com/",
     solAvailable: false,
     proAvailable: false,

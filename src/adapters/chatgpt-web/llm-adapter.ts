@@ -451,11 +451,18 @@ export function toCodexParsedRequest(
   }
 
   const tools: CodexTool[] | undefined = options.tools?.length
-    ? options.tools.map((tool: ToolSchema) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters ?? {},
-      }))
+    ? options.tools.map((tool: ToolSchema) => {
+        const extended = tool as ToolSchema & { namespace?: string; strict?: boolean };
+        return {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters ?? {},
+          ...(typeof extended.namespace === "string" && extended.namespace.trim()
+            ? { namespace: extended.namespace }
+            : {}),
+          ...(extended.strict !== undefined ? { strict: extended.strict } : {}),
+        };
+      })
     : undefined;
 
   const turnId = randomUUID();

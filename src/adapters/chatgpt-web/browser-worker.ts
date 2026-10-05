@@ -58,14 +58,14 @@ import {
 } from "./context-budget";
 import {
   assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
+  assertChatGptPage,
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
-  CHATGPT_TEMPORARY_CHAT_URL,
+  CHATGPT_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
@@ -1420,9 +1420,12 @@ export type ChatGptConnectorAttachmentMode = "none" | "mention" | "retained";
 /** A launcher lease may reuse a connector only after proving that exact retained surface is bound. */
 export function chatGptConnectorAttachmentMode(
   localTools: boolean,
+  nativeConnector: boolean,
   reuseConversation: boolean,
 ): ChatGptConnectorAttachmentMode {
-  if (!localTools) return "none";
+  // Text-protocol DSH tools do not require (and must not touch) ChatGPT's connector picker.
+  // Only the explicit legacy/native connector route is allowed to mutate connector UI state.
+  if (!localTools || !nativeConnector) return "none";
   return reuseConversation ? "retained" : "mention";
 }
 
@@ -2231,7 +2234,7 @@ export class ChatGptBrowserWorker {
 
   inspectSession(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    temporary: false;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
@@ -2631,8 +2634,8 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  /** Put every browser operation on one fully hydrated Temporary Chat document. */
-  private async prepareTemporaryChatSurface(
+  /** Put every browser operation on one fully hydrated persistent ChatGPT conversation surface. */
+  private async prepareChatSurface(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<Locator> {
@@ -2640,8 +2643,8 @@ export class ChatGptBrowserWorker {
     // connector is present in the catalog. Navigating again here destroys that freshly hydrated
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
-    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+    if (page.url() !== CHATGPT_CHAT_URL) {
+      await page.goto(CHATGPT_CHAT_URL, {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
@@ -2651,15 +2654,12 @@ export class ChatGptBrowserWorker {
     try {
       composer = await this.activeComposer(page);
     } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
-    }
-    if (await dismissChatGptTemporaryChatOnboarding(page)) {
-      await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
+      throw new Error("ChatGPT web login is expired or the persistent ChatGPT conversation surface is unavailable");
     }
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
+    await assertChatGptPage(page);
     await captureDiagnostic?.("session-verified");
     return composer;
   }
@@ -3420,6 +3420,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     prompt: string,
     localTools: boolean,
+    nativeConnector: boolean,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
     catalogRefreshAvailable = false,
@@ -3427,7 +3428,7 @@ export class ChatGptBrowserWorker {
     reuseConnector = false,
   ): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
-    const connectorMode = chatGptConnectorAttachmentMode(localTools, reuseConnector);
+    const connectorMode = chatGptConnectorAttachmentMode(localTools, nativeConnector, reuseConnector);
     let composerMutationStarted = false;
     try {
       if (connectorMode !== "mention") {
@@ -3719,6 +3720,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     prompt: string,
     localTools: boolean,
+    nativeConnector: boolean,
     compaction: boolean,
     baseline: ChatGptSubmissionBaseline,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
@@ -3734,6 +3736,7 @@ export class ChatGptBrowserWorker {
           page,
           prompt,
           localTools,
+          nativeConnector,
           captureDiagnostic,
           abortSignal,
           catalogRefreshAvailable,
@@ -3789,7 +3792,7 @@ export class ChatGptBrowserWorker {
     const captureDiagnostic = (checkpoint: string): Promise<void> => diagnostics.capture(page, checkpoint);
     try {
       await captureDiagnostic("connector-verification-started");
-      await this.prepareTemporaryChatSurface(page, captureDiagnostic);
+      await this.prepareChatSurface(page, captureDiagnostic);
       // The launcher refreshes its owned ChatGPT document before starting this helper. A second
       // reload here can discard the first catalog's exact mismatch evidence and report a generic
       // menu failure instead of identifying the connector the account actually exposes.
@@ -3804,22 +3807,22 @@ export class ChatGptBrowserWorker {
 
   private async inspectSessionExclusive(detectCapabilities: boolean): Promise<{
     authenticated: true;
-    temporary: true;
+    temporary: false;
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
+    await this.prepareChatSurface(page);
     const url = page.url();
-    if (!detectCapabilities) return { authenticated: true, temporary: true, url };
+    if (!detectCapabilities) return { authenticated: true, temporary: false, url };
     const capabilities = await detectChatGptAccountCapabilities(page);
-    return { authenticated: true, temporary: true, url, ...capabilities };
+    return { authenticated: true, temporary: false, url, ...capabilities };
   }
 
   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
+    await this.prepareChatSurface(page);
     const account = await detectChatGptAccountCapabilities(page);
     // Core smoke runs before the optional MCP connector is configured, so it must remain a
     // browser-only transport check. Connector setup has its own explicit verification operation.
@@ -4694,9 +4697,9 @@ export class ChatGptBrowserWorker {
       if (!reuseConversation) {
         await this.runStage(
           turn.traceId,
-          "temporary_chat_preparation",
+          "chatgpt_surface_preparation",
           browserStageTimeouts.temporaryChatPreparation,
-          () => this.prepareTemporaryChatSurface(
+          () => this.prepareChatSurface(
             page,
             checkpoint => diagnostics.capture(page, checkpoint),
           ),
@@ -4733,6 +4736,7 @@ export class ChatGptBrowserWorker {
             (stageSignal) => this.attachPrompt(
               page,
               stage.text,
+              false,
               false,
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
@@ -4813,7 +4817,10 @@ export class ChatGptBrowserWorker {
       }
 
       let submissionBaseline = await this.captureSubmissionBaseline(page);
-      let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
+      let catalogRefreshAvailable = turn.nativeConnector === true
+        && mode.localTools
+        && !reuseConversation
+        && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
       const completionTracker = new ChatGptCompletionTracker();
       const sendAndWaitForResponse = async (attempt: number): Promise<ChatGptAssistantTurnBinding> => {
@@ -4835,6 +4842,7 @@ export class ChatGptBrowserWorker {
                   page,
                   finalPrompt,
                   mode.localTools,
+                  turn.nativeConnector === true,
                   turn.compaction === true,
                   submissionBaseline,
                   checkpoint => diagnostics.capture(page, checkpoint),
@@ -4858,7 +4866,7 @@ export class ChatGptBrowserWorker {
               browserStageTimeouts.temporaryChatPreparation,
               async () => {
                 await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-                await this.prepareTemporaryChatSurface(
+                await this.prepareChatSurface(
                   page,
                   checkpoint => diagnostics.capture(page, checkpoint),
                 );

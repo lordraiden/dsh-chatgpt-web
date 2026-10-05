@@ -64,7 +64,7 @@ export interface WebSurfaceTurn {
 
 export interface WebSurfaceInspection {
   authenticated: true;
-  temporary: true;
+  temporary: false;
   url: string;
   solAvailable?: boolean;
   proAvailable?: boolean;
