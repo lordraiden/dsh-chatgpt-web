@@ -3267,7 +3267,24 @@ export class ChatGptBrowserWorker {
       '[role="option"]',
       '[role="menuitemradio"]',
     ].join(", ")).filter({ visible: true });
-    const appResult = page.getByText(this.config.appName, { exact: true }).filter({ visible: true });
+    const escapedAppName = this.config.appName
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"');
+    // ChatGPT has shipped several picker representations: visible text, accessible names,
+    // and semantic app/plugin attributes. Treat all of those as the same app identity.
+    // The private menu-item selector remains only a transport fallback for rows that carry
+    // the configured app name as nested text.
+    const appResult = page
+      .getByText(this.config.appName, { exact: true })
+      .or(page.locator([
+        '[data-keyword="' + escapedAppName + '"]',
+        '[data-app-name="' + escapedAppName + '"]',
+        '[data-plugin-name="' + escapedAppName + '"]',
+        '[aria-label="' + escapedAppName + '"]',
+        '[title="' + escapedAppName + '"]',
+      ].join(", ")))
+      .or(menuRows.filter({ hasText: this.config.appName, visible: true }))
+      .filter({ visible: true });
     const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY;
 
     await ensureChatGptPersonalizedConnectorAccess(
@@ -3452,7 +3469,9 @@ export class ChatGptBrowserWorker {
               if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
 
               // Some current ChatGPT surfaces put less-common apps/plugins under More after +.
-              const moreItems = page.getByRole("menuitem", { name: /^(More|Apps|Plugins)$/i })
+              const moreItems = page
+                .getByRole("menuitem", { name: /^(More|Apps|Plugins)$/i })
+                .or(page.getByRole("button", { name: /^(More|Apps|Plugins)$/i }))
                 .filter({ visible: true });
               const moreCount = await withBrowserTurnAbort(
                 withChatGptBrowserObservationTimeout(moreItems.count()),
@@ -3467,7 +3486,9 @@ export class ChatGptBrowserWorker {
                 await waitForExactConfiguredConnector();
               } else {
                 // Some surfaces expose a search box instead of rendering all apps immediately.
-                const searchBoxes = page.getByRole("textbox", { name: /search/i })
+                const searchBoxes = page
+                  .getByRole("textbox", { name: /search/i })
+                  .or(page.locator('input[placeholder*="search" i], textarea[placeholder*="search" i]'))
                   .filter({ visible: true });
                 const searchCount = await withBrowserTurnAbort(
                   withChatGptBrowserObservationTimeout(searchBoxes.count()),
