@@ -390,6 +390,49 @@ describe("ChatGptWebLlmAdapter cancellation", () => {
 });
 
 describe("native path does not enter the Responses server", () => {
+  test("records browser logical completion before physical settlement retires the ProviderTurn", async () => {
+    const provider = providerConfigFixture();
+    const parsed = toCodexParsedRequest(userRequest("hello"), provider);
+    let releaseBrowser!: () => void;
+    let signalStarted!: () => void;
+    const browserStarted = new Promise<void>(resolve => { signalStarted = resolve; });
+    const transport: WebSurfaceTransport = {
+      async run(turn) {
+        await turn.onPhysicalSurfaceBound?.({
+          resourceId: "surface-lifecycle",
+          browserContextId: "context-lifecycle",
+          pageId: "page-lifecycle",
+          profileId: "profile-lifecycle",
+          accountId: "chatgpt-account:unknown",
+        });
+        await turn.onSurfaceReady?.();
+        await turn.onSendActivated?.();
+        turn.onSubmitted?.();
+        turn.onTextDelta("ok");
+        signalStarted();
+        await new Promise<void>(resolve => { releaseBrowser = resolve; });
+        return "ok";
+      },
+      verifyConnector: async () => "verified",
+      inspectSession: async () => ({ authenticated: true, temporary: true, url: "https://chatgpt.com/" }),
+      smokeTest: async () => ({ effort: "low", response: "ok" }),
+      close: async () => {},
+    };
+    const core = new ChatGptWebProviderCore();
+    const adapter = createChatGptWebAdapter(provider, { providerCore: core, transport });
+    const events: AdapterEvent[] = [];
+    const run = adapter.runTurn!(parsed, { headers: new Headers() }, event => events.push(event));
+
+    await browserStarted;
+    releaseBrowser();
+    await expect(run).resolves.toBeUndefined();
+
+    expect(events.some(event => event.type === "done" && event.stopReason === "stop")).toBe(true);
+    expect(core.get(chatGptTurnExecutionKey(parsed))).toBeUndefined();
+    expect(core.wasRetired(chatGptTurnExecutionKey(parsed))).toBe(true);
+    await adapter.shutdown();
+  });
+
   test("tool-capable native turns wait for accepted submission before broker capability wait", async () => {
     const provider = providerConfigFixture({ localToolsEnabled: true });
     const parsed = toCodexParsedRequest(userRequest("read the workspace file", {
