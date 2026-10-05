@@ -52,7 +52,7 @@ import {
   chatGptConversationHandleForEpoch,
   createChatGptWebReplayTransport,
 } from "./replay-transport";
-import { capabilityBindingIdForExecution } from "./provider-core";
+import { capabilityBindingIdForExecution, markProviderTurnRecoveryFailedIfMutable } from "./provider-core";
 import {
   canonicalizeCompactionHandoff,
   existingStructuredCompactionRun,
@@ -1370,9 +1370,7 @@ export function createChatGptWebAdapter(
             if (!failedSession) {
               providerTurn.failBeforePhysicalSettlement();
             } else {
-              if (providerTurn.snapshot().state !== "RETIRED") {
-                providerTurn.markRecovery("FAILED");
-              }
+              markProviderTurnRecoveryFailedIfMutable(providerTurn);
               failedSession.cancel(error instanceof Error ? error : new Error(String(error)));
             }
             throw error;
@@ -1818,7 +1816,7 @@ export function createChatGptWebAdapter(
                 cause: retryCandidate,
               },
             );
-            providerTurn.markRecovery("FAILED");
+            markProviderTurnRecoveryFailedIfMutable(providerTurn);
             providerTurn.markLogicalSettled("failed");
             emitRoundEvent({
               type: "error",
@@ -1832,7 +1830,7 @@ export function createChatGptWebAdapter(
             return;
           }
 
-          providerTurn.markRecovery("FAILED");
+          markProviderTurnRecoveryFailedIfMutable(providerTurn);
           if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed) {
             session.cancel();
           } else {
