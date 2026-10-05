@@ -7,6 +7,7 @@ import { parseRequest } from "../src/responses/parser";
 import { expandPreviousResponseInput, rememberResponseState } from "../src/responses/state";
 import { responseRequest, routeChatGptWebRequest } from "../src/server";
 import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
+import { projectChatGptCapabilities } from "../src/adapters/chatgpt-web/capability-projector";
 
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -25,12 +26,12 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
       browserProfile: "profile-race",
       browserContext: "context-race",
       pageIdentity: "page-race",
-      capabilitySnapshot: {
-        snapshotId: "snapshot-race",
+      capabilitySnapshot: projectChatGptCapabilities({
         sessionId: "session-race",
         agentId: "agent-race",
         turnId: "turn-race",
-      },
+        tools: [],
+      }),
     });
     core.bindPhysicalSettlement("race-execution", physical);
     await physical;
