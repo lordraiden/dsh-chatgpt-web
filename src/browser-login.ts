@@ -229,7 +229,7 @@ export async function captureSystemBrowserLogin(
   const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
   try { chmodSync(profileDir, 0o700); } catch {}
   process.stdout.write(
-    "Sign in with your passkey in the dedicated Chrome window. When Temporary Chat is ready, return to Codex Web GPT and choose Continue.\n",
+    "Sign in with your passkey in the dedicated Chrome window. When the ChatGPT conversation surface is ready, return to Codex Web GPT and choose Continue.\n",
   );
 
   let capture: SystemBrowserLoginCapture | undefined;
@@ -242,7 +242,7 @@ export async function captureSystemBrowserLogin(
       "--disable-background-mode",
       "--no-first-run",
       "--no-default-browser-check",
-      CHATGPT_TEMPORARY_CHAT_URL,
+      CHATGPT_CHAT_URL,
     ], { env: process.env, stdio: "ignore" });
     let continuationRequested = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -309,7 +309,7 @@ export async function captureSystemBrowserLogin(
       body: "<!doctype html><meta charset=\"utf-8\"><title>Private login-state capture</title>",
     }));
     const page = context.pages()[0] ?? await context.newPage();
-    await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+    await page.goto(CHATGPT_CHAT_URL, {
       waitUntil: "domcontentloaded",
       timeout: Math.min(60_000, remainingTime()),
     });
@@ -440,7 +440,7 @@ export async function loginToChatGpt(
   try {
     const page = context.pages()[0] ?? await context.newPage();
     try {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+      await page.goto(CHATGPT_CHAT_URL, {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
