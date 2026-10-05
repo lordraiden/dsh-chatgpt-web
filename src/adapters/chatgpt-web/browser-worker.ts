@@ -211,7 +211,9 @@ const CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR = [
   'button[data-testid="composer-plus-button"]',
   'button[aria-label*="Add files and more" i]',
   'button[aria-label*="Add files" i]',
+  'button[aria-label*="tools" i]',
   'button[aria-label^="Add " i]',
+  'button:has-text("+")',
 ].join(", ");
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
@@ -3449,9 +3451,8 @@ export class ChatGptBrowserWorker {
               await capture("connector-picker-visible");
             }
           } catch (error) {
-            if (!(error instanceof Error) || error.name !== "TimeoutError") {
-              if (error instanceof ChatGptWebAdapterError) throw error;
-            }
+            if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+            await capture("connector-plus-picker-missing");
           }
         }
       }
