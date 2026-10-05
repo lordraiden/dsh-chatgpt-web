@@ -4697,7 +4697,7 @@ export class ChatGptBrowserWorker {
       if (!reuseConversation) {
         await this.runStage(
           turn.traceId,
-          "temporary_chat_preparation",
+          "chatgpt_surface_preparation",
           browserStageTimeouts.temporaryChatPreparation,
           () => this.prepareChatSurface(
             page,
@@ -4736,6 +4736,7 @@ export class ChatGptBrowserWorker {
             (stageSignal) => this.attachPrompt(
               page,
               stage.text,
+              false,
               false,
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
@@ -4816,7 +4817,10 @@ export class ChatGptBrowserWorker {
       }
 
       let submissionBaseline = await this.captureSubmissionBaseline(page);
-      let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
+      let catalogRefreshAvailable = turn.nativeConnector === true
+        && mode.localTools
+        && !reuseConversation
+        && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
       const completionTracker = new ChatGptCompletionTracker();
       const sendAndWaitForResponse = async (attempt: number): Promise<ChatGptAssistantTurnBinding> => {
@@ -4838,6 +4842,7 @@ export class ChatGptBrowserWorker {
                   page,
                   finalPrompt,
                   mode.localTools,
+                  turn.nativeConnector === true,
                   turn.compaction === true,
                   submissionBaseline,
                   checkpoint => diagnostics.capture(page, checkpoint),
