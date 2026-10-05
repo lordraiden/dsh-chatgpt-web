@@ -14,6 +14,7 @@ export function safeErrorDescriptor(error: unknown): string {
     code?: unknown;
     errorType?: unknown;
     status?: unknown;
+    message?: unknown;
   };
 
   const name = safeToken(candidate.name, "Error");
