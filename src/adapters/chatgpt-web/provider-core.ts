@@ -404,8 +404,14 @@ export class ProviderTurnLifecycle {
     this.recovery = value;
   }
 
+  /**
+   * Record the logical browser outcome independently from physical resource retirement.
+   *
+   * Logical settlement is response semantics, not physical lifecycle ownership. A browser result
+   * can become observable after the helper/Playwright resource has already retired, so this method
+   * must remain writable in SETTLING/RETIRED states.
+   */
   markLogicalSettled(outcome: Exclude<LogicalSettlementOutcome, "pending"> = "completed"): void {
-    this.assertMutable();
     if (this.logicalSettled) {
       if (this.logicalOutcome !== outcome) {
         throw new Error(`Provider turn logical outcome cannot change: ${this.logicalOutcome} -> ${outcome}`);
@@ -427,7 +433,7 @@ export class ProviderTurnLifecycle {
   requestShutdown(reason: Error = new Error("ChatGPT Web ProviderCore is shutting down")): void {
     if (this.state === "RETIRED") return;
     this.shutdownRequested = true;
-    if (!this.logicalSettled && this.state !== "SETTLING") {
+    if (!this.logicalSettled) {
       this.markLogicalSettled("cancelled");
     }
     this.cancelExecution?.(reason);
@@ -500,14 +506,10 @@ export class ProviderTurnLifecycle {
     if (outcome === "rejected") {
       this.physicalSettlementError = normalizeError(error);
       this.recovery = "FAILED";
-      if (!this.logicalSettled) {
-        this.logicalSettled = true;
-        this.logicalOutcome = "failed";
-      }
-    } else if (!this.logicalSettled) {
-      this.logicalSettled = true;
-      this.logicalOutcome = "failed";
     }
+    // Physical settlement only answers whether the browser resource has finished unwinding.
+    // It cannot infer the logical response outcome: the browser/adapter path may settle that
+    // outcome immediately before or immediately after physical retirement.
     this.activity = "idle";
     if (this.state !== "RETIRED") {
       if (this.state !== "SETTLING") this.transition("SETTLING");
