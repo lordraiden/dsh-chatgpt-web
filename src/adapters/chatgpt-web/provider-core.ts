@@ -664,6 +664,12 @@ export class ChatGptWebProviderCore {
     const turn = this.turns.get(executionKey);
     if (!turn) return;
     await turn.waitForPhysicalSettlement();
+    // The physical-settlement promise resolves before its retirement continuation runs. Wait until
+    // ProviderCore has completed that continuation so callers cannot immediately race a still-owned
+    // SETTLING turn when they create the replacement lifecycle.
+    while (this.turns.get(executionKey) === turn) {
+      await Promise.resolve();
+    }
   }
 
   begin(input: ChatGptWebProviderCoreTurnInput): ProviderTurnLifecycle {
