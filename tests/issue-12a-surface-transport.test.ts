@@ -6,7 +6,11 @@ import {
   type WebSurfaceTransportBackend,
   type WebSurfaceTurn,
 } from "../src/adapters/chatgpt-web/web-surface-transport";
-import { resolveBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
+import {
+  chooseChatGptConnectorCandidate,
+  resolveBrowserConfig,
+  scoreChatGptConnectorCandidate,
+} from "../src/adapters/chatgpt-web/browser-worker";
 import type { CodexProviderConfig } from "../src/types";
 
 const ROOT = join(import.meta.dir, "..");
@@ -242,4 +246,52 @@ test("ChatGPT connector selection keeps app identity separate from the UI activa
   expect(source).not.toContain(
     "const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY(this.config.appName);",
   );
+});
+
+test("ChatGPT connector discovery separates configured display names from semantic picker identity", () => {
+  const exactDisplay = {
+    rawIndex: 0,
+    text: "Codex Native2",
+    keyword: "codex-native2",
+    dataId: "plugin:prod",
+    appName: null,
+    pluginName: null,
+    ariaLabel: null,
+    title: null,
+  };
+  const semanticExact = {
+    rawIndex: 1,
+    text: "Codex",
+    keyword: "Codex-Native2",
+    dataId: "plugin:prod",
+    appName: null,
+    pluginName: null,
+    ariaLabel: null,
+    title: null,
+  };
+  const genericCodex = {
+    rawIndex: 2,
+    text: "Codex",
+    keyword: "codex",
+    dataId: "plugin:only",
+    appName: null,
+    pluginName: null,
+    ariaLabel: null,
+    title: null,
+  };
+  expect(scoreChatGptConnectorCandidate(exactDisplay, "Codex Native2")).toBe(100);
+  expect(scoreChatGptConnectorCandidate(semanticExact, "Codex Native2")).toBe(95);
+  expect(chooseChatGptConnectorCandidate([semanticExact], "Codex Native2")).toEqual(semanticExact);
+  expect(chooseChatGptConnectorCandidate([genericCodex], "Codex Native2")).toEqual(genericCodex);
+  expect(chooseChatGptConnectorCandidate([genericCodex, { ...genericCodex, rawIndex: 3 }], "Codex Native2")).toBeUndefined();
+});
+
+test("ChatGPT connector verification does not require data-keyword to equal the configured display name", () => {
+  const source = readFileSync(
+    join(ROOT, "src", "adapters", "chatgpt-web", "browser-worker.ts"),
+    "utf8",
+  );
+  expect(source).not.toContain("keyword === this.config.appName");
+  expect(source).toContain("selectedConnectorControls");
+  expect(source).toContain("chooseChatGptConnectorCandidate");
 });

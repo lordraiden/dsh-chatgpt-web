@@ -262,10 +262,76 @@ class ChatGptConnectorCatalogStaleError extends Error {
   }
 }
 
+class ChatGptConnectorPickerTimeoutError extends Error {
+  constructor() {
+    super("ChatGPT connector picker did not expose a selectable configured connector");
+    this.name = "ChatGptConnectorPickerTimeoutError";
+  }
+}
+
+export interface ChatGptConnectorCandidateIdentity {
+  rawIndex: number;
+  text: string;
+  keyword: string | null;
+  dataId: string | null;
+  appName: string | null;
+  pluginName: string | null;
+  ariaLabel: string | null;
+  title: string | null;
+}
+
+function normalizeChatGptConnectorIdentity(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function chatGptConnectorCandidateValues(candidate: ChatGptConnectorCandidateIdentity): string[] {
+  return [
+    candidate.text,
+    candidate.keyword,
+    candidate.dataId,
+    candidate.appName,
+    candidate.pluginName,
+    candidate.ariaLabel,
+    candidate.title,
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+}
+
+export function scoreChatGptConnectorCandidate(
+  candidate: ChatGptConnectorCandidateIdentity,
+  configuredName: string,
+): number {
+  const configured = configuredName.trim();
+  if (!configured) return 0;
+  const normalizedConfigured = normalizeChatGptConnectorIdentity(configured);
+  const values = chatGptConnectorCandidateValues(candidate);
+  if (values.some(value => value.trim() === configured)) return 100;
+  if (values.some(value => normalizeChatGptConnectorIdentity(value) === normalizedConfigured)) return 95;
+  if (values.some(value => {
+    const normalized = normalizeChatGptConnectorIdentity(value);
+    return normalized.includes(normalizedConfigured) || normalizedConfigured.includes(normalized);
+  })) return 80;
+  if (normalizedConfigured.startsWith("codex")
+    && values.some(value => normalizeChatGptConnectorIdentity(value) === "codex")) return 40;
+  return 0;
+}
+
+export function chooseChatGptConnectorCandidate(
+  candidates: ChatGptConnectorCandidateIdentity[],
+  configuredName: string,
+): ChatGptConnectorCandidateIdentity | undefined {
+  const scored = candidates.map(candidate => ({
+    candidate,
+    score: scoreChatGptConnectorCandidate(candidate, configuredName),
+  }));
+  const maxScore = Math.max(0, ...scored.map(item => item.score));
+  if (maxScore <= 0) return undefined;
+  const top = scored.filter(item => item.score === maxScore);
+  return top.length === 1 ? top[0]!.candidate : undefined;
+}
+
 interface ChatGptConnectorAttemptBudget {
   triggerAttempts: number;
 }
-
 function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(message, {
     status: 424,
@@ -1931,8 +1997,14 @@ class ChatGptBrowserDiagnostics {
                 testId: element.getAttribute("data-testid"),
                 ariaExpanded: element.getAttribute("aria-expanded"),
                 ariaChecked: element.getAttribute("aria-checked"),
+                ariaLabel: element.getAttribute("aria-label"),
+                title: element.getAttribute("title"),
                 dataState: element.getAttribute("data-state"),
                 dataHighlighted: element.getAttribute("data-highlighted"),
+                dataKeyword: element.getAttribute("data-keyword"),
+                dataId: element.getAttribute("data-id"),
+                dataAppName: element.getAttribute("data-app-name"),
+                dataPluginName: element.getAttribute("data-plugin-name"),
                 rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
                 text: boundedText(element),
               };
@@ -1955,7 +2027,16 @@ class ChatGptBrowserDiagnostics {
             effortControls: rows(effortControlSelector, 10),
             effortItems: rows(effortItemSelector, 20),
             menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
-            connectorRows: rows('.__menu-item[tabindex="0"]', 40),
+            connectorRows: rows([
+              '.__menu-item[tabindex="0"]',
+              '[role="menuitem"]',
+              '[role="option"]',
+              '[role="menuitemradio"]',
+              '[data-id^="plugin:"]',
+              '[data-keyword]',
+              '[data-app-name]',
+              '[data-plugin-name]',
+            ].join(", "), 80),
             overlays: rows('[role="dialog"], [role="alert"], [role="status"]', 30),
             turns: {
               user: document.querySelectorAll('[data-testid^="conversation-turn-"][data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"]').length,
@@ -3154,27 +3235,143 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  private selectedConnectorControl(composer: Locator): Locator {
-    return composer
-      .locator('[data-id^="plugin:"][data-keyword]')
-      .filter({ hasText: this.config.appName, visible: true });
+  private selectedConnectorControls(composer: Locator): Locator {
+    return composer.locator([
+      "[data-id^=\"plugin:\"][data-keyword]",
+      "[data-inline-selection-pill-cursor-target]",
+    ].join(", ")).filter({ visible: true });
   }
 
-  private async connectorIsSelected(composer: Locator, abortSignal?: AbortSignal): Promise<boolean> {
-    const selected = this.selectedConnectorControl(composer);
-    const keywords = await withBrowserTurnAbort(
-      withChatGptBrowserObservationTimeout(selected.evaluateAll(elements => (
-        elements.map(element => element.getAttribute("data-keyword"))
-      ))),
+  private async connectorIsSelected(
+    composer: Locator,
+    abortSignal?: AbortSignal,
+    expected?: ChatGptConnectorCandidateIdentity,
+  ): Promise<boolean> {
+    const selected = this.selectedConnectorControls(composer);
+    const records = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(selected.evaluateAll(elements => elements.map(element => ({
+        text: (element.textContent ?? "").replace(/\s+/g, " ").trim(),
+        keyword: element.getAttribute("data-keyword"),
+        dataId: element.getAttribute("data-id"),
+        appName: element.getAttribute("data-app-name"),
+        pluginName: element.getAttribute("data-plugin-name"),
+        ariaLabel: element.getAttribute("aria-label"),
+        title: element.getAttribute("title"),
+      })))),
       abortSignal,
     );
-    const exactMatches = keywords.filter(keyword => keyword === this.config.appName).length;
-    if (exactMatches > 1) {
+    if (records.length === 0) return false;
+
+    const exactConfigured = records.filter(record => [
+      record.text, record.keyword, record.appName, record.pluginName, record.ariaLabel, record.title,
+    ].some(value => value === this.config.appName));
+    if (exactConfigured.length > 1) {
       throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(this.config.appName)} connector selections`);
     }
-    return exactMatches === 1;
+    if (exactConfigured.length === 1) return true;
+
+    if (expected) {
+      const expectedValues = chatGptConnectorCandidateValues(expected).map(normalizeChatGptConnectorIdentity);
+      const expectedMatches = records.filter(record => {
+        const values = [
+          record.text,
+          record.keyword,
+          record.dataId,
+          record.appName,
+          record.pluginName,
+          record.ariaLabel,
+          record.title,
+        ].filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+          .map(normalizeChatGptConnectorIdentity);
+        return expectedValues.some(value => values.includes(value));
+      });
+      if (expectedMatches.length > 1) {
+        throw new Error(`ChatGPT composer exposed duplicate connector selections matching ${JSON.stringify(this.config.appName)}`);
+      }
+      if (expectedMatches.length === 1) return true;
+      // The picker candidate was uniquely discovered and immediately activated. ChatGPT can
+      // render a different internal identity on the selected pill than on the picker row.
+      if (records.length === 1) return true;
+    }
+
+    return false;
   }
 
+  private connectorPickerRows(page: Page): Locator {
+    return page.locator([
+      ".__menu-item[tabindex=\"0\"]",
+      "[role=\"menuitem\"]",
+      "[role=\"option\"]",
+      "[role=\"menuitemradio\"]",
+      "[data-id^=\"plugin:\"]",
+      "[data-keyword]",
+      "[data-app-name]",
+      "[data-plugin-name]",
+    ].join(", ")).filter({ visible: true });
+  }
+
+  private async discoverConnectorCandidate(
+    page: Page,
+    abortSignal?: AbortSignal,
+  ): Promise<{ row: Locator; candidate: ChatGptConnectorCandidateIdentity } | undefined> {
+    throwIfPromptAttachmentAborted(abortSignal);
+    const rows = this.connectorPickerRows(page);
+    const candidates = await withBrowserTurnAbort(
+      withChatGptBrowserObservationTimeout(rows.evaluateAll((elements, configuredName) => {
+        const normalizedConfigured = configuredName
+          .normalize("NFKC")
+          .toLocaleLowerCase()
+          .replace(/[^a-z0-9]+/g, "");
+        return elements.map((element, rawIndex) => ({
+          rawIndex,
+          text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 240),
+          keyword: element.getAttribute("data-keyword"),
+          dataId: element.getAttribute("data-id"),
+          appName: element.getAttribute("data-app-name"),
+          pluginName: element.getAttribute("data-plugin-name"),
+          ariaLabel: element.getAttribute("aria-label"),
+          title: element.getAttribute("title"),
+        })).filter(candidate => {
+          const values = [
+            candidate.text,
+            candidate.keyword,
+            candidate.dataId,
+            candidate.appName,
+            candidate.pluginName,
+            candidate.ariaLabel,
+            candidate.title,
+          ].filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            .map(value => value.normalize("NFKC").toLocaleLowerCase().replace(/[^a-z0-9]+/g, ""));
+          const hasPluginIdentity = typeof candidate.dataId === "string" && candidate.dataId.startsWith("plugin:");
+          const hasConnectorAttribute = Boolean(candidate.keyword || candidate.appName || candidate.pluginName);
+          const looksLikeConfigured = values.some(value =>
+            value.includes(normalizedConfigured) || normalizedConfigured.includes(value));
+          const looksLikeCodex = normalizedConfigured.startsWith("codex")
+            && values.some(value => value === "codex" || value.startsWith("codex"));
+          return hasPluginIdentity || hasConnectorAttribute || looksLikeConfigured || looksLikeCodex;
+        });
+      }, this.config.appName)),
+      abortSignal,
+    );
+    const candidate = chooseChatGptConnectorCandidate(candidates, this.config.appName);
+    if (!candidate) return undefined;
+    return { row: rows.nth(candidate.rawIndex), candidate };
+  }
+
+  private async waitForConnectorCandidate(
+    page: Page,
+    timeoutMs: number,
+    abortSignal?: AbortSignal,
+  ): Promise<{ row: Locator; candidate: ChatGptConnectorCandidateIdentity }> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      throwIfPromptAttachmentAborted(abortSignal);
+      const discovered = await this.discoverConnectorCandidate(page, abortSignal);
+      if (discovered) return discovered;
+      await withBrowserTurnAbort(new Promise(resolveWait => setTimeout(resolveWait, 50)), abortSignal);
+    }
+    throw new ChatGptConnectorPickerTimeoutError();
+  }
   private async connectorMentionRowTitles(
     menuRows: Locator,
     abortSignal?: AbortSignal,
@@ -3236,11 +3433,14 @@ export class ChatGptBrowserWorker {
         undefined,
         { timeout: remainingMs, signal },
       );
-      const connectorSelected = await this.connectorIsSelected(settledComposer, signal);
-      if (remainingText.length > 0 || connectorSelected) {
+      const selectedConnectorCount = await withBrowserTurnAbort(
+        withChatGptBrowserObservationTimeout(this.selectedConnectorControls(settledComposer).count()),
+        signal,
+      );
+      if (remainingText.length > 0 || selectedConnectorCount > 0) {
         throw new Error(
           `ChatGPT connector cleanup did not produce an empty composer`
-          + ` (visibleCharacters=${remainingText.length}, connectorSelected=${connectorSelected})`,
+          + ` (visibleCharacters=${remainingText.length}, selectedConnectorCount=${selectedConnectorCount})`,
         );
       }
     });
@@ -3259,39 +3459,14 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
     };
     let composer: Locator;
-    // ChatGPT exposes app selection through multiple supported UI mechanisms (@ mention and +).
-    // The browser transport owns those mechanics; the configured app identity remains semantic.
-    const menuRows = page.locator([
-      '.__menu-item[tabindex="0"]',
-      '[role="menuitem"]',
-      '[role="option"]',
-      '[role="menuitemradio"]',
-    ].join(", ")).filter({ visible: true });
-    const escapedAppName = this.config.appName
-      .replace(/\\/g, "\\\\")
-      .replace(/"/g, '\\"');
-    // ChatGPT has shipped several picker representations: visible text, accessible names,
-    // and semantic app/plugin attributes. Treat all of those as the same app identity.
-    // The private menu-item selector remains only a transport fallback for rows that carry
-    // the configured app name as nested text.
-    const appResult = page
-      .getByText(this.config.appName, { exact: true })
-      .or(page.locator([
-        '[data-keyword="' + escapedAppName + '"]',
-        '[data-app-name="' + escapedAppName + '"]',
-        '[data-plugin-name="' + escapedAppName + '"]',
-        '[aria-label="' + escapedAppName + '"]',
-        '[title="' + escapedAppName + '"]',
-      ].join(", ")))
-      .or(menuRows.filter({ hasText: this.config.appName, visible: true }))
-      .filter({ visible: true });
+    let selectedCandidate: ChatGptConnectorCandidateIdentity | undefined;
     const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY;
 
     await ensureChatGptPersonalizedConnectorAccess(
       page,
       capture,
       async (personalizationSignal) => {
-        let proofResult: boolean | undefined;
+        let proofResult = false;
         let proofError: unknown;
         try {
           composer = await this.activeComposer(page, 30_000, personalizationSignal);
@@ -3310,17 +3485,12 @@ export class ChatGptBrowserWorker {
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
           });
           await capture("personalization-proof-mention-triggered");
-          try {
-            await appResult.waitFor({ state: "visible", timeout: 2_500, signal: personalizationSignal });
-            proofResult = true;
-            await capture("personalization-proof-menu-visible");
-          } catch (error) {
-            if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-            proofResult = false;
-            await capture("personalization-proof-menu-missing");
-          }
+          await this.waitForConnectorCandidate(page, 2_500, personalizationSignal);
+          proofResult = true;
+          await capture("personalization-proof-menu-visible");
         } catch (error) {
-          proofError = error;
+          if (personalizationSignal?.aborted) throw error;
+          if (!(error instanceof ChatGptConnectorPickerTimeoutError)) proofError = error;
         }
         try {
           await this.clearChatGptComposerState(page);
@@ -3331,7 +3501,8 @@ export class ChatGptBrowserWorker {
           );
         }
         if (proofError !== undefined) throw proofError;
-        return proofResult === true;
+        if (!proofResult) await capture("personalization-proof-menu-missing");
+        return proofResult;
       },
       abortSignal,
     );
@@ -3361,16 +3532,14 @@ export class ChatGptBrowserWorker {
           await capture("connector-mention-triggered");
         }
         try {
-          await appResult.waitFor({
-            state: "visible",
-            timeout: 2_500,
-            signal: abortSignal,
-          });
+          const discovered = await this.waitForConnectorCandidate(page, 2_500, abortSignal);
+          selectedCandidate = discovered.candidate;
           await capture("connector-picker-visible");
           break;
         } catch (error) {
-          if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-          const visibleRows = await this.connectorMentionRowTitles(menuRows, abortSignal);
+          if (!(error instanceof ChatGptConnectorPickerTimeoutError)) throw error;
+          const pickerRows = this.connectorPickerRows(page);
+          const visibleRows = await this.connectorMentionRowTitles(pickerRows, abortSignal);
           const knownIdentityMismatch = this.config.appName === CHATGPT_CONNECTOR_NAME
             && (
               visibleRows.includes(DEV_CHATGPT_CONNECTOR_NAME)
@@ -3379,7 +3548,7 @@ export class ChatGptBrowserWorker {
           if (knownIdentityMismatch) {
             await capture("connector-picker-missing");
             throw chatGptConnectorUnavailableError(
-              await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts, abortSignal),
+              await this.connectorMentionFailure(pickerRows, attemptBudget.triggerAttempts, abortSignal),
             );
           }
           if (
@@ -3388,10 +3557,7 @@ export class ChatGptBrowserWorker {
             && !visibleRows.includes(this.config.appName)
             && attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS
           ) {
-            throw new ChatGptConnectorCatalogStaleError(
-              this.config.appName,
-              attemptBudget.triggerAttempts,
-            );
+            throw new ChatGptConnectorCatalogStaleError(this.config.appName, attemptBudget.triggerAttempts);
           }
           if (attemptBudget.triggerAttempts >= MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
             await capture("connector-picker-missing");
@@ -3400,23 +3566,10 @@ export class ChatGptBrowserWorker {
         }
       }
 
-      let exactResultCount = await withBrowserTurnAbort(
-        withChatGptBrowserObservationTimeout(appResult.count()),
-        abortSignal,
-      );
-
-      // ChatGPT officially supports choosing an app from the + tools menu as an alternative
-      // to @ mentions. Use that as the semantic fallback instead of depending on one autocomplete DOM.
-      if (exactResultCount === 0) {
+      if (!selectedCandidate) {
         composer = await this.activeComposer(page, 30_000, abortSignal);
-        await composer.fill("", {
-          signal: abortSignal,
-          timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-        });
-        await composer.focus({
-          signal: abortSignal,
-          timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-        });
+        await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+        await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await composer.press("Escape", {
           signal: abortSignal,
           timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
@@ -3424,17 +3577,13 @@ export class ChatGptBrowserWorker {
         await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
 
         const composerForm = composer.locator("xpath=ancestor::form[1]");
-        let plusButtons = composerForm
-          .locator(CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR)
-          .filter({ visible: true });
+        let plusButtons = composerForm.locator(CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR).filter({ visible: true });
         let plusCount = await withBrowserTurnAbort(
           withChatGptBrowserObservationTimeout(plusButtons.count()),
           abortSignal,
         );
         if (plusCount === 0) {
-          plusButtons = page
-            .locator(CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR)
-            .filter({ visible: true });
+          plusButtons = page.locator(CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR).filter({ visible: true });
           plusCount = await withBrowserTurnAbort(
             withChatGptBrowserObservationTimeout(plusButtons.count()),
             abortSignal,
@@ -3451,24 +3600,11 @@ export class ChatGptBrowserWorker {
             await capture("connector-plus-triggered");
             await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
 
-            const waitForExactConfiguredConnector = async (): Promise<void> => {
-              await appResult.waitFor({
-                state: "visible",
-                timeout: 2_500,
-                signal: abortSignal,
-              });
-              exactResultCount = await withBrowserTurnAbort(
-                withChatGptBrowserObservationTimeout(appResult.count()),
-                abortSignal,
-              );
-            };
-
             try {
-              await waitForExactConfiguredConnector();
+              const discovered = await this.waitForConnectorCandidate(page, 2_500, abortSignal);
+              selectedCandidate = discovered.candidate;
             } catch (error) {
-              if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-
-              // Some current ChatGPT surfaces put less-common apps/plugins under More after +.
+              if (!(error instanceof ChatGptConnectorPickerTimeoutError)) throw error;
               const moreItems = page
                 .getByRole("menuitem", { name: /^(More|Apps|Plugins)$/i })
                 .or(page.getByRole("button", { name: /^(More|Apps|Plugins)$/i }))
@@ -3483,9 +3619,7 @@ export class ChatGptBrowserWorker {
                   signal: abortSignal,
                 });
                 await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
-                await waitForExactConfiguredConnector();
               } else {
-                // Some surfaces expose a search box instead of rendering all apps immediately.
                 const searchBoxes = page
                   .getByRole("textbox", { name: /search/i })
                   .or(page.locator('input[placeholder*="search" i], textarea[placeholder*="search" i]'))
@@ -3500,62 +3634,52 @@ export class ChatGptBrowserWorker {
                   timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
                 });
                 await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
-                await waitForExactConfiguredConnector();
               }
+              const discovered = await this.waitForConnectorCandidate(page, 2_500, abortSignal);
+              selectedCandidate = discovered.candidate;
             }
-
-            if (exactResultCount > 0) {
-              await capture("connector-picker-visible");
-            }
+            if (selectedCandidate) await capture("connector-picker-visible");
           } catch (error) {
-            if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+            if (!(error instanceof ChatGptConnectorPickerTimeoutError)) throw error;
             await capture("connector-plus-picker-missing");
           }
         }
       }
-      if (exactResultCount !== 1) {
+
+      if (!selectedCandidate) {
         await capture("connector-picker-missing");
         throw chatGptConnectorUnavailableError(
-          `ChatGPT connector picker did not expose one exact visible ${JSON.stringify(this.config.appName)} entry`
+          `ChatGPT connector picker did not expose a uniquely selectable connector for ${JSON.stringify(this.config.appName)}`
           + ` after ${attemptBudget.triggerAttempts} mention trigger attempt(s)`
           + ` and a "+" app-picker fallback`,
         );
       }
 
-      const appTarget = appResult.first();
+      const appTarget = this.connectorPickerRows(page).nth(selectedCandidate.rawIndex);
       let activated = false;
-
-      // Prefer direct activation whenever ChatGPT gives the result a real visible box. This handles
-      // current app-picker/listbox implementations without depending on private highlight attributes.
       const box = await appTarget.boundingBox().catch(() => null);
       if (box && box.width > 1 && box.height > 1) {
         try {
-          await appTarget.click({
-            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-            signal: abortSignal,
-          });
+          await appTarget.click({ timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: abortSignal });
           activated = true;
-        } catch {
-          // Fall through to the keyboard path used by the 1x1 Launcher maintenance browser.
-        }
+        } catch {}
       }
-
       if (!activated) {
-        // Hidden launcher maintenance keeps a 1x1 Chromium viewport, so pointer activation cannot
-        // reach this menu. Prefer the exact current result and use ChatGPT's keyboard owner.
+        try {
+          await appTarget.press("Enter", { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: abortSignal });
+          activated = true;
+        } catch {}
+      }
+      if (!activated) {
         const rowHighlighted = async () => {
-          const attributes = ["data-highlighted", "aria-selected", "data-active"];
-          for (const attribute of attributes) {
-            if (await appTarget.getAttribute(attribute).then(value => value !== null).catch(() => false)) {
-              return true;
-            }
+          for (const attribute of ["data-highlighted", "aria-selected", "data-active"]) {
+            if (await appTarget.getAttribute(attribute).then(value => value !== null).catch(() => false)) return true;
           }
           return false;
         };
-
         if (!await rowHighlighted()) {
           const visibleRowCount = await withBrowserTurnAbort(
-            withChatGptBrowserObservationTimeout(menuRows.count()),
+            withChatGptBrowserObservationTimeout(this.connectorPickerRows(page).count()),
             abortSignal,
           );
           for (let step = 0; step < visibleRowCount && !await rowHighlighted(); step += 1) {
@@ -3565,44 +3689,27 @@ export class ChatGptBrowserWorker {
             });
           }
         }
-
         if (await rowHighlighted()) {
           await composer.press("Enter", {
             signal: abortSignal,
             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
           });
           activated = true;
-        } else {
-          try {
-            await appTarget.press("Enter", {
-              signal: abortSignal,
-              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-            });
-            activated = true;
-          } catch {
-            // Let the stable semantic error below report that no activation path succeeded.
-          }
         }
       }
-
       if (!activated) {
-        throw new Error(
-          `ChatGPT connector picker exposed ${JSON.stringify(this.config.appName)} but it could not be activated`,
-        );
+        throw new Error(`ChatGPT connector picker exposed ${JSON.stringify(this.config.appName)} but it could not be activated`);
       }
 
       await capture("connector-choice-activated");
-      // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
-      // again instead of returning the pre-selection locator, otherwise the real turn can focus a
-      // detached/hidden editor even though verification just succeeded.
       const selectedComposer = await this.activeComposer(page, 30_000, abortSignal);
-      const selectedConnector = this.selectedConnectorControl(selectedComposer);
-      await selectedConnector.waitFor({
+      const selectedConnector = this.selectedConnectorControls(selectedComposer);
+      await selectedConnector.first().waitFor({
         state: "visible",
         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
         signal: abortSignal,
       });
-      if (!await this.connectorIsSelected(selectedComposer, abortSignal)) {
+      if (!await this.connectorIsSelected(selectedComposer, abortSignal, selectedCandidate)) {
         throw new Error(`ChatGPT composer did not select ${JSON.stringify(this.config.appName)} connector`);
       }
       await capture("connector-selected");
@@ -3619,7 +3726,6 @@ export class ChatGptBrowserWorker {
       throw error;
     }
   }
-
   private async attachPrompt(
     page: Page,
     prompt: string,
