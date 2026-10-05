@@ -205,8 +205,14 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
-const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string): string => `@${appName}`;
+const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
 const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
+const CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR = [
+  'button[data-testid="composer-plus-button"]',
+  'button[aria-label*="Add files and more" i]',
+  'button[aria-label*="Add files" i]',
+  'button[aria-label^="Add " i]',
+].join(", ");
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 /**
@@ -3193,8 +3199,9 @@ export class ChatGptBrowserWorker {
   ): Promise<string> {
     const titles = await this.connectorMentionRowTitles(menuRows, abortSignal);
     if (titles.length === 0) {
-      return `ChatGPT connector picker did not expose any recognized menu row after ${triggerAttempts} complete mention trigger attempt(s)`
-        + ` (the picker may have changed its internal DOM contract)`;
+      return `ChatGPT app selection exposed no recognized entry after ${triggerAttempts} complete ` 
+        + `mention trigger attempt(s) and the "+" app-picker fallback`
+        + ` (the ChatGPT picker DOM may have changed)`;
     }
     if (this.config.appName === CHATGPT_CONNECTOR_NAME && titles.includes(DEV_CHATGPT_CONNECTOR_NAME)) {
       return `ChatGPT exposes the isolated DEV connector ${JSON.stringify(DEV_CHATGPT_CONNECTOR_NAME)},`
@@ -3250,9 +3257,8 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
     };
     let composer: Locator;
-    // ChatGPT's app picker DOM is not a stable public API. Keep the role-based fallbacks only
-    // for keyboard navigation; the exact configured connector identity is detected by its visible
-    // text instead of the retired internal .__menu-item[tabindex="0"] implementation detail.
+    // ChatGPT exposes app selection through multiple supported UI mechanisms (@ mention and +).
+    // The browser transport owns those mechanics; the configured app identity remains semantic.
     const menuRows = page.locator([
       '.__menu-item[tabindex="0"]',
       '[role="menuitem"]',
@@ -3260,7 +3266,7 @@ export class ChatGptBrowserWorker {
       '[role="menuitemradio"]',
     ].join(", ")).filter({ visible: true });
     const appResult = page.getByText(this.config.appName, { exact: true }).filter({ visible: true });
-    const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY(this.config.appName);
+    const mentionQuery = CHATGPT_CONNECTOR_MENTION_QUERY;
 
     await ensureChatGptPersonalizedConnectorAccess(
       page,
@@ -3341,31 +3347,21 @@ export class ChatGptBrowserWorker {
             timeout: 2_500,
             signal: abortSignal,
           });
-          await capture("connector-menu-visible");
+          await capture("connector-picker-visible");
           break;
         } catch (error) {
           if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
           const visibleRows = await this.connectorMentionRowTitles(menuRows, abortSignal);
-          const visibleConfiguredConnector = await withBrowserTurnAbort(
-            withChatGptBrowserObservationTimeout(appResult.count()),
-            abortSignal,
-          );
           const knownIdentityMismatch = this.config.appName === CHATGPT_CONNECTOR_NAME
             && (
               visibleRows.includes(DEV_CHATGPT_CONNECTOR_NAME)
               || LEGACY_CHATGPT_CONNECTOR_NAMES.some(name => visibleRows.includes(name))
             );
           if (knownIdentityMismatch) {
-            await capture("connector-menu-missing");
+            await capture("connector-picker-missing");
             throw chatGptConnectorUnavailableError(
               await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts, abortSignal),
             );
-          }
-          if (visibleConfiguredConnector > 0) {
-            // The picker is present but ChatGPT no longer exposes its result through the old
-            // internal menu-item selector. The exact visible app identity is the source of truth.
-            await capture("connector-menu-visible");
-            break;
           }
           if (
             catalogRefreshAvailable
@@ -3379,22 +3375,92 @@ export class ChatGptBrowserWorker {
             );
           }
           if (attemptBudget.triggerAttempts >= MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
-            await capture("connector-menu-missing");
-            throw chatGptConnectorUnavailableError(
-              await this.connectorMentionFailure(menuRows, attemptBudget.triggerAttempts, abortSignal),
-            );
+            await capture("connector-picker-missing");
+            break;
           }
         }
       }
 
-      const exactResultCount = await withBrowserTurnAbort(
+      let exactResultCount = await withBrowserTurnAbort(
         withChatGptBrowserObservationTimeout(appResult.count()),
         abortSignal,
       );
+
+      // ChatGPT officially supports choosing an app from the + tools menu as an alternative
+      // to @ mentions. Use that as the semantic fallback instead of depending on one autocomplete DOM.
+      if (exactResultCount === 0) {
+        composer = await this.activeComposer(page, 30_000, abortSignal);
+        const composerForm = composer.locator("xpath=ancestor::form[1]");
+        const plusButtons = composerForm
+          .locator(CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR)
+          .filter({ visible: true });
+        const plusCount = await withBrowserTurnAbort(
+          withChatGptBrowserObservationTimeout(plusButtons.count()),
+          abortSignal,
+        );
+
+        if (plusCount > 0) {
+          const plusButton = plusButtons.last();
+          try {
+            await plusButton.click({
+              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+              signal: abortSignal,
+            });
+            await capture("connector-plus-triggered");
+            await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
+
+            try {
+              await appResult.waitFor({
+                state: "visible",
+                timeout: 2_500,
+                signal: abortSignal,
+              });
+            } catch (error) {
+              if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+
+              // Some current ChatGPT surfaces put less-common apps/plugins under More after +.
+              const moreItems = page.getByRole("menuitem", { name: /^(More|Apps|Plugins)$/i })
+                .filter({ visible: true });
+              const moreCount = await withBrowserTurnAbort(
+                withChatGptBrowserObservationTimeout(moreItems.count()),
+                abortSignal,
+              );
+              if (moreCount > 0) {
+                await moreItems.last().click({
+                  timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+                  signal: abortSignal,
+                });
+                await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
+                await appResult.waitFor({
+                  state: "visible",
+                  timeout: 2_500,
+                  signal: abortSignal,
+                });
+              } else {
+                throw error;
+              }
+            }
+
+            exactResultCount = await withBrowserTurnAbort(
+              withChatGptBrowserObservationTimeout(appResult.count()),
+              abortSignal,
+            );
+            if (exactResultCount > 0) {
+              await capture("connector-picker-visible");
+            }
+          } catch (error) {
+            if (!(error instanceof Error) || error.name !== "TimeoutError") {
+              if (error instanceof ChatGptWebAdapterError) throw error;
+            }
+          }
+        }
+      }
       if (exactResultCount !== 1) {
+        await capture("connector-picker-missing");
         throw chatGptConnectorUnavailableError(
           `ChatGPT connector picker did not expose one exact visible ${JSON.stringify(this.config.appName)} entry`
-          + ` after ${attemptBudget.triggerAttempts} complete mention trigger attempt(s)`,
+          + ` after ${attemptBudget.triggerAttempts} mention trigger attempt(s)`
+          + ` and a "+" app-picker fallback`,
         );
       }
 
