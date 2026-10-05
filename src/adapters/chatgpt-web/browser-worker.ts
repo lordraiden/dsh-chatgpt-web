@@ -1420,9 +1420,12 @@ export type ChatGptConnectorAttachmentMode = "none" | "mention" | "retained";
 /** A launcher lease may reuse a connector only after proving that exact retained surface is bound. */
 export function chatGptConnectorAttachmentMode(
   localTools: boolean,
+  nativeConnector: boolean,
   reuseConversation: boolean,
 ): ChatGptConnectorAttachmentMode {
-  if (!localTools) return "none";
+  // Text-protocol DSH tools do not require (and must not touch) ChatGPT's connector picker.
+  // Only the explicit legacy/native connector route is allowed to mutate connector UI state.
+  if (!localTools || !nativeConnector) return "none";
   return reuseConversation ? "retained" : "mention";
 }
 
@@ -3417,6 +3420,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     prompt: string,
     localTools: boolean,
+    nativeConnector: boolean,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
     catalogRefreshAvailable = false,
@@ -3716,6 +3720,7 @@ export class ChatGptBrowserWorker {
     page: Page,
     prompt: string,
     localTools: boolean,
+    nativeConnector: boolean,
     compaction: boolean,
     baseline: ChatGptSubmissionBaseline,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
@@ -3731,6 +3736,7 @@ export class ChatGptBrowserWorker {
           page,
           prompt,
           localTools,
+          nativeConnector,
           captureDiagnostic,
           abortSignal,
           catalogRefreshAvailable,
