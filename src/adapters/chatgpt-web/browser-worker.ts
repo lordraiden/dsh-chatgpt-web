@@ -3489,7 +3489,7 @@ export class ChatGptBrowserWorker {
           proofResult = true;
           await capture("personalization-proof-menu-visible");
         } catch (error) {
-          if (personalizationSignal.aborted) throw error;
+          if (personalizationSignal?.aborted) throw error;
           if (!(error instanceof ChatGptConnectorPickerTimeoutError)) proofError = error;
         }
         try {
