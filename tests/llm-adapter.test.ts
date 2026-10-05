@@ -430,7 +430,7 @@ describe("native path does not enter the Responses server", () => {
     expect(events.some(event => event.type === "done" && event.stopReason === "stop")).toBe(true);
     expect(core.get(chatGptTurnExecutionKey(parsed))).toBeUndefined();
     expect(core.wasRetired(chatGptTurnExecutionKey(parsed))).toBe(true);
-    await adapter.shutdown();
+    await adapter.shutdown?.();
   });
 
   test("tool-capable native turns wait for accepted submission before broker capability wait", async () => {
