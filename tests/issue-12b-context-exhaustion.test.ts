@@ -125,6 +125,7 @@ function runtimeForRetainedConversation(physicalSettlement: Promise<void>, relea
     text: new ChatGptTextFeed(),
     conversationKey,
     releaseRetainedConversation: async () => release(),
+    running: Promise.resolve(),
     cancel: () => {},
   };
 }

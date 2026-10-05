@@ -9,7 +9,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
-import type { TurnBrokerOwner } from "../src/adapters/chatgpt-web/turn-broker";
+import type { TurnBrokerOwner, BrokerToolRequest } from "../src/adapters/chatgpt-web/turn-broker";
+import type { WebSurfaceTransport } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { readFileSync } from "node:fs";
 import { defaultConfig } from "../src/config";
 import { dirname, join } from "node:path";
@@ -24,12 +25,21 @@ import {
 import type { AdapterEvent, CodexParsedRequest } from "../src/types";
 import type { ProviderAdapter } from "../src/adapters/base";
 import type { CodexProviderConfig } from "../src/types";
+import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import {
   chatGptTurnExecutionKey,
   chatGptTurnRoundKey,
 } from "../src/adapters/chatgpt-web/turn-execution";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+class TestProviderCore extends ChatGptWebProviderCore {
+  override bindPhysicalSettlement(executionKey: string, _settlement: Promise<void>): ReturnType<ChatGptWebProviderCore["bindPhysicalSettlement"]> {
+    const turn = this.get(executionKey);
+    if (!turn) throw new Error(`TestProviderCore turn missing: ${executionKey}`);
+    return turn;
+  }
+}
 
 function providerConfigFixture(overrides: Partial<CodexProviderConfig["chatgptWeb"]> = {}): CodexProviderConfig {
   return {
@@ -380,6 +390,107 @@ describe("ChatGptWebLlmAdapter cancellation", () => {
 });
 
 describe("native path does not enter the Responses server", () => {
+  test("tool-capable native turns wait for accepted submission before broker capability wait", async () => {
+    const provider = providerConfigFixture({ localToolsEnabled: true });
+    const parsed = toCodexParsedRequest(userRequest("read the workspace file", {
+      tools: [{
+        name: "fs.read",
+        description: "Read a bounded UTF-8 workspace file.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: { file_path: { type: "string" } },
+          required: ["file_path"],
+        },
+      }] as unknown as ToolSchema[],
+    }), provider);
+    const rawInput = (parsed._rawBody as { input: Array<Record<string, unknown>> }).input;
+    const nativeUser = [...rawInput].reverse().find(item => item.type === "message" && item.role === "user");
+    const nativeTurnId = ((nativeUser?.internal_chat_message_metadata_passthrough as { turn_id?: unknown } | undefined)?.turn_id);
+    expect(typeof nativeTurnId).toBe("string");
+    parsed._dshContext = {
+      dshSessionId: "issue-127-session",
+      threadId: "issue-127-thread",
+      turnId: nativeTurnId as string,
+      environment: {
+        cwd: "/tmp",
+        roots: ["/tmp"],
+        writableRoots: ["/tmp"],
+        sandboxMode: "workspace-write",
+        networkAccess: false,
+      },
+    };
+
+    const controller = new AbortController();
+    let nextToolBatchCalled = false;
+    let releaseSubmission!: () => void;
+    const submissionGate = new Promise<void>(resolve => { releaseSubmission = resolve; });
+
+    const broker: TurnBrokerOwner = {
+      register: async () => "tool-turn-token",
+      registerSafe: async () => "safe-turn-token",
+      updateEnvironment: () => {},
+      confirmSafeTurnSent: () => ({ confirmed: true, duplicate: false }),
+      nextToolBatch: (_token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]> => {
+        nextToolBatchCalled = true;
+        controller.abort();
+        return new Promise<BrokerToolRequest[]>((_resolve, reject) => {
+          const onAbort = () => {
+            signal?.removeEventListener("abort", onAbort);
+            reject(new DOMException("aborted", "AbortError"));
+          };
+          if (signal?.aborted) {
+            onAbort();
+          } else {
+            signal?.addEventListener("abort", onAbort, { once: true });
+          }
+        });
+      },
+      completeTool: () => {},
+      waitForSafeStart: async () => {},
+      waitForSafeCompletion: async () => "done",
+      requestCompaction: () => 0,
+      compactionDeliveryCount: () => 0,
+      beginCompletionFence: () => undefined,
+      commitCompletionFence: () => true,
+      waitForRetirement: async () => new Promise<void>(() => {}),
+      revoke: () => {},
+    };
+
+    const transport: WebSurfaceTransport = {
+      async run(turn) {
+        await turn.prepare();
+        await turn.onPhysicalSurfaceBound?.({
+          resourceId: "surface-127",
+          browserContextId: "context-127",
+          pageId: "page-127",
+          profileId: "profile-127",
+          accountId: "chatgpt-account:unknown",
+        });
+        await turn.onSurfaceReady?.();
+        await turn.onSendActivated?.();
+        await submissionGate;
+        turn.onSubmitted?.();
+        await new Promise<void>(() => {});
+        return "unreachable";
+      },
+      verifyConnector: async () => "verified",
+      inspectSession: async () => ({ authenticated: true, temporary: true, url: "https://chatgpt.com/" }),
+      smokeTest: async () => ({ effort: "low", response: "ok" }),
+      close: async () => {},
+    };
+
+    const adapter = createChatGptWebAdapter(provider, { broker, transport, providerCore: new TestProviderCore() });
+    const run = adapter.runTurn!(parsed, { headers: new Headers(), abortSignal: controller.signal }, () => {});
+
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(nextToolBatchCalled).toBe(false);
+
+    releaseSubmission();
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(nextToolBatchCalled).toBe(true);
+  });
+
   test("plugin declares the LLM service as a hard Cordis dependency", () => {
     const source = readFileSync(join(HERE, "..", "src", "plugin.ts"), "utf8");
     expect(source).toContain('export const inject = ["llm", "tools"];');
