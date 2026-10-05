@@ -8,7 +8,7 @@
  * so no browser is started.
  */
 import { describe, expect, test } from "bun:test";
-import { createChatGptWebAdapter } from "../src/adapters/chatgpt-web/index";
+import { createChatGptWebAdapter, resolveChatGptCapabilitySnapshotForTurn } from "../src/adapters/chatgpt-web/index";
 import type { TurnBrokerOwner, BrokerToolRequest } from "../src/adapters/chatgpt-web/turn-broker";
 import type { WebSurfaceTransport } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { readFileSync } from "node:fs";
@@ -30,6 +30,7 @@ import {
   chatGptTurnExecutionKey,
   chatGptTurnRoundKey,
 } from "../src/adapters/chatgpt-web/turn-execution";
+import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -390,27 +391,44 @@ describe("ChatGptWebLlmAdapter cancellation", () => {
 });
 
 describe("native path does not enter the Responses server", () => {
-  test("records browser logical completion before physical settlement retires the ProviderTurn", async () => {
+  test("waits for a SETTLING ProviderTurn before creating a reconnect surface", async () => {
     const provider = providerConfigFixture({ accountIdentityFingerprint: "test-account" });
     const parsed = toCodexParsedRequest(userRequest("hello"), provider);
-    let releaseBrowser!: () => void;
-    let signalStarted!: () => void;
-    const browserStarted = new Promise<void>(resolve => { signalStarted = resolve; });
+    const executionKey = chatGptTurnExecutionKey(parsed);
+    const core = new ChatGptWebProviderCore();
+    const identity = extractChatGptTurnIdentity(parsed);
+    const snapshot = resolveChatGptCapabilitySnapshotForTurn(core, executionKey, parsed, identity);
+    const previous = core.begin({
+      executionKey,
+      traceId: "trace-settling-reconnect",
+      nativeTurnId: identity.turnId!,
+      nativeThreadId: identity.threadId,
+      accountIdentity: "test-account",
+      browserProfile: "/usr/bin/chromium",
+      browserContext: "test-context",
+      pageIdentity: "old-page",
+      capabilitySnapshot: snapshot,
+    });
+    previous.transition("SETTLING");
+    let releasePhysical!: () => void;
+    const physicalSettlement = new Promise<void>(resolve => { releasePhysical = resolve; });
+    core.bindPhysicalSettlement(executionKey, physicalSettlement);
+
+    let transportRuns = 0;
     const transport: WebSurfaceTransport = {
       async run(turn) {
+        transportRuns += 1;
         await turn.onPhysicalSurfaceBound?.({
-          resourceId: "surface-lifecycle",
-          browserContextId: "context-lifecycle",
-          pageId: "page-lifecycle",
-          profileId: "profile-lifecycle",
+          resourceId: "surface-reconnect",
+          browserContextId: "context-reconnect",
+          pageId: "page-reconnect",
+          profileId: "profile-reconnect",
           accountId: "chatgpt-account:test-account",
         });
         await turn.onSurfaceReady?.();
         await turn.onSendActivated?.();
         turn.onSubmitted?.();
         turn.onTextDelta("ok");
-        signalStarted!();
-        await new Promise<void>(resolve => { releaseBrowser = resolve; });
         return "ok";
       },
       verifyConnector: async () => "verified",
@@ -418,20 +436,13 @@ describe("native path does not enter the Responses server", () => {
       smokeTest: async () => ({ effort: "low", response: "ok" }),
       close: async () => {},
     };
-    const core = new ChatGptWebProviderCore();
+
     const adapter = createChatGptWebAdapter(provider, { providerCore: core, transport });
-    const events: AdapterEvent[] = [];
-    const run = adapter.runTurn!(parsed, { headers: new Headers() }, event => events.push(event));
-
-    await browserStarted;
-    releaseBrowser!();
+    const run = adapter.runTurn!(parsed, { headers: new Headers() }, () => {});
+    releasePhysical();
     await expect(run).resolves.toBeUndefined();
-    await core.waitForRetirement(chatGptTurnExecutionKey(parsed));
-
-    expect(events.some(event => event.type === "done" && event.stopReason === "stop")).toBe(true);
-    expect(core.get(chatGptTurnExecutionKey(parsed))).toBeUndefined();
-    expect(core.wasRetired(chatGptTurnExecutionKey(parsed))).toBe(true);
-    await adapter.shutdown?.();
+    expect(transportRuns).toBe(1);
+    await core.shutdown();
   });
 
   test("tool-capable native turns wait for accepted submission before broker capability wait", async () => {
