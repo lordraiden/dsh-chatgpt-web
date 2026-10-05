@@ -612,15 +612,16 @@ export function createChatGptWebAdapter(
     };
     const submission: NonNullable<ChatGptTurnRuntime["submission"]> = { phase: "prepared" };
     const running = deferred<void>();
-    const logicalSettlement = providerTurn
+    const activeProviderTurn = providerTurn;
+    const logicalSettlement = activeProviderTurn
       ? (outcome: ChatGptBrowserOutcome): void => {
         if (outcome.type === "final") {
-          providerTurn.markLogicalSettled("completed");
+          activeProviderTurn.markLogicalSettled("completed");
           return;
         }
         const cancelled = (outcome.error instanceof DOMException && outcome.error.name === "AbortError")
           || (outcome.error instanceof ChatGptWebAdapterError && outcome.error.code === "client_cancelled");
-        providerTurn.markLogicalSettled(cancelled ? "cancelled" : "failed");
+        activeProviderTurn.markLogicalSettled(cancelled ? "cancelled" : "failed");
       }
       : undefined;
     // A canonical compaction request is side-effect free and remains safe to rebuild after an
