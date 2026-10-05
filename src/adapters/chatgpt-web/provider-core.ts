@@ -405,7 +405,18 @@ export class ProviderTurnLifecycle {
   }
 
   markLogicalSettled(outcome: Exclude<LogicalSettlementOutcome, "pending"> = "completed"): void {
-    this.assertMutable();
+    // Physical browser cleanup can settle just before the client-visible browser outcome is
+    // consumed. Logical settlement is the one lifecycle mutation that remains legal in that
+    // short SETTLING window; every other lifecycle mutation remains fail-closed.
+    if (this.state === "RETIRED") {
+      throw new Error("Provider turn is retired and cannot accept lifecycle mutations");
+    }
+    if (this.state === "SETTLING" && !this.physicalSettled) {
+      throw new Error("Provider turn is settling and cannot accept lifecycle mutations");
+    }
+    if (!this.lease.isActive()) {
+      throw new Error("Provider turn lease is no longer active");
+    }
     if (this.logicalSettled) {
       if (this.logicalOutcome !== outcome) {
         throw new Error(`Provider turn logical outcome cannot change: ${this.logicalOutcome} -> ${outcome}`);
@@ -414,6 +425,7 @@ export class ProviderTurnLifecycle {
     }
     this.logicalSettled = true;
     this.logicalOutcome = outcome;
+    this.retireIfSettled();
   }
 
   attachCancellation(cancel: (reason: Error) => void): void {
@@ -504,16 +516,20 @@ export class ProviderTurnLifecycle {
         this.logicalSettled = true;
         this.logicalOutcome = "failed";
       }
-    } else if (!this.logicalSettled) {
-      this.logicalSettled = true;
-      this.logicalOutcome = "failed";
     }
     this.activity = "idle";
-    if (this.state !== "RETIRED") {
-      if (this.state !== "SETTLING") this.transition("SETTLING");
-      this.transition("RETIRED");
+    if (this.state !== "RETIRED" && this.state !== "SETTLING") {
+      this.transition("SETTLING");
     }
+    this.retireIfSettled();
+  }
+
+  private retireIfSettled(): void {
+    if (!this.physicalSettled || !this.logicalSettled || this.state === "RETIRED") return;
+    if (this.state !== "SETTLING") this.transition("SETTLING");
+    this.activity = "idle";
     this.releaseLease();
+    this.transition("RETIRED");
     this.onRetired();
   }
 
