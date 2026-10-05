@@ -3,6 +3,7 @@ import type { GenerateOptions } from "@deepseek-ai/dsh-llm";
 import {
   BrowserAccountLeaseRegistry,
   ChatGptWebProviderCore,
+  markProviderTurnRecoveryFailedIfMutable,
 } from "../src/adapters/chatgpt-web/provider-core";
 import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { mapStream } from "../src/adapters/chatgpt-web/llm-adapter";
@@ -624,6 +625,25 @@ function leaseInput(turnId: string) {
   assert.equal(generations.get("conversation-b"), 2);
   assert.equal(generations.get("conversation-c"), 3);
   console.log("ok conversation generation history is bounded");
+}
+
+
+{
+  const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("preserve-error-after-retirement"));
+  turn.bindPhysicalResource({
+    resourceId: "surface-preserve-error-after-retirement",
+    browserContextId: "ctx-preserve-error-after-retirement",
+    pageId: "page-preserve-error-after-retirement",
+    profileId: "profile-preserve-error-after-retirement",
+    accountId: "chatgpt-account:account-preserve-error-after-retirement",
+  });
+  turn.markSurfaceReady();
+  turn.failBeforePhysicalSettlement();
+  assert.equal(turn.snapshot().state, "RETIRED");
+  assert.equal(markProviderTurnRecoveryFailedIfMutable(turn), false);
+  assert.equal(turn.snapshot().recovery, "FAILED");
+  console.log("ok terminal provider turn does not mask the original browser failure");
 }
 
 console.log("Issue #9 ProviderCore contract tests passed.");
