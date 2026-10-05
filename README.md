@@ -71,33 +71,25 @@ The repository also contains two intentionally separate surfaces: native Codex p
 
 ### 1. Installation
 
-Install the plugin from the npm registry:
+Install the plugin directly from the GitHub `main` branch:
 
 ```bash
-dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
+dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
 ```
 
-Every validated merge to `main` is published automatically as the next patch version, so a registry-installed profile can update normally:
+The repository commits its generated `lib/` runtime bundles. Git installs therefore do **not** need to run a build during dependency installation, so pnpm/DSH does not require SHA-specific `allowBuilds` entries for this plugin.
+
+Use the normal update command to move the profile to the latest validated `main` commit:
 
 ```bash
 dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
 ```
 
-GitHub-hosted installs are intended only for development. They require pnpm build-script authorization tied to the resolved Git revision. Use the registry package for normal runtime deployments so updates do not require SHA-specific `allowBuilds` entries.
+You do not need to edit `pnpm-workspace.yaml`, change a Git SHA, or add a new build-script exception for each release. CI verifies that the committed `lib/` output is synchronized with the source before a change can pass.
+
+The npm package is also produced by the repository's packaging workflow when explicitly published, but the normal DSH installation path tracks Git `main`.
 
 This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
-
-### Migrating an existing Git installation
-
-An existing Git-pinned installation needs a one-time migration to the registry package:
-
-```bash
-dsh plugin --profile <profile> remove @lordraiden/dsh-chatgpt-web
-dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
-```
-
-After that migration, future merges to `main` are ordinary package updates; no SHA changes or `allowBuilds` edits are required.
-
 ### 2. One-Time Browser Sign-In
 
 Authenticate your ChatGPT account once. The plugin binary lives in the profile's `node_modules/.bin`:
