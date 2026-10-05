@@ -169,8 +169,9 @@ export function isChatGptConversationUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
     if (url.origin !== new URL(CHATGPT_CHAT_URL).origin) return false;
+    if (url.searchParams.get("temporary-chat") === "true") return false;
     if (url.pathname === "/" || url.pathname === "") return true;
-    return /^\\/c\\/[^/?#]+$/.test(url.pathname);
+    return /^\/c\/[^/?#]+$/.test(url.pathname);
   } catch {
     return false;
   }
