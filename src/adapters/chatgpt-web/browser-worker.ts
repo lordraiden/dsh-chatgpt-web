@@ -3392,14 +3392,37 @@ export class ChatGptBrowserWorker {
       // to @ mentions. Use that as the semantic fallback instead of depending on one autocomplete DOM.
       if (exactResultCount === 0) {
         composer = await this.activeComposer(page, 30_000, abortSignal);
+        await composer.fill("", {
+          signal: abortSignal,
+          timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+        });
+        await composer.focus({
+          signal: abortSignal,
+          timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+        });
+        await composer.press("Escape", {
+          signal: abortSignal,
+          timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+        }).catch(() => {});
+        await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
+
         const composerForm = composer.locator("xpath=ancestor::form[1]");
-        const plusButtons = composerForm
+        let plusButtons = composerForm
           .locator(CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR)
           .filter({ visible: true });
-        const plusCount = await withBrowserTurnAbort(
+        let plusCount = await withBrowserTurnAbort(
           withChatGptBrowserObservationTimeout(plusButtons.count()),
           abortSignal,
         );
+        if (plusCount === 0) {
+          plusButtons = page
+            .locator(CHATGPT_CONNECTOR_PLUS_BUTTON_SELECTOR)
+            .filter({ visible: true });
+          plusCount = await withBrowserTurnAbort(
+            withChatGptBrowserObservationTimeout(plusButtons.count()),
+            abortSignal,
+          );
+        }
 
         if (plusCount > 0) {
           const plusButton = plusButtons.last();
@@ -3411,12 +3434,20 @@ export class ChatGptBrowserWorker {
             await capture("connector-plus-triggered");
             await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
 
-            try {
+            const waitForExactConfiguredConnector = async (): Promise<void> => {
               await appResult.waitFor({
                 state: "visible",
                 timeout: 2_500,
                 signal: abortSignal,
               });
+              exactResultCount = await withBrowserTurnAbort(
+                withChatGptBrowserObservationTimeout(appResult.count()),
+                abortSignal,
+              );
+            };
+
+            try {
+              await waitForExactConfiguredConnector();
             } catch (error) {
               if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
 
@@ -3433,20 +3464,25 @@ export class ChatGptBrowserWorker {
                   signal: abortSignal,
                 });
                 await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
-                await appResult.waitFor({
-                  state: "visible",
-                  timeout: 2_500,
-                  signal: abortSignal,
-                });
+                await waitForExactConfiguredConnector();
               } else {
-                throw error;
+                // Some surfaces expose a search box instead of rendering all apps immediately.
+                const searchBoxes = page.getByRole("textbox", { name: /search/i })
+                  .filter({ visible: true });
+                const searchCount = await withBrowserTurnAbort(
+                  withChatGptBrowserObservationTimeout(searchBoxes.count()),
+                  abortSignal,
+                );
+                if (searchCount === 0) throw error;
+                await searchBoxes.last().fill(this.config.appName, {
+                  signal: abortSignal,
+                  timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+                });
+                await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
+                await waitForExactConfiguredConnector();
               }
             }
 
-            exactResultCount = await withBrowserTurnAbort(
-              withChatGptBrowserObservationTimeout(appResult.count()),
-              abortSignal,
-            );
             if (exactResultCount > 0) {
               await capture("connector-picker-visible");
             }
