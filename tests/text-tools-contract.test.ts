@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { isChatGptConversationUrl } from "../src/chatgpt-session";
 import { formatDshToolCapabilities } from "../src/adapters/chatgpt-web/prompt";
 import { ChatGptToolStreamParser, ChatGptToolProtocolError } from "../src/adapters/chatgpt-web/tool-stream-parser";
+import { chatGptConnectorAttachmentMode } from "../src/adapters/chatgpt-web/browser-worker";
 
 describe("persistent ChatGPT surface", () => {
   test("accepts the account root and persisted conversation URLs", () => {
@@ -78,5 +79,19 @@ describe("DSH text tool protocol", () => {
       },
     ]);
     expect(text).not.toContain('"strict"');
+  });
+});
+
+
+describe("text-tool browser attachment", () => {
+  test("does not invoke the ChatGPT connector picker for text-protocol tools", () => {
+    expect(chatGptConnectorAttachmentMode(false, false, false)).toBe("none");
+    expect(chatGptConnectorAttachmentMode(true, false, false)).toBe("none");
+    expect(chatGptConnectorAttachmentMode(true, false, true)).toBe("none");
+  });
+
+  test("retains connector UI only for the explicit native connector route", () => {
+    expect(chatGptConnectorAttachmentMode(true, true, false)).toBe("mention");
+    expect(chatGptConnectorAttachmentMode(true, true, true)).toBe("retained");
   });
 });
