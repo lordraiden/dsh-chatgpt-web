@@ -278,6 +278,8 @@ export interface ChatGptConnectorCandidateIdentity {
   pluginName: string | null;
   ariaLabel: string | null;
   title: string | null;
+  mentionDisplayName: string | null;
+  dataListNavigationItem: string | null;
 }
 
 function normalizeChatGptConnectorIdentity(value: string): string {
@@ -293,6 +295,7 @@ function chatGptConnectorCandidateValues(candidate: ChatGptConnectorCandidateIde
     candidate.pluginName,
     candidate.ariaLabel,
     candidate.title,
+    candidate.mentionDisplayName,
   ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
 }
 
@@ -1335,6 +1338,10 @@ async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSigna
 export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
+
+export const CHATGPT_COMPOSER_SELECT_ALL_KEY = process.platform === "darwin"
+  ? "Meta+A"
+  : "Control+A";
 
 function throwIfPromptAttachmentAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("ChatGPT prompt attachment aborted", "AbortError");
@@ -3201,7 +3208,7 @@ export class ChatGptBrowserWorker {
     return composer.evaluate(element => {
       const clone = element.cloneNode(true) as HTMLElement;
       clone.querySelectorAll(
-        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]',
+        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target], [app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
       )
         .forEach(part => part.remove());
       return [...clone.childNodes]
@@ -3239,6 +3246,7 @@ export class ChatGptBrowserWorker {
     return composer.locator([
       "[data-id^=\"plugin:\"][data-keyword]",
       "[data-inline-selection-pill-cursor-target]",
+      '[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]',
     ].join(", ")).filter({ visible: true });
   }
 
@@ -3257,6 +3265,7 @@ export class ChatGptBrowserWorker {
         pluginName: element.getAttribute("data-plugin-name"),
         ariaLabel: element.getAttribute("aria-label"),
         title: element.getAttribute("title"),
+        mentionDisplayName: element.getAttribute("app-mention-display-name"),
       })))),
       abortSignal,
     );
@@ -3299,6 +3308,8 @@ export class ChatGptBrowserWorker {
 
   private connectorPickerRows(page: Page): Locator {
     return page.locator([
+      // Current ChatGPT app-mention surface.
+      '[data-mention-list-scroll-area] button[data-list-navigation-item="true"]',
       ".__menu-item[tabindex=\"0\"]",
       "[role=\"menuitem\"]",
       "[role=\"option\"]",
@@ -3331,6 +3342,8 @@ export class ChatGptBrowserWorker {
           pluginName: element.getAttribute("data-plugin-name"),
           ariaLabel: element.getAttribute("aria-label"),
           title: element.getAttribute("title"),
+          mentionDisplayName: element.getAttribute("app-mention-display-name"),
+          dataListNavigationItem: element.getAttribute("data-list-navigation-item"),
         })).filter(candidate => {
           const values = [
             candidate.text,
@@ -3340,15 +3353,19 @@ export class ChatGptBrowserWorker {
             candidate.pluginName,
             candidate.ariaLabel,
             candidate.title,
+            candidate.mentionDisplayName,
           ].filter((value): value is string => typeof value === "string" && value.trim().length > 0)
             .map(value => value.normalize("NFKC").toLocaleLowerCase().replace(/[^a-z0-9]+/g, ""));
           const hasPluginIdentity = typeof candidate.dataId === "string" && candidate.dataId.startsWith("plugin:");
-          const hasConnectorAttribute = Boolean(candidate.keyword || candidate.appName || candidate.pluginName);
+          const hasConnectorAttribute = Boolean(
+            candidate.keyword || candidate.appName || candidate.pluginName || candidate.mentionDisplayName
+          );
           const looksLikeConfigured = values.some(value =>
             value.includes(normalizedConfigured) || normalizedConfigured.includes(value));
           const looksLikeCodex = normalizedConfigured.startsWith("codex")
             && values.some(value => value === "codex" || value.startsWith("codex"));
-          return hasPluginIdentity || hasConnectorAttribute || looksLikeConfigured || looksLikeCodex;
+          const isCurrentMentionRow = candidate.dataListNavigationItem === "true";
+          return isCurrentMentionRow || hasPluginIdentity || hasConnectorAttribute || looksLikeConfigured || looksLikeCodex;
         });
       }, this.config.appName)),
       abortSignal,
@@ -3421,7 +3438,15 @@ export class ChatGptBrowserWorker {
       await pressChatGptPersonalizationEscape(page, deadline, signal);
       const timeoutMs = Math.max(1, deadline - Date.now());
       const composer = await this.activeComposer(page, timeoutMs, signal);
-      await composer.fill("", {
+      await composer.focus({
+        signal,
+        timeout: Math.max(1, Math.min(CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, deadline - Date.now())),
+      });
+      await composer.press(CHATGPT_COMPOSER_SELECT_ALL_KEY, {
+        signal,
+        timeout: Math.max(1, Math.min(CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, deadline - Date.now())),
+      });
+      await composer.press("Backspace", {
         signal,
         timeout: Math.max(1, Math.min(CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, deadline - Date.now())),
       });
@@ -3509,17 +3534,19 @@ export class ChatGptBrowserWorker {
 
     try {
       composer = await this.activeComposer(page, 30_000, abortSignal);
-      await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
       if (await this.connectorIsSelected(composer, abortSignal)) {
         await capture("connector-already-selected");
         return composer;
       }
+      await this.clearChatGptComposerState(page);
+      composer = await this.activeComposer(page, 30_000, abortSignal);
 
       let firstMenuCaptured = false;
       while (attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
         attemptBudget.triggerAttempts += 1;
         composer = await this.activeComposer(page, 30_000, abortSignal);
-        await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+        await this.clearChatGptComposerState(page);
+        composer = await this.activeComposer(page, 30_000, abortSignal);
         await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
         await composer.pressSequentially(mentionQuery, {

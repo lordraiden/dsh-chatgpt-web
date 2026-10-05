@@ -236,8 +236,12 @@ test("ChatGPT connector selection separates app identity from the UI activation 
   expect(source).toContain('button[data-testid="composer-plus-button"]');
   expect(source).toContain('button[aria-label*="Add files and more" i]');
   expect(source).toContain("connectorPickerRows");
+  expect(source).toContain('[data-mention-list-scroll-area] button[data-list-navigation-item="true"]');
   expect(source).toContain("chooseChatGptConnectorCandidate");
   expect(source).toContain("selectedConnectorControls");
+  expect(source).toContain('[app-mention-path^="app://"][app-mention-display-name][contenteditable="false"]');
+  expect(source).toContain('composer.press(CHATGPT_COMPOSER_SELECT_ALL_KEY');
+  expect(source).toContain('composer.press("Backspace"');
   expect(source).toContain("connector-plus-triggered");
   expect(source).not.toContain('const CHATGPT_CONNECTOR_MENTION_QUERY = (appName: string)');
   expect(source).not.toContain(
@@ -256,6 +260,8 @@ test("ChatGPT connector discovery separates configured display names from semant
     pluginName: null,
     ariaLabel: null,
     title: null,
+    mentionDisplayName: "Codex Native2",
+    dataListNavigationItem: "true",
   };
   const semanticExact = {
     rawIndex: 1,
@@ -266,6 +272,8 @@ test("ChatGPT connector discovery separates configured display names from semant
     pluginName: null,
     ariaLabel: null,
     title: null,
+    mentionDisplayName: null,
+    dataListNavigationItem: null,
   };
   const genericCodex = {
     rawIndex: 2,
@@ -276,6 +284,8 @@ test("ChatGPT connector discovery separates configured display names from semant
     pluginName: null,
     ariaLabel: null,
     title: null,
+    mentionDisplayName: null,
+    dataListNavigationItem: null,
   };
   expect(scoreChatGptConnectorCandidate(exactDisplay, "Codex Native2")).toBe(100);
   expect(scoreChatGptConnectorCandidate(semanticExact, "Codex Native2")).toBe(95);
