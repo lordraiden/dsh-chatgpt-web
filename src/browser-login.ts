@@ -6,8 +6,8 @@ import type { AppConfig } from "./config";
 import { atomicWriteFile } from "./config";
 import {
   assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
-  CHATGPT_TEMPORARY_CHAT_URL,
+  assertChatGptPage,
+  CHATGPT_CHAT_URL,
   detectChatGptAccountCapabilities,
 } from "./chatgpt-session";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
@@ -49,7 +49,7 @@ interface LoginVerificationMarker {
 const SYSTEM_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const SYSTEM_LOGIN_STOP_TIMEOUT_MS = 5_000;
 const LOGIN_STORAGE_ROOT_DOMAINS = ["chatgpt.com", "openai.com"] as const;
-const CHATGPT_ORIGIN = new URL(CHATGPT_TEMPORARY_CHAT_URL).origin;
+const CHATGPT_ORIGIN = new URL(CHATGPT_CHAT_URL).origin;
 
 function browserProcessExited(browser: ChildProcess): boolean {
   return browser.exitCode !== null || browser.signalCode !== null;
@@ -164,10 +164,10 @@ async function inspectStoredState(
     const verifierContext = await verifierBrowser.newContext({ storageState });
     try {
       const verifierPage = await verifierContext.newPage();
-      await verifierPage.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await verifierPage.goto(CHATGPT_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 60_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
-      await assertTemporaryChatPage(verifierPage);
+      await assertChatGptPage(verifierPage);
       return { ...await detectChatGptAccountCapabilities(verifierPage), url: verifierPage.url() };
     } finally {
       await verifierContext.close();
