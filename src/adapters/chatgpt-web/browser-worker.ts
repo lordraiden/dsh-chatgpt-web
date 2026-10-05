@@ -279,6 +279,7 @@ export interface ChatGptConnectorCandidateIdentity {
   ariaLabel: string | null;
   title: string | null;
   mentionDisplayName: string | null;
+  dataListNavigationItem: string | null;
 }
 
 function normalizeChatGptConnectorIdentity(value: string): string {
@@ -1337,6 +1338,10 @@ async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSigna
 export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
+
+export const CHATGPT_COMPOSER_SELECT_ALL_KEY = process.platform === "darwin"
+  ? "Meta+A"
+  : "Control+A";
 
 function throwIfPromptAttachmentAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("ChatGPT prompt attachment aborted", "AbortError");
@@ -3338,6 +3343,7 @@ export class ChatGptBrowserWorker {
           ariaLabel: element.getAttribute("aria-label"),
           title: element.getAttribute("title"),
           mentionDisplayName: element.getAttribute("app-mention-display-name"),
+          dataListNavigationItem: element.getAttribute("data-list-navigation-item"),
         })).filter(candidate => {
           const values = [
             candidate.text,
@@ -3347,6 +3353,7 @@ export class ChatGptBrowserWorker {
             candidate.pluginName,
             candidate.ariaLabel,
             candidate.title,
+            candidate.mentionDisplayName,
           ].filter((value): value is string => typeof value === "string" && value.trim().length > 0)
             .map(value => value.normalize("NFKC").toLocaleLowerCase().replace(/[^a-z0-9]+/g, ""));
           const hasPluginIdentity = typeof candidate.dataId === "string" && candidate.dataId.startsWith("plugin:");
@@ -3357,7 +3364,7 @@ export class ChatGptBrowserWorker {
             value.includes(normalizedConfigured) || normalizedConfigured.includes(value));
           const looksLikeCodex = normalizedConfigured.startsWith("codex")
             && values.some(value => value === "codex" || value.startsWith("codex"));
-          const isCurrentMentionRow = element.matches('[data-list-navigation-item="true"]');
+          const isCurrentMentionRow = candidate.dataListNavigationItem === "true";
           return isCurrentMentionRow || hasPluginIdentity || hasConnectorAttribute || looksLikeConfigured || looksLikeCodex;
         });
       }, this.config.appName)),
