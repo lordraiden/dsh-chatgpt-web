@@ -58,14 +58,14 @@ import {
 } from "./context-budget";
 import {
   assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
+  assertChatGptPage,
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
-  CHATGPT_TEMPORARY_CHAT_URL,
+  CHATGPT_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
@@ -2631,8 +2631,8 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  /** Put every browser operation on one fully hydrated Temporary Chat document. */
-  private async prepareTemporaryChatSurface(
+  /** Put every browser operation on one fully hydrated persistent ChatGPT conversation surface. */
+  private async prepareChatSurface(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<Locator> {
@@ -2640,8 +2640,8 @@ export class ChatGptBrowserWorker {
     // connector is present in the catalog. Navigating again here destroys that freshly hydrated
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
-    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+    if (page.url() !== CHATGPT_CHAT_URL) {
+      await page.goto(CHATGPT_CHAT_URL, {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
@@ -2651,15 +2651,12 @@ export class ChatGptBrowserWorker {
     try {
       composer = await this.activeComposer(page);
     } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
-    }
-    if (await dismissChatGptTemporaryChatOnboarding(page)) {
-      await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
+      throw new Error("ChatGPT web login is expired or the persistent ChatGPT conversation surface is unavailable");
     }
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
+    await assertChatGptPage(page);
     await captureDiagnostic?.("session-verified");
     return composer;
   }
@@ -3789,7 +3786,7 @@ export class ChatGptBrowserWorker {
     const captureDiagnostic = (checkpoint: string): Promise<void> => diagnostics.capture(page, checkpoint);
     try {
       await captureDiagnostic("connector-verification-started");
-      await this.prepareTemporaryChatSurface(page, captureDiagnostic);
+      await this.prepareChatSurface(page, captureDiagnostic);
       // The launcher refreshes its owned ChatGPT document before starting this helper. A second
       // reload here can discard the first catalog's exact mismatch evidence and report a generic
       // menu failure instead of identifying the connector the account actually exposes.
@@ -3810,16 +3807,16 @@ export class ChatGptBrowserWorker {
     proAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
+    await this.prepareChatSurface(page);
     const url = page.url();
     if (!detectCapabilities) return { authenticated: true, temporary: true, url };
     const capabilities = await detectChatGptAccountCapabilities(page);
-    return { authenticated: true, temporary: true, url, ...capabilities };
+    return { authenticated: true, temporary: false, url, ...capabilities };
   }
 
   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
+    await this.prepareChatSurface(page);
     const account = await detectChatGptAccountCapabilities(page);
     // Core smoke runs before the optional MCP connector is configured, so it must remain a
     // browser-only transport check. Connector setup has its own explicit verification operation.
@@ -4696,7 +4693,7 @@ export class ChatGptBrowserWorker {
           turn.traceId,
           "temporary_chat_preparation",
           browserStageTimeouts.temporaryChatPreparation,
-          () => this.prepareTemporaryChatSurface(
+          () => this.prepareChatSurface(
             page,
             checkpoint => diagnostics.capture(page, checkpoint),
           ),
@@ -4858,7 +4855,7 @@ export class ChatGptBrowserWorker {
               browserStageTimeouts.temporaryChatPreparation,
               async () => {
                 await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-                await this.prepareTemporaryChatSurface(
+                await this.prepareChatSurface(
                   page,
                   checkpoint => diagnostics.capture(page, checkpoint),
                 );
