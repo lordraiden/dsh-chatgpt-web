@@ -290,13 +290,6 @@ export class ChatGptTurnSession {
     readonly nativeThreadId?: string,
   ) {
     this.attachedConversationKey = runtime.conversationKey;
-    this.physicalSettlement = runtime.physicalSettlement.then(
-      () => { this.settledPhysical = true; },
-      error => {
-        this.settledPhysical = true;
-        throw error;
-      },
-    );
     this.browserOutcome = runtime.browser
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
@@ -311,6 +304,20 @@ export class ChatGptTurnSession {
       this.settledBrowserOutcome = outcome;
       return outcome;
     });
+    // ProviderCore retirement must not outrun the browser outcome observer. Physical helper
+    // cleanup still defines the earliest release point, but lifecycle retirement waits for the
+    // logical browser result to be classified first.
+    this.physicalSettlement = runtime.physicalSettlement.then(
+      async () => {
+        await this.browserOutcome;
+        this.settledPhysical = true;
+      },
+      async error => {
+        await this.browserOutcome.catch(() => {});
+        this.settledPhysical = true;
+        throw error;
+      },
+    );
   }
 
   runExclusive<T>(task: () => Promise<T>): Promise<T> {
