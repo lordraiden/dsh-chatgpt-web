@@ -66,8 +66,16 @@ export function projectConversationalMessages(
         "ChatGPT Web refused to forward an unparsed DSH transport envelope.",
       );
     }
-    // Once a transport envelope is present, it is the canonical conversation
-    // source. Do not mix it with outer DSH protocol messages or duplicate history.
+
+    const role = (message as unknown as { role?: unknown }).role;
+    if (role !== "user" && role !== "assistant") continue;
+
+    // A pure transport envelope is canonical history. The only outer content we
+    // retain alongside it is a user/assistant message that explicitly contains
+    // one of the known internal blocks, after sanitization.
+    if (!containsSanitizationMarker(text)) continue;
+    const sanitized = projectStandaloneConversationMessage(message);
+    if (sanitized !== undefined) projected.push(sanitized);
   }
 
   if (projected.length === 0) {
@@ -200,6 +208,12 @@ function projectStandaloneConversationMessage(message: RequestMessage): RequestM
   const content = conversationalContent((message as unknown as { content?: unknown }).content);
   if (content === undefined) return undefined;
   return { ...(message as object), content } as unknown as RequestMessage;
+}
+
+function containsSanitizationMarker(text: string): boolean {
+  return TRANSPORT_BLOCKS.some(([open, close]) => text.includes(open) || text.includes(close))
+    || OPERATIONAL_LINE_PREFIXES.some(prefix => text.trimStart().startsWith(prefix))
+    || text.includes(PRIVATE_CHECKPOINT_MARKER);
 }
 
 function sanitizeConversationText(text: string): string {
