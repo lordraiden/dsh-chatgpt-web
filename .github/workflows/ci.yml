@@ -121,6 +121,10 @@ jobs:
           fi
           tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
           test -n "$tarball"
+          printf '%s\n' \
+            '@lordraiden:registry=https://registry.npmjs.org/' \
+            "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" \
+            > ~/.npmrc
           npm publish "./$tarball" --registry https://registry.npmjs.org --access public
 
       - name: Publish to GitHub Packages
