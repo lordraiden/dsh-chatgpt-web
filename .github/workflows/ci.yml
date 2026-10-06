@@ -120,7 +120,18 @@ jobs:
             '@lordraiden:registry=https://npm.pkg.github.com/' \
             "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
             > ~/.npmrc
-          npm publish "./$tarball" --registry https://npm.pkg.github.com
+          if npm view "@lordraiden/dsh-chatgpt-web@${version}" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "@lordraiden/dsh-chatgpt-web@${version} is already published to GitHub Packages"
+          else
+            npm publish "./$tarball" --registry https://npm.pkg.github.com
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p .ci-release
+          printf '%s\n' "$version" > ".ci-release/github-packages-published"
+          git add ".ci-release/github-packages-published"
+          git commit -m "ci: record GitHub Packages publication ${version} [skip ci]"
+          git push origin HEAD:main
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
         shell: bash
