@@ -302,21 +302,19 @@ function createNativeDshRemoteBackend(
       const decoder = new TextDecoder();
       let buffer = "";
       const emitFrame = (frame: string): void => {
-        let event: AdapterEvent;
+        let decoded: unknown;
         try {
-          event = JSON.parse(frame) as AdapterEvent;
+          decoded = JSON.parse(frame);
         } catch {
           // A truncated or corrupted NDJSON frame means the sidecar stream
           // broke before a clean terminal event. Surface a stable
-          // protocol-level failure (like bad tool-argument JSON) instead of a
-          // raw SyntaxError, so the turn ends as a typed finish, not a
-          // cryptic generic PROVIDER_ERROR.
+          // protocol-level failure instead of a raw SyntaxError.
           throw new LlmError(
             `ChatGPT Web sidecar returned an unreadable native DSH stream frame: ${frame.slice(0, 120)}`,
             "PROTOCOL_ERROR",
           );
         }
-        emit(event);
+        emit(validateAdapterEvent(decoded));
       };
       try {
         for (;;) {
@@ -715,6 +713,147 @@ function failureFromEvent(message: string, code?: string, status?: number) {
     ...(status !== undefined ? { status } : {}),
   };
 }
+function assertLosslessJsonValue(value: unknown, label: string, seen = new WeakSet<object>()): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new LlmError(`ChatGPT Web emitted invalid ${label}: expected lossless JSON number.`, "PROTOCOL_ERROR");
+    }
+    return;
+  }
+  if (value === undefined) {
+    throw new LlmError(`ChatGPT Web emitted invalid ${label}: value is undefined.`, "PROTOCOL_ERROR");
+  }
+  if (typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") {
+    throw new LlmError(`ChatGPT Web emitted invalid ${label}: value is not JSON-serializable.`, "PROTOCOL_ERROR");
+  }
+  if (typeof value !== "object") {
+    throw new LlmError(`ChatGPT Web emitted invalid ${label}: unsupported value type.`, "PROTOCOL_ERROR");
+  }
+  if (seen.has(value)) {
+    throw new LlmError(`ChatGPT Web emitted invalid ${label}: circular reference.`, "PROTOCOL_ERROR");
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(value, index)) {
+        throw new LlmError(`ChatGPT Web emitted invalid ${label}[${index}]: sparse arrays are not allowed.`, "PROTOCOL_ERROR");
+      }
+      assertLosslessJsonValue(value[index], `${label}[${index}]`, seen);
+    }
+    seen.delete(value);
+    return;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new LlmError(`ChatGPT Web emitted invalid ${label}: object must be plain JSON data.`, "PROTOCOL_ERROR");
+  }
+  for (const key of Object.keys(value)) {
+    assertLosslessJsonValue((value as Record<string, unknown>)[key], `${label}.${key}`, seen);
+  }
+  seen.delete(value);
+}
+
+function validateOptionalString(value: unknown, field: string): void {
+  if (value !== undefined && typeof value !== "string") {
+    throw new LlmError(`ChatGPT Web sidecar emitted invalid ${field}: expected a string.`, "PROTOCOL_ERROR");
+  }
+}
+
+function validateUsage(value: unknown): void {
+  if (value === undefined) return;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new LlmError("ChatGPT Web sidecar emitted invalid usage.", "PROTOCOL_ERROR");
+  }
+  const usage = value as Record<string, unknown>;
+  for (const field of [
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "cachedInputTokens",
+    "cacheReadInputTokens",
+    "cacheCreationInputTokens",
+    "reasoningOutputTokens",
+  ]) {
+    const candidate = usage[field];
+    if (candidate !== undefined && (!Number.isSafeInteger(candidate) || candidate < 0)) {
+      throw new LlmError(`ChatGPT Web sidecar emitted invalid usage.${field}.`, "PROTOCOL_ERROR");
+    }
+  }
+  if (usage.estimated !== undefined && typeof usage.estimated !== "boolean") {
+    throw new LlmError("ChatGPT Web sidecar emitted invalid usage.estimated.", "PROTOCOL_ERROR");
+  }
+}
+
+function validateAdapterEvent(value: unknown): AdapterEvent {
+  assertLosslessJsonValue(value, "native DSH stream event");
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new LlmError("ChatGPT Web sidecar emitted a non-object native DSH stream event.", "PROTOCOL_ERROR");
+  }
+  const event = value as Record<string, unknown>;
+  switch (event.type) {
+    case "heartbeat":
+    case "assistant_boundary":
+    case "tool_call_end":
+      return event as AdapterEvent;
+    case "text_delta":
+      if (typeof event.text !== "string") throw new LlmError("ChatGPT Web sidecar emitted text_delta without string text.", "PROTOCOL_ERROR");
+      validateOptionalString(event.phase, "text_delta.phase");
+      return event as AdapterEvent;
+    case "thinking_delta":
+      if (typeof event.thinking !== "string") throw new LlmError("ChatGPT Web sidecar emitted thinking_delta without string thinking.", "PROTOCOL_ERROR");
+      return event as AdapterEvent;
+    case "reasoning_raw_delta":
+      if (typeof event.text !== "string") throw new LlmError("ChatGPT Web sidecar emitted reasoning_raw_delta without string text.", "PROTOCOL_ERROR");
+      return event as AdapterEvent;
+    case "tool_call_start":
+      if (typeof event.id !== "string" || event.id.length === 0) throw new LlmError("ChatGPT Web sidecar emitted tool_call_start without a non-empty id.", "PROTOCOL_ERROR");
+      if (typeof event.name !== "string" || event.name.length === 0) throw new LlmError("ChatGPT Web sidecar emitted tool_call_start without a non-empty name.", "PROTOCOL_ERROR");
+      return event as AdapterEvent;
+    case "tool_call_delta":
+      if (typeof event.arguments !== "string") throw new LlmError("ChatGPT Web sidecar emitted tool_call_delta without string arguments.", "PROTOCOL_ERROR");
+      return event as AdapterEvent;
+    case "thinking_signature":
+      if (typeof event.signature !== "string") throw new LlmError("ChatGPT Web sidecar emitted thinking_signature without string signature.", "PROTOCOL_ERROR");
+      return event as AdapterEvent;
+    case "redacted_thinking":
+      if (typeof event.data !== "string") throw new LlmError("ChatGPT Web sidecar emitted redacted_thinking without string data.", "PROTOCOL_ERROR");
+      return event as AdapterEvent;
+    case "done":
+      validateOptionalString(event.stopReason, "done.stopReason");
+      if (event.endTurn !== undefined && typeof event.endTurn !== "boolean") {
+        throw new LlmError("ChatGPT Web sidecar emitted invalid done.endTurn.", "PROTOCOL_ERROR");
+      }
+      validateUsage(event.usage);
+      return event as AdapterEvent;
+    case "incomplete":
+      if (typeof event.reason !== "string") throw new LlmError("ChatGPT Web sidecar emitted incomplete without string reason.", "PROTOCOL_ERROR");
+      validateOptionalString(event.message, "incomplete.message");
+      if (event.retryable !== undefined && typeof event.retryable !== "boolean") throw new LlmError("ChatGPT Web sidecar emitted invalid incomplete.retryable.", "PROTOCOL_ERROR");
+      validateUsage(event.usage);
+      return event as AdapterEvent;
+    case "error":
+      if (typeof event.message !== "string" || event.message.length === 0) throw new LlmError("ChatGPT Web sidecar emitted error without a non-empty message.", "PROTOCOL_ERROR");
+      validateOptionalString(event.code, "error.code");
+      validateOptionalString(event.errorType, "error.errorType");
+      if (event.status !== undefined && (!Number.isInteger(event.status) || event.status < 100 || event.status > 599)) {
+        throw new LlmError("ChatGPT Web sidecar emitted an invalid error.status.", "PROTOCOL_ERROR");
+      }
+      if (event.retryable !== undefined && typeof event.retryable !== "boolean") {
+        throw new LlmError("ChatGPT Web sidecar emitted invalid error.retryable.", "PROTOCOL_ERROR");
+      }
+      validateUsage(event.usage);
+      return event as AdapterEvent;
+    default:
+      throw new LlmError(`ChatGPT Web sidecar emitted unknown native DSH event type: ${String(event.type)}.`, "PROTOCOL_ERROR");
+  }
+}
+
+function checkedStreamChunk(chunk: StreamChunk): StreamChunk {
+  assertLosslessJsonValue(chunk, "stream chunk");
+  return chunk;
+}
+
 
 /**
  * Drive the existing backend and translate its `AdapterEvent` stream into
@@ -727,7 +866,7 @@ export function mapStream(
   toRequest: () => CodexParsedRequest,
   settings: { usageMode?: "emit" | "omit" } = {},
 ): AsyncIterable<StreamChunk> {
-  return (async function* (): AsyncGenerator<StreamChunk> {
+  const source = (async function* (): AsyncGenerator<StreamChunk> {
     if (options.signal?.aborted) {
       yield { type: "finish", reason: { kind: "aborted", failure: failureFromEvent("ChatGPT Web turn aborted.", "aborted") } };
       return;
@@ -774,8 +913,9 @@ export function mapStream(
 
     try {
       for (;;) {
-        const event = await queue.next();
-        if (event === undefined) break;
+        const rawEvent = await queue.next();
+        if (rawEvent === undefined) break;
+        const event = validateAdapterEvent(rawEvent);
         switch (event.type) {
           case "text_delta": {
             if (openBlock?.kind !== "text") {
@@ -877,6 +1017,28 @@ export function mapStream(
       backendAbort.abort(options.signal?.reason ?? new DOMException("ChatGPT Web stream consumer stopped.", "AbortError"));
       options.signal?.removeEventListener("abort", onAbort);
       await runPromise.catch(() => {});
+    }
+  })();
+
+  return (async function* (): AsyncGenerator<StreamChunk> {
+    const iterator = source[Symbol.asyncIterator]();
+    for (;;) {
+      let item: IteratorResult<StreamChunk>;
+      try {
+        item = await iterator.next();
+      } catch (error) {
+        await iterator.return?.().catch?.(() => {});
+        yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
+        return;
+      }
+      if (item.done) return;
+      try {
+        yield checkedStreamChunk(item.value);
+      } catch (error) {
+        await iterator.return?.().catch?.(() => {});
+        yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
+        return;
+      }
     }
   })();
 }
