@@ -185,6 +185,8 @@ export interface AppConfig {
   browserHostDescriptorPath?: string;
   chromeExecutablePath: string;
   storageStatePath: string;
+  /** Stable authenticated ChatGPT account fingerprint derived from /api/auth/session user.id. */
+  accountIdentityFingerprint?: string;
   brokerSocketPath: string;
   headed: boolean;
   solAvailable: boolean;
@@ -728,6 +730,8 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,
+      accountIdentityFingerprint: config.accountIdentityFingerprint
+        ?? accountIdentityFingerprint(config),
       chromeExecutablePath: config.chromeExecutablePath,
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
