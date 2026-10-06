@@ -6,7 +6,7 @@ import { existsSync, rmSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { stdin, stdout } from "node:process";
 import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt } from "./browser-login";
-import { CHATGPT_CONNECTOR_NAME, defaultConfig, getConfigDir, getConfigPath, loadConfig, saveConfig, loadConfigForSetup } from "./config";
+import { CHATGPT_CONNECTOR_NAME, defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
 import {
   inspectLauncherBrowserHost,
   inspectLauncherBrowserHostLiveness,
@@ -554,11 +554,7 @@ async function main(): Promise<void> {
     if (hostOverride !== undefined && hostOverride !== "127.0.0.1") {
       throw new Error("--host must be 127.0.0.1; the sidecar is loopback-only");
     }
-    let config = loadConfig();
-    if (config.releaseVersion !== VERSION) {
-      config = { ...config, releaseVersion: VERSION };
-      saveConfig(config);
-    }
+    const config = loadConfig();
     const port = portOverride === undefined ? config.port : Number(portOverride);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       throw new Error("--port must be an integer between 1 and 65535");
