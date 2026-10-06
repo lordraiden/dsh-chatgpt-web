@@ -6,7 +6,7 @@ import {
 } from "../src/conversation-projection";
 
 function user(content: string): RequestMessage {
-  return { role: "user", content } as RequestMessage;
+  return { role: "user", content } as unknown as RequestMessage;
 }
 
 describe("conversational context projection", () => {
@@ -80,7 +80,7 @@ Objective:
     const projected = projectConversationalMessages([user(envelope)]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as { content: string }).content).toBe("User question");
+    expect((projected[0] as unknown as { content: string }).content).toBe("User question");
   });
 
   test("handles braces and transport-closing text inside JSON strings", () => {
