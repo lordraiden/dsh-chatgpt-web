@@ -92,7 +92,7 @@ Objective:
     const projected = projectConversationalMessages([user(envelope)]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as { content: string }).content).toBe(content);
+    expect((projected[0] as unknown as { content: string }).content).toBe(content);
   });
 
   test("fails closed on malformed transport instead of forwarding raw protocol text", () => {
@@ -115,7 +115,7 @@ Objective:
     )]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as { content: string }).content).toBe("Hola");
+    expect((projected[0] as unknown as { content: string }).content).toBe("Hola");
   });
 
   test("removes an unterminated internal block rather than leaking its remainder", () => {
@@ -124,7 +124,7 @@ Objective:
     )]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as { content: string }).content).toBe("Hola");
+    expect((projected[0] as unknown as { content: string }).content).toBe("Hola");
     expect(JSON.stringify(projected)).not.toContain("secret never closed");
   });
 
