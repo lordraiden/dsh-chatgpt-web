@@ -250,6 +250,67 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
     accumulator.push({ time: 1_000, chunk: finish });
   });
 }
+
+{
+  const chunks = [];
+  const malformedBackend = {
+    runTurn: async (_parsed: CodexParsedRequest, _incoming: unknown, emit: (event: any) => void) => {
+      emit({ type: "error", code: "BROKEN_PROVIDER" });
+    },
+  };
+  for await (const chunk of mapStream(
+    () => malformedBackend as any,
+    baseOptions(),
+    nativeRequest,
+    { usageMode: "omit" },
+  )) {
+    chunks.push(chunk);
+  }
+  assert.deepEqual(chunks, [{
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: {
+        message: "ChatGPT Web sidecar emitted error without a non-empty message.",
+        code: "PROTOCOL_ERROR",
+      },
+    },
+  }]);
+  const accumulator = new AssistantStreamAccumulator();
+  for (const [index, chunk] of chunks.entries()) {
+    assert.doesNotThrow(() => accumulator.push({ time: 2_000 + index, chunk }));
+  }
+}
+
+{
+  const chunks = [];
+  const malformedToolEventBackend = {
+    runTurn: async (_parsed: CodexParsedRequest, _incoming: unknown, emit: (event: any) => void) => {
+      emit({ type: "tool_call_start", id: "tool-1" });
+    },
+  };
+  for await (const chunk of mapStream(
+    () => malformedToolEventBackend as any,
+    baseOptions(),
+    nativeRequest,
+    { usageMode: "omit" },
+  )) {
+    chunks.push(chunk);
+  }
+  assert.deepEqual(chunks, [{
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: {
+        message: "ChatGPT Web sidecar emitted tool_call_start without a non-empty name.",
+        code: "PROTOCOL_ERROR",
+      },
+    },
+  }]);
+  const accumulator = new AssistantStreamAccumulator();
+  assert.doesNotThrow(() => accumulator.push({ time: 3_000, chunk: chunks[0]! }));
+}
+
 {
   const backend = {
     runTurn: async (
