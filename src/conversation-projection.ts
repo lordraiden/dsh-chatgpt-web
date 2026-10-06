@@ -159,7 +159,7 @@ function extractBalancedJsonObject(text: string, start: number): string {
     if (inString) {
       if (escaped) {
         escaped = false;
-      } else if (char === "\\\\") {
+      } else if (char === "\\") {
         escaped = true;
       } else if (char === '"') {
         inString = false;
