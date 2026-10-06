@@ -1027,18 +1027,28 @@ export function mapStream(
       try {
         item = await iterator.next();
       } catch (error) {
-        await iterator.return?.().catch?.(() => {});
+        try {
+          await iterator.return?.();
+        } catch {
+          // Preserve the original provider/protocol failure; cleanup is best-effort.
+        }
         yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
         return;
       }
       if (item.done) return;
+      let chunk: StreamChunk;
       try {
-        yield checkedStreamChunk(item.value);
+        chunk = checkedStreamChunk(item.value);
       } catch (error) {
-        await iterator.return?.().catch?.(() => {});
+        try {
+          await iterator.return?.();
+        } catch {
+          // Preserve the original protocol failure; cleanup is best-effort.
+        }
         yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
         return;
       }
+      yield chunk;
     }
   })();
 }
