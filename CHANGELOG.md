@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.11
+
+- project DSH transport envelopes down to conversational user/assistant history before sending turns to ChatGPT Web.
+- remove Hindsight, transport, environment, operational timestamp, and private checkpoint content from the ChatGPT-facing context.
+- fail closed when a DSH transport envelope is present but cannot be parsed safely.
+- add adversarial regression coverage for nested JSON, malformed envelopes, and unterminated internal blocks.
+
 ## 1.0.10
 
 - automatically migrate persisted `releaseVersion` to the installed plugin release during config loading.
