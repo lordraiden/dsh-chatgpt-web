@@ -102,7 +102,7 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
   assert.equal(parsed.context.messages.length, 1);
   assert.deepEqual(parsed.context.messages[0], {
     role: "user",
-    content: "prueba de contexto enviado",
+    content: [{ type: "text", text: "prueba de contexto enviado" }],
     timestamp: parsed.context.messages[0]?.timestamp,
   });
 }
