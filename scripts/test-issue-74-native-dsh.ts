@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   LlmError,
   type GenerateOptions,
+  type StreamChunk,
 } from "@deepseek-ai/dsh-llm";
 import { AssistantStreamAccumulator } from "@deepseek-ai/dsh-llm/assistant-stream";
 import {
@@ -252,7 +253,7 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
 }
 
 {
-  const chunks = [];
+  const chunks: StreamChunk[] = [];
   const malformedBackend = {
     runTurn: async (_parsed: CodexParsedRequest, _incoming: unknown, emit: (event: any) => void) => {
       emit({ type: "error", code: "BROKEN_PROVIDER" });
@@ -283,7 +284,7 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
 }
 
 {
-  const chunks = [];
+  const chunks: StreamChunk[] = [];
   const malformedToolEventBackend = {
     runTurn: async (_parsed: CodexParsedRequest, _incoming: unknown, emit: (event: any) => void) => {
       emit({ type: "tool_call_start", id: "tool-1" });

@@ -776,7 +776,7 @@ function validateUsage(value: unknown): void {
     "reasoningOutputTokens",
   ]) {
     const candidate = usage[field];
-    if (candidate !== undefined && (!Number.isSafeInteger(candidate) || candidate < 0)) {
+    if (candidate !== undefined && (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0)) {
       throw new LlmError(`ChatGPT Web sidecar emitted invalid usage.${field}.`, "PROTOCOL_ERROR");
     }
   }
@@ -836,7 +836,7 @@ function validateAdapterEvent(value: unknown): AdapterEvent {
       if (typeof event.message !== "string" || event.message.length === 0) throw new LlmError("ChatGPT Web sidecar emitted error without a non-empty message.", "PROTOCOL_ERROR");
       validateOptionalString(event.code, "error.code");
       validateOptionalString(event.errorType, "error.errorType");
-      if (event.status !== undefined && (!Number.isInteger(event.status) || event.status < 100 || event.status > 599)) {
+      if (event.status !== undefined && (typeof event.status !== "number" || !Number.isInteger(event.status) || event.status < 100 || event.status > 599)) {
         throw new LlmError("ChatGPT Web sidecar emitted an invalid error.status.", "PROTOCOL_ERROR");
       }
       if (event.retryable !== undefined && typeof event.retryable !== "boolean") {
@@ -1022,22 +1022,36 @@ export function mapStream(
 
   return (async function* (): AsyncGenerator<StreamChunk> {
     const iterator = source[Symbol.asyncIterator]();
-    for (;;) {
-      let item: IteratorResult<StreamChunk>;
-      try {
-        item = await iterator.next();
-      } catch (error) {
-        await iterator.return?.().catch?.(() => {});
-        yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
-        return;
+    let sourceDone = false;
+    try {
+      for (;;) {
+        let item: IteratorResult<StreamChunk>;
+        try {
+          item = await iterator.next();
+        } catch (error) {
+          yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
+          return;
+        }
+        if (item.done) {
+          sourceDone = true;
+          return;
+        }
+        let chunk: StreamChunk;
+        try {
+          chunk = checkedStreamChunk(item.value);
+        } catch (error) {
+          yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
+          return;
+        }
+        yield chunk;
       }
-      if (item.done) return;
-      try {
-        yield checkedStreamChunk(item.value);
-      } catch (error) {
-        await iterator.return?.().catch?.(() => {});
-        yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
-        return;
+    } finally {
+      if (!sourceDone) {
+        try {
+          await iterator.return?.(undefined);
+        } catch {
+          // Preserve the primary stream outcome; source cleanup is best-effort.
+        }
       }
     }
   })();
