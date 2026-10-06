@@ -121,7 +121,7 @@ jobs:
           fi
           tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
           test -n "$tarball"
-          npm publish "$tarball" --registry https://registry.npmjs.org --access public
+          npm publish "./$tarball" --registry https://registry.npmjs.org --access public
 
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
