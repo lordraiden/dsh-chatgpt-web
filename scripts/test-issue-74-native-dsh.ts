@@ -73,7 +73,7 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
       {
         role: "developer",
         content: [{ type: "text", text: "source developer content" }],
-      },
+      } as any,
     ],
   });
   const contextMessages = parsed.context.messages;
