@@ -38,6 +38,7 @@ import {
 } from "../../chatgpt-web-authority";
 import { loadConfig, providerConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../lib/compaction";
+import { projectConversationalMessages } from "../../conversation-projection";
 import {
   type AdapterEvent,
   type CodexAssistantContentPart,
@@ -420,8 +421,10 @@ export function toCodexParsedRequest(
   const systemPrompt: string[] = [];
   if (options.system && options.system.trim()) systemPrompt.push(options.system);
 
+  const requestMessages = projectConversationalMessages(options.messages);
+
   const toolCallsById = new Map<string, { name: string; namespace?: string }>();
-  for (const message of options.messages) {
+  for (const message of requestMessages) {
     if (message.role !== "assistant") continue;
     for (const block of message.content ?? []) {
       if (block.type !== "tool-call") continue;
@@ -434,7 +437,7 @@ export function toCodexParsedRequest(
   }
 
   const messages: CodexMessage[] = [];
-  for (const message of options.messages) {
+  for (const message of requestMessages) {
     const mapped = mapRequestMessage(message, toolCallsById);
     if (mapped === "system") {
       const text = (message.content ?? [])
