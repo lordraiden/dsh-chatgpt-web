@@ -137,7 +137,7 @@ jobs:
           tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
           test -n "$tarball"
 
-          npm publish "$tarball" --registry https://npm.pkg.github.com
+          npm publish "./$tarball" --registry https://npm.pkg.github.com
 
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
@@ -157,7 +157,7 @@ jobs:
 
           printf '%s\n'             '@lordraiden:registry=https://npm.pkg.github.com/'             "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}"             > ~/.npmrc
 
-          npm publish "$tarball" --registry https://npm.pkg.github.com
+          npm publish "./$tarball" --registry https://npm.pkg.github.com
 
       - name: Publish to npmjs.com
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
@@ -177,4 +177,4 @@ jobs:
 
           printf '%s\n'             '@lordraiden:registry=https://registry.npmjs.org/'             "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"             > ~/.npmrc
 
-          npm publish "$tarball" --registry https://registry.npmjs.org --access public
+          npm publish "./$tarball" --registry https://registry.npmjs.org --access public
