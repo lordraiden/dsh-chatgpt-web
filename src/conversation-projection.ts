@@ -53,36 +53,21 @@ export function projectConversationalMessages(
 
   for (const message of messages) {
     const text = textContent(message);
+    if (text === undefined) continue;
 
-    if (text !== undefined) {
-      const embedded = extractCodexContext(text);
-      if (embedded !== undefined) {
-        projected.push(...projectEmbeddedMessages(embedded));
-        continue;
-      }
-
-      if (text.includes(CODEX_CONTEXT_OPEN) || text.includes(TRANSPORT_PROTOCOL_MARKER)) {
-        throw new ConversationalContextProjectionError(
-          "ChatGPT Web refused to forward an unparsed DSH transport envelope.",
-        );
-      }
-    }
-
-    if (transportEnvelopePresent) {
-      const role = (message as unknown as { role?: unknown }).role;
-      if (role !== "user" && role !== "assistant") continue;
-      const conversational = projectStandaloneConversationMessage(message);
-      if (conversational !== undefined) projected.push(conversational);
+    const embedded = extractCodexContext(text);
+    if (embedded !== undefined) {
+      projected.push(...projectEmbeddedMessages(embedded));
       continue;
     }
 
-    if (text === undefined) {
-      projected.push(message);
-      continue;
+    if (text.includes(CODEX_CONTEXT_OPEN) || text.includes(TRANSPORT_PROTOCOL_MARKER)) {
+      throw new ConversationalContextProjectionError(
+        "ChatGPT Web refused to forward an unparsed DSH transport envelope.",
+      );
     }
-
-    const sanitized = sanitizeStandaloneMessage(message);
-    if (sanitized !== undefined) projected.push(sanitized);
+    // Once a transport envelope is present, it is the canonical conversation
+    // source. Do not mix it with outer DSH protocol messages or duplicate history.
   }
 
   if (projected.length === 0) {
@@ -215,30 +200,6 @@ function projectStandaloneConversationMessage(message: RequestMessage): RequestM
   const content = conversationalContent((message as unknown as { content?: unknown }).content);
   if (content === undefined) return undefined;
   return { ...(message as object), content } as unknown as RequestMessage;
-}
-
-function sanitizeStandaloneMessage(message: RequestMessage): RequestMessage | undefined {
-  const content = (message as unknown as { content?: unknown }).content;
-
-  if (typeof content === "string") {
-    const sanitized = sanitizeConversationText(content);
-    if (!sanitized) return undefined;
-    return { ...(message as object), content: sanitized } as unknown as RequestMessage;
-  }
-
-  if (!Array.isArray(content)) return message;
-
-  let changed = false;
-  const blocks = content.map(block => {
-    if (!isTextBlock(block)) return block;
-    const sanitized = sanitizeConversationText(block.text);
-    if (sanitized !== block.text) changed = true;
-    return { ...block, text: sanitized };
-  }).filter(block => !isTextBlock(block) || block.text.length > 0);
-
-  if (blocks.length === 0) return undefined;
-  if (!changed) return message;
-  return { ...(message as object), content: blocks } as unknown as RequestMessage;
 }
 
 function sanitizeConversationText(text: string): string {
