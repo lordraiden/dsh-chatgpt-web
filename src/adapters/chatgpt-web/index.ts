@@ -1350,7 +1350,7 @@ export function createChatGptWebAdapter(
               providerTurn.failBeforePhysicalSettlement();
             } else {
               if (providerTurn.snapshot().state !== "RETIRED") {
-                providerTurn.markRecovery("FAILED");
+                providerTurn.markLogicalSettled("failed");
               }
               failedSession.cancel(error instanceof Error ? error : new Error(String(error)));
             }
@@ -1797,7 +1797,6 @@ export function createChatGptWebAdapter(
                 cause: retryCandidate,
               },
             );
-            providerTurn.markRecovery("FAILED");
             providerTurn.markLogicalSettled("failed");
             emitRoundEvent({
               type: "error",
@@ -1811,7 +1810,7 @@ export function createChatGptWebAdapter(
             return;
           }
 
-          providerTurn.markRecovery("FAILED");
+          providerTurn.markLogicalSettled("failed");
           if (retryCandidate instanceof ChatGptWebAdapterError && !retryAllowed) {
             session.cancel();
           } else {
@@ -1821,7 +1820,6 @@ export function createChatGptWebAdapter(
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
           if (retryCandidate instanceof ChatGptWebAdapterError) {
-            providerTurn.markLogicalSettled("failed");
             emitRoundEvent({
               type: "error",
               message: retryCandidate.message,
