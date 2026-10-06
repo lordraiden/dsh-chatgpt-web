@@ -454,10 +454,56 @@ export function defaultChromeExecutable(
   return "/usr/bin/google-chrome";
 }
 
+function comparableReleaseVersion(value: string): [number, number, number] | undefined {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value.trim());
+  if (!match) return undefined;
+  return [
+    Number.parseInt(match[1]!, 10),
+    Number.parseInt(match[2]!, 10),
+    Number.parseInt(match[3]!, 10),
+  ];
+}
+
+/**
+ * Synchronize the persisted config with the installed plugin release.
+ *
+ * Config files intentionally survive package upgrades, so releaseVersion is runtime metadata,
+ * not user-owned configuration. Older persisted versions are promoted automatically. A config
+ * from a newer plugin is refused rather than silently downgraded.
+ */
+export function migrateReleaseVersion(config: AppConfig, installedVersion = VERSION): AppConfig {
+  if (config.releaseVersion === installedVersion) return config;
+
+  const stored = comparableReleaseVersion(config.releaseVersion);
+  const installed = comparableReleaseVersion(installedVersion);
+  if (stored && installed) {
+    const newerConfig = stored[0] > installed[0]
+      || (stored[0] === installed[0] && stored[1] > installed[1])
+      || (stored[0] === installed[0] && stored[1] === installed[1] && stored[2] > installed[2]);
+    if (newerConfig) {
+      throw new Error(
+        `Configuration releaseVersion ${config.releaseVersion} is newer than installed plugin ${installedVersion}; refusing automatic downgrade`,
+      );
+    }
+  }
+
+  return {
+    ...config,
+    releaseVersion: installedVersion,
+  };
+}
+
+function loadAndMigrateConfig(path: string, raw: unknown): AppConfig {
+  const parsed = parseConfig(raw, path);
+  const migrated = migrateReleaseVersion(parsed);
+  if (migrated !== parsed) saveConfig(migrated);
+  return migrated;
+}
+
 export function loadConfig(): AppConfig {
   const path = getConfigPath();
   if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run dsh-chatgpt-web setup first.`);
-  return parseConfig(JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))), path);
+  return loadAndMigrateConfig(path, JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))));
 }
 
 export function loadConfigForSetup(): AppConfig {
@@ -479,7 +525,7 @@ export function loadConfigForSetup(): AppConfig {
     raw.automaticAppName = CHATGPT_CONNECTOR_NAME;
     if (interactionMode === "automatic") raw.appName = CHATGPT_CONNECTOR_NAME;
   }
-  return parseConfig(raw, path);
+  return loadAndMigrateConfig(path, raw);
 }
 
 function parseConfig(value: unknown, path: string): AppConfig {
