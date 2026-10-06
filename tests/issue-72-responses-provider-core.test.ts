@@ -42,6 +42,34 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
     expect(turn.snapshot().logicalOutcome).toBe("completed");
   });
 
+  test("ProviderCore accepts failed logical settlement after physical cleanup wins the race", async () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey: "race-failure-execution",
+      traceId: "race-failure-trace",
+      nativeTurnId: "turn-race-failure",
+      nativeThreadId: "thread-race-failure",
+      accountIdentity: "account-race-failure",
+      browserProfile: "profile-race-failure",
+      browserContext: "context-race-failure",
+      pageIdentity: "page-race-failure",
+      capabilitySnapshot: projectChatGptCapabilities({
+        sessionId: "session-race-failure",
+        agentId: "agent-race-failure",
+        turnId: "turn-race-failure",
+        tools: [],
+      }),
+    });
+    core.bindPhysicalSettlement("race-failure-execution", Promise.resolve());
+    await turn.waitForPhysicalSettlement();
+
+    expect(turn.snapshot().state).toBe("SETTLING");
+    expect(() => turn.markLogicalSettled("failed")).not.toThrow();
+    expect(turn.snapshot().recovery).toBe("FAILED");
+    expect(turn.snapshot().logicalOutcome).toBe("failed");
+    expect(turn.snapshot().state).toBe("RETIRED");
+  });
+
   test("Responses ingress delegates Web execution to the same ProviderAdapter entrypoint used by native DSH", () => {
     const server = read("src/server.ts");
     expect(server).toContain("route = routeChatGptWebRequest(parsed, config)");
