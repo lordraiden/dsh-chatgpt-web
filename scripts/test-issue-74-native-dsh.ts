@@ -63,25 +63,21 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
 }
 
 {
+  const auxiliaryEnvelope = "<codex_context_json>{\"messages\":[{\"role\":\"user\",\"content\":\"source user content\"}]}</codex_context_json>";
   const parsed = nativeRequest({
     purpose: "compaction",
-    messages: [
-      {
-        role: "user",
-        content: [{ type: "text", text: "source user content" }],
-      },
-      {
-        role: "developer",
-        content: [{ type: "text", text: "source developer content" }],
-      } as any,
-    ],
+    messages: [{
+      role: "user",
+      content: [{ type: "text", text: auxiliaryEnvelope }],
+    }],
   });
   const contextMessages = parsed.context.messages;
-  assert.ok(contextMessages.some(message =>
-    message.role === "developer"
-    && typeof message.content !== "string"
-    && message.content.some(block => block.type === "text" && block.text === "source developer content"),
-  ));
+  assert.equal(contextMessages[0]?.role, "user");
+  assert.equal(
+    contextMessages[0]?.content,
+    auxiliaryEnvelope,
+    "compaction input must bypass conversational projection",
+  );
 }
 
 {
