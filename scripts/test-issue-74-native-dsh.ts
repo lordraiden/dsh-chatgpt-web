@@ -63,6 +63,28 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
 }
 
 {
+  const parsed = nativeRequest({
+    purpose: "compaction",
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "source user content" }],
+      },
+      {
+        role: "developer",
+        content: [{ type: "text", text: "source developer content" }],
+      },
+    ],
+  });
+  const contextMessages = parsed.context.messages;
+  assert.ok(contextMessages.some(message =>
+    message.role === "developer"
+    && typeof message.content !== "string"
+    && message.content.some(block => block.type === "text" && block.text === "source developer content"),
+  ));
+}
+
+{
   const parsed = nativeRequest();
   assert.deepEqual(parsed._dshContext, nativeContext);
   const raw = parsed._rawBody as Record<string, unknown>;
