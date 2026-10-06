@@ -147,7 +147,7 @@ Objective:
     )]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as unknown as { content: string }).content).toBe("Hola");
+    expect(textOf(projected[0]!)).toBe("Hola");
     expect(JSON.stringify(projected)).not.toContain("secret never closed");
   });
 
@@ -180,5 +180,24 @@ Objective:
         "<codex_context_json>{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
       )]),
     ).toThrow(ConversationalContextProjectionError);
+  });
+
+  test("treats the embedded conversation as canonical and does not duplicate outer history", () => {
+    const envelope = `<codex_context_json>${JSON.stringify({
+      messages: [{ role: "user", content: "canonical user message" }],
+    })}</codex_context_json>`;
+    const outerHistory = [
+      user("duplicate outer user message"),
+      user(envelope),
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "duplicate outer assistant message" }],
+      },
+    ] as unknown as RequestMessage[];
+
+    const projected = projectConversationalMessages(outerHistory);
+
+    expect(projected).toHaveLength(1);
+    expect(textOf(projected[0]!)).toBe("canonical user message");
   });
 });
