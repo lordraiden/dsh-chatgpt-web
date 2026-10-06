@@ -776,7 +776,7 @@ function validateUsage(value: unknown): void {
     "reasoningOutputTokens",
   ]) {
     const candidate = usage[field];
-    if (candidate !== undefined && (!Number.isSafeInteger(candidate) || candidate < 0)) {
+    if (candidate !== undefined && (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0)) {
       throw new LlmError(`ChatGPT Web sidecar emitted invalid usage.${field}.`, "PROTOCOL_ERROR");
     }
   }
@@ -836,7 +836,7 @@ function validateAdapterEvent(value: unknown): AdapterEvent {
       if (typeof event.message !== "string" || event.message.length === 0) throw new LlmError("ChatGPT Web sidecar emitted error without a non-empty message.", "PROTOCOL_ERROR");
       validateOptionalString(event.code, "error.code");
       validateOptionalString(event.errorType, "error.errorType");
-      if (event.status !== undefined && (!Number.isInteger(event.status) || event.status < 100 || event.status > 599)) {
+      if (event.status !== undefined && (typeof event.status !== "number" || !Number.isInteger(event.status) || event.status < 100 || event.status > 599)) {
         throw new LlmError("ChatGPT Web sidecar emitted an invalid error.status.", "PROTOCOL_ERROR");
       }
       if (event.retryable !== undefined && typeof event.retryable !== "boolean") {
@@ -1028,7 +1028,7 @@ export function mapStream(
         item = await iterator.next();
       } catch (error) {
         try {
-          await iterator.return?.();
+          await iterator.return?.(undefined);
         } catch {
           // Preserve the original provider/protocol failure; cleanup is best-effort.
         }
@@ -1041,7 +1041,7 @@ export function mapStream(
         chunk = checkedStreamChunk(item.value);
       } catch (error) {
         try {
-          await iterator.return?.();
+          await iterator.return?.(undefined);
         } catch {
           // Preserve the original protocol failure; cleanup is best-effort.
         }
