@@ -3,6 +3,7 @@ import {
   LlmError,
   type GenerateOptions,
 } from "@deepseek-ai/dsh-llm";
+import { AssistantStreamAccumulator } from "@deepseek-ai/dsh-llm/assistant-stream";
 import {
   ChatGptThreadEnvironmentStore,
 } from "../src/adapters/chatgpt-web/thread-environment";
@@ -195,6 +196,34 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
   }
 }
 
+{
+  const chunks = [];
+  for await (const chunk of mapStream(
+    () => ({ runTurn: async () => undefined } as any),
+    baseOptions(),
+    () => {
+      throw new LlmError("projection failure", "UNSUPPORTED_OPTION");
+    },
+    { usageMode: "omit" },
+  )) {
+    chunks.push(chunk);
+  }
+
+  const finish = chunks.findLast(chunk => chunk.type === "finish");
+  assert.ok(finish && finish.type === "finish");
+  assert.deepEqual(finish.reason, {
+    kind: "error",
+    failure: {
+      message: "projection failure",
+      code: "UNSUPPORTED_OPTION",
+    },
+  });
+
+  const accumulator = new AssistantStreamAccumulator();
+  assert.doesNotThrow(() => {
+    accumulator.push({ time: 1_000, chunk: finish });
+  });
+}
 {
   const backend = {
     runTurn: async (
