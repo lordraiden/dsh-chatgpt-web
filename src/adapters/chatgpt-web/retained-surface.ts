@@ -66,6 +66,14 @@ interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
 
 export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSurfacePage> {
   private readonly surfaces = new Map<string, RetainedSurfaceEntry<P>>();
+  /**
+   * In-flight first creations, per key. A key that is being created is busy,
+   * so a second acquire of the same key fails with RetainedSurfaceBusyError
+   * instead of starting a second creation. The marker is cleared as soon as
+   * the creation settles (success or failure); it stores no conversation
+   * state beyond the physical creation itself.
+   */
+  private readonly pendingCreates = new Set<string>();
 
   get size(): number {
     return this.surfaces.size;
@@ -95,10 +103,26 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
       existing.busy = true;
       return { page: existing.page, created: false };
     }
+    if (this.pendingCreates.has(conversationKey)) {
+      throw new RetainedSurfaceBusyError(conversationKey);
+    }
     if (options.required) throw new RetainedSurfaceMissingError(conversationKey);
-    const page = await options.create();
-    this.surfaces.set(conversationKey, { page, busy: true });
-    return { page, created: true };
+    // Claim the key before the (awaitable) creation so a concurrent acquire of the
+    // same key is rejected while the first surface is being created. The marker is
+    // always cleared, on success and on failure, so a failed creation never leaves
+    // the key permanently busy and a later attempt can create normally.
+    this.pendingCreates.add(conversationKey);
+    try {
+      const page = await options.create();
+      if (page.isClosed()) {
+        this.surfaces.delete(conversationKey);
+        throw new RetainedSurfaceLostError(conversationKey);
+      }
+      this.surfaces.set(conversationKey, { page, busy: true });
+      return { page, created: true };
+    } finally {
+      this.pendingCreates.delete(conversationKey);
+    }
   }
 
   /** Drop the busy flag at the end of a turn; the surface stays retained. */

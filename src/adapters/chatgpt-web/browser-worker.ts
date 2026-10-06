@@ -4494,6 +4494,9 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    let turnCompleted = false;
+    let retainedCreated = false;
+    let retainedPage: Page | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const multipartTransactionId = prepared.multipart
@@ -4570,7 +4573,6 @@ export class ChatGptBrowserWorker {
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
-      let retainedCreated = false;
       let page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
         if (maintenancePage) return maintenancePage;
         if (!launcherSurfaceId) {
@@ -4589,8 +4591,15 @@ export class ChatGptBrowserWorker {
             }
             retainedCreated = retained.created;
             if (abortSignal.aborted) {
-              this.retainedSurfaces.release(turn.conversationKey!);
-              await retained.page.close().catch(() => {});
+              if (retained.created) {
+                // This turn created the surface and never used it: discard it so no orphaned page
+                // is left behind and no dead entry turns the next turn into a spurious loss.
+                await this.retainedSurfaces.invalidate(turn.conversationKey!);
+              } else {
+                // A previously retained surface already carries a conversation: keep it and only
+                // clear the busy flag, so the next turn reuses it instead of starting a new one.
+                this.retainedSurfaces.release(turn.conversationKey!);
+              }
               throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
             }
             return retained.page;
@@ -4616,6 +4625,7 @@ export class ChatGptBrowserWorker {
         await waitForOperationalChatGptViewport(connection.page, abortSignal);
         return connection.page;
       });
+      retainedPage = page;
       // A retained managed-chrome surface is owned by the registry (issue #171): it is never
       // closed at the end of a normal turn, so it must not be tracked as a per-turn managedPage.
       if (!maintenancePage && !launcherSurfaceId && !managedRetained) managedPage = page;
@@ -5279,6 +5289,7 @@ export class ChatGptBrowserWorker {
         `[chatgpt-web] browser turn ${turn.traceId} completed`
         + ` (markdownChars=${finalText.length}, domFullScans=${responseDomCache.fullScans ?? 0}, domCacheHits=${responseDomCache.cacheHits ?? 0})`,
       );
+      turnCompleted = true;
       return finalText;
     } catch (error) {
       console.error(
@@ -5293,7 +5304,15 @@ export class ChatGptBrowserWorker {
       prepared.release();
       // A retained managed-chrome surface outlives its turn (issue #171): clear the busy flag so
       // the next turn of the same conversationKey can continue, keeping the page itself open.
-      if (managedRetained) this.retainedSurfaces.release(turn.conversationKey!);
+      if (managedRetained) {
+        this.retainedSurfaces.release(turn.conversationKey!);
+        // A surface that this turn created and that the turn never completed is discarded so no
+        // orphaned page is left behind; a previously retained surface stays (a live one continues,
+        // a dead one becomes an explicit continuity loss on the next turn).
+        if (!turnCompleted && retainedCreated && retainedPage && !retainedPage.isClosed()) {
+          await this.retainedSurfaces.invalidate(turn.conversationKey!);
+        }
+      }
       if (turnConnection) {
         await turnConnection.close().catch(error => {
           console.error(
