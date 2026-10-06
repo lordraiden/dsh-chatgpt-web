@@ -240,6 +240,23 @@ function leaseInput(turnId: string) {
 
 {
   const core = new ChatGptWebProviderCore();
+  const turn = core.begin(leaseInput("late-failure-callback"));
+  let resolveSettlement!: () => void;
+  const settlement = new Promise<void>(resolve => { resolveSettlement = resolve; });
+  core.bindPhysicalSettlement(turn.provenance.executionKey, settlement);
+  resolveSettlement();
+  await turn.waitForPhysicalSettlement();
+
+  assert.equal(turn.snapshot().state, "SETTLING");
+  assert.doesNotThrow(() => turn.markLogicalSettled("failed"));
+  assert.equal(turn.snapshot().recovery, "FAILED");
+  assert.equal(turn.snapshot().logicalOutcome, "failed");
+  assert.equal(turn.snapshot().state, "RETIRED");
+  console.log("ok physical-first failed logical settlement");
+}
+
+{
+  const core = new ChatGptWebProviderCore();
   const turn = core.begin(leaseInput("late-callback"));
   turn.bindPhysicalResource({
     resourceId: "surface-late-callback",
