@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.13
+
+- validate native DSH NDJSON events at the sidecar boundary instead of trusting TypeScript casts at runtime.
+- validate every adapter-emitted DSH stream chunk before exposing it to the harness, converting protocol corruption into a serializable terminal error instead of an AssistantStreamAccumulator serialization crash.
+- add regressions for malformed error and tool-call events that previously could inject undefined fields into stream chunks.
+
 ## 1.0.12
 
 - fix parsing of escaped quotes and backslashes inside the DSH JSON context envelope.
