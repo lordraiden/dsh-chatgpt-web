@@ -744,7 +744,6 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
         solAvailable: "unsupported",
         proAvailable: "unsupported",
       } : config.capabilityState,
-      accountIdentityFingerprint: accountIdentityFingerprint(config),
       zeroRiskProEnabled: manual ? config.zeroRiskProEnabled : false,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
