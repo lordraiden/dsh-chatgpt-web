@@ -13,7 +13,6 @@ import {
   readLauncherBrowserHostDescriptor,
 } from "./launcher-browser-host";
 import { processRunning } from "./process";
-import { VERSION } from "./version";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
@@ -75,13 +74,8 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
     if (body.mode !== config.mode) {
       return { id: "proxy", status: "error", message: `Daemon is running in ${String(body.mode)} mode; config requires ${config.mode}` };
     }
-    let versionWarning: string | undefined;
     if (body.version !== config.releaseVersion) {
-      if (body.version === VERSION) {
-        versionWarning = `Daemon is ${String(body.version)}; persisted config releaseVersion is stale (${config.releaseVersion})`;
-      } else {
-        return { id: "proxy", status: "error", message: `Daemon version is ${String(body.version)}; config requires ${config.releaseVersion}` };
-      }
+      return { id: "proxy", status: "error", message: `Daemon version is ${String(body.version)}; config requires ${config.releaseVersion}` };
     }
     if (body.accepting_turns !== true) {
       return {
@@ -94,14 +88,7 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
     if (ownershipError) {
       return { id: "proxy", status: "error", message: "Responses proxy ownership could not be verified", detail: ownershipError };
     }
-    return versionWarning
-      ? {
-          id: "proxy",
-          status: "warning",
-          message: versionWarning,
-          detail: "The daemon is current; the persisted config version will be synchronized automatically when the sidecar is started next.",
-        }
-      : { id: "proxy", status: "ok", message: `Responses proxy is healthy on 127.0.0.1:${config.port}` };
+    return { id: "proxy", status: "ok", message: `Responses proxy is healthy on 127.0.0.1:${config.port}` };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return { id: "proxy", status: "error", message: "Responses proxy is not reachable", detail };
