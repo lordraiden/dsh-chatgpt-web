@@ -1022,33 +1022,37 @@ export function mapStream(
 
   return (async function* (): AsyncGenerator<StreamChunk> {
     const iterator = source[Symbol.asyncIterator]();
-    for (;;) {
-      let item: IteratorResult<StreamChunk>;
-      try {
-        item = await iterator.next();
-      } catch (error) {
+    let sourceDone = false;
+    try {
+      for (;;) {
+        let item: IteratorResult<StreamChunk>;
+        try {
+          item = await iterator.next();
+        } catch (error) {
+          yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
+          return;
+        }
+        if (item.done) {
+          sourceDone = true;
+          return;
+        }
+        let chunk: StreamChunk;
+        try {
+          chunk = checkedStreamChunk(item.value);
+        } catch (error) {
+          yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
+          return;
+        }
+        yield chunk;
+      }
+    } finally {
+      if (!sourceDone) {
         try {
           await iterator.return?.(undefined);
         } catch {
-          // Preserve the original provider/protocol failure; cleanup is best-effort.
+          // Preserve the primary stream outcome; source cleanup is best-effort.
         }
-        yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
-        return;
       }
-      if (item.done) return;
-      let chunk: StreamChunk;
-      try {
-        chunk = checkedStreamChunk(item.value);
-      } catch (error) {
-        try {
-          await iterator.return?.(undefined);
-        } catch {
-          // Preserve the original protocol failure; cleanup is best-effort.
-        }
-        yield checkedStreamChunk({ type: "finish", reason: toFinishFailure(error, options.signal) });
-        return;
-      }
-      yield chunk;
     }
   })();
 }
