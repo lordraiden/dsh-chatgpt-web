@@ -122,6 +122,24 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs" \
             -d "{\"ref\":\"refs/tags/v${version}\",\"sha\":\"${GITHUB_SHA}\"}"
 
+      - name: Publish v1.0.6 from main
+        if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'main' }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v1.0.6"
+          version="$(node -p "require('./package.json').version")"
+          test "$version" = "1.0.6"
+          if npm view "@lordraiden/dsh-chatgpt-web@${version}" version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "@lordraiden/dsh-chatgpt-web@${version} is already published"
+            exit 0
+          fi
+          tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+          npm publish "$tarball" --registry https://registry.npmjs.org --access public
+
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
         shell: bash
