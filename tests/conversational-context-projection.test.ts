@@ -169,6 +169,74 @@ Objective:
     expect(JSON.stringify(projected)).not.toContain("secret never closed");
   });
 
+  test("preserves clean conversation when standalone injected context is in a separate message", () => {
+    const projected = projectConversationalMessages([
+      user("prueba de contexto enviado"),
+      user("<hindsight_knowledge>internal memory that must not reach ChatGPT</hindsight_knowledge>"),
+      user("Time sampled while preparing turn 1, step 1: 2026-10-06T12:29:05+02:00[Europe/Madrid]"),
+    ]);
+
+    expect(projected).toHaveLength(1);
+    expect(textOf(projected[0]!)).toBe("prueba de contexto enviado");
+  });
+
+  test("preserves clean user and assistant history around standalone injected context", () => {
+    const projected = projectConversationalMessages([
+      user("first user message"),
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "first assistant answer" }],
+      } as RequestMessage,
+      user("<hindsight_memory>private context</hindsight_memory>"),
+      user("second user message"),
+    ]);
+
+    expect(projected.map(message => message.role)).toEqual(["user", "assistant", "user"]);
+    expect(projected.map(textOf)).toEqual([
+      "first user message",
+      "first assistant answer",
+      "second user message",
+    ]);
+  });
+
+  test("detects and removes operational context when it is embedded after conversational text", () => {
+    const projected = projectConversationalMessages([
+      user("keep this line\nTime sampled while preparing turn 1, step 1: 2026-10-06T12:29:05+02:00[Europe/Madrid]\nkeep this too"),
+    ]);
+
+    expect(projected).toHaveLength(1);
+    expect(textOf(projected[0]!)).toBe("keep this line\nkeep this too");
+  });
+
+  test("strips embedded transport metadata instead of preserving raw internal message fields", () => {
+    const projected = projectConversationalMessages([
+      {
+        role: "user",
+        id: "internal-id",
+        source: { kind: "internal", secret: "must not survive" },
+        content: [{ type: "text", text: "visible user content" }],
+      } as unknown as RequestMessage,
+      user("<hindsight_memory>secret</hindsight_memory>"),
+    ]);
+
+    expect(projected).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "visible user content" }],
+      },
+    ]);
+  });
+
+  test("rejects multiple canonical context envelopes instead of concatenating histories", () => {
+    const envelope = `<codex_context_json>${JSON.stringify({
+      messages: [{ role: "user", content: "canonical" }],
+    })}</codex_context_json>`;
+
+    expect(() =>
+      projectConversationalMessages([user(envelope), user(envelope)]),
+    ).toThrow(ConversationalContextProjectionError);
+  });
+
   test("keeps clean non-envelope messages unchanged", () => {
     const message = user("  A normal user message with no internal markers.  \n");
     const projected = projectConversationalMessages([message]);

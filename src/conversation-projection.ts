@@ -39,43 +39,69 @@ export function projectConversationalMessages(
   messages: readonly RequestMessage[],
 ): RequestMessage[] {
   const projected: RequestMessage[] = [];
-  const transportEnvelopePresent = messages.some(message => {
+  const canonicalEnvelopePresent = messages.some(message =>
+    textContent(message)?.includes(CODEX_CONTEXT_OPEN) === true,
+  );
+  const protocolMarkerPresent = messages.some(message =>
+    textContent(message)?.includes(TRANSPORT_PROTOCOL_MARKER) === true,
+  );
+  const sanitizationMarkerPresent = messages.some(message => {
     const text = textContent(message);
-    return text !== undefined && (
-      text.includes(CODEX_CONTEXT_OPEN)
-      || text.includes(TRANSPORT_PROTOCOL_MARKER)
-      || TRANSPORT_BLOCKS.some(([open, close]) => text.includes(open) || text.includes(close))
-      || text.includes(PRIVATE_CHECKPOINT_MARKER)
-    );
+    return text !== undefined && containsSanitizationMarker(text);
   });
 
-  if (!transportEnvelopePresent) return [...messages];
+  if (!canonicalEnvelopePresent && !protocolMarkerPresent && !sanitizationMarkerPresent) {
+    return [...messages];
+  }
 
-  for (const message of messages) {
-    const text = textContent(message);
-    if (text === undefined) continue;
+  if (protocolMarkerPresent && !canonicalEnvelopePresent) {
+    throw new ConversationalContextProjectionError(
+      "ChatGPT Web refused to forward a DSH transport protocol marker without a complete context envelope.",
+    );
+  }
 
-    const embedded = extractCodexContext(text);
-    if (embedded !== undefined) {
-      projected.push(...projectEmbeddedMessages(embedded));
-      continue;
+  if (canonicalEnvelopePresent) {
+    let envelopeCount = 0;
+
+    for (const message of messages) {
+      const text = textContent(message);
+      if (text === undefined) continue;
+
+      const embedded = extractCodexContext(text);
+      if (embedded !== undefined) {
+        envelopeCount += 1;
+        if (envelopeCount > 1) {
+          throw new ConversationalContextProjectionError(
+            "ChatGPT Web received multiple <codex_context_json> envelopes and cannot choose a canonical conversation safely.",
+          );
+        }
+        projected.push(...projectEmbeddedMessages(embedded));
+        continue;
+      }
+
+      if (text.includes(CODEX_CONTEXT_OPEN) || text.includes(TRANSPORT_PROTOCOL_MARKER)) {
+        throw new ConversationalContextProjectionError(
+          "ChatGPT Web refused to forward an unparsed DSH transport envelope.",
+        );
+      }
+
+      // When a canonical envelope exists, it owns the complete conversation.
+      // Ignore all outer DSH transport/history messages to avoid duplication.
     }
+  } else {
+    // DSH can also expose its injected context as separate user-role messages
+    // instead of one canonical transport envelope. In that form, sanitize every
+    // user/assistant message independently while retaining clean conversation.
+    for (const message of messages) {
+      const text = textContent(message);
+      if (text === undefined) continue;
 
-    if (text.includes(CODEX_CONTEXT_OPEN) || text.includes(TRANSPORT_PROTOCOL_MARKER)) {
-      throw new ConversationalContextProjectionError(
-        "ChatGPT Web refused to forward an unparsed DSH transport envelope.",
-      );
+      const role = (message as unknown as { role?: unknown }).role;
+      if (role !== "user" && role !== "assistant") continue;
+
+      const sanitized = projectStandaloneConversationMessage(message);
+      if (sanitized !== undefined) projected.push(sanitized);
     }
-
-    const role = (message as unknown as { role?: unknown }).role;
-    if (role !== "user" && role !== "assistant") continue;
-
-    // A pure transport envelope is canonical history. The only outer content we
-    // retain alongside it is a user/assistant message that explicitly contains
-    // one of the known internal blocks, after sanitization.
-    if (!containsSanitizationMarker(text)) continue;
-    const sanitized = projectStandaloneConversationMessage(message);
-    if (sanitized !== undefined) projected.push(sanitized);
   }
 
   if (projected.length === 0) {
@@ -86,7 +112,6 @@ export function projectConversationalMessages(
 
   return projected;
 }
-
 function projectEmbeddedMessages(rawMessages: unknown[]): RequestMessage[] {
   const projected: RequestMessage[] = [];
 
@@ -99,7 +124,6 @@ function projectEmbeddedMessages(rawMessages: unknown[]): RequestMessage[] {
     if (content === undefined) continue;
 
     projected.push({
-      ...rawMessage,
       role,
       content,
     } as unknown as RequestMessage);
@@ -219,8 +243,14 @@ function projectStandaloneConversationMessage(message: RequestMessage): RequestM
 
 function containsSanitizationMarker(text: string): boolean {
   return TRANSPORT_BLOCKS.some(([open, close]) => text.includes(open) || text.includes(close))
-    || OPERATIONAL_LINE_PREFIXES.some(prefix => text.trimStart().startsWith(prefix))
+    || containsOperationalLine(text)
     || text.includes(PRIVATE_CHECKPOINT_MARKER);
+}
+
+function containsOperationalLine(text: string): boolean {
+  return text.split(/\r?\n/).some(line =>
+    OPERATIONAL_LINE_PREFIXES.some(prefix => line.trimStart().startsWith(prefix)),
+  );
 }
 
 function sanitizeConversationText(text: string): string {

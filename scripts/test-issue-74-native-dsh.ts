@@ -109,6 +109,36 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
 }
 
 {
+  const parsed = nativeRequest({
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "prueba de contexto enviado" }],
+      },
+      {
+        role: "user",
+        content: [{
+          type: "text",
+          text: "<hindsight_knowledge>\nprivate memory\n</hindsight_knowledge>",
+        }],
+      },
+      {
+        role: "user",
+        content: [{
+          type: "text",
+          text: "Time sampled while preparing turn 1, step 1: 2026-10-06T12:29:05+02:00[Europe/Madrid]\nBrowser time zone for this request: Europe/Madrid.",
+        }],
+      },
+    ],
+  });
+
+  assert.equal(parsed.context.messages.length, 1);
+  assert.deepEqual(parsed.context.messages[0]?.content, [
+    { type: "text", text: "prueba de contexto enviado" },
+  ]);
+}
+
+{
   const parsed = nativeRequest();
   assert.deepEqual(parsed._dshContext, nativeContext);
   const raw = parsed._rawBody as Record<string, unknown>;
