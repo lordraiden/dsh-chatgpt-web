@@ -73,9 +73,9 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
   });
   const contextMessages = parsed.context.messages;
   assert.equal(contextMessages[0]?.role, "user");
-  assert.equal(
+  assert.deepEqual(
     contextMessages[0]?.content,
-    auxiliaryEnvelope,
+    [{ type: "text", text: auxiliaryEnvelope }],
     "compaction input must bypass conversational projection",
   );
 }
