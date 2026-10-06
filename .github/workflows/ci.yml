@@ -105,6 +105,40 @@ jobs:
       - name: Smoke test the exact validated artifact
         run: node scripts/smoke-tarball.mjs "$GITHUB_WORKSPACE/artifact/${{ steps.package.outputs.artifact_name }}"
 
+      - name: Publish missing main version to GitHub Packages
+        id: publish-main-version
+        if: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          printf '%s\n' \
+            '@lordraiden:registry=https://npm.pkg.github.com/' \
+            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
+            > ~/.npmrc
+
+          if npm view "@lordraiden/dsh-chatgpt-web@${version}" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "GitHub Packages already contains @lordraiden/dsh-chatgpt-web@${version}"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "GitHub Packages does not contain @lordraiden/dsh-chatgpt-web@${version}"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to GitHub Packages from main
+        if: ${{ github.event_name == 'push' && github.ref_name == 'main' && steps.publish-main-version.outputs.should_publish == 'true' }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+
+          npm publish "$tarball" --registry https://npm.pkg.github.com
+
       - name: Publish to GitHub Packages
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
         shell: bash
