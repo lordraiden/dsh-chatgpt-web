@@ -52,6 +52,20 @@ export function resolveChatGptWebCapabilityState(input: {
     return { solAvailable, proAvailable };
 }
 
+export function accountIdentityFromUserId(userId: string): ChatGptWebAccountIdentity {
+  const normalized = userId.trim();
+  if (!normalized) throw new Error("ChatGPT authenticated session did not expose a user id");
+  const fingerprint = createHash("sha256")
+    .update(`chatgpt-web-user:${normalized}`)
+    .digest("hex")
+    .slice(0, 24);
+  return {
+    kind: "authenticated-session",
+    fingerprint,
+  };
+}
+
+/** Legacy compatibility only; storage state is not a stable account identity. */
 export function accountIdentityFromStorageState(storageState: unknown): ChatGptWebAccountIdentity {
   const fingerprint = createHash("sha256")
     .update(JSON.stringify(storageState))
