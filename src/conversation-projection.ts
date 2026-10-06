@@ -100,7 +100,7 @@ function projectEmbeddedMessages(rawMessages: unknown[]): RequestMessage[] {
       ...rawMessage,
       role,
       content,
-    } as RequestMessage);
+    } as unknown as RequestMessage);
   }
 
   return projected;
@@ -197,7 +197,7 @@ function conversationalContent(content: unknown): string | unknown[] | undefined
 function projectStandaloneConversationMessage(message: RequestMessage): RequestMessage | undefined {
   const content = conversationalContent((message as unknown as { content?: unknown }).content);
   if (content === undefined) return undefined;
-  return { ...(message as object), content } as RequestMessage;
+  return { ...(message as object), content } as unknown as RequestMessage;
 }
 
 function sanitizeStandaloneMessage(message: RequestMessage): RequestMessage | undefined {
@@ -206,7 +206,7 @@ function sanitizeStandaloneMessage(message: RequestMessage): RequestMessage | un
   if (typeof content === "string") {
     const sanitized = sanitizeConversationText(content);
     if (!sanitized) return undefined;
-    return { ...(message as object), content: sanitized } as RequestMessage;
+    return { ...(message as object), content: sanitized } as unknown as RequestMessage;
   }
 
   if (!Array.isArray(content)) return message;
@@ -221,7 +221,7 @@ function sanitizeStandaloneMessage(message: RequestMessage): RequestMessage | un
 
   if (blocks.length === 0) return undefined;
   if (!changed) return message;
-  return { ...(message as object), content: blocks } as RequestMessage;
+  return { ...(message as object), content: blocks } as unknown as RequestMessage;
 }
 
 function sanitizeConversationText(text: string): string {
