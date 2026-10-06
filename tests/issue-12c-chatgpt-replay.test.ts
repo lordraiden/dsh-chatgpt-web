@@ -44,7 +44,7 @@ function replayIdentity(snapshot: ReturnType<typeof capabilitySnapshot>): {
   };
 }
 
-test("ProviderCore reuses the immutable capability snapshot after physical retirement", async () => {
+test("ProviderCore retains the immutable capability snapshot across physical-first settlement", async () => {
   const core = new ChatGptWebProviderCore();
   const snapshot = capabilitySnapshot();
   const first = core.begin({
@@ -65,6 +65,14 @@ test("ProviderCore reuses the immutable capability snapshot after physical retir
   await first.waitForPhysicalSettlement();
   await Promise.resolve();
 
+  // Physical browser cleanup may win the race. The turn must remain in SETTLING so the
+  // client-visible logical outcome can still arrive and complete retirement safely.
+  expect(core.get("execution-66")).toBeDefined();
+  expect(first.snapshot().state).toBe("SETTLING");
+  expect(first.snapshot().physicalSettled).toBe(true);
+  expect(first.snapshot().logicalSettled).toBe(false);
+
+  first.markLogicalSettled("completed");
   expect(core.get("execution-66")).toBeUndefined();
   expect(core.getRetiredCapabilitySnapshot("execution-66")).toBe(snapshot);
   expect(core.wasRetired("execution-66")).toBe(true);
