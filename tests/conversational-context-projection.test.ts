@@ -208,6 +208,27 @@ Objective:
     expect(textOf(projected[0]!)).toBe("keep this line\nkeep this too");
   });
 
+  test("does not preserve hidden metadata from canonical embedded messages", () => {
+    const envelope = `<codex_context_json>${JSON.stringify({
+      messages: [{
+        role: "user",
+        id: "internal-id",
+        source: { kind: "internal", secret: "must not survive" },
+        timestamp: 123,
+        content: "visible canonical content",
+      }],
+    })}</codex_context_json>`;
+
+    const projected = projectConversationalMessages([user(envelope)]);
+
+    expect(projected).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "visible canonical content" }],
+      },
+    ]);
+  });
+
   test("strips embedded transport metadata instead of preserving raw internal message fields", () => {
     const projected = projectConversationalMessages([
       {
