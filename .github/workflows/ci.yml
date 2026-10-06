@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Main-version releases regenerate and push the checked-in lib bundle. Serialize workflow runs
+# per ref so concurrent pushes cannot race that generated commit or package publication.
+concurrency:
+  group: dsh-chatgpt-web-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   verify:
