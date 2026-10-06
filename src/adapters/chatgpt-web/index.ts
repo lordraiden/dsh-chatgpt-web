@@ -458,7 +458,8 @@ export function createChatGptWebAdapter(
     throw new Error("ChatGPT Bigger Context preference must be a boolean");
   }
   const configuredCapabilities: ChatGptWebCapabilities = {
-    localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
+    // Chat-only stability mode: local DSH tools are intentionally disabled until the basic browser chat path is proven stable.
+    localToolsEnabled: false,
     solAvailable: provider.chatgptWeb?.solAvailable !== false,
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
@@ -952,6 +953,7 @@ export function createChatGptWebAdapter(
       return shutdownPromise;
     },
     async runTurn(parsed, incoming, emit) {
+      console.info(`[chatgpt-web] runTurn model=${parsed.modelId} chatOnly=true`);
       if (shuttingDown) {
         throw new Error("ChatGPT Web provider is shutting down");
       }
@@ -1831,7 +1833,6 @@ export function createChatGptWebAdapter(
             session.completeRound(roundKey);
             return;
           }
-          providerTurn.markLogicalSettled("failed");
           session.failRound(roundKey, turnError);
           throw turnError;
         }
