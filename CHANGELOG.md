@@ -2,6 +2,7 @@
 
 ## 1.0.14
 
+- declare compatibility with the current DSH `0.2.1-alpha.1` LLM peer runtime.
 - fix conversational projection when DSH injects Hindsight or operational context as separate user-role messages.
 - preserve clean user/assistant history instead of dropping it when standalone internal context is present.
 - detect operational context lines anywhere inside a message and strip them safely.
