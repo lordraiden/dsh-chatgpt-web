@@ -425,6 +425,9 @@ export class ProviderTurnLifecycle {
     }
     this.logicalSettled = true;
     this.logicalOutcome = outcome;
+    if (outcome === "failed") {
+      this.recovery = "FAILED";
+    }
     this.retireIfSettled();
   }
 
