@@ -253,6 +253,27 @@ function stripTaggedBlocks(text: string): string {
     }
   }
 
+  // Hindsight may add new named sections over time. Treat the whole
+  // <hindsight_...> namespace as plugin-private and fail closed on an
+  // unterminated section so future memory formats cannot leak by default.
+  for (;;) {
+    const match = /<hindsight_[a-z0-9_-]+>/i.exec(current);
+    if (!match || match.index === undefined) break;
+
+    const open = match[0];
+    const start = match.index;
+    const tagName = open.slice(1, -1);
+    const closingTag = new RegExp(`</${tagName}>`, "i");
+    const closingMatch = closingTag.exec(current.slice(start + open.length));
+    if (!closingMatch || closingMatch.index === undefined) {
+      current = current.slice(0, start);
+      break;
+    }
+
+    const end = start + open.length + closingMatch.index + closingMatch[0].length;
+    current = current.slice(0, start) + current.slice(end);
+  }
+
   return current;
 }
 
