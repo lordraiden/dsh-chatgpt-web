@@ -913,8 +913,9 @@ export function mapStream(
 
     try {
       for (;;) {
-        const event = await queue.next();
-        if (event === undefined) break;
+        const rawEvent = await queue.next();
+        if (rawEvent === undefined) break;
+        const event = validateAdapterEvent(rawEvent);
         switch (event.type) {
           case "text_delta": {
             if (openBlock?.kind !== "text") {
