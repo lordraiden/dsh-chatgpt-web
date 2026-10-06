@@ -186,7 +186,7 @@ Objective:
       {
         role: "assistant",
         content: [{ type: "text", text: "first assistant answer" }],
-      } as RequestMessage,
+      } as unknown as RequestMessage,
       user("<hindsight_memory>private context</hindsight_memory>"),
       user("second user message"),
     ]);
