@@ -524,6 +524,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && existing) await assertServiceIdle(existing);
     if (loginRequired) {
       const login = await loginToChatGpt(config);
+      config.accountIdentityFingerprint = login.accountIdentityFingerprint;
       solAvailable = login.solAvailable;
       proAvailable = login.proAvailable;
       loginCreated = true;
