@@ -6,7 +6,6 @@
 - preserve clean user/assistant history instead of dropping it when standalone internal context is present.
 - detect operational context lines anywhere inside a message and strip them safely.
 - reject ambiguous multiple canonical context envelopes and strip hidden metadata from embedded messages.
-- align the test/peer DSH LLM version range with the current 0.2.1 alpha runtime.
 
 
 ## 1.0.13
