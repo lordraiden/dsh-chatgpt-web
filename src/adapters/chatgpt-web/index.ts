@@ -251,13 +251,21 @@ export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexPa
     .slice(0, 12);
 }
 
+/**
+ * Logical retention decision for one normal turn.
+ *
+ * Continuity is a property of the DSH chat identity, not of a particular
+ * browser surface: a retained Launcher is not required, so plugin-managed
+ * browsers keep the same affinity. Manual Zero Risk turns own an explicit
+ * launcher lifecycle and compaction requests follow a separate retention
+ * path, so neither retains here.
+ */
 export function shouldRetainChatGptWebConversation(
   parsed: CodexParsedRequest,
   mode: { localTools: boolean },
-  hasRetainedLauncher: boolean,
   manualRequest = false,
 ): boolean {
-  if (manualRequest || parsed._compactionRequest || !hasRetainedLauncher) return false;
+  if (manualRequest || parsed._compactionRequest) return false;
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     const identity = extractChatGptTurnIdentity(parsed);
     return Boolean(identity.threadId && identity.turnId);
@@ -521,7 +529,6 @@ export function createChatGptWebAdapter(
     const retainConversationForTurn = shouldRetainChatGptWebConversation(
       parsed,
       mode,
-      Boolean(retainedLauncherDescriptor),
       manualRequest,
     );
     const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID

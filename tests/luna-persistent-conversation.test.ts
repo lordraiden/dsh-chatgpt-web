@@ -32,32 +32,72 @@ function nativeParsed(overrides: Partial<CodexParsedRequest> = {}): CodexParsedR
   });
 }
 
-test("Luna retains the authenticated ChatGPT Web conversation when a launcher is available", () => {
+test("Luna retains the authenticated ChatGPT Web conversation without a Launcher", () => {
   expect(
-    shouldRetainChatGptWebConversation(nativeParsed(), { localTools: false }, true),
+    shouldRetainChatGptWebConversation(nativeParsed(), { localTools: false }),
   ).toBe(true);
 });
 
-test("Luna does not retain a conversation without the launcher surface", () => {
+test("Sol retains only when local tools are enabled", () => {
   expect(
-    shouldRetainChatGptWebConversation(nativeParsed(), { localTools: false }, false),
-  ).toBe(false);
-});
-
-test("Luna does not retain a conversation for compaction turns", () => {
+    shouldRetainChatGptWebConversation(nativeParsed({ modelId: "gpt-5.6-sol" }), { localTools: true }),
+  ).toBe(true);
   expect(
-    shouldRetainChatGptWebConversation(
-      nativeParsed({ _compactionRequest: true }),
-      { localTools: false },
-      true,
-    ),
+    shouldRetainChatGptWebConversation(nativeParsed({ modelId: "gpt-5.6-sol" }), { localTools: false }),
   ).toBe(false);
 });
 
 test("manual Zero Risk turns keep their existing explicit launcher lifecycle", () => {
   expect(
-    shouldRetainChatGptWebConversation(nativeParsed(), { localTools: true }, true, true),
+    shouldRetainChatGptWebConversation(nativeParsed(), { localTools: true }, true),
   ).toBe(false);
+});
+
+test("a Sol turn without local tools and without a stable thread identity has no conversation affinity", () => {
+  const sol = parsed({ modelId: "gpt-5.6-sol" });
+  expect(chatGptConversationKey(sol, "namespace-a")).toBeUndefined();
+});
+
+test("consecutive turns of the same DSH chat keep one conversation affinity", () => {
+  const firstTurn = nativeParsed({
+    _dshContext: { dshSessionId: "session-1", threadId: "thread-1", turnId: "turn-1" },
+  });
+  const secondTurn = nativeParsed({
+    _dshContext: { dshSessionId: "session-1", threadId: "thread-1", turnId: "turn-2" },
+  });
+  const key = chatGptConversationKey(firstTurn, "namespace-a");
+  expect(key).toBe(chatGptConversationKey(secondTurn, "namespace-a"));
+  const otherChat = nativeParsed({
+    _dshContext: { dshSessionId: "session-2", threadId: "thread-9", turnId: "turn-1" },
+  });
+  expect(key).not.toBe(chatGptConversationKey(otherChat, "namespace-a"));
+});
+
+test("model and reasoning changes do not change the conversation key", () => {
+  const base = nativeParsed();
+  const key = chatGptConversationKey(base, "namespace-a");
+  expect(key).toBe(chatGptConversationKey(
+    nativeParsed({ modelId: "gpt-5.6-sol" }),
+    "namespace-a",
+  ));
+  expect(key).toBe(chatGptConversationKey(
+    nativeParsed({ options: { reasoning: "medium" } }),
+    "namespace-a",
+  ));
+});
+
+test("a compaction marker in the raw body does not change the conversation key", () => {
+  const normal = nativeParsed();
+  const compacted = nativeParsed({
+    _rawBody: {
+      input: [
+        { type: "message", role: "user", content: "first" },
+        { type: "compaction" },
+      ],
+    },
+  });
+  expect(chatGptConversationKey(normal, "namespace-a"))
+    .toBe(chatGptConversationKey(compacted, "namespace-a"));
 });
 
 test("Luna conversation keys are stable for the same DSH conversation affinity", () => {
