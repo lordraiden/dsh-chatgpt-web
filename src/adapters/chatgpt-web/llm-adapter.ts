@@ -421,7 +421,10 @@ export function toCodexParsedRequest(
   const systemPrompt: string[] = [];
   if (options.system && options.system.trim()) systemPrompt.push(options.system);
 
-  const requestMessages = projectConversationalMessages(options.messages);
+  const purpose = options.purpose;
+  const requestMessages = purpose === "compaction" || purpose === "session-title"
+    ? options.messages
+    : projectConversationalMessages(options.messages);
 
   const toolCallsById = new Map<string, { name: string; namespace?: string }>();
   for (const message of requestMessages) {
@@ -473,7 +476,6 @@ export function toCodexParsedRequest(
   const threadId = dshSessionId
     ? `dsh-${createHash("sha256").update(dshSessionId).digest("hex").slice(0, 24)}`
     : `dsh-request-${turnId}`;
-  const purpose = options.purpose;
   const dshContext = resolveNativeDshContext(options, turnId, threadId);
   const input = nativeInputFromMessages(messages, systemPrompt, turnId, purpose);
 
