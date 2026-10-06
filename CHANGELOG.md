@@ -6,6 +6,10 @@
 
 1.0.9 development is intentionally focused on optimizing the browser-backed chat path before any tool execution work is reconsidered.
 
+Identity fix in this development cycle:
+- authenticate the browser lease against the stable ChatGPT user identity instead of mutable storage-state serialization.
+- persist the account fingerprint during login so restarts keep the same logical account identity.
+
 Focus:
 - observability and diagnostics;
 - chat turn reliability and lifecycle behavior;
