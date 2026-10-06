@@ -1,5 +1,9 @@
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import {
+  accountIdentityFromUserId,
+  type ChatGptWebAccountIdentity,
+} from "./chatgpt-web-authority";
 import type { ChatGptWebCapabilityState } from "./chatgpt-web-authority";
 
 export const CHATGPT_CHAT_URL = "https://chatgpt.com/";
@@ -262,6 +266,28 @@ export async function probeChatGptAccountCapabilities(
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }
+}
+
+export async function detectChatGptAuthenticatedAccountIdentity(
+  page: Page,
+): Promise<ChatGptWebAccountIdentity> {
+  const session = await page.evaluate(async () => {
+    const response = await fetch("/api/auth/session", {
+      credentials: "include",
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) throw new Error(`ChatGPT auth session probe failed with HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object") throw new Error("ChatGPT auth session probe returned malformed data");
+    const user = (body as { user?: unknown }).user;
+    if (!user || typeof user !== "object") throw new Error("ChatGPT authenticated session did not expose a user");
+    const userId = (user as { id?: unknown }).id;
+    if (typeof userId !== "string" || userId.trim().length === 0) {
+      throw new Error("ChatGPT authenticated session did not expose a stable user id");
+    }
+    return userId;
+  });
+  return accountIdentityFromUserId(session);
 }
 
 export async function detectChatGptAccountCapabilities(
