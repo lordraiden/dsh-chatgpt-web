@@ -18,7 +18,7 @@ import {
 import { estimateTokens } from "../../lib/token-estimate";
 import { safeErrorDescriptor } from "../../lib/safe-diagnostics";
 import type { CodexProviderConfig } from "../../types";
-import { accountIdentityFromStorageState, accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
+import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import { parseDataUrl } from "../image";
 import {
   ChatGptMarkdownBuffer,
@@ -69,6 +69,7 @@ import {
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
+  detectChatGptAuthenticatedAccountIdentity,
   parseChatGptEffortSliderState,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
@@ -4572,16 +4573,12 @@ export class ChatGptBrowserWorker {
       const physicalProfileId = this.config.browserHost === "launcher"
         ? `launcher-profile:${this.config.browserHostDescriptorPath ?? "unknown"}`
         : `chrome-profile:${this.config.chromeExecutablePath}`;
-      let physicalAccountId = "chatgpt-account:unknown";
-      try {
-        const storageState = await page.context().storageState();
-        physicalAccountId = `chatgpt-account:${accountIdentityFromStorageState(storageState).fingerprint}`;
-      } catch {
-        physicalAccountId = `chatgpt-account:${accountIdentityFromUnknownSession().fingerprint}`;
-      }
+      let physicalAccountId = `chatgpt-account:${accountIdentityFromUnknownSession().fingerprint}`;
       let physicalPageId = physicalObjectId(page, "page");
       let physicalContextId = physicalObjectId(page.context(), "context");
       const bindPhysicalSurface = async (): Promise<void> => {
+        const accountIdentity = await detectChatGptAuthenticatedAccountIdentity(page);
+        physicalAccountId = `chatgpt-account:${accountIdentity.fingerprint}`;
         await turn.onPhysicalSurfaceBound?.({
           resourceId: physicalResourceId,
           browserContextId: physicalContextId,
@@ -4590,7 +4587,6 @@ export class ChatGptBrowserWorker {
           accountId: physicalAccountId,
         });
       };
-      await bindPhysicalSurface();
       const rebindLauncherPage = async (
         attempt: number,
         cause: Error,
@@ -4705,6 +4701,7 @@ export class ChatGptBrowserWorker {
           ),
         );
       }
+      await bindPhysicalSurface();
       let mode = requestedMode;
       if (chatGptEffortSelectionRequired(
         reuseConversation,
