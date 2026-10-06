@@ -238,7 +238,17 @@ function conversationalContent(
 function projectStandaloneConversationMessage(message: RequestMessage): RequestMessage | undefined {
   const content = conversationalContent((message as unknown as { content?: unknown }).content);
   if (content === undefined) return undefined;
-  return { ...(message as object), content } as unknown as RequestMessage;
+
+  const role = (message as unknown as { role?: unknown }).role;
+  if (role !== "user" && role !== "assistant") return undefined;
+
+  // In sanitized transport mode, retain only provider-facing conversation fields.
+  // Durable DSH ids/sources and plugin-private metadata must not cross the
+  // projection boundary.
+  return {
+    role,
+    content,
+  } as unknown as RequestMessage;
 }
 
 function containsSanitizationMarker(text: string): boolean {
