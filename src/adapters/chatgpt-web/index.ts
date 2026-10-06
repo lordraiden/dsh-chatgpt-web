@@ -831,6 +831,18 @@ export function createChatGptWebAdapter(
           ),
           release: () => {},
         }),
+        // A retained conversation (managed-chrome, issue #171) continues on the existing surface,
+        // so it compiles the continuation delta exactly like the tool-capable path.
+        ...(resumeInput ? { prepareResume: async () => ({
+          ...compileChatGptWebPrompt(
+            resumeInput,
+            turnCapabilities,
+            undefined,
+            compileOptionsFor(resumeInput),
+          ),
+          release: () => {},
+        }) } : {}),
+        ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,

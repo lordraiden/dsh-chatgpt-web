@@ -1,0 +1,124 @@
+/**
+ * Physical ChatGPT Web surface retention for managed-chrome (issue #171).
+ *
+ * This registry maps a stable conversationKey (defined by #170) to the one
+ * physical page that carries the visible ChatGPT conversation for that DSH
+ * chat. It manages only physical resources, ownership, lifetime, and mutual
+ * exclusion: it never stores messages, transcripts, or session authority, and
+ * it introduces no journal. A lost retained surface is reported through an
+ * explicit continuity error, never by silently creating a new conversation.
+ *
+ * The registry is generic over the concrete page type so callers keep their
+ * full page capability (e.g. Playwright `Page`) without a widening cast.
+ */
+
+/** The only page capabilities the registry needs; Playwright Page satisfies it. */
+export interface RetainedSurfacePage {
+  isClosed(): boolean;
+  close(): Promise<void>;
+}
+
+export interface RetainedSurfaceAcquired<P extends RetainedSurfacePage> {
+  page: P;
+  /** True when this turn created the surface; false when it reuses an existing one. */
+  created: boolean;
+}
+
+export interface RetainedSurfaceAcquireOptions<P extends RetainedSurfacePage> {
+  /**
+   * The turn requires a pre-existing retained surface (e.g. the compaction
+   * handoff). When no surface exists for the key this fails explicitly
+   * instead of creating one.
+   */
+  required: boolean;
+  /** Creates the surface for the first turn of the conversation. */
+  create: () => Promise<P>;
+}
+
+/** A required retained surface does not exist for the conversation key. */
+export class RetainedSurfaceMissingError extends Error {
+  constructor(conversationKey: string) {
+    super(`The retained ChatGPT conversation for ${conversationKey} does not exist`);
+    this.name = "RetainedSurfaceMissingError";
+  }
+}
+
+/** A previously retained surface died, breaking conversation continuity. */
+export class RetainedSurfaceLostError extends Error {
+  constructor(conversationKey: string) {
+    super(`The retained ChatGPT conversation for ${conversationKey} was lost`);
+    this.name = "RetainedSurfaceLostError";
+  }
+}
+
+/** Another turn already owns the retained surface for the conversation key. */
+export class RetainedSurfaceBusyError extends Error {
+  constructor(conversationKey: string) {
+    super(`Another turn is already using the retained ChatGPT conversation for ${conversationKey}`);
+    this.name = "RetainedSurfaceBusyError";
+  }
+}
+
+interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
+  page: P;
+  busy: boolean;
+}
+
+export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSurfacePage> {
+  private readonly surfaces = new Map<string, RetainedSurfaceEntry<P>>();
+
+  get size(): number {
+    return this.surfaces.size;
+  }
+
+  has(conversationKey: string): boolean {
+    return this.surfaces.has(conversationKey);
+  }
+
+  /**
+   * Acquire the retained surface for one turn. The surface stays busy until
+   * `release` is called, so two turns of the same conversationKey can never
+   * share a page concurrently. A dead stored page is removed and reported as
+   * a continuity loss; it is never replaced silently.
+   */
+  async acquire(
+    conversationKey: string,
+    options: RetainedSurfaceAcquireOptions<P>,
+  ): Promise<RetainedSurfaceAcquired<P>> {
+    const existing = this.surfaces.get(conversationKey);
+    if (existing) {
+      if (existing.busy) throw new RetainedSurfaceBusyError(conversationKey);
+      if (existing.page.isClosed()) {
+        this.surfaces.delete(conversationKey);
+        throw new RetainedSurfaceLostError(conversationKey);
+      }
+      existing.busy = true;
+      return { page: existing.page, created: false };
+    }
+    if (options.required) throw new RetainedSurfaceMissingError(conversationKey);
+    const page = await options.create();
+    this.surfaces.set(conversationKey, { page, busy: true });
+    return { page, created: true };
+  }
+
+  /** Drop the busy flag at the end of a turn; the surface stays retained. */
+  release(conversationKey: string): void {
+    const entry = this.surfaces.get(conversationKey);
+    if (entry) entry.busy = false;
+  }
+
+  /** Remove and close one retained surface. */
+  async invalidate(conversationKey: string): Promise<void> {
+    const entry = this.surfaces.get(conversationKey);
+    if (!entry) return;
+    this.surfaces.delete(conversationKey);
+    await entry.page.close().catch(() => {});
+  }
+
+  /** Shutdown path: release every retained surface so no page is orphaned. */
+  async closeAll(): Promise<void> {
+    const entries = [...this.surfaces.values()];
+    this.surfaces.clear();
+    await Promise.all(entries.map(entry => entry.page.close().catch(() => {})));
+  }
+}

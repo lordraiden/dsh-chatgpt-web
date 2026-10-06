@@ -93,8 +93,16 @@ import {
   chatGptBrowserTabClosedError,
   chatGptContextExhaustedError,
   chatGptRetainedConversationUnavailableError,
+  chatGptRetainedSurfaceBusyError,
+  chatGptRetainedSurfaceLostError,
   chatGptStoppedThinkingError,
 } from "./adapter-error";
+import {
+  RetainedSurfaceBusyError,
+  RetainedSurfaceLostError,
+  RetainedSurfaceMissingError,
+  RetainedSurfaceRegistry,
+} from "./retained-surface";
 import {
   detectChatGptContextExhaustion,
   type ChatGptContextExhaustionObservation,
@@ -2149,6 +2157,12 @@ export class ChatGptBrowserWorker {
   private launcherHelper?: LauncherBrowserHelperClient;
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
+  /**
+   * Retained managed-chrome surfaces keyed by conversationKey (issue #171).
+   * Physical resources only: the registry owns page lifetime and mutual
+   * exclusion. It never stores history and is not a second source of truth.
+   */
+  private readonly retainedSurfaces = new RetainedSurfaceRegistry<Page>();
 
   private constructor(private readonly config: ResolvedBrowserConfig) {}
 
@@ -2266,6 +2280,9 @@ export class ChatGptBrowserWorker {
     }
     await Promise.allSettled([...this.activeRuns.values()]);
     await this.maintenanceTail;
+    // Release every retained managed-chrome surface so shutdown leaves no orphaned page
+    // (issue #171). This runs before the browser connection itself is torn down.
+    await this.retainedSurfaces.closeAll();
     const browser = this.browser;
     this.browser = undefined;
     this.context = undefined;
@@ -4457,7 +4474,17 @@ export class ChatGptBrowserWorker {
       ? { ...turn.capabilities, localToolsEnabled: true }
       : turn.capabilities;
     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, browserCapabilities);
-    const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
+    // Managed-chrome physical retention (issue #171): a normal turn that carries a stable
+    // conversationKey reuses the one retained page for that DSH chat. A surface that already
+    // exists is a continuation, so it takes the resume prompt exactly like the Launcher lease.
+    const managedRetained = !launcherSurfaceId
+      && !maintenancePage
+      && this.config.browserHost === "managed-chrome"
+      && turn.conversationKey !== undefined
+      && (turn.retainConversation === true || turn.requireRetainedConversation === true);
+    const managedReuse = managedRetained && this.retainedSurfaces.has(turn.conversationKey!);
+    const effectiveReuse = reuseConversation || managedReuse;
+    const prepare = effectiveReuse ? turn.prepareResume : turn.prepare;
     if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
     const prepared = await prepare();
     const diagnostics = new ChatGptBrowserDiagnostics(
@@ -4543,9 +4570,31 @@ export class ChatGptBrowserWorker {
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
+      let retainedCreated = false;
       let page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
         if (maintenancePage) return maintenancePage;
         if (!launcherSurfaceId) {
+          if (managedRetained) {
+            let retained;
+            try {
+              retained = await this.retainedSurfaces.acquire(turn.conversationKey!, {
+                required: turn.requireRetainedConversation === true,
+                create: () => this.pageForNewTurn(),
+              });
+            } catch (error) {
+              if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError();
+              if (error instanceof RetainedSurfaceBusyError) throw chatGptRetainedSurfaceBusyError();
+              if (error instanceof RetainedSurfaceMissingError) throw chatGptRetainedConversationUnavailableError();
+              throw error;
+            }
+            retainedCreated = retained.created;
+            if (abortSignal.aborted) {
+              this.retainedSurfaces.release(turn.conversationKey!);
+              await retained.page.close().catch(() => {});
+              throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
+            }
+            return retained.page;
+          }
           const managed = await this.pageForNewTurn();
           if (abortSignal.aborted) {
             await managed.close().catch(() => {});
@@ -4567,7 +4616,9 @@ export class ChatGptBrowserWorker {
         await waitForOperationalChatGptViewport(connection.page, abortSignal);
         return connection.page;
       });
-      if (!maintenancePage && !launcherSurfaceId) managedPage = page;
+      // A retained managed-chrome surface is owned by the registry (issue #171): it is never
+      // closed at the end of a normal turn, so it must not be tracked as a per-turn managedPage.
+      if (!maintenancePage && !launcherSurfaceId && !managedRetained) managedPage = page;
       diagnosticPage = page;
       const physicalResourceId = launcherSurfaceId ?? physicalObjectId(page, "managed-surface");
       const physicalProfileId = this.config.browserHost === "launcher"
@@ -4690,7 +4741,7 @@ export class ChatGptBrowserWorker {
       console.info(
         `[chatgpt-web] browser turn ${turn.traceId} opened (transport=${prepared.multipart ? `multipart-${prepared.multipart.parts.length}` : "inline"}, maxMessageChars=${maxMessageChars}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length}, compactionTrimmedMessages=${prepared.trimmedCompactionMessages ?? 0})`,
       );
-      if (!reuseConversation) {
+      if (!effectiveReuse) {
         await this.runStage(
           turn.traceId,
           "chatgpt_surface_preparation",
@@ -4704,7 +4755,7 @@ export class ChatGptBrowserWorker {
       await bindPhysicalSurface();
       let mode = requestedMode;
       if (chatGptEffortSelectionRequired(
-        reuseConversation,
+        effectiveReuse,
         requestedMode.effort,
         stagingMode.effort,
       )) {
@@ -4816,7 +4867,7 @@ export class ChatGptBrowserWorker {
       let submissionBaseline = await this.captureSubmissionBaseline(page);
       let catalogRefreshAvailable = turn.nativeConnector === true
         && mode.localTools
-        && !reuseConversation
+        && !effectiveReuse
         && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
       const completionTracker = new ChatGptCompletionTracker();
@@ -4846,7 +4897,7 @@ export class ChatGptBrowserWorker {
                   promptAbortSignal,
                   catalogRefreshAvailable,
                   connectorAttemptBudget,
-                  reuseConversation,
+                  effectiveReuse,
                 );
               },
               chatGptSuspensionClock,
@@ -5240,6 +5291,9 @@ export class ChatGptBrowserWorker {
       throw error;
     } finally {
       prepared.release();
+      // A retained managed-chrome surface outlives its turn (issue #171): clear the busy flag so
+      // the next turn of the same conversationKey can continue, keeping the page itself open.
+      if (managedRetained) this.retainedSurfaces.release(turn.conversationKey!);
       if (turnConnection) {
         await turnConnection.close().catch(error => {
           console.error(
