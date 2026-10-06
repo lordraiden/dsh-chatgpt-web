@@ -455,7 +455,7 @@ export function defaultChromeExecutable(
 }
 
 function comparableReleaseVersion(value: string): [number, number, number] | undefined {
-  const match = /^(\\d+)\\.(\\d+)\\.(\\d+)/.exec(value.trim());
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value.trim());
   if (!match) return undefined;
   return [
     Number.parseInt(match[1]!, 10),
