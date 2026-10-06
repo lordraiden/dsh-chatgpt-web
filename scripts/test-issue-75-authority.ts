@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   accountIdentityFromStorageState,
+  accountIdentityFromUserId,
   createChatGptWebRouteAuthority,
   requireChatGptWebRoute,
   availableChatGptWebRoutes,
@@ -82,6 +83,16 @@ describe("issue #75 ChatGPT Web authority", () => {
       const body = await response.json() as { models: Array<{ slug?: string }> };
       expect(body.models.some(model => model.slug === "chatgpt-web/luna")).toBe(true);
     });
+  });
+
+  test("authenticated user identity remains stable across storage-state rotation", () => {
+    const first = accountIdentityFromUserId("user-123");
+    const second = accountIdentityFromUserId("user-123");
+    const other = accountIdentityFromUserId("user-456");
+    expect(first.kind).toBe("authenticated-session");
+    expect(first.fingerprint).toBe(second.fingerprint);
+    expect(first.fingerprint).not.toBe(other.fingerprint);
+    expect(first.fingerprint).toMatch(/^[a-f0-9]{24}$/);
   });
 
   test("authenticated session fingerprints are distinct from filesystem/profile identity", () => {
