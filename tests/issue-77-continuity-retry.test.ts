@@ -70,6 +70,9 @@ console.log("Issue #77 targeted retry classification and continuity fail-closed 
   assert.equal(core.recordRetryAttempt(executionKey, first, 1_000).attempt, 1);
 
   core.bindPhysicalSettlement(executionKey, Promise.resolve());
+  // A retryable browser error is logically settled after the physical cleanup completes.
+  // The replacement turn must inherit the execution-scoped retry budget rather than reset it.
+  first.markLogicalSettled("failed");
   await core.waitForRetirement(executionKey);
 
   const second = begin();
