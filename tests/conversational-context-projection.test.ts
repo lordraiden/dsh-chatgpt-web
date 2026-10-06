@@ -19,6 +19,15 @@ SECRET HINDSIGHT KNOWLEDGE
 <hindsight_memory>
 SECRET HINDSIGHT MEMORY
 </hindsight_memory>
+<hindsight_future_internal_section>
+SECRET FUTURE HINDSIGHT
+</hindsight_future_internal_section>
+<hindsight_knowledge_refresh>
+SECRET HINDSIGHT REFRESH
+</hindsight_knowledge_refresh>
+<environment_context>
+SECRET ENVIRONMENT CONTEXT
+</environment_context>
 <codex_context_json>
 ${JSON.stringify({
   messages: [
@@ -57,6 +66,8 @@ Objective:
     expect(JSON.stringify(projected)).toContain("Respuesta anterior");
     expect(JSON.stringify(projected)).toContain("Respuesta visible");
     expect(JSON.stringify(projected)).not.toContain("SECRET HINDSIGHT");
+    expect(JSON.stringify(projected)).not.toContain("SECRET FUTURE HINDSIGHT");
+    expect(JSON.stringify(projected)).not.toContain("SECRET ENVIRONMENT CONTEXT");
     expect(JSON.stringify(projected)).not.toContain("private reasoning");
     expect(JSON.stringify(projected)).not.toContain("internal developer");
     expect(JSON.stringify(projected)).not.toContain("internal tool");
