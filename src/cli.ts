@@ -199,6 +199,8 @@ async function loginCommand(args: string[]): Promise<void> {
       throw new Error("ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step");
     }
     const result = await loginToChatGpt(config);
+    config.accountIdentityFingerprint = result.accountIdentityFingerprint;
+    saveConfig(config);
     stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
     return;
   }
