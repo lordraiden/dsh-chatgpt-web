@@ -1,3 +1,4 @@
+const { createHash } = require("node:crypto");
 const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { dirname, join } = require("node:path");
@@ -55,6 +56,12 @@ async function isUserAuthenticated(context, page) {
   return false;
 }
 
+function accountIdentityFingerprintFromUserId(userId) {
+  const normalized = String(userId || "").trim();
+  if (!normalized) throw new Error("ChatGPT authenticated session did not expose a stable user id");
+  return createHash("sha256").update(`chatgpt-web-user:${normalized}`).digest("hex").slice(0, 24);
+}
+
 async function runLogin(config, options = {}) {
   if (!existsSync(config.chromeExecutablePath)) {
     throw new Error(`Google Chrome was not found at ${config.chromeExecutablePath}`);
@@ -96,6 +103,19 @@ async function runLogin(config, options = {}) {
 
     const rawState = await context.storageState();
     const sanitized = sanitizeBrowserLoginStorageState(rawState);
+    const session = await authenticatedPage.evaluate(async () => {
+      const response = await fetch("/api/auth/session", {
+        credentials: "include",
+        headers: { accept: "application/json" },
+      });
+      if (!response.ok) throw new Error(`ChatGPT auth session probe failed with HTTP ${response.status}`);
+      const body = await response.json();
+      const userId = body?.user?.id;
+      if (typeof userId !== "string" || !userId.trim()) {
+        throw new Error("ChatGPT authenticated session did not expose a stable user id");
+      }
+      return userId;
+    });
 
     const marker = {
       version: 1,
@@ -113,6 +133,7 @@ async function runLogin(config, options = {}) {
     return {
       storageStatePath: config.storageStatePath,
       accountSurfaceUrl: authenticatedPage.url(),
+      accountIdentityFingerprint: accountIdentityFingerprintFromUserId(session),
       solAvailable: false,
       proAvailable: false,
     };
