@@ -159,7 +159,7 @@ function extractBalancedJsonObject(text: string, start: number): string {
     if (inString) {
       if (escaped) {
         escaped = false;
-      } else if (char === "\\\\") {
+      } else if (char === "\\") {
         escaped = true;
       } else if (char === '"') {
         inString = false;
@@ -188,18 +188,25 @@ function extractBalancedJsonObject(text: string, start: number): string {
   );
 }
 
-function conversationalContent(content: unknown): string | unknown[] | undefined {
+function conversationalContent(
+  content: unknown,
+): Array<{ type: "text"; text: string }> | undefined {
   if (typeof content === "string") {
     const sanitized = sanitizeConversationText(content);
-    return sanitized.length > 0 ? sanitized : undefined;
+    return sanitized.length > 0
+      ? [{ type: "text", text: sanitized }]
+      : undefined;
   }
 
   if (!Array.isArray(content)) return undefined;
 
-  const blocks = content.filter(isTextBlock).map(block => ({
-    ...block,
-    text: sanitizeConversationText(block.text),
-  })).filter(block => block.text.length > 0);
+  const blocks = content
+    .filter(isTextBlock)
+    .map(block => ({
+      type: "text" as const,
+      text: sanitizeConversationText(block.text),
+    }))
+    .filter(block => block.text.length > 0);
 
   return blocks.length > 0 ? blocks : undefined;
 }

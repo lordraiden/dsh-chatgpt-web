@@ -895,7 +895,13 @@ function toFinishFailure(error: unknown, signal?: AbortSignal): { kind: "aborted
   if (error instanceof LlmError) {
     return {
       kind: signal?.aborted ? "aborted" : "error",
-      failure: { message: error.message, code: error.code, status: (error as { status?: number }).status },
+      failure: {
+        message: error.message,
+        code: error.code,
+        ...((error as { status?: number }).status !== undefined
+          ? { status: (error as { status?: number }).status }
+          : {}),
+      },
     };
   }
   return {

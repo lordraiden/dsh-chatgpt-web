@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.12
+
+- fix parsing of escaped quotes and backslashes inside the DSH JSON context envelope.
+- prevent invalid lossless stream chunks when an input projection error occurs by omitting undefined finish status fields.
+- add regression coverage using realistic escaped Hindsight content and DSH stream serialization.
+
 ## 1.0.11
 
 - project DSH transport envelopes down to conversational user/assistant history before sending turns to ChatGPT Web.

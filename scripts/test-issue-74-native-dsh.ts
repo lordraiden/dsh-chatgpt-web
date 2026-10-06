@@ -3,6 +3,7 @@ import {
   LlmError,
   type GenerateOptions,
 } from "@deepseek-ai/dsh-llm";
+import { AssistantStreamAccumulator } from "@deepseek-ai/dsh-llm/assistant-stream";
 import {
   ChatGptThreadEnvironmentStore,
 } from "../src/adapters/chatgpt-web/thread-environment";
@@ -78,6 +79,32 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
     [{ type: "text", text: auxiliaryEnvelope }],
     "compaction input must bypass conversational projection",
   );
+}
+
+{
+  const escapedHindsight = 'Hindsight includes "quoted text", \\slashes, and {JSON-like braces}.';
+  const transportEnvelope = `<codex_context_json>${JSON.stringify({
+    version: 3,
+    system: ["You are a concise conversational assistant."],
+    messages: [
+      { role: "user", content: "prueba de contexto enviado" },
+      { role: "user", content: `<hindsight_knowledge>\\n${escapedHindsight}\\n</hindsight_knowledge>` },
+      { role: "user", content: "Time sampled while preparing turn 1, step 1: 2026-10-06T12:29:05+02:00[Europe/Madrid]" },
+    ],
+  })}</codex_context_json>`;
+
+  const parsed = nativeRequest({
+    messages: [{
+      role: "user",
+      content: [{ type: "text", text: transportEnvelope }],
+    }],
+  });
+  assert.equal(parsed.context.messages.length, 1);
+  assert.deepEqual(parsed.context.messages[0], {
+    role: "user",
+    content: [{ type: "text", text: "prueba de contexto enviado" }],
+    timestamp: parsed.context.messages[0]?.timestamp,
+  });
 }
 
 {
@@ -195,6 +222,34 @@ function nativeRequest(overrides: Partial<GenerateOptions> = {}): CodexParsedReq
   }
 }
 
+{
+  const chunks = [];
+  for await (const chunk of mapStream(
+    () => ({ runTurn: async () => undefined } as any),
+    baseOptions(),
+    () => {
+      throw new LlmError("projection failure", "UNSUPPORTED_OPTION");
+    },
+    { usageMode: "omit" },
+  )) {
+    chunks.push(chunk);
+  }
+
+  const finish = chunks.findLast(chunk => chunk.type === "finish");
+  assert.ok(finish && finish.type === "finish");
+  assert.deepEqual(finish.reason, {
+    kind: "error",
+    failure: {
+      message: "projection failure",
+      code: "UNSUPPORTED_OPTION",
+    },
+  });
+
+  const accumulator = new AssistantStreamAccumulator();
+  assert.doesNotThrow(() => {
+    accumulator.push({ time: 1_000, chunk: finish });
+  });
+}
 {
   const backend = {
     runTurn: async (

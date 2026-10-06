@@ -117,6 +117,24 @@ Objective:
     expect(projected).toHaveLength(1);
     expect(textOf(projected[0]!)).toBe(content);
   });
+  test("parses escaped quotes, backslashes and braces inside real JSON string content", () => {
+    const content = 'Hindsight text includes "quoted instructions", escaped \\slashes, and JSON-like {braces}. It can also contain a literal sequence like \\n inside the source JSON string.';
+    const envelope = `<codex_context_json>${JSON.stringify({
+      version: 3,
+      system: ["You are a concise conversational assistant."],
+      messages: [
+        { role: "user", content: "prueba de contexto enviado" },
+        { role: "user", content: `<hindsight_knowledge>\n${content}\n</hindsight_knowledge>` },
+      ],
+    })}</codex_context_json>`;
+
+    const projected = projectConversationalMessages([user(envelope)]);
+
+    expect(projected).toHaveLength(1);
+    expect(textOf(projected[0]!)).toBe("prueba de contexto enviado");
+    expect(JSON.stringify(projected)).not.toContain("quoted instructions");
+    expect(JSON.stringify(projected)).not.toContain("\\slashes");
+  });
 
   test("fails closed on malformed transport instead of forwarding raw protocol text", () => {
     expect(() =>
