@@ -9,12 +9,14 @@ import {
   assertChatGptPage,
   CHATGPT_CHAT_URL,
   detectChatGptAccountCapabilities,
+  detectChatGptAuthenticatedAccountIdentity,
 } from "./chatgpt-session";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
 export interface BrowserLoginResult {
   storageStatePath: string;
   accountSurfaceUrl: string;
+  accountIdentityFingerprint: string;
   solAvailable: boolean;
   proAvailable: boolean;
 }
@@ -479,12 +481,14 @@ export async function loginToChatGpt(
       proAvailable: false,
     };
     capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
+    const accountIdentity = await detectChatGptAuthenticatedAccountIdentity(activePage);
 
     atomicWriteFile(config.storageStatePath, `${JSON.stringify(state)}\n`);
     writeVerificationMarker(config.storageStatePath, capabilities);
     return {
       storageStatePath: config.storageStatePath,
       accountSurfaceUrl: activePage.url(),
+      accountIdentityFingerprint: accountIdentity.fingerprint,
       solAvailable: capabilities.solAvailable,
       proAvailable: capabilities.proAvailable,
     };
