@@ -38,6 +38,7 @@ import {
 } from "../../chatgpt-web-authority";
 import { loadConfig, providerConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../lib/compaction";
+import { projectConversationalMessages } from "../../conversation-projection";
 import {
   type AdapterEvent,
   type CodexAssistantContentPart,
@@ -420,8 +421,13 @@ export function toCodexParsedRequest(
   const systemPrompt: string[] = [];
   if (options.system && options.system.trim()) systemPrompt.push(options.system);
 
+  const purpose = options.purpose;
+  const requestMessages = purpose === "compaction" || purpose === "session-title"
+    ? options.messages
+    : projectConversationalMessages(options.messages);
+
   const toolCallsById = new Map<string, { name: string; namespace?: string }>();
-  for (const message of options.messages) {
+  for (const message of requestMessages) {
     if (message.role !== "assistant") continue;
     for (const block of message.content ?? []) {
       if (block.type !== "tool-call") continue;
@@ -434,7 +440,7 @@ export function toCodexParsedRequest(
   }
 
   const messages: CodexMessage[] = [];
-  for (const message of options.messages) {
+  for (const message of requestMessages) {
     const mapped = mapRequestMessage(message, toolCallsById);
     if (mapped === "system") {
       const text = (message.content ?? [])
@@ -470,7 +476,6 @@ export function toCodexParsedRequest(
   const threadId = dshSessionId
     ? `dsh-${createHash("sha256").update(dshSessionId).digest("hex").slice(0, 24)}`
     : `dsh-request-${turnId}`;
-  const purpose = options.purpose;
   const dshContext = resolveNativeDshContext(options, turnId, threadId);
   const input = nativeInputFromMessages(messages, systemPrompt, turnId, purpose);
 
