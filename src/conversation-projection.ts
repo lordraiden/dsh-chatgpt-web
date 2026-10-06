@@ -1,6 +1,7 @@
 import type { RequestMessage } from "@deepseek-ai/dsh-llm";
 
 const CODEX_CONTEXT_OPEN = "<codex_context_json>";
+const CODEX_CONTEXT_CLOSE = "</codex_context_json>";
 const TRANSPORT_BLOCKS = [
   ["<hindsight_knowledge>", "</hindsight_knowledge>"],
   ["<hindsight_memory>", "</hindsight_memory>"],
@@ -38,9 +39,17 @@ export function projectConversationalMessages(
   messages: readonly RequestMessage[],
 ): RequestMessage[] {
   const projected: RequestMessage[] = [];
-  const transportEnvelopePresent = messages.some(message =>
-    textContent(message)?.includes(CODEX_CONTEXT_OPEN) === true,
-  );
+  const transportEnvelopePresent = messages.some(message => {
+    const text = textContent(message);
+    return text !== undefined && (
+      text.includes(CODEX_CONTEXT_OPEN)
+      || text.includes(TRANSPORT_PROTOCOL_MARKER)
+      || TRANSPORT_BLOCKS.some(([open, close]) => text.includes(open) || text.includes(close))
+      || text.includes(PRIVATE_CHECKPOINT_MARKER)
+    );
+  });
+
+  if (!transportEnvelopePresent) return [...messages];
 
   for (const message of messages) {
     const text = textContent(message);
@@ -120,6 +129,14 @@ function extractCodexContext(text: string): unknown[] | undefined {
   }
 
   const json = extractBalancedJsonObject(text, cursor);
+  const afterJson = cursor + json.length;
+  let closeCursor = afterJson;
+  while (closeCursor < text.length && /\s/.test(text[closeCursor] ?? "")) closeCursor += 1;
+  if (!text.startsWith(CODEX_CONTEXT_CLOSE, closeCursor)) {
+    throw new ConversationalContextProjectionError(
+      "ChatGPT Web received an incomplete <codex_context_json> envelope.",
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
