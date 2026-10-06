@@ -51,6 +51,12 @@ describe("issue #79 security and observability hardening", () => {
     expect(descriptor).not.toContain("tool output");
   });
 
+  test("browser account binding uses authenticated session identity, not mutable storage-state hashing", () => {
+    const runtime = source("src/adapters/chatgpt-web/browser-worker.ts");
+    expect(runtime).toContain("detectChatGptAuthenticatedAccountIdentity(page)");
+    expect(runtime).not.toContain("accountIdentityFromStorageState(storageState)");
+  });
+
   test("runtime log sites do not contain known raw payload/error patterns", () => {
     const runtime = [
       source("src/adapters/chatgpt-web/index.ts"),
