@@ -6,7 +6,19 @@ import {
 } from "../src/conversation-projection";
 
 function user(content: string): RequestMessage {
-  return { role: "user", content } as unknown as RequestMessage;
+  return {
+    role: "user",
+    content: [{ type: "text", text: content }],
+  } as RequestMessage;
+}
+
+function textOf(message: RequestMessage): string {
+  const content = message.content;
+  if (!Array.isArray(content)) return String(content);
+  return content
+    .filter((block): block is { type: "text"; text: string } => block.type === "text")
+    .map(block => block.text)
+    .join("\n");
 }
 
 describe("conversational context projection", () => {
@@ -91,7 +103,7 @@ Objective:
     const projected = projectConversationalMessages([user(envelope)]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as unknown as { content: string }).content).toBe("User question");
+    expect(textOf(projected[0]!)).toBe("User question");
   });
 
   test("handles braces and transport-closing text inside JSON strings", () => {
@@ -103,7 +115,7 @@ Objective:
     const projected = projectConversationalMessages([user(envelope)]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as unknown as { content: string }).content).toBe(content);
+    expect(textOf(projected[0]!)).toBe(content);
   });
 
   test("fails closed on malformed transport instead of forwarding raw protocol text", () => {
@@ -126,7 +138,7 @@ Objective:
     )]);
 
     expect(projected).toHaveLength(1);
-    expect((projected[0] as unknown as { content: string }).content).toBe("Hola");
+    expect(textOf(projected[0]!)).toBe("Hola");
   });
 
   test("removes an unterminated internal block rather than leaking its remainder", () => {
@@ -140,9 +152,33 @@ Objective:
   });
 
   test("keeps clean non-envelope messages unchanged", () => {
-    const message = user("A normal user message with no internal markers.");
+    const message = user("  A normal user message with no internal markers.  \n");
     const projected = projectConversationalMessages([message]);
 
     expect(projected).toEqual([message]);
+  });
+
+  test("preserves non-envelope whitespace and roles without rewriting user content", () => {
+    const messages = [
+      user("  leading and trailing spaces  \n"),
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "  assistant text  " }],
+      },
+      {
+        role: "developer",
+        content: [{ type: "text", text: "developer content" }],
+      },
+    ] as unknown as RequestMessage[];
+
+    expect(projectConversationalMessages(messages)).toEqual(messages);
+  });
+
+  test("requires the closing codex context tag before accepting an envelope", () => {
+    expect(() =>
+      projectConversationalMessages([user(
+        "<codex_context_json>{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+      )]),
+    ).toThrow(ConversationalContextProjectionError);
   });
 });
