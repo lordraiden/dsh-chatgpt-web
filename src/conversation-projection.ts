@@ -38,24 +38,38 @@ export function projectConversationalMessages(
   messages: readonly RequestMessage[],
 ): RequestMessage[] {
   const projected: RequestMessage[] = [];
+  const transportEnvelopePresent = messages.some(message =>
+    textContent(message)?.includes(CODEX_CONTEXT_OPEN) === true,
+  );
 
   for (const message of messages) {
     const text = textContent(message);
+
+    if (text !== undefined) {
+      const embedded = extractCodexContext(text);
+      if (embedded !== undefined) {
+        projected.push(...projectEmbeddedMessages(embedded));
+        continue;
+      }
+
+      if (text.includes(CODEX_CONTEXT_OPEN) || text.includes(TRANSPORT_PROTOCOL_MARKER)) {
+        throw new ConversationalContextProjectionError(
+          "ChatGPT Web refused to forward an unparsed DSH transport envelope.",
+        );
+      }
+    }
+
+    if (transportEnvelopePresent) {
+      const role = (message as unknown as { role?: unknown }).role;
+      if (role !== "user" && role !== "assistant") continue;
+      const conversational = projectStandaloneConversationMessage(message);
+      if (conversational !== undefined) projected.push(conversational);
+      continue;
+    }
+
     if (text === undefined) {
       projected.push(message);
       continue;
-    }
-
-    const embedded = extractCodexContext(text);
-    if (embedded !== undefined) {
-      projected.push(...projectEmbeddedMessages(embedded));
-      continue;
-    }
-
-    if (text.includes(CODEX_CONTEXT_OPEN) || text.includes(TRANSPORT_PROTOCOL_MARKER)) {
-      throw new ConversationalContextProjectionError(
-        "ChatGPT Web refused to forward an unparsed DSH transport envelope.",
-      );
     }
 
     const sanitized = sanitizeStandaloneMessage(message);
@@ -180,6 +194,12 @@ function conversationalContent(content: unknown): string | unknown[] | undefined
   return blocks.length > 0 ? blocks : undefined;
 }
 
+function projectStandaloneConversationMessage(message: RequestMessage): RequestMessage | undefined {
+  const content = conversationalContent((message as unknown as { content?: unknown }).content);
+  if (content === undefined) return undefined;
+  return { ...(message as object), content } as RequestMessage;
+}
+
 function sanitizeStandaloneMessage(message: RequestMessage): RequestMessage | undefined {
   const content = (message as unknown as { content?: unknown }).content;
 
@@ -250,6 +270,6 @@ function isTextBlock(value: unknown): value is { type: "text"; text: string } {
   return value.type === "text" && typeof value.text === "string";
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
