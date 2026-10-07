@@ -495,6 +495,7 @@ export class ChatGptTurnSessions {
   private readonly conversationRetirements = new Map<string, Promise<void>>();
   private readonly conversationGenerations = new Map<string, number>();
   private readonly contextExhaustions = new Map<string, ChatGptContextExhaustionRecord>();
+  private readonly sentSystemFingerprints = new Map<string, string>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
@@ -549,6 +550,22 @@ export class ChatGptTurnSessions {
       throw new Error("ChatGPT conversation generation cannot move backwards");
     }
     this.conversationGenerations.set(conversationKey, generation);
+    this.pruneConversationGenerations();
+  }
+
+  /**
+   * Last system-block identity delivered to the physical ChatGPT conversation, if any.
+   * Absent (first turn, process restart, retired conversation) means the next
+   * continuation must carry the system block again — the safe direction.
+   */
+  sentSystemFingerprint(conversationKey: string): string | undefined {
+    return this.sentSystemFingerprints.get(conversationKey);
+  }
+
+  recordSentSystemFingerprint(conversationKey: string, fingerprint: string): void {
+    if (!conversationKey.trim()) throw new Error("ChatGPT system fingerprint requires a conversation key");
+    if (!fingerprint.trim()) throw new Error("ChatGPT system fingerprint is empty");
+    this.sentSystemFingerprints.set(conversationKey, fingerprint);
     this.pruneConversationGenerations();
   }
 
@@ -767,13 +784,19 @@ export class ChatGptTurnSessions {
     if (executionNamespace === undefined) {
       this.conversationHeads.clear();
       this.contextExhaustions.clear();
+      this.sentSystemFingerprints.clear();
     } else {
+      const clearedConversationKeys: string[] = [];
       for (const [key, session] of this.conversationHeads) {
-        if (session.ownerKey?.startsWith(`${executionNamespace}:`)) this.conversationHeads.delete(key);
+        if (session.ownerKey?.startsWith(`${executionNamespace}:`)) {
+          this.conversationHeads.delete(key);
+          clearedConversationKeys.push(key);
+        }
       }
       for (const key of this.contextExhaustions.keys()) {
         if (key.startsWith(`${executionNamespace}:`)) this.contextExhaustions.delete(key);
       }
+      for (const key of clearedConversationKeys) this.sentSystemFingerprints.delete(key);
     }
     return matches.length;
   }
@@ -833,11 +856,19 @@ export class ChatGptTurnSessions {
 
   private pruneConversationGenerations(): void {
     const activeConversationKeys = new Set(this.conversationHeads.keys());
-    if (this.conversationGenerations.size <= this.maxEntries) return;
-    for (const conversationKey of this.conversationGenerations.keys()) {
-      if (this.conversationGenerations.size <= this.maxEntries) break;
-      if (activeConversationKeys.has(conversationKey)) continue;
-      this.conversationGenerations.delete(conversationKey);
+    if (this.conversationGenerations.size > this.maxEntries) {
+      for (const conversationKey of this.conversationGenerations.keys()) {
+        if (this.conversationGenerations.size <= this.maxEntries) break;
+        if (activeConversationKeys.has(conversationKey)) continue;
+        this.conversationGenerations.delete(conversationKey);
+      }
+    }
+    if (this.sentSystemFingerprints.size > this.maxEntries) {
+      for (const conversationKey of this.sentSystemFingerprints.keys()) {
+        if (this.sentSystemFingerprints.size <= this.maxEntries) break;
+        if (activeConversationKeys.has(conversationKey)) continue;
+        this.sentSystemFingerprints.delete(conversationKey);
+      }
     }
   }
 

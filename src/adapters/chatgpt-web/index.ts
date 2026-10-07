@@ -28,7 +28,7 @@ import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface }
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { compileChatGptWebPrompt, compileRetainedChatGptWebContinuation, type CompiledChatGptWebPrompt } from "./prompt";
 import { projectCanonicalChatGptWebContext } from "./context-projection";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
@@ -64,6 +64,7 @@ import {
 } from "./compaction-handoff";
 import {
   chatGptConversationKey,
+  chatGptSystemFingerprint,
   retainedConversationResumeRequest,
 } from "./conversation-key";
 import {
@@ -339,18 +340,6 @@ function emitTextDeltas(deltas: string[], emit: (event: AdapterEvent) => void): 
   for (const text of deltas) emit({ type: "text_delta", text, phase: "final_answer" });
 }
 
-function emitReadOnlyContextWarning(
-  parsed: CodexParsedRequest,
-  capabilities: ChatGptWebCapabilities,
-  emit: (event: AdapterEvent) => void,
-): void {
-  const warning = chatGptReadOnlyContextWarning(parsed, capabilities);
-  if (!warning) return;
-  emit({ type: "assistant_boundary" });
-  emit({ type: "text_delta", text: warning, phase: "commentary" });
-  emit({ type: "assistant_boundary" });
-}
-
 function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => void): void {
   for (const event of events) emit(event);
 }
@@ -564,6 +553,39 @@ export function createChatGptWebAdapter(
           ? { experimentalMultipartParts }
           : {}),
       };
+    };
+    // Retained continuation (issue #171/#172): the physical ChatGPT conversation already
+    // carries the fixed transport contract, the DSH system block, and the complete prior
+    // history. When the system block is unchanged (fingerprint match), send only the delta
+    // plus the per-turn contracts. A missing or changed fingerprint re-installs the full
+    // contract and system, which is what a brand-new physical conversation (first turn,
+    // process restart, or a replayed replacement epoch) needs.
+    const compileResume = (input: CodexParsedRequest): CompiledChatGptWebPrompt => {
+      const systemUnchanged = conversationKey !== undefined
+        && chatGptTurnSessions.sentSystemFingerprint(conversationKey) === chatGptSystemFingerprint(input.context.systemPrompt);
+      if (systemUnchanged) {
+        const experimentalMultipartParts = experimentalBiggerContext
+          ? resolveBiggerContextMultipartParts(input, turnCapabilities)
+          : undefined;
+        return compileRetainedChatGptWebContinuation(input, {
+          captureLunaCheckpoint,
+          ...(experimentalMultipartParts !== undefined ? { experimentalMultipartParts } : {}),
+        });
+      }
+      return compileChatGptWebPrompt(input, turnCapabilities, undefined, compileOptionsFor(input));
+    };
+    // The system block is "delivered" only when the turn that carried it settles
+    // successfully; a failed turn never establishes the fingerprint, so the next
+    // turn re-sends the full contract (the safe direction).
+    const recordSentSystemFingerprint = (browser: Promise<string>): void => {
+      if (!retainConversation || !conversationKey) return;
+      void browser.then(
+        () => chatGptTurnSessions.recordSentSystemFingerprint(
+          conversationKey,
+          chatGptSystemFingerprint(checkpointInput.parsed.context.systemPrompt),
+        ),
+        () => {},
+      );
     };
     if (captureLunaCheckpoint) {
       console.info(
@@ -832,14 +854,10 @@ export function createChatGptWebAdapter(
           release: () => {},
         }),
         // A retained conversation (managed-chrome, issue #171) continues on the existing surface,
-        // so it compiles the continuation delta exactly like the tool-capable path.
+        // so it compiles the minimal continuation delta (issue #172) when the system block is
+        // unchanged, and re-installs the full contract otherwise.
         ...(resumeInput ? { prepareResume: async () => ({
-          ...compileChatGptWebPrompt(
-            resumeInput,
-            turnCapabilities,
-            undefined,
-            compileOptionsFor(resumeInput),
-          ),
+          ...compileResume(resumeInput),
           release: () => {},
         }) } : {}),
         ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
@@ -855,6 +873,7 @@ export function createChatGptWebAdapter(
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
       })), browserAbort);
+      recordSentSystemFingerprint(browserTurn.browser);
       return {
         mode: "read-only",
         capabilitySnapshot,
@@ -873,7 +892,7 @@ export function createChatGptWebAdapter(
     const externalProgress = new ChatGptExternalTurnProgress();
     let tokenSettled = false;
     let activeToken: string | undefined;
-    const prepareWith = async (input: CodexParsedRequest) => {
+    const prepareWith = async (input: CodexParsedRequest, isResume = false) => {
       const turnToken = activeToken ?? await broker.register(
         environment,
         timeoutMs === undefined ? undefined : timeoutMs + 60_000,
@@ -886,12 +905,11 @@ export function createChatGptWebAdapter(
         token.resolve(turnToken);
       }
       try {
-        const compiled = compileChatGptWebPrompt(
-          input,
-          turnCapabilities,
-          turnToken,
-          compileOptionsFor(input),
-        );
+        // A retained resume sends the minimal continuation delta (issue #172) when the
+        // system block is unchanged; the broker token is still registered for the turn.
+        const compiled = isResume
+          ? compileResume(input)
+          : compileChatGptWebPrompt(input, turnCapabilities, turnToken, compileOptionsFor(input));
         return { ...compiled, release: () => {} };
       } catch (error) {
         await broker.revoke(turnToken);
@@ -905,7 +923,7 @@ export function createChatGptWebAdapter(
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
       prepare: () => prepareWith(checkpointInput.parsed),
-      ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
+      ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput, true) } : {}),
       ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
@@ -930,6 +948,7 @@ export function createChatGptWebAdapter(
         token.reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+    recordSentSystemFingerprint(browserTurn.browser);
     return {
       mode: "tools",
       capabilitySnapshot,
@@ -1461,9 +1480,6 @@ export function createChatGptWebAdapter(
 
                 const traceTexts = trace.map(event => event.text);
                 session.appendRoundReasoning(roundKey, [...traceTexts, ...parsedThinking]);
-                if (replay.length === 0 && !parsed._compactionRequest) {
-                  emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
-                }
                 emitRoundBatch(buffer => emitTraceEvents(trace, buffer));
                 for (const thinking of parsedThinking) {
                   emitRoundBatch(buffer => buffer({ type: "thinking_delta", thinking }));
@@ -1584,9 +1600,6 @@ export function createChatGptWebAdapter(
                   emitRoundBatch(buffer => emitTextDeltas(textChunks, buffer));
                 }
               };
-              if (replay.length === 0 && !parsed._compactionRequest) {
-                emitRoundBatch(buffer => emitReadOnlyContextWarning(parsed, turnCapabilities, buffer));
-              }
               emitNewTrace(session.runtime.trace.drain());
               emitNewText(session.runtime.text.drain());
               const externalProgress = session.runtime.mode === "tools"

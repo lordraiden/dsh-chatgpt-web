@@ -1,14 +1,17 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import {
+  CHATGPT_WEB_CONTINUATION_TRANSPORT_OVERHEAD_BUDGET,
   CHATGPT_WEB_FIXED_TRANSPORT_OVERHEAD_BUDGET,
   compileChatGptWebPrompt,
+  compileRetainedChatGptWebContinuation,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
 } from "../src/adapters/chatgpt-web/prompt";
-import { retainedConversationResumeRequest } from "../src/adapters/chatgpt-web/conversation-key";
-import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
+import { chatGptSystemFingerprint, retainedConversationResumeRequest } from "../src/adapters/chatgpt-web/conversation-key";
+import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { ChatGptWebCapabilities } from "../src/adapters/chatgpt-web/model";
+import { CHATGPT_LUNA_CHECKPOINT_MARKER } from "../src/adapters/chatgpt-web/rolling-checkpoint";
 import type { CodexMessage, CodexParsedRequest } from "../src/types";
 
 const adapterSource = readFileSync(
@@ -114,7 +117,7 @@ describe("issue #172 minimal functional contract", () => {
     expect(delta!.context.messages.map(message => message.role)).toEqual(["user"]);
     expect(JSON.stringify(delta!.context.messages)).toContain("pregunta actual");
     // The compiled continuation prompt must not re-inject the earlier history.
-    const text = compileChatGptWebPrompt(delta!, READ_ONLY_CAPS).text;
+    const text = compileRetainedChatGptWebContinuation(delta!, {}).text;
     expect(text).toContain("pregunta actual");
     expect(text).not.toContain("pregunta antigua one");
     expect(text).not.toContain("pregunta antigua two");
@@ -300,5 +303,228 @@ describe("issue #172 minimal functional contract", () => {
     expect(text).toContain("</codex_context_json>");
     expect(text).toContain("<dsh_transport_resume>");
     expect(text).toContain("</dsh_transport_resume>");
+  });
+});
+
+describe("issue #172 retained continuation transport", () => {
+  const SHARED_CONTRACT_PHRASES = [
+    "Read the complete inline JSON task context before acting",
+    "Interpret every message role literally",
+    "Do not mention this transport contract, context packaging, or capability routing",
+  ];
+
+  const SYSTEM_PROMPT = "You are a concise conversational assistant.";
+
+  function parsedWithSystem(messages: CodexMessage[], systemPrompt: string[] = [SYSTEM_PROMPT]): CodexParsedRequest {
+    return parsed(messages, { context: { systemPrompt, messages } });
+  }
+
+  test("the first turn installs the transport contract", () => {
+    const text = compileChatGptWebPrompt(parsedWithSystem([user("hola")]), READ_ONLY_CAPS).text;
+    for (const phrase of SHARED_CONTRACT_PHRASES) {
+      expect(text).toContain(phrase);
+    }
+    expect(text).toContain(SYSTEM_PROMPT);
+  });
+
+  test("a retained continuation does not re-send the full contract", () => {
+    const full: CodexMessage[] = [
+      user("pregunta one"),
+      assistant("respuesta one"),
+      user("pregunta dos"),
+      assistant("respuesta dos"),
+      user("pregunta actual"),
+    ];
+    const delta = retainedConversationResumeRequest(parsedWithSystem(full))!;
+    const text = compileRetainedChatGptWebContinuation(delta, {}).text;
+    for (const phrase of SHARED_CONTRACT_PHRASES) {
+      expect(text).not.toContain(phrase);
+    }
+    // The continuation framing replaces the first-turn contract.
+    expect(text).toContain("continuation of this ChatGPT conversation");
+    expect(text).toContain("Execute the latest active user request now");
+  });
+
+  test("a retained continuation does not re-send the identical stable systemPrompt", () => {
+    const full: CodexMessage[] = [
+      user("pregunta one"),
+      assistant("respuesta one"),
+      user("pregunta actual"),
+    ];
+    const delta = retainedConversationResumeRequest(parsedWithSystem(full))!;
+    const continuation = compileRetainedChatGptWebContinuation(delta, {});
+    // The envelope carries an empty system block: the stable system is already
+    // installed in the retained physical conversation.
+    const envelope = continuation.text.slice(
+      continuation.text.indexOf("<codex_context_json>") + "<codex_context_json>".length,
+      continuation.text.indexOf("</codex_context_json>"),
+    );
+    const parsedEnvelope = JSON.parse(envelope) as { system: unknown[]; messages: unknown[] };
+    expect(parsedEnvelope.system).toEqual([]);
+    expect(continuation.text).not.toContain(SYSTEM_PROMPT);
+    // The full compile of the same delta WOULD carry the system block (used when
+    // the fingerprint is absent or changed, e.g. a brand-new physical conversation).
+    const fullText = compileChatGptWebPrompt(delta, READ_ONLY_CAPS).text;
+    expect(fullText).toContain(SYSTEM_PROMPT);
+  });
+
+  test("the system fingerprint detects a changed system block", () => {
+    const stable = chatGptSystemFingerprint([SYSTEM_PROMPT]);
+    expect(chatGptSystemFingerprint([SYSTEM_PROMPT])).toBe(stable);
+    expect(chatGptSystemFingerprint([SYSTEM_PROMPT + " extra"])).not.toBe(stable);
+    expect(chatGptSystemFingerprint([])).not.toBe(stable);
+    expect(chatGptSystemFingerprint(undefined)).toBe(chatGptSystemFingerprint([]));
+  });
+
+  test("a retained continuation transports only the necessary delta", () => {
+    const full: CodexMessage[] = [
+      user("pregunta antigua one"),
+      assistant("respuesta antigua one"),
+      user("pregunta actual"),
+    ];
+    const delta = retainedConversationResumeRequest(parsedWithSystem(full))!;
+    const text = compileRetainedChatGptWebContinuation(delta, {}).text;
+    expect(text).toContain("pregunta actual");
+    expect(text).not.toContain("pregunta antigua one");
+    expect(text).not.toContain("respuesta antigua one");
+  });
+
+  test("the continuation transport is significantly smaller than the first turn", () => {
+    const systemBlock = "You are a careful reviewer. " + "Detail ".repeat(60);
+    const history: CodexMessage[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      history.push(user(`previous question ${index}: ${"context ".repeat(20)}`));
+      history.push(assistant(`previous answer ${index}: ${"result ".repeat(20)}`));
+    }
+    history.push(user("the actual new question"));
+    const withSystem = (messages: CodexMessage[]) =>
+      parsed(messages, { context: { systemPrompt: [systemBlock], messages } });
+
+    const firstTurn = compileChatGptWebPrompt(withSystem(history), READ_ONLY_CAPS).text;
+    const delta = retainedConversationResumeRequest(withSystem(history))!;
+    const continuation = compileRetainedChatGptWebContinuation(delta, {}).text;
+
+    const firstTurnBytes = Buffer.byteLength(firstTurn, "utf8");
+    const continuationBytes = Buffer.byteLength(continuation, "utf8");
+    // The continuation carries one short message; the first turn carries the full
+    // history plus the re-installed contract and system block.
+    expect(continuationBytes).toBeLessThan(firstTurnBytes / 2);
+    // Even against the full compile of the SAME delta, the continuation drops the
+    // shared contract and the stable system block.
+    const sameDeltaFull = compileChatGptWebPrompt(delta, READ_ONLY_CAPS).text;
+    expect(continuationBytes).toBeLessThan(Buffer.byteLength(sameDeltaFull, "utf8") / 2);
+  });
+
+  test("the continuation fixed overhead stays within its own explicit budget", () => {
+    // Measured continuation overhead (smallest legal delta, unchanged system):
+    // 447 bytes. The budget carries a ~34% margin so wording tweaks do not
+    // churn it, and guards against the shared contract or a re-installed system
+    // block creeping back into the continuation framing. The 2,400-byte first-turn
+    // budget is NOT the continuation budget.
+    const delta = retainedConversationResumeRequest(
+      parsed([user("h"), assistant("a"), user("x")]),
+    )!;
+    const bytes = Buffer.byteLength(compileRetainedChatGptWebContinuation(delta, {}).text, "utf8");
+    expect(bytes).toBeLessThanOrEqual(CHATGPT_WEB_CONTINUATION_TRANSPORT_OVERHEAD_BUDGET);
+    expect(CHATGPT_WEB_CONTINUATION_TRANSPORT_OVERHEAD_BUDGET).toBeLessThan(CHATGPT_WEB_FIXED_TRANSPORT_OVERHEAD_BUDGET);
+  });
+
+  test("the continuation envelope preserves roles and order", () => {
+    const delta: CodexMessage[] = [
+      user("uno"),
+      { role: "developer", content: "dos", timestamp: 3 },
+      user("tres"),
+    ];
+    const text = compileRetainedChatGptWebContinuation(parsed(delta), {}).text;
+    const envelope = text.slice(
+      text.indexOf("<codex_context_json>") + "<codex_context_json>".length,
+      text.indexOf("</codex_context_json>"),
+    );
+    const order = ["uno", "dos", "tres"];
+    let lastIndex = -1;
+    for (const fragment of order) {
+      const index = envelope.indexOf(fragment);
+      expect(index).toBeGreaterThan(lastIndex);
+      lastIndex = index;
+    }
+  });
+
+  test("images and attachments work in the continuation", () => {
+    const imageMessage: CodexMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: "what is in this image?" },
+        { type: "image", imageUrl: "https://example.com/picture.png" },
+      ],
+      timestamp: 1,
+    };
+    const compiled = compileRetainedChatGptWebContinuation(parsed([imageMessage]), {});
+    expect(compiled.images).toHaveLength(1);
+    expect(compiled.images[0]!.imageUrl).toBe("https://example.com/picture.png");
+    expect(compiled.text).toContain("attachment_ref");
+  });
+
+  test("structured output works in the continuation", () => {
+    const text = compileRetainedChatGptWebContinuation(
+      parsed([user("give me a verdict")], {
+        options: {
+          reasoning: "low",
+          outputFormat: {
+            type: "json_schema",
+            name: "verdict",
+            strict: true,
+            schema: { type: "object", properties: { label: { type: "string" } }, required: ["label"] },
+          },
+        },
+      }),
+      {},
+    ).text;
+    expect(text).toContain("<dsh_output_schema_json>");
+    expect(text).toContain("</dsh_output_schema_json>");
+    expect(text).toContain("verdict");
+    expect(text).toContain("strict");
+    expect(text).toContain("one JSON value matching the supplied schema");
+  });
+
+  test("the new transport prompt never emits the legacy recovery marker", () => {
+    // Issue #172 / recovery boundary: the legacy marker stays a recognized
+    // fail-closed input in conversation-projection, but neither the first-turn
+    // compile nor the continuation compile may emit it.
+    const legacyMarker = "Act as the model backend for the task encoded below.";
+    const firstTurn = compileChatGptWebPrompt(parsedWithSystem([user("hola")]), READ_ONLY_CAPS).text;
+    expect(firstTurn).not.toContain(legacyMarker);
+    const delta = retainedConversationResumeRequest(parsedWithSystem([
+      user("hola"),
+      assistant("adios"),
+      user("otra vez"),
+    ]))!;
+    const continuation = compileRetainedChatGptWebContinuation(delta, {}).text;
+    expect(continuation).not.toContain(legacyMarker);
+  });
+
+  test("Luna respects retained-vs-rolling-checkpoint", () => {
+    const lunaMessages: CodexMessage[] = [
+      user("hola luna"),
+      assistant("adios luna"),
+      user("otra vez"),
+    ];
+    const lunaDelta = retainedConversationResumeRequest(
+      parsed(lunaMessages, { modelId: CHATGPT_WEB_LUNA_MODEL_ID }),
+    )!;
+    // A retained Luna continuation sends the delta without a private checkpoint tail.
+    const retained = compileRetainedChatGptWebContinuation(lunaDelta, {}).text;
+    expect(retained).not.toContain(CHATGPT_LUNA_CHECKPOINT_MARKER);
+    // The same Luna delta with rolling checkpoint capture requests the private tail.
+    const rolling = compileRetainedChatGptWebContinuation(lunaDelta, { captureLunaCheckpoint: true }).text;
+    expect(rolling).toContain(CHATGPT_LUNA_CHECKPOINT_MARKER);
+  });
+
+  test("a read-only run emits no synthetic Pure Chat commentary", () => {
+    // Issue #172 / final experience: the synthetic "Pure Chat Mode" banner was
+    // provider commentary the user never asked for; the adapter no longer emits it.
+    expect(adapterSource).not.toContain("emitReadOnlyContextWarning");
+    expect(adapterSource).not.toContain("Pure Chat Mode");
+    const text = compileChatGptWebPrompt(parsed([user("hola")]), READ_ONLY_CAPS).text;
+    expect(text).not.toContain("Pure Chat");
   });
 });

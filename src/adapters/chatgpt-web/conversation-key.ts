@@ -36,3 +36,14 @@ export function retainedConversationResumeRequest(
     },
   };
 }
+
+/**
+ * Stable identity of the DSH system block for one retained conversation.
+ *
+ * A retained continuation omits the system block entirely while this identity
+ * matches the one last delivered to the physical ChatGPT conversation; a change
+ * propagates only the new complete block, never a full context rebuild.
+ */
+export function chatGptSystemFingerprint(systemPrompt?: readonly string[]): string {
+  return createHash("sha256").update(JSON.stringify(systemPrompt ?? [])).digest("hex");
+}
