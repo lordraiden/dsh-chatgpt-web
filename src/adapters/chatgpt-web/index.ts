@@ -65,6 +65,7 @@ import {
 import {
   chatGptConversationKey,
   chatGptSystemFingerprint,
+  isStableSystemContinuation,
   retainedConversationResumeRequest,
 } from "./conversation-key";
 import {
@@ -554,15 +555,26 @@ export function createChatGptWebAdapter(
           : {}),
       };
     };
-    // Retained continuation (issue #171/#172): the physical ChatGPT conversation already
-    // carries the fixed transport contract, the DSH system block, and the complete prior
-    // history. When the system block is unchanged (fingerprint match), send only the delta
-    // plus the per-turn contracts. A missing or changed fingerprint re-installs the full
-    // contract and system, which is what a brand-new physical conversation (first turn,
-    // process restart, or a replayed replacement epoch) needs.
+    // Retained continuation (issue #171/#172): the physical ChatGPT conversation
+    // already carries the fixed transport contract, the DSH system block, and the
+    // complete prior history. When the system block is unchanged IN THE CURRENT
+    // PHYSICAL GENERATION (fingerprint match), send only the delta plus the
+    // per-turn contracts. A missing, mismatched, or stale-generation fingerprint
+    // re-installs the full contract and system, which is what a brand-new
+    // physical conversation (first turn, process restart, or a replayed
+    // replacement epoch) needs.
+    //
+    // Identities kept apart: conversationKey (logical DSH chat, #170),
+    // conversationGeneration (physical epoch, #170/#171), and the system
+    // fingerprint (which system block was installed in that epoch).
     const compileResume = (input: CodexParsedRequest): CompiledChatGptWebPrompt => {
       const systemUnchanged = conversationKey !== undefined
-        && chatGptTurnSessions.sentSystemFingerprint(conversationKey) === chatGptSystemFingerprint(input.context.systemPrompt);
+        && isStableSystemContinuation(
+          chatGptTurnSessions,
+          conversationKey,
+          chatGptTurnSessions.conversationGeneration(conversationKey),
+          input.context.systemPrompt,
+        );
       if (systemUnchanged) {
         const experimentalMultipartParts = experimentalBiggerContext
           ? resolveBiggerContextMultipartParts(input, turnCapabilities)
@@ -576,14 +588,21 @@ export function createChatGptWebAdapter(
     };
     // The system block is "delivered" only when the turn that carried it settles
     // successfully; a failed turn never establishes the fingerprint, so the next
-    // turn re-sends the full contract (the safe direction).
+    // turn re-sends the full contract (the safe direction). The fingerprint is
+    // bound to the physical generation the system block was actually delivered
+    // to (read at settle time, so a mid-turn replacement epoch is captured): a
+    // later generation N+1 must not reuse a generation-N fingerprint.
     const recordSentSystemFingerprint = (browser: Promise<string>): void => {
       if (!retainConversation || !conversationKey) return;
       void browser.then(
-        () => chatGptTurnSessions.recordSentSystemFingerprint(
-          conversationKey,
-          chatGptSystemFingerprint(checkpointInput.parsed.context.systemPrompt),
-        ),
+        () => {
+          const key = conversationKey!;
+          chatGptTurnSessions.recordSentSystemFingerprint(
+            key,
+            chatGptTurnSessions.conversationGeneration(key),
+            chatGptSystemFingerprint(checkpointInput.parsed.context.systemPrompt),
+          );
+        },
         () => {},
       );
     };

@@ -41,9 +41,47 @@ export function retainedConversationResumeRequest(
  * Stable identity of the DSH system block for one retained conversation.
  *
  * A retained continuation omits the system block entirely while this identity
- * matches the one last delivered to the physical ChatGPT conversation; a change
- * propagates only the new complete block, never a full context rebuild.
+ * matches the one installed in the current physical generation; a change (or a
+ * new physical epoch) propagates only the new complete block, never a full
+ * context rebuild.
  */
 export function chatGptSystemFingerprint(systemPrompt?: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify(systemPrompt ?? [])).digest("hex");
+}
+
+/**
+ * Registry that remembers which system block was installed in a specific
+ * physical generation of a retained conversation. `ChatGptTurnSessions`
+ * satisfies this structurally; the adapter's resume orchestration and the
+ * deterministic tests share the same decision through this seam.
+ */
+export interface ChatGptSystemFingerprintStore {
+  sentSystemFingerprint(conversationKey: string, generation: number): string | undefined;
+}
+
+/**
+ * Decision for a retained continuation (issue #171/#172). True only when the
+ * CURRENT physical generation already has this exact system block installed:
+ *
+ * - no conversationKey → false (nothing to continue);
+ * - no fingerprint recorded for the current generation → false (full compile
+ *   re-installs the contract + system — the safe direction);
+ * - the current generation's recorded fingerprint differs → false (the system
+ *   block changed, so the full compile re-sends the new one);
+ * - the current generation's recorded fingerprint matches → true (minimal
+ *   continuation; the stable system block is omitted).
+ *
+ * A fingerprint recorded for generation N is never considered for generation
+ * N+1: a replacement physical epoch re-installs the system, so the stale
+ * fingerprint must not apply. This is the exact predicate the adapter's
+ * `compileResume` uses, exported for deterministic regression testing.
+ */
+export function isStableSystemContinuation(
+  store: ChatGptSystemFingerprintStore,
+  conversationKey: string | undefined,
+  generation: number,
+  systemPrompt: readonly string[] | undefined,
+): boolean {
+  if (conversationKey === undefined) return false;
+  return store.sentSystemFingerprint(conversationKey, generation) === chatGptSystemFingerprint(systemPrompt);
 }

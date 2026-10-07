@@ -40,12 +40,13 @@ export const CHATGPT_WEB_FIXED_TRANSPORT_OVERHEAD_BUDGET = 2_400;
  *
  * Measured as the UTF-8 byte length of a compiled continuation with the
  * smallest legal delta (one 1-character user message) and an unchanged system
- * block: no re-installed contract, no system block. Measured value:
- * 447 bytes — versus 1,933 bytes for the first-turn fixed contract, a 73.8%
- * reduction on a representative 200-char-delta/300-char-system payload. The
- * delta payload itself is variable and not bounded by this constant; the
- * budget guards against the shared contract or the stable system block
- * creeping back into the continuation framing.
+ * block: 447 bytes = the fixed continuation framing plus that minimal delta.
+ * The stable systemPrompt is NOT re-sent (it stays installed in the physical
+ * conversation), so those 447 bytes contain no system block. Versus the
+ * 1,933-byte first-turn fixed contract, that is a 76.9% reduction. The delta
+ * payload itself is variable and not bounded by this constant; the budget
+ * guards against the shared contract or the stable system block creeping back
+ * into the continuation framing.
  */
 export const CHATGPT_WEB_CONTINUATION_TRANSPORT_OVERHEAD_BUDGET = 600;
 

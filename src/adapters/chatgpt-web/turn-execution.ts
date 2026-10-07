@@ -495,7 +495,7 @@ export class ChatGptTurnSessions {
   private readonly conversationRetirements = new Map<string, Promise<void>>();
   private readonly conversationGenerations = new Map<string, number>();
   private readonly contextExhaustions = new Map<string, ChatGptContextExhaustionRecord>();
-  private readonly sentSystemFingerprints = new Map<string, string>();
+  private readonly sentSystemFingerprints = new Map<string, { generation: number; fingerprint: string }>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
@@ -554,18 +554,33 @@ export class ChatGptTurnSessions {
   }
 
   /**
-   * Last system-block identity delivered to the physical ChatGPT conversation, if any.
-   * Absent (first turn, process restart, retired conversation) means the next
-   * continuation must carry the system block again — the safe direction.
+   * The system-block identity installed in the EXACT physical generation of this
+   * conversation, if any.
+   *
+   * Three distinct identities are deliberately kept apart and never conflated:
+   * - `conversationKey` = the stable logical DSH chat identity (issue #170);
+   * - `generation` = the physical ChatGPT Web conversation epoch (a replay or
+   *   replacement surface bumps it; issue #170/#171);
+   * - the fingerprint = which DSH system block was installed in THAT epoch.
+   *
+   * Returns undefined when no fingerprint was recorded for the given
+   * generation. A fingerprint recorded for generation N is never considered
+   * valid for generation N+1: a new physical epoch re-installs the system, so
+   * the caller falls back to the full compile (the safe direction).
    */
-  sentSystemFingerprint(conversationKey: string): string | undefined {
-    return this.sentSystemFingerprints.get(conversationKey);
+  sentSystemFingerprint(conversationKey: string, generation: number): string | undefined {
+    const recorded = this.sentSystemFingerprints.get(conversationKey);
+    if (!recorded || recorded.generation !== generation) return undefined;
+    return recorded.fingerprint;
   }
 
-  recordSentSystemFingerprint(conversationKey: string, fingerprint: string): void {
+  recordSentSystemFingerprint(conversationKey: string, generation: number, fingerprint: string): void {
     if (!conversationKey.trim()) throw new Error("ChatGPT system fingerprint requires a conversation key");
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new Error("ChatGPT system fingerprint requires a positive safe generation");
+    }
     if (!fingerprint.trim()) throw new Error("ChatGPT system fingerprint is empty");
-    this.sentSystemFingerprints.set(conversationKey, fingerprint);
+    this.sentSystemFingerprints.set(conversationKey, { generation, fingerprint });
     this.pruneConversationGenerations();
   }
 
