@@ -74,6 +74,15 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
    * state beyond the physical creation itself.
    */
   private readonly pendingCreates = new Set<string>();
+  /**
+   * Lost surfaces, per key. When a retained page dies the key is tombstoned:
+   * every later acquire fails with RetainedSurfaceLostError until an explicit
+   * `reset` restores the key. This is the explicit continuity-loss policy for
+   * issue #171 — a lost surface never degrades into a silently created new
+   * conversation. The tombstone records only that continuity is broken, not
+   * what happened; it is not a journal.
+   */
+  private readonly lostSurfaces = new Set<string>();
 
   get size(): number {
     return this.surfaces.size;
@@ -83,21 +92,38 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
     return this.surfaces.has(conversationKey);
   }
 
+  /** True when the key's continuity is broken until an explicit reset. */
+  isLost(conversationKey: string): boolean {
+    return this.lostSurfaces.has(conversationKey);
+  }
+
+  /**
+   * Explicit recovery action for a lost key: continuity may start again. The
+   * only way to clear a tombstone; there is no implicit fallback.
+   */
+  reset(conversationKey: string): void {
+    this.lostSurfaces.delete(conversationKey);
+  }
+
   /**
    * Acquire the retained surface for one turn. The surface stays busy until
    * `release` is called, so two turns of the same conversationKey can never
-   * share a page concurrently. A dead stored page is removed and reported as
-   * a continuity loss; it is never replaced silently.
+   * share a page concurrently. A dead stored page is tombstoned and reported
+   * as a continuity loss; it is never replaced silently.
    */
   async acquire(
     conversationKey: string,
     options: RetainedSurfaceAcquireOptions<P>,
   ): Promise<RetainedSurfaceAcquired<P>> {
+    if (this.lostSurfaces.has(conversationKey)) {
+      throw new RetainedSurfaceLostError(conversationKey);
+    }
     const existing = this.surfaces.get(conversationKey);
     if (existing) {
       if (existing.busy) throw new RetainedSurfaceBusyError(conversationKey);
       if (existing.page.isClosed()) {
         this.surfaces.delete(conversationKey);
+        this.lostSurfaces.add(conversationKey);
         throw new RetainedSurfaceLostError(conversationKey);
       }
       existing.busy = true;
@@ -139,10 +165,11 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
     await entry.page.close().catch(() => {});
   }
 
-  /** Shutdown path: release every retained surface so no page is orphaned. */
+  /** Shutdown path: release every retained surface and clear every tombstone. */
   async closeAll(): Promise<void> {
     const entries = [...this.surfaces.values()];
     this.surfaces.clear();
+    this.lostSurfaces.clear();
     await Promise.all(entries.map(entry => entry.page.close().catch(() => {})));
   }
 }

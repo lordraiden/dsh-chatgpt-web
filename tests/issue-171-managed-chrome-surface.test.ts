@@ -7,6 +7,7 @@ import {
   RetainedSurfaceRegistry,
   type RetainedSurfacePage,
 } from "../src/adapters/chatgpt-web/retained-surface";
+import { chatGptEffortSelectionRequired } from "../src/adapters/chatgpt-web/browser-worker";
 
 const adapterSource = readFileSync(
   new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url),
@@ -84,7 +85,7 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     expect(page.closeCount).toBe(0);
   });
 
-  test("a lost surface produces an explicit continuity error, not a silent new conversation", async () => {
+  test("a lost surface is explicit, tombstoned, and never degrades into a silent new conversation", async () => {
     const registry = new RetainedSurfaceRegistry();
     const page = fakePage("page-1");
     await registry.acquire("key-a", { required: false, create: async () => page });
@@ -95,8 +96,36 @@ describe("issue #171 managed-chrome retained surface registry", () => {
       required: false,
       create: async () => fakePage("page-fresh"),
     })).rejects.toBeInstanceOf(RetainedSurfaceLostError);
-    // The dead entry is gone; the key no longer maps to a (silent) replacement.
+    // The dead entry is gone and the key is tombstoned: continuity is broken.
     expect(registry.has("key-a")).toBe(false);
+    expect(registry.isLost("key-a")).toBe(true);
+    // A later turn of the same key fails explicitly — it must NOT create a new
+    // conversation silently, even with a create function available.
+    await expect(registry.acquire("key-a", {
+      required: false,
+      create: async () => fakePage("page-quiet"),
+    })).rejects.toBeInstanceOf(RetainedSurfaceLostError);
+    expect(registry.has("key-a")).toBe(false);
+    // Only an explicit reset restores the key; then a new continuity may start.
+    registry.reset("key-a");
+    const fresh = fakePage("page-reset");
+    const next = await registry.acquire("key-a", { required: false, create: async () => fresh });
+    expect(next.created).toBe(true);
+    expect(next.page).toBe(fresh);
+    expect(registry.isLost("key-a")).toBe(false);
+  });
+
+  test("shutdown clears retained surfaces and tombstones", async () => {
+    const registry = new RetainedSurfaceRegistry();
+    const page = fakePage("page-1");
+    await registry.acquire("key-a", { required: false, create: async () => page });
+    registry.release("key-a");
+    page.markClosed();
+    await expect(registry.acquire("key-a", { required: false, create: async () => fakePage("x") }))
+      .rejects.toBeInstanceOf(RetainedSurfaceLostError);
+    expect(registry.isLost("key-a")).toBe(true);
+    await registry.closeAll();
+    expect(registry.isLost("key-a")).toBe(false);
   });
 
   test("a required surface that does not exist fails explicitly", async () => {
@@ -105,6 +134,18 @@ describe("issue #171 managed-chrome retained surface registry", () => {
       required: true,
       create: async () => fakePage("page-1"),
     })).rejects.toBeInstanceOf(RetainedSurfaceMissingError);
+  });
+
+  test("a required surface on a tombstoned key fails as a continuity loss", async () => {
+    const registry = new RetainedSurfaceRegistry();
+    const page = fakePage("page-1");
+    await registry.acquire("key-a", { required: false, create: async () => page });
+    registry.release("key-a");
+    page.markClosed();
+    await expect(registry.acquire("key-a", { required: false, create: async () => fakePage("x") }))
+      .rejects.toBeInstanceOf(RetainedSurfaceLostError);
+    await expect(registry.acquire("key-a", { required: true, create: async () => fakePage("y") }))
+      .rejects.toBeInstanceOf(RetainedSurfaceLostError);
   });
 
   test("mutual exclusion: a second turn on the same key is rejected while busy", async () => {
@@ -166,16 +207,39 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     expect(b.page).toBe(pageB);
   });
 
-  test("a reused surface aborted during acquisition leaves no dead entry behind", async () => {
+  test("abort of a reused surface keeps the page open and the next turn reuses the same page", async () => {
     const registry = new RetainedSurfaceRegistry();
     const page = fakePage("page-1");
     await registry.acquire("key-a", { required: false, create: async () => page });
     registry.release("key-a");
-    // The page dies and the turn that would have reused it is aborted; the worker
-    // invalidates the key, so the next turn creates fresh instead of hitting a loss.
-    page.markClosed();
+    // Turn 2 acquires the existing surface (a continuation) ...
+    const acquired = await registry.acquire("key-a", { required: false, create: async () => fakePage("x") });
+    expect(acquired.created).toBe(false);
+    expect(acquired.page).toBe(page);
+    // ... and is aborted. The worker's abort path for a reused surface only releases.
+    registry.release("key-a");
+    // The page must be untouched: not closed, not removed.
+    expect(page.closeCount).toBe(0);
+    expect(page.isClosed()).toBe(false);
+    expect(registry.has("key-a")).toBe(true);
+    // The next turn reuses the exact same page (no new conversation).
+    const next = await registry.acquire("key-a", { required: false, create: async () => fakePage("y") });
+    expect(next.created).toBe(false);
+    expect(next.page).toBe(page);
+  });
+
+  test("abort of a created surface invalidates it so no orphaned page is left behind", async () => {
+    const registry = new RetainedSurfaceRegistry();
+    const page = fakePage("page-1");
+    const acquired = await registry.acquire("key-a", { required: false, create: async () => page });
+    expect(acquired.created).toBe(true);
+    // The turn is aborted before the surface is used. The worker's abort path for a
+    // created surface invalidates: the page is closed and the entry removed.
     await registry.invalidate("key-a");
+    expect(page.closeCount).toBe(1);
+    expect(page.isClosed()).toBe(true);
     expect(registry.has("key-a")).toBe(false);
+    // A later turn starts a fresh continuity (nothing was ever sent to ChatGPT).
     const fresh = fakePage("page-fresh");
     const next = await registry.acquire("key-a", { required: false, create: async () => fresh });
     expect(next.created).toBe(true);
@@ -210,6 +274,85 @@ describe("issue #171 managed-chrome retained surface registry", () => {
   });
 });
 
+describe("issue #171 physical reuse vs configuration reuse", () => {
+  test("a retained managed-chrome turn re-applies a changed model/effort configuration", () => {
+    // The worker passes configurationReuse=false for a managed-chrome retained surface, so
+    // effort selection runs whenever the turn's configuration differs from the surface's.
+    expect(chatGptEffortSelectionRequired(false, "high", "low")).toBe(true);
+    expect(chatGptEffortSelectionRequired(false, "low", "low")).toBe(true);
+    // A first turn (no reuse at all) always selects its configuration.
+    expect(chatGptEffortSelectionRequired(false, "high", "high")).toBe(true);
+  });
+
+  test("the Launcher lease keeps its current configuration-reuse semantics", () => {
+    // Launcher reuse with the same configuration skips selection (existing behavior).
+    expect(chatGptEffortSelectionRequired(true, "high", "high")).toBe(false);
+    // Launcher reuse with a different configuration still re-applies it (existing behavior).
+    expect(chatGptEffortSelectionRequired(true, "high", "low")).toBe(true);
+  });
+
+  test("a retained managed-chrome turn reuses the same physical page across turns", async () => {
+    // physicalReuse (registry) never creates a second page for the same conversationKey,
+    // no matter how the turn's configuration changes.
+    const registry = new RetainedSurfaceRegistry();
+    const page = fakePage("page-1");
+    const first = await registry.acquire("key-a", { required: false, create: async () => page });
+    expect(first.created).toBe(true);
+    registry.release("key-a");
+    const second = await registry.acquire("key-a", { required: false, create: async () => fakePage("x") });
+    expect(second.created).toBe(false);
+    expect(second.page).toBe(page);
+    registry.release("key-a");
+    const third = await registry.acquire("key-a", { required: false, create: async () => fakePage("y") });
+    expect(third.created).toBe(false);
+    expect(third.page).toBe(page);
+    expect(page.closeCount).toBe(0);
+  });
+
+  test("configurationReuse is derived from the Launcher lease only, never from managed-chrome retention", () => {
+    const configurationReuse = workerSource.match(/const configurationReuse = [\s\S]*?;/)?.[0] ?? "";
+    // Exactly the Launcher lease — a retained managed-chrome page is NOT a configuration reuse.
+    expect(configurationReuse).toContain("reuseConversation");
+    expect(configurationReuse).not.toContain("managedReuse");
+    const physicalReuse = workerSource.match(/const physicalReuse = [\s\S]*?;/)?.[0] ?? "";
+    expect(physicalReuse).toContain("reuseConversation || managedReuse");
+  });
+
+  test("effort selection is driven by configurationReuse, not by physical reuse", () => {
+    expect(workerSource).toContain("chatGptEffortSelectionRequired(\n        configurationReuse,");
+  });
+
+  test("root navigation and surface preparation are skipped for a physical continuation", () => {
+    expect(workerSource).toContain("if (!physicalReuse) {");
+    expect(workerSource).toContain("const prepare = physicalReuse ? turn.prepareResume : turn.prepare;");
+  });
+});
+
+describe("issue #171 send-boundary retention", () => {
+  test("a created surface is discarded only when the send never activated", () => {
+    // The finally block gates the discard on the send activation boundary, not on
+    // whole-turn completion: a post-completion housekeeping fault must not destroy it.
+    expect(workerSource).toContain("if (!sendActivated && retainedCreated && retainedPage && !retainedPage.isClosed()) {");
+    expect(workerSource).not.toContain("turnCompleted");
+  });
+
+  test("send activation and submission both mark the boundary", () => {
+    // The wrapped lifecycle records the boundary on both signals and forwards to the
+    // adapter's callbacks, reusing the existing submissionLifecycle architecture.
+    const lifecycle = workerSource.match(/const retainedSubmissionLifecycle = [\s\S]*?^\s{4}\};/m)?.[0] ?? "";
+    expect(lifecycle).toContain("onSendActivated");
+    expect(lifecycle).toContain("onSubmitted");
+    const activatedMarks = (lifecycle.match(/sendActivated = true;/g) ?? []).length;
+    expect(activatedMarks).toBeGreaterThanOrEqual(2);
+  });
+
+  test("both send paths route through the boundary-wrapping lifecycle", () => {
+    // Multipart stage sends and the final commit must both observe the boundary.
+    const sites = (workerSource.match(/retainedSubmissionLifecycle,/g) ?? []).length;
+    expect(sites).toBe(2);
+  });
+});
+
 describe("issue #171 worker and adapter wiring", () => {
   test("the read-only adapter path carries the retention identity to the transport", () => {
     // The normal (no-local-tools) path must pass the stable conversationKey and the
@@ -239,14 +382,6 @@ describe("issue #171 worker and adapter wiring", () => {
     expect(workerSource).toContain("!managedRetained) managedPage = page;");
   });
 
-  test("continuation skips root navigation and surface preparation", () => {
-    // The surface-preparation stage (which navigates to the ChatGPT root) runs only when
-    // the turn is NOT a continuation.
-    expect(workerSource).toContain("if (!effectiveReuse) {");
-    // A continuation takes the resume prompt, not the full prompt.
-    expect(workerSource).toContain("const prepare = effectiveReuse ? turn.prepareResume : turn.prepare;");
-  });
-
   test("a lost or busy retained surface surfaces an explicit continuity error", () => {
     expect(workerSource).toContain("if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError();");
     expect(workerSource).toContain("if (error instanceof RetainedSurfaceBusyError) throw chatGptRetainedSurfaceBusyError();");
@@ -261,9 +396,5 @@ describe("issue #171 worker and adapter wiring", () => {
     expect(workerSource).toContain("await this.retainedSurfaces.invalidate(turn.conversationKey!);");
     // A reused surface only clears the busy flag, preserving the prior conversation.
     expect(workerSource).toMatch(/if \(retained\.created\)[\s\S]*?invalidate[\s\S]*?else[\s\S]*?retainedSurfaces\.release/);
-  });
-
-  test("a created surface is only discarded when its turn did not complete", () => {
-    expect(workerSource).toContain("if (!turnCompleted && retainedCreated && retainedPage && !retainedPage.isClosed()) {");
   });
 });
