@@ -65,7 +65,7 @@ import {
 import {
   chatGptConversationKey,
   chatGptSystemFingerprint,
-  isStableSystemContinuation,
+  resolveChatGptResumeBranch,
   retainedConversationResumeRequest,
 } from "./conversation-key";
 import {
@@ -568,14 +568,16 @@ export function createChatGptWebAdapter(
     // conversationGeneration (physical epoch, #170/#171), and the system
     // fingerprint (which system block was installed in that epoch).
     const compileResume = (input: CodexParsedRequest): CompiledChatGptWebPrompt => {
-      const systemUnchanged = conversationKey !== undefined
-        && isStableSystemContinuation(
-          chatGptTurnSessions,
-          conversationKey,
-          chatGptTurnSessions.conversationGeneration(conversationKey),
-          input.context.systemPrompt,
-        );
-      if (systemUnchanged) {
+      // The branch decision is shared with the deterministic regression tests:
+      // one implementation of "which compile path" lives in
+      // conversation-key.ts (returns fullCompile for an undefined conversationKey).
+      const branch = resolveChatGptResumeBranch(
+        chatGptTurnSessions,
+        conversationKey,
+        conversationKey === undefined ? 1 : chatGptTurnSessions.conversationGeneration(conversationKey),
+        input.context.systemPrompt,
+      );
+      if (branch === "minimalContinuation") {
         const experimentalMultipartParts = experimentalBiggerContext
           ? resolveBiggerContextMultipartParts(input, turnCapabilities)
           : undefined;
@@ -586,12 +588,14 @@ export function createChatGptWebAdapter(
       }
       return compileChatGptWebPrompt(input, turnCapabilities, undefined, compileOptionsFor(input));
     };
-    // The system block is "delivered" only when the turn that carried it settles
-    // successfully; a failed turn never establishes the fingerprint, so the next
-    // turn re-sends the full contract (the safe direction). The fingerprint is
-    // bound to the physical generation the system block was actually delivered
-    // to (read at settle time, so a mid-turn replacement epoch is captured): a
-    // later generation N+1 must not reuse a generation-N fingerprint.
+    // The fingerprint is recorded ONLY after a successful settlement of the
+    // turn that carried the system block, and is associated with the physical
+    // generation that is current at that moment (replay serializes the retired
+    // generation's teardown before the replacement is created, so the recorded
+    // generation is the one the system block was delivered to). A failed turn
+    // never establishes the fingerprint, so the next turn re-sends the full
+    // contract (the safe direction); a later generation N+1 must not reuse a
+    // generation-N fingerprint.
     const recordSentSystemFingerprint = (browser: Promise<string>): void => {
       if (!retainConversation || !conversationKey) return;
       void browser.then(

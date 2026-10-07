@@ -85,3 +85,43 @@ export function isStableSystemContinuation(
   if (conversationKey === undefined) return false;
   return store.sentSystemFingerprint(conversationKey, generation) === chatGptSystemFingerprint(systemPrompt);
 }
+
+/**
+ * Which compile path a retained continuation uses (issue #171/#172):
+ *
+ * - `minimalContinuation` → `compileRetainedChatGptWebContinuation` (only the
+ *   delta; the fixed contract and the stable system block are NOT re-sent);
+ * - `fullCompile` → `compileChatGptWebPrompt` (re-installs the fixed contract,
+ *   the complete system block, and the full context).
+ */
+export type ChatGptResumeBranch = "minimalContinuation" | "fullCompile";
+
+/**
+ * The single branch-selection decision for a retained continuation.
+ *
+ * This is the exact decision the adapter's `compileResume` executes (via
+ * `isStableSystemContinuation`), extracted here so production and the
+ * deterministic regression tests share ONE implementation of the decision
+ * instead of the test re-stating the condition it protects. It is a pure
+ * function of its dependencies — conversationKey, the current physical
+ * generation, the system block, and the fingerprint store — and performs no
+ * compilation: the caller applies the returned branch to the real compile
+ * functions (which own the per-turn options).
+ *
+ * - no conversationKey, or no fingerprint recorded for the current generation,
+ *   or a mismatched fingerprint → `fullCompile` (the safe direction);
+ * - a matching fingerprint in the current generation → `minimalContinuation`.
+ *
+ * A fingerprint recorded for generation N is never considered for generation
+ * N+1 (see `isStableSystemContinuation`).
+ */
+export function resolveChatGptResumeBranch(
+  store: ChatGptSystemFingerprintStore,
+  conversationKey: string | undefined,
+  generation: number,
+  systemPrompt: readonly string[] | undefined,
+): ChatGptResumeBranch {
+  return isStableSystemContinuation(store, conversationKey, generation, systemPrompt)
+    ? "minimalContinuation"
+    : "fullCompile";
+}

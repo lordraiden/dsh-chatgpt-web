@@ -8,7 +8,12 @@ import {
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
 } from "../src/adapters/chatgpt-web/prompt";
-import { chatGptSystemFingerprint, isStableSystemContinuation, retainedConversationResumeRequest } from "../src/adapters/chatgpt-web/conversation-key";
+import {
+  chatGptSystemFingerprint,
+  resolveChatGptResumeBranch,
+  retainedConversationResumeRequest,
+  type ChatGptResumeBranch,
+} from "../src/adapters/chatgpt-web/conversation-key";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { ChatGptWebCapabilities } from "../src/adapters/chatgpt-web/model";
 import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
@@ -551,25 +556,26 @@ describe("issue #172 compileResume orchestration (generation-bound fingerprint)"
     )!;
   }
 
-  // Mirrors the adapter's compileResume decision exactly: the same
-  // isStableSystemContinuation predicate the adapter calls, then the real
-  // compile function for each branch. No ChatGPT Web, no string-only probing of
-  // an implementation detail — it exercises the real decision + real compiles.
-  function resumeLike(
+  // Executes the SAME branch decision the adapter's compileResume uses
+  // (resolveChatGptResumeBranch in conversation-key.ts), then applies the real
+  // compile function for the chosen branch. The decision is NOT re-stated here:
+  // the production function owns it, so a test can only diverge from production
+  // by changing the compile it feeds the result to — never the condition.
+  function resume(
     sessions: ChatGptTurnSessions,
     conversationKey: string,
     generation: number,
     input: CodexParsedRequest,
-  ): { systemUnchanged: boolean; text: string } {
-    const systemUnchanged = isStableSystemContinuation(
+  ): { branch: ChatGptResumeBranch; text: string } {
+    const branch = resolveChatGptResumeBranch(
       sessions,
       conversationKey,
       generation,
       input.context.systemPrompt,
     );
     return {
-      systemUnchanged,
-      text: systemUnchanged
+      branch,
+      text: branch === "minimalContinuation"
         ? compileRetainedChatGptWebContinuation(input, {}).text
         : compileChatGptWebPrompt(input, READ_ONLY_CAPS).text,
     };
@@ -578,8 +584,8 @@ describe("issue #172 compileResume orchestration (generation-bound fingerprint)"
   test("case A: no recorded fingerprint for the generation → full compile with contract + system", () => {
     const sessions = new ChatGptTurnSessions();
     const key = "conversation-a";
-    const { systemUnchanged, text } = resumeLike(sessions, key, 1, deltaParsed([SYSTEM]));
-    expect(systemUnchanged).toBe(false);
+    const { branch, text } = resume(sessions, key, 1, deltaParsed([SYSTEM]));
+    expect(branch).toBe("fullCompile");
     for (const phrase of CONTRACT_PHRASES) expect(text).toContain(phrase);
     expect(text).toContain(SYSTEM);
     expect(text).toContain("pregunta actual");
@@ -589,8 +595,8 @@ describe("issue #172 compileResume orchestration (generation-bound fingerprint)"
     const sessions = new ChatGptTurnSessions();
     const key = "conversation-b";
     sessions.recordSentSystemFingerprint(key, 1, chatGptSystemFingerprint([SYSTEM]));
-    const { systemUnchanged, text } = resumeLike(sessions, key, 1, deltaParsed([SYSTEM]));
-    expect(systemUnchanged).toBe(true);
+    const { branch, text } = resume(sessions, key, 1, deltaParsed([SYSTEM]));
+    expect(branch).toBe("minimalContinuation");
     for (const phrase of CONTRACT_PHRASES) expect(text).not.toContain(phrase);
     expect(text).not.toContain(SYSTEM);
     // Only the delta + minimal framing + the per-turn resume marker remain.
@@ -603,8 +609,8 @@ describe("issue #172 compileResume orchestration (generation-bound fingerprint)"
     const sessions = new ChatGptTurnSessions();
     const key = "conversation-c";
     sessions.recordSentSystemFingerprint(key, 1, chatGptSystemFingerprint([SYSTEM]));
-    const { systemUnchanged, text } = resumeLike(sessions, key, 1, deltaParsed([NEW_SYSTEM]));
-    expect(systemUnchanged).toBe(false);
+    const { branch, text } = resume(sessions, key, 1, deltaParsed([NEW_SYSTEM]));
+    expect(branch).toBe("fullCompile");
     for (const phrase of CONTRACT_PHRASES) expect(text).toContain(phrase);
     expect(text).toContain(NEW_SYSTEM);
     expect(text).not.toContain(SYSTEM);
@@ -626,28 +632,29 @@ describe("issue #172 compileResume orchestration (generation-bound fingerprint)"
       );
     });
     expect(sessions.sentSystemFingerprint(key, generation)).toBeUndefined();
-    // Next turn: the fingerprint is still absent → full compile.
-    const { systemUnchanged, text } = resumeLike(sessions, key, generation, deltaParsed([SYSTEM]));
-    expect(systemUnchanged).toBe(false);
+    // Next turn: the fingerprint is still absent → the production decision
+    // picks the full compile.
+    const { branch, text } = resume(sessions, key, generation, deltaParsed([SYSTEM]));
+    expect(branch).toBe("fullCompile");
     for (const phrase of CONTRACT_PHRASES) expect(text).toContain(phrase);
     expect(text).toContain(SYSTEM);
   });
 
-  test("a fingerprint recorded for generation N is never valid for generation N+1", () => {
+  test("case E: a fingerprint recorded for generation N is never valid for N+1; only N+1's own settled fingerprint is", () => {
     const sessions = new ChatGptTurnSessions();
     const key = "conversation-gen";
     sessions.recordSentSystemFingerprint(key, 1, chatGptSystemFingerprint([SYSTEM]));
-    // Same generation → valid.
+    // Same generation → valid (minimal continuation).
     expect(sessions.sentSystemFingerprint(key, 1)).toBe(chatGptSystemFingerprint([SYSTEM]));
-    expect(isStableSystemContinuation(sessions, key, 1, [SYSTEM])).toBe(true);
+    expect(resolveChatGptResumeBranch(sessions, key, 1, [SYSTEM])).toBe("minimalContinuation");
     // Replacement epoch (N+1) → the generation-1 fingerprint is NOT valid.
     expect(sessions.sentSystemFingerprint(key, 2)).toBeUndefined();
-    expect(isStableSystemContinuation(sessions, key, 2, [SYSTEM])).toBe(false);
-    // A system delivered to generation 2 settles → re-bound to generation 2;
+    expect(resolveChatGptResumeBranch(sessions, key, 2, [SYSTEM])).toBe("fullCompile");
+    // A system delivered to generation 2 settles → bound to generation 2;
     // generation 1 no longer reports a fingerprint.
     sessions.recordSentSystemFingerprint(key, 2, chatGptSystemFingerprint([SYSTEM]));
     expect(sessions.sentSystemFingerprint(key, 1)).toBeUndefined();
     expect(sessions.sentSystemFingerprint(key, 2)).toBe(chatGptSystemFingerprint([SYSTEM]));
-    expect(isStableSystemContinuation(sessions, key, 2, [SYSTEM])).toBe(true);
+    expect(resolveChatGptResumeBranch(sessions, key, 2, [SYSTEM])).toBe("minimalContinuation");
   });
 });
