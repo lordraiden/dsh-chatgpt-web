@@ -69,6 +69,40 @@ export function chatGptRetainedConversationUnavailableError(): ChatGptWebAdapter
   );
 }
 
+export const CHATGPT_RETAINED_SURFACE_LOST_CODE = "retained_surface_lost";
+
+/**
+ * A previously retained managed-chrome surface died, so the visible ChatGPT
+ * conversation can no longer be continued. This is an explicit continuity
+ * failure: the turn must not fall back to a silently created new conversation.
+ */
+export function chatGptRetainedSurfaceLostError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "The retained ChatGPT Web conversation was lost and can no longer be continued.",
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: CHATGPT_RETAINED_SURFACE_LOST_CODE,
+      retryable: false,
+    },
+  );
+}
+
+export const CHATGPT_RETAINED_SURFACE_BUSY_CODE = "retained_surface_busy";
+
+/** Two turns of the same DSH chat raced for the one retained managed-chrome surface. */
+export function chatGptRetainedSurfaceBusyError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "Another turn is already using this ChatGPT Web conversation; concurrent turns of one chat are not allowed.",
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: CHATGPT_RETAINED_SURFACE_BUSY_CODE,
+      retryable: false,
+    },
+  );
+}
+
 /**
  * The Temporary Chat surface rehydrated the conversation mid-turn ("Loading chats" / "Loading
  * profile"), so the already-sent prompt and its in-flight generation were lost to a page reload.
