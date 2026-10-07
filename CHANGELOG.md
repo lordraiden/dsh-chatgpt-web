@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.15
+
+- retain the managed-Chrome ChatGPT Web surface across turns of the same DSH conversation.
+- minimize retained ChatGPT Web continuation transport to the newest DSH delta instead of replaying the fixed contract and stable system prompt.
+- bind the installed system fingerprint to the physical conversation generation so replacements safely reinstall the system contract.
+- remove the ChatGPT Web bridge tool transport contract and synthetic Pure Chat commentary from normal turns.
+- preserve native/OAuth/Codex tool infrastructure separately from the ChatGPT Web prompt transport.
+
 ## 1.0.14
 
 - declare compatibility with the current DSH `0.2.1-alpha.1` LLM peer runtime.
