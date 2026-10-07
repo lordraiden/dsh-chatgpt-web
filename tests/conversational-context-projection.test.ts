@@ -180,6 +180,45 @@ Objective:
     expect(textOf(projected[0]!)).toBe("prueba de contexto enviado");
   });
 
+  test("keeps system-role messages (persona prefix) in sanitized transport mode", () => {
+    const projected = projectConversationalMessages([
+      {
+        role: "system",
+        content: [{ type: "text", text: "You are a helpful software engineer assistant." }],
+      } as unknown as RequestMessage,
+      user("<hindsight_memory>internal memory</hindsight_memory>"),
+      user("Time sampled while preparing turn 1, step 1: 2026-10-06T12:29:05+02:00[Europe/Madrid]"),
+      user("hola"),
+    ]);
+
+    expect(projected.map(message => message.role)).toEqual(["system", "user"]);
+    expect(textOf(projected[0]!)).toBe("You are a helpful software engineer assistant.");
+    expect(textOf(projected[1]!)).toBe("hola");
+  });
+
+  test("strips the Aegis routing bootstrap from user messages", () => {
+    const projected = projectConversationalMessages([
+      user("otra vez?"),
+      user(
+        "<AEGIS_DSH_ROUTING_BOOTSTRAP>\nYou have Aegis.\n\n**ROUTING CONTRACT (this lifecycle):** stay on the fast path.\n</AEGIS_DSH_ROUTING_BOOTSTRAP>",
+      ),
+    ]);
+
+    expect(projected).toHaveLength(1);
+    expect(textOf(projected[0]!)).toBe("otra vez?");
+    expect(JSON.stringify(projected)).not.toContain("AEGIS");
+  });
+
+  test("removes an unterminated Aegis bootstrap block rather than leaking its remainder", () => {
+    const projected = projectConversationalMessages([
+      user("Hola\n<AEGIS_DSH_ROUTING_BOOTSTRAP>You have Aegis. never closed"),
+    ]);
+
+    expect(projected).toHaveLength(1);
+    expect(textOf(projected[0]!)).toBe("Hola");
+    expect(JSON.stringify(projected)).not.toContain("never closed");
+  });
+
   test("preserves clean user and assistant history around standalone injected context", () => {
     const projected = projectConversationalMessages([
       user("first user message"),

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sanitizeConversationText } from "../../conversation-projection";
 import { type CodexMessage, type CodexParsedRequest } from "../../types";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
@@ -15,17 +16,20 @@ import {
 export type { ChatGptWebPromptImage } from "./context-projection";
 
 /**
- * Explicit, stable budget for the FIXED transport contract (issue #172).
+ * Explicit, stable budget for the FIXED transport contract (issue #172) used
+ * by the NON-retained routes (read-only turns without physical retention,
+ * Zero Risk, compaction).
  *
  * Measured as the UTF-8 byte length of a compiled prompt with an empty DSH
  * context: no system prompt, no messages, no output schema. Measured value:
  * 1,933 bytes against a 2,400-byte budget — a margin of 467 bytes. The
- * contract text is identical across every in-scope route (read-only normal
- * and first turn); the retained continuation uses its own smaller budget
- * (see `CHATGPT_WEB_CONTINUATION_TRANSPORT_OVERHEAD_BUDGET`) because the
- * contract is already installed in the physical conversation. The bridge's
- * local-tool capability contract is out of scope, so it no longer adds
- * contract bytes here.
+ * contract text is identical across every in-scope route. Retained routes
+ * (tools, Luna with identity) no longer use this envelope at all: they send
+ * plain composer text (`compileRetainedChatGptWebInstall` /
+ * `compileRetainedChatGptWebContinuation`), whose fixed overhead is zero —
+ * the regression tests assert the exact composer text instead of a byte
+ * budget. The bridge's local-tool capability contract is out of scope, so it
+ * no longer adds contract bytes here.
  *
  * The budget guards against a narrative contract of hundreds of lines
  * reappearing; the 467-byte margin keeps ordinary wording tweaks from
@@ -33,22 +37,6 @@ export type { ChatGptWebPromptImage } from "./context-projection";
  * would cost.
  */
 export const CHATGPT_WEB_FIXED_TRANSPORT_OVERHEAD_BUDGET = 2_400;
-
-/**
- * Explicit, stable budget for the FIXED overhead of the minimal retained
- * continuation transport (issue #172).
- *
- * Measured as the UTF-8 byte length of a compiled continuation with the
- * smallest legal delta (one 1-character user message) and an unchanged system
- * block: 447 bytes = the fixed continuation framing plus that minimal delta.
- * The stable systemPrompt is NOT re-sent (it stays installed in the physical
- * conversation), so those 447 bytes contain no system block. Versus the
- * 1,933-byte first-turn fixed contract, that is a 76.9% reduction. The delta
- * payload itself is variable and not bounded by this constant; the budget
- * guards against the shared contract or the stable system block creeping back
- * into the continuation framing.
- */
-export const CHATGPT_WEB_CONTINUATION_TRANSPORT_OVERHEAD_BUDGET = 600;
 
 export interface CompiledChatGptWebPrompt {
   text: string;
@@ -237,15 +225,155 @@ export interface CompileRetainedContinuationOptions {
 }
 
 /**
- * Minimal transport for a retained continuation (issue #171/#172): the physical
- * ChatGPT conversation already carries the fixed transport contract, the DSH
- * system block, and the complete prior history, so only the delta after the last
- * assistant reply is sent, plus the per-turn contracts (structured output, Luna
- * checkpoint tail) and the resume marker.
+ * New human content of a retained continuation (issue #171/#172): the delta
+ * after the last assistant reply, projected to composer text. Internal
+ * messages (agent_message, developer, tool_result) are dropped; every user
+ * message is sanitized with the shared transport-block/operational-line
+ * projection (Aegis bootstrap, Hindsight, environment, operational lines), so
+ * only genuine human conversational content survives. Images keep the existing
+ * per-turn attachment mechanism.
+ */
+export interface RetainedComposerDelta {
+  text: string;
+  images: ChatGptWebPromptImage[];
+}
+
+export function projectRetainedComposerDelta(messages: readonly CodexMessage[]): RetainedComposerDelta {
+  const parts: string[] = [];
+  const images: ChatGptWebPromptImage[] = [];
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    const textParts: string[] = [];
+    if (typeof message.content === "string") {
+      textParts.push(message.content);
+    } else {
+      for (const part of message.content) {
+        if (part.type === "text") textParts.push(part.text);
+        else if (part.type === "image") {
+          images.push({
+            ref: `image_${images.length + 1}`,
+            imageUrl: part.imageUrl,
+            ...(part.detail ? { detail: part.detail } : {}),
+          });
+        }
+      }
+    }
+    const sanitized = textParts
+      .map(part => sanitizeConversationText(part))
+      .filter(part => part.length > 0)
+      .join("\n");
+    if (sanitized.length > 0) parts.push(sanitized);
+  }
+  return { text: parts.join("\n\n"), images: images.slice(0, CHATGPT_MAX_INPUT_IMAGES) };
+}
+
+/**
+ * Composer transport for the first turn of a retained conversation (issue
+ * #171/#172, round 4): the physical ChatGPT conversation does not exist yet,
+ * so the composer receives, as plain text — no JSON envelope, no transport
+ * contract, no resume marker — the effective system prompt (the profile
+ * persona prefix), the workspace reference, and the current human message.
+ * The physical conversation keeps everything sent from here on, so later
+ * turns send only their new human content
+ * (`compileRetainedChatGptWebContinuation`).
  *
- * The system block is carried as an empty array when it is unchanged; a change
- * is detected by the caller through `chatGptSystemFingerprint` and falls back to
- * the full compile, which re-sends the complete system block.
+ * A restart (the turn that follows a failed install, or a replayed
+ * replacement epoch) projects the DSH history into `User:`/`Assistant:`
+ * lines so the re-anchored conversation stays deterministic.
+ */
+export function compileRetainedChatGptWebInstall(
+  parsed: CodexParsedRequest,
+  options: CompileRetainedContinuationOptions,
+): CompiledChatGptWebPrompt {
+  if (parsed._compactionRequest) {
+    throw new Error("A compaction request cannot use the retained composer install");
+  }
+  const multipartParts = options.experimentalMultipartParts;
+  if (multipartParts !== undefined && multipartParts !== 2 && multipartParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
+    throw new Error("Bigger Context requires two or three multipart stages");
+  }
+  const multipartEnabled = multipartParts !== undefined;
+  if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+    throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
+  }
+  const system = (parsed.context.systemPrompt ?? [])
+    .map(part => sanitizeConversationText(part))
+    .filter(part => part.length > 0);
+  const workspace = parsed._dshContext?.environment?.cwd;
+  const humanMessages: Array<{ role: "user" | "assistant"; text: string }> = [];
+  const images: ChatGptWebPromptImage[] = [];
+  for (const message of parsed.context.messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    const textParts: string[] = [];
+    if (typeof message.content === "string") {
+      textParts.push(message.content);
+    } else {
+      for (const part of message.content) {
+        if (part.type === "text") textParts.push(part.text);
+        else if (part.type === "image" && message.role === "user") {
+          images.push({
+            ref: `image_${images.length + 1}`,
+            imageUrl: part.imageUrl,
+            ...(part.detail ? { detail: part.detail } : {}),
+          });
+        }
+      }
+    }
+    const sanitized = textParts
+      .map(part => sanitizeConversationText(part))
+      .filter(part => part.length > 0)
+      .join("\n");
+    if (sanitized.length > 0) humanMessages.push({ role: message.role, text: sanitized });
+  }
+  if (humanMessages.length === 0) {
+    throw new Error("A retained composer install must carry at least one human message");
+  }
+  const body = humanMessages.length === 1
+    ? [humanMessages[0]!.text]
+    : humanMessages.map(entry => `${entry.role === "user" ? "User" : "Assistant"}: ${entry.text}`);
+  const header = [
+    ...system,
+    ...(workspace ? [`Working workspace: ${workspace}`] : []),
+  ];
+  if (multipartEnabled) {
+    const records: MultipartContextRecord[] = [
+      ...system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
+      ...humanMessages.map((entry, message_index) => ({
+        kind: "message" as const,
+        message_index,
+        message: { role: entry.role, content: [{ type: "text", text: entry.text }] },
+      })),
+    ];
+    const multipart: ChatGptWebMultipartPrompt = {
+      parts: partitionMultipartContext(records, multipartParts!),
+      commit: [
+        ...(workspace ? [`Working workspace: ${workspace}`] : []),
+        "The staged JSON records are this conversation's system and prior messages; the complete earlier history is already in this conversation. Act on the latest user message.",
+      ].join("\n"),
+    };
+    return { text: multipart.commit, images: images.slice(0, CHATGPT_MAX_INPUT_IMAGES), multipart };
+  }
+  console.info("[chatgpt-web] install: systemItems=" + system.length + ", workspace=" + (workspace ?? "none")
+    + ", humanMessages=" + humanMessages.length + " (" + body.join("").length + " chars)");
+  return {
+    text: [...header, ...(header.length > 0 ? [""] : []), ...body].join("\n"),
+    images: images.slice(0, CHATGPT_MAX_INPUT_IMAGES),
+  };
+}
+
+/**
+ * Composer transport for a retained continuation (issue #171/#172, round 4):
+ * the physical ChatGPT conversation already carries the prefix, the workspace
+ * reference, and the complete prior history, so the composer receives ONLY
+ * the new human content — plain text, no JSON envelope, no transport
+ * contract, no resume marker — plus the per-turn contracts (verbosity,
+ * structured output, Luna checkpoint tail) when the turn needs them.
+ *
+ * The prefix is frozen per physical conversation: a system-block change does
+ * not re-install anything here (the caller detects it through
+ * `chatGptSystemFingerprint` and logs the frozen prefix). A delta that
+ * sanitizes to no human content throws; the caller falls back to the full
+ * envelope compile, which is the safe direction.
  */
 export function compileRetainedChatGptWebContinuation(
   parsed: CodexParsedRequest,
@@ -266,69 +394,44 @@ export function compileRetainedChatGptWebContinuation(
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
   }
-  const sourceMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
-  if (sourceMessages.length === 0) {
-    throw new Error("A retained continuation must carry at least one delta message");
+  const delta = projectRetainedComposerDelta(parsed.context.messages);
+  if (delta.text.length === 0) {
+    throw new Error("A retained continuation delta must carry human content; the caller falls back to the full envelope compile");
   }
-  const continuationFraming = multipartEnabled
-    ? "The staged JSON task context is a continuation of this ChatGPT conversation: it carries only the newest task messages, and the complete earlier history is already in this conversation."
-    : "The inline JSON task context is a continuation of this ChatGPT conversation: it carries only the newest task messages, and the complete earlier history is already in this conversation.";
   const outputControlContract = outputControlContractFor(parsed);
   const checkpointContract = checkpointContractFor(captureLunaCheckpoint);
   const answerContract = captureLunaCheckpoint
     ? "Return the complete answer, then the required private checkpoint tail."
-    : "Return only the final answer.";
-  const transportResume = [
-    "<dsh_transport_resume>",
-    "The task context is complete. Execute the latest active user request now.",
-    "</dsh_transport_resume>",
-  ];
-  const build = (transportContext: CanonicalChatGptWebContext): CompiledChatGptWebPrompt => {
-    const images = [...transportContext.images];
-    const messages = transportContext.messages;
-    if (multipartEnabled) {
-      const records: MultipartContextRecord[] = [
-        ...transportContext.system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
-        ...messages.map((message, message_index) => ({
-          kind: "message" as const,
-          message_index,
-          message,
-        })),
-      ];
-      const multipart: ChatGptWebMultipartPrompt = {
-        parts: partitionMultipartContext(records, multipartParts!),
-        commit: [
-          continuationFraming,
-          ...outputControlContract,
-          ...checkpointContract,
-          answerContract,
-          ...transportResume,
-        ].join("\n"),
-      };
-      return { text: multipart.commit, images, multipart };
-    }
-    const envelopeJson = serializeCanonicalChatGptWebContext(transportContext);
-    return {
-      text: [
-        continuationFraming,
+    : "";
+  if (multipartEnabled) {
+    const records: MultipartContextRecord[] = parsed.context.messages
+      .filter(message => message.role === "user")
+      .map((message, message_index) => ({
+        kind: "message" as const,
+        message_index,
+        message: { role: "user" as const, content: message.content, timestamp: message.timestamp },
+      }));
+    const multipart: ChatGptWebMultipartPrompt = {
+      parts: partitionMultipartContext(records, multipartParts!),
+      commit: [
+        "The staged JSON records are the newest user messages of this ChatGPT conversation; the complete earlier history is already in this conversation.",
         ...outputControlContract,
         ...checkpointContract,
-        answerContract,
-        "<codex_context_json>",
-        envelopeJson,
-        "</codex_context_json>",
-        ...transportResume,
+        ...(answerContract ? [answerContract] : []),
       ].join("\n"),
-      images,
     };
+    return { text: multipart.commit, images: delta.images, multipart };
+  }
+  console.info("[chatgpt-web] continuation: composer text (" + delta.text.length + " chars), images=" + delta.images.length);
+  return {
+    text: [
+      delta.text,
+      ...outputControlContract,
+      ...checkpointContract,
+      ...(answerContract ? [answerContract] : []),
+    ].join("\n"),
+    images: delta.images,
   };
-  // The system block is intentionally empty: it is already installed in the retained
-  // physical conversation and is only re-sent by the full compile on a fingerprint change.
-  const canonical = projectCanonicalChatGptWebContext([], sourceMessages);
-  const transportContext = applyChatGptWebImageBudget(canonical, CHATGPT_MAX_INPUT_IMAGES);
-  console.info("[chatgpt-web] continuation: systemUnchanged=true, messagesCount=" + transportContext.messages.length
-    + " (" + JSON.stringify(transportContext.messages).length + " chars)");
-  return build(transportContext);
 }
 
 function outputControlContractFor(parsed: CodexParsedRequest): string[] {

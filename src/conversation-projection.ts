@@ -8,6 +8,7 @@ const TRANSPORT_BLOCKS = [
   ["<hindsight_knowledge_refresh>", "</hindsight_knowledge_refresh>"],
   ["<environment_context>", "</environment_context>"],
   ["<dsh_transport_resume>", "</dsh_transport_resume>"],
+  ["<AEGIS_DSH_ROUTING_BOOTSTRAP>", "</AEGIS_DSH_ROUTING_BOOTSTRAP>"],
 ] as const;
 
 const OPERATIONAL_LINE_PREFIXES = [
@@ -89,15 +90,19 @@ export function projectConversationalMessages(
       // Ignore all outer DSH transport/history messages to avoid duplication.
     }
   } else {
-    // DSH can also expose its injected context as separate user-role messages
-    // instead of one canonical transport envelope. In that form, sanitize every
-    // user/assistant message independently while retaining clean conversation.
+    // DSH can also expose its injected context as separate messages instead of
+    // one canonical transport envelope. In that form, sanitize every
+    // user/assistant/system message independently while retaining clean
+    // conversation. System-role messages (the effective DSH system prompt, e.g.
+    // a persona prefix) must survive: the adapter maps them to the request's
+    // systemPrompt, and dropping them is what made persona prefixes invisible
+    // to the retained composer transport.
     for (const message of messages) {
       const text = textContent(message);
       if (text === undefined) continue;
 
       const role = (message as unknown as { role?: unknown }).role;
-      if (role !== "user" && role !== "assistant") continue;
+      if (role !== "user" && role !== "assistant" && role !== "system") continue;
 
       const sanitized = projectStandaloneConversationMessage(message);
       if (sanitized !== undefined) projected.push(sanitized);
@@ -240,7 +245,7 @@ function projectStandaloneConversationMessage(message: RequestMessage): RequestM
   if (content === undefined) return undefined;
 
   const role = (message as unknown as { role?: unknown }).role;
-  if (role !== "user" && role !== "assistant") return undefined;
+  if (role !== "user" && role !== "assistant" && role !== "system") return undefined;
 
   // In sanitized transport mode, retain only provider-facing conversation fields.
   // Durable DSH ids/sources and plugin-private metadata must not cross the
@@ -263,7 +268,14 @@ function containsOperationalLine(text: string): boolean {
   );
 }
 
-function sanitizeConversationText(text: string): string {
+/**
+ * Remove internal transport blocks (Hindsight, environment, Aegis bootstrap,
+ * transport resume markers), private checkpoint tails, and operational line
+ * prefixes from one piece of conversational text. Shared by the message
+ * projection and the retained composer transport so both strip the same
+ * blocks from the same source of truth.
+ */
+export function sanitizeConversationText(text: string): string {
   let sanitized = stripTaggedBlocks(text);
 
   if (sanitized.includes(PRIVATE_CHECKPOINT_MARKER)) {

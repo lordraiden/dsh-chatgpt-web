@@ -435,6 +435,45 @@ describe("native path does not enter the Responses server", () => {
     expect(second._dshContext?.turnId).not.toBe(parsed._dshContext?.turnId);
   });
 
+  test("the persona system prompt survives sanitization into context.systemPrompt (issue #172 round 4)", () => {
+    // DSH delivers the effective system prompt (e.g. a persona prefix) as a
+    // system-role message alongside injected operational user messages. When
+    // any sanitization marker is present, projectConversationalMessages runs
+    // its sanitize branch — which must KEEP system-role messages (dropping
+    // them is what made persona prefixes invisible: the transcript showed
+    // system:[]) and strip the Aegis bootstrap user message.
+    const request = {
+      ...userRequest("hola, dime si funcionas?"),
+      messages: [
+        {
+          role: "system",
+          content: [{ type: "text", text: "You are a helpful software engineer assistant." }],
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "Time sampled while preparing turn 1, step 1: 2026-10-07T18:00:00+02:00[Europe/Madrid]" }],
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "<AEGIS_DSH_ROUTING_BOOTSTRAP>You have Aegis.</AEGIS_DSH_ROUTING_BOOTSTRAP>" }],
+        },
+        {
+          role: "user",
+          id: "msg-1",
+          source: { kind: "user" },
+          content: [{ type: "text", text: "hola, dime si funcionas?" }],
+        },
+      ] as GenerateOptions["messages"],
+    };
+    const parsed = toCodexParsedRequest(request, providerConfigFixture());
+    expect(parsed.context.systemPrompt).toEqual(["You are a helpful software engineer assistant."]);
+    // Only the genuine human message reaches the conversation.
+    expect(parsed.context.messages).toHaveLength(1);
+    expect(parsed.context.messages[0]?.role).toBe("user");
+    expect(JSON.stringify(parsed.context.messages)).not.toContain("AEGIS");
+    expect(JSON.stringify(parsed.context.messages)).not.toContain("Time sampled");
+  });
+
   test("mapStream drives an injected backend without any HTTP hop", async () => {
     let invoked = false;
     const backend: ProviderAdapter = {
