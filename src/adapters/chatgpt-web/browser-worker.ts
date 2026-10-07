@@ -39,12 +39,8 @@ import {
 } from "./input-tokens";
 import {
   CHATGPT_MAX_INPUT_IMAGES,
-  CLAIMS_CONFIRMATION_OR_PERMISSION,
-  CLAIMS_REFUSAL_OR_INABILITY,
-  CLAIMS_USER_DELEGATION,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
-  isLunaClaimingPendingActions,
   type CompiledChatGptWebPrompt,
   type ChatGptWebPromptImage,
   type ChatGptWebMultipartStage,

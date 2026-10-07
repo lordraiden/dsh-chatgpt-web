@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { isChatGptConversationUrl } from "../src/chatgpt-session";
-import { formatDshToolCapabilities } from "../src/adapters/chatgpt-web/prompt";
 import { ChatGptToolStreamParser, ChatGptToolProtocolError } from "../src/adapters/chatgpt-web/tool-stream-parser";
 import { chatGptConnectorAttachmentMode } from "../src/adapters/chatgpt-web/browser-worker";
 
@@ -49,36 +48,6 @@ describe("DSH text tool protocol", () => {
 
     expect(parser.feed(frame).toolCalls).toHaveLength(1);
     expect(() => parser.feed(frame)).toThrow(ChatGptToolProtocolError);
-  });
-
-  test("exposes only the model-facing tool schema", () => {
-    const text = formatDshToolCapabilities([
-      {
-        name: "read",
-        namespace: "fs",
-        description: "Read one UTF-8 file.",
-        parameters: {
-          type: "object",
-          properties: { path: { type: "string" } },
-          required: ["path"],
-        },
-        strict: true,
-      },
-    ]);
-
-    const capabilities = JSON.parse(text);
-    expect(capabilities).toEqual([
-      {
-        name: "fs__read",
-        description: "Read one UTF-8 file.",
-        parameters: {
-          type: "object",
-          properties: { path: { type: "string" } },
-          required: ["path"],
-        },
-      },
-    ]);
-    expect(text).not.toContain('"strict"');
   });
 });
 

@@ -17,7 +17,7 @@ const adapterSource = readFileSync(
 );
 
 const READ_ONLY_CAPS: ChatGptWebCapabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
-const TOOL_CAPS: ChatGptWebCapabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+const FULL_CAPS: ChatGptWebCapabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
 
 function user(content: string): CodexMessage {
   return { role: "user", content, timestamp: 1 };
@@ -88,6 +88,17 @@ describe("issue #172 minimal functional contract", () => {
     for (const phrase of NARRATIVE_PHRASES) {
       expect(text).not.toContain(phrase);
     }
+  });
+
+  test("assistant messages are prior DSH turns, not the current model's own replies", () => {
+    const text = compileChatGptWebPrompt(
+      parsed([user("hola"), assistant("adios")]),
+      READ_ONLY_CAPS,
+    ).text;
+    expect(text).toContain("assistant messages are prior assistant turns in the DSH conversation");
+    expect(text).not.toContain("your own earlier replies");
+    // Role priority is preserved: system > developer > user.
+    expect(text).toContain("system, then developer, then user");
   });
 
   test("a retained continuation transports only the delta, not the full history", () => {
@@ -188,7 +199,10 @@ describe("issue #172 minimal functional contract", () => {
     expect(text).toContain("Do not wrap it in a Markdown code fence");
   });
 
-  test("tools keep the exact names, schemas, and the strict control-frame protocol", () => {
+  test("the local-tool capability contract is absent from the transport prompt", () => {
+    // Issue #172: the bridge tools protocol (capabilities JSON, control frames,
+    // turn_token correlation) is out of scope for the ChatGPT Web transport prompt;
+    // local tooling is delivered through the separate native DSH/OAuth integration.
     const text = compileChatGptWebPrompt(
       parsed([], {
         context: {
@@ -203,17 +217,44 @@ describe("issue #172 minimal functional contract", () => {
           ],
         },
       }),
-      TOOL_CAPS,
+      FULL_CAPS,
       "call_abc123",
     ).text;
-    expect(text).toContain("<dsh_tool_capabilities_json>");
-    expect(text).toContain("fs__read");
-    expect(text).toContain("Read a file");
-    expect(text).toContain("<dsh_tool_call>");
-    expect(text).toContain("version, id, name, arguments");
-    expect(text).toContain("call_<token>");
-    expect(text).toContain("turn_token");
-    expect(text).toContain("call_abc123");
+    for (const marker of [
+      "<dsh_tool_capabilities_json>",
+      "<dsh_tool_call>",
+      "turn_token",
+      "call_abc123",
+      "fs__read",
+    ]) {
+      expect(text).not.toContain(marker);
+    }
+  });
+
+  test("the local-tool capability adds no contract bytes to the transport prompt", () => {
+    // The fixed contract is identical across in-scope routes: full mode with a
+    // broker token and an advertised tool compiles to the same contract text as
+    // the read-only route with an empty context.
+    const readOnly = compileChatGptWebPrompt(parsed([]), READ_ONLY_CAPS).text;
+    const full = compileChatGptWebPrompt(
+      parsed([], {
+        context: {
+          messages: [],
+          tools: [
+            {
+              namespace: "fs",
+              name: "read",
+              description: "Read a file",
+              parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+            },
+          ],
+        },
+      }),
+      FULL_CAPS,
+      "call_abc123",
+    ).text;
+    expect(full).toBe(readOnly);
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThanOrEqual(CHATGPT_WEB_FIXED_TRANSPORT_OVERHEAD_BUDGET);
   });
 
   test("a read-only turn must not receive a tool capability token", () => {
