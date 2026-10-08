@@ -1,115 +1,369 @@
 # Troubleshooting dsh-chatgpt-web
 
-This guide covers common issues and resolutions when running `dsh-chatgpt-web` in DeepSeek Harness.
+This guide covers operational problems in the current production implementation of dsh-chatgpt-web.
 
-## Quick Diagnostics
+Today the production WebChat provider is **ChatGPT Web**. Qwen Chat and DeepSeek Chat are future text-only providers under the multi-provider architecture and are not current user-facing routes.
 
-Before modifying configuration, run the built-in diagnostic doctor:
+For the ownership model and future provider architecture, see doc/architecture.md.
 
-```bash
+## 1. Start with the doctor
+
+Before changing configuration, run:
+
+~~~bash
 dsh-chatgpt-web doctor
-```
-
-This inspects:
-- Chrome / Chromium executable availability
-- ChatGPT web session authentication status
-- Local sidecar background daemon health (`http://127.0.0.1:17841/healthz`)
-
----
-
-## Common Issues & Solutions
-
-### 1. `ChatGPT login state is missing or unverified`
-**Cause:** No active ChatGPT session is saved in the local storage profile.
-**Solution:**
-Run the interactive browser login:
-```bash
-dsh-chatgpt-web login
-```
-A browser window will open. Log into your OpenAI / ChatGPT account (Free or paid). Once the ChatGPT composer loads, the authenticated browser state is saved to the plugin's local storage directory (default `~/.dsh/storages/chatgpt-web/`). Treat that directory as sensitive credential material.
-
----
-
-### 2. `Port 17841 is already in use`
-**Cause:** An existing instance of the daemon or another background task is occupying port 17841.
-**Solution:**
-Identify and terminate any lingering instance, or run `doctor` to see if the running service is already healthy. If you need a custom port, configure it via:
-```bash
-dsh-chatgpt-web serve --port 17842
-```
-or configure the plugin port in your profile's Cordis configuration.
-
----
-
-### 3. `Chrome executable is missing`
-**Cause:** Google Chrome or Chromium could not be automatically located on the default system path.
-**Solution:**
-Specify your browser executable path explicitly. Login uses Chromium/Chrome driven by Playwright, and the executable can be pointed at explicitly:
-```bash
-dsh-chatgpt-web setup --chrome "C:\Program Files\Google\Chrome\Application\chrome.exe"
-```
-
----
-
-### 4. Temporary Rate Limits or Cloudflare Verification
-**Cause:** High frequency of requests in a short time frame or ChatGPT anti-bot challenge.
-**Solution:**
-- Wait a couple of minutes for Cloudflare challenges to settle.
-- Run `dsh-chatgpt-web login` to solve any visual verification prompt directly in the visible browser if required.
-
-### 5. Stream Disconnected or Browser Response Interrupted
-**Cause:** ChatGPT web page refreshed, network connection dropped, or the Chrome browser process was closed.
-**Solution:**
-- Check that your internet connection is active and `chatgpt.com` is accessible.
-- Verify that Chrome is open and logged in.
-- Run `dsh-chatgpt-web doctor` to check proxy and session status.
-- Restart the daemon if needed: `dsh-chatgpt-web serve`.
-
-### 6. ChatGPT Web Rate Limits (HTTP 429)
-**Cause:** The authenticated ChatGPT Web account or selected product route has reached a product-specific limit.
-**Solution:**
-- Treat availability and limits as account/model-specific; do not assume a fixed hourly quota.
-- Wait until ChatGPT makes the route available again, or select another supported Web route.
-- Avoid spawning parallel multi-agent requests against a single ChatGPT browser session.
-
-### 7. `ChatGPT stopped responding after the task started` while the ChatGPT tab is still generating
-**Cause:** The browser worker fails a turn whose assistant material has not appeared yet once ChatGPT has kept its Stop button visible (generation running) for the whole generation-stall budget. Long reasoning, long answers and connector waits on slower Free/Think routes can legitimately exceed the old hardcoded five-minute budget, and the error copy is generic for any post-submission failure, so it also covers this stall.
-**Solution:**
-- Check the ChatGPT tab before retrying: a generation that was still running when the turn failed continues there, and its answer is not lost in the conversation.
-- Raise the budget in the browser transport tuning:
-
-~~~json
-{
-  "tuning": {
-    "generationRunningStallMs": 1800000
-  }
-}
 ~~~
 
-- The value measures one continuous generation window (from the Stop button appearing until it disappears), not the total turn time, so a long but healthy turn is never cut short. Lower it to fail a stuck generator sooner; `turnTimeoutMs` remains the optional absolute ceiling for one browser turn. The full transport tuning table is in [README.md](./README.md#browser-transport-tuning).
+The doctor should validate at least:
 
-## Update and Uninstall
+- configuration;
+- Chrome/Chromium availability;
+- authenticated ChatGPT browser evidence;
+- local sidecar health;
+- configured runtime prerequisites.
 
-To update `dsh-chatgpt-web`, pull the latest changes and rebuild:
-```bash
+If the doctor reports a failure, fix that failure before changing provider or browser logic.
+
+For machine-readable diagnostics:
+
+~~~bash
+dsh-chatgpt-web doctor --json
+~~~
+
+Do not paste unredacted diagnostic output into a public issue. Browser/session state, control tokens, local paths and authentication material are sensitive.
+
+## 2. ChatGPT login state is missing or unverified
+
+### Cause
+
+The configured browser storage does not contain usable authenticated ChatGPT Web state, or the current browser/session evidence is no longer valid.
+
+### Resolution
+
+Run:
+
+~~~bash
+dsh-chatgpt-web login
+~~~
+
+Complete the login or verification flow in the browser.
+
+Then run:
+
+~~~bash
+dsh-chatgpt-web doctor
+~~~
+
+If the browser is managed by the DSH Launcher, authentication belongs to the Launcher-owned browser flow; do not create a second plugin-owned login state unless the selected mode requires it.
+
+Treat the plugin storage tree as credential material.
+
+## 3. Snap/Chromium cannot create its browser profile
+
+### Symptom
+
+A snap-confined Chromium fails with an error similar to:
+
+~~~text
+Failed to create .../SingletonLock: Permission denied (13)
+~~~
+
+### Cause
+
+The snap browser may not be allowed to write the hidden default plugin directory under ~/.dsh/.
+
+### Resolution
+
+Use a non-hidden home for the plugin:
+
+~~~bash
+DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web" \
+  dsh-chatgpt-web setup --chrome /snap/bin/chromium
+~~~
+
+Persist the same DSH_CHATGPT_WEB_HOME in the environment that starts DSH.
+
+The same effective plugin home must be visible to:
+
+- setup;
+- login;
+- doctor;
+- the DSH process that starts the sidecar.
+
+A one-off VAR=value command does not change the environment of a later DSH process.
+
+## 4. Chrome executable is missing
+
+### Cause
+
+Chrome/Chromium was not found automatically.
+
+### Resolution
+
+Specify it explicitly:
+
+~~~bash
+dsh-chatgpt-web setup --chrome "/path/to/chrome"
+~~~
+
+Then verify:
+
+~~~bash
+dsh-chatgpt-web doctor
+~~~
+
+## 5. Port 17841 is already in use
+
+### Cause
+
+Another process or an existing sidecar is already listening on the loopback port.
+
+### Resolution
+
+First determine whether the existing sidecar is healthy:
+
+~~~bash
+dsh-chatgpt-web doctor
+~~~
+
+If a manually launched sidecar is required, use another port:
+
+~~~bash
+dsh-chatgpt-web serve --port 17842
+~~~
+
+For the normal DSH-managed path, prefer changing the configured sidecar port rather than maintaining a second competing sidecar.
+
+Do not expose the sidecar beyond its intended loopback boundary.
+
+## 6. DSH starts but the native provider is unavailable
+
+Confirm that the provider is configured through DSH's native ctx.llm route.
+
+The native path does **not** require an OpenAI API key, an openai-responses provider entry, or a separate localhost Responses provider.
+
+Check:
+
+1. the provider is chatgpt-web;
+2. the selected model route is one actually exposed by the authenticated ChatGPT Web capability state;
+3. doctor is healthy;
+4. the sidecar is running in the same effective plugin home/profile.
+
+Do not configure backend model IDs directly. Use the public chatgpt-web/... routes documented in the README.
+
+The local /v1/responses endpoint is a compatibility ingress, not the native DSH provider boundary.
+
+## 7. The selected model route is unavailable
+
+### Cause
+
+ChatGPT Web model availability is account- and product-state dependent.
+
+The provider deliberately fails closed when a route cannot be established from the authenticated Web surface.
+
+### Resolution
+
+Check the authenticated account's currently exposed model routes and use the corresponding chatgpt-web/... model.
+
+Do not infer availability from:
+
+- a backend model ID;
+- a model name shown by another API;
+- Free/paid status alone;
+- a previously available route.
+
+A route that belongs to a Codex/Work allocation is not part of the ChatGPT Web provider.
+
+## 8. Stream disconnected or browser response was interrupted
+
+### Possible causes
+
+- browser/page closed;
+- Web network connection dropped;
+- ChatGPT refreshed or replaced the conversation surface;
+- sidecar stopped;
+- authentication expired;
+- transport timeout/termination.
+
+### Resolution
+
+1. Check connectivity to chatgpt.com.
+2. Check that the authenticated browser/session is still valid.
+3. Run dsh-chatgpt-web doctor.
+4. Inspect sidecar/service status.
+5. Restart the DSH-managed sidecar only if it is actually unhealthy.
+
+A logical cancellation/failure does not necessarily prove that the browser operation has physically stopped. Avoid immediately reusing a transport resource when late browser output may still arrive.
+
+## 9. ChatGPT Web rate limits / 429 / verification
+
+### Cause
+
+The authenticated account or selected product route has reached a product-specific limit, or the web service is asking for additional verification.
+
+### Resolution
+
+- Wait for the provider to make the route available again.
+- Complete any required verification in the authenticated browser flow.
+- Re-run doctor after authentication/session changes.
+- Avoid aggressive repeated retries.
+
+Do not treat a provider rate limit as proof that changing WebChat retry logic is correct. The retry boundary must remain conservative around submitted turns.
+
+## 10. Second DSH chat cannot start while another chat is generating
+
+### Current status
+
+The current main implementation has an account-level ChatGPT browser lease that can reject a second DSH turn on the same authenticated account while another turn is active.
+
+This is a **known implementation limitation**, not the target multi-provider architecture.
+
+Tracked by:
+
+- issue #201;
+- proposed fix PR #202.
+
+The intended ownership model is:
+
+- one active turn per logical provider conversation;
+- separate DSH conversations may use separate physical transport resources;
+- account-level fan-out remains bounded and provider-specific.
+
+Do not work around this by disabling the per-conversation safety guards or sharing one physical page between unrelated DSH conversations.
+
+## 11. A request was submitted but no response was observed
+
+Do **not** immediately resend the same prompt.
+
+This may be an ambiguous submission: the provider may have accepted the turn even though the client did not observe the response.
+
+The retry invariant is:
+
+~~~text
+before submission
+    -> retry may be safe
+
+after confirmed submission
+    -> no automatic duplicate submission
+
+submission ambiguous
+    -> no automatic duplicate submission
+~~~
+
+First determine whether the provider conversation can be safely resumed or whether an explicit recovery/replay path is required.
+
+## 12. Conversation continuity was lost
+
+A provider conversation is not the DSH session.
+
+The system must not silently create a new remote conversation and report normal continuation.
+
+The intended recovery choices are explicit:
+
+- exact resume;
+- explicit replay/rebuild from canonical DSH text history;
+- deterministic failure.
+
+Do not reconstruct authoritative DSH state from browser-visible conversation text.
+
+## 13. Qwen Chat or DeepSeek Chat cannot be selected
+
+This is expected on the current production release.
+
+Qwen Chat and DeepSeek Chat are architectural roadmap providers, not currently supported user-facing routes.
+
+Their implementation work is tracked separately under the WebChat migration:
+
+- #189–#199.
+
+Do not add ad-hoc Qwen/DeepSeek routes to ChatGPT-specific code. The provider migration requires the shared WebChat contracts to be implemented first.
+
+## 14. Updating the published plugin
+
+For the normal private package workflow, use the DSH plugin updater rather than pulling source and rebuilding:
+
+~~~bash
+dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
+~~~
+
+The @lordraiden scope must resolve through GitHub Packages:
+
+~~~ini
+@lordraiden:registry=https://npm.pkg.github.com
+~~~
+
+Authentication belongs outside the repository.
+
+For source development, use the repository's normal development commands:
+
+~~~bash
 bun install
+bun run typecheck
 bun run build
-```
+bun run test
+~~~
 
-To remove or disable `dsh-chatgpt-web` in DeepSeek Harness:
-1. Remove the `dsh-chatgpt-web` plugin entry from your profile's `cordis.patch.yml` or `cordis.yml`.
-2. Delete saved browser session data if desired:
-   - On Windows: `%USERPROFILE%\.dsh\storages\chatgpt-web\`
-   - On macOS/Linux: `~/.dsh/storages/chatgpt-web/`
+A source build is not a substitute for publishing/versioning the private package used by DSH.
 
-## Submitting Bug Reports
+## 15. Removing the integration
 
-When opening an issue or bug report on GitHub:
-- Specify your OS and architecture (e.g., Windows 11 x64, macOS arm64, Linux x64).
-- ChatGPT account tier (Free or paid) and the selected Web model route.
-- Node.js and Bun versions.
-- Output from `dsh-chatgpt-web doctor` (after redacting sensitive values).
-- Clear reproduction steps and console error traces.
+For package management, prefer the DSH plugin lifecycle rather than editing Cordis files manually unless the installation workflow specifically requires it.
 
-Before sharing logs or screenshots, ensure all personal session cookies, authentication tokens, and private prompts are redacted.
+When removing local state manually, the important storage tree is:
 
+~~~text
+~/.dsh/storages/chatgpt-web/
+~~~
+
+or the path selected by --home / DSH_CHATGPT_WEB_HOME.
+
+Delete browser/session state only when you intend to invalidate the saved authentication.
+
+## 16. Reporting a bug
+
+Include:
+
+- operating system and architecture;
+- DSH version;
+- plugin/package version;
+- Node/Bun version;
+- browser name/version;
+- selected chatgpt-web/... route;
+- whether the browser is plugin-managed or Launcher-owned;
+- relevant doctor --json output after redaction;
+- clear reproduction steps;
+- the exact failure state or error.
+
+Also state whether the failure occurred:
+
+- before submission;
+- after confirmed submission;
+- during streaming;
+- during cancellation;
+- during conversation recovery.
+
+Before sharing logs or screenshots, remove:
+
+- cookies;
+- authentication/session tokens;
+- runtime keys;
+- control tokens;
+- private prompts;
+- local filesystem secrets;
+- launcher authorization material.
+
+## 17. Development versus user troubleshooting
+
+If you are changing the implementation rather than operating an installed release, start with:
+
+~~~bash
+bun run typecheck
+bun run build
+bun run test
+~~~
+
+Then run the focused test associated with the behavior being changed.
+
+For browser/session changes, use deterministic transport fixtures where possible and use live authenticated browser sessions only where they are required to prove provider-specific behavior.
+
+For architecture work, read doc/architecture.md before modifying ownership boundaries.
