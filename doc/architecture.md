@@ -294,7 +294,7 @@ A provider may bypass them entirely if its transport does not require them.
 |                                                                            |
 |  Driver Resolver for DSH-selected routes                                 |
 |       |                                                                    |
-|       +--> Model Resolver                                                  |
+|       +--> Model resolution delegation                                    |
 |       |                                                                    |
 |       +--> Conversation Affinity Store                                     |
 |       |                                                                    |
