@@ -7,13 +7,19 @@ import {
 import type { ChatGptWebCapabilityState } from "./chatgpt-web-authority";
 
 export const CHATGPT_CHAT_URL = "https://chatgpt.com/";
-export const CHATGPT_COMPOSER_SELECTOR = [
+/**
+ * Ordered provider selectors. Discovery keeps this list separate from the
+ * joined diagnostic selector so activeComposer can rank overlapping DOM nodes
+ * instead of relying on an exact global match count.
+ */
+export const CHATGPT_COMPOSER_SELECTORS = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
   '[role="textbox"][aria-label="Ask ChatGPT"]',
   '.ProseMirror[contenteditable="true"]',
-].join(", ");
+] as const;
+export const CHATGPT_COMPOSER_SELECTOR = CHATGPT_COMPOSER_SELECTORS.join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
   'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
