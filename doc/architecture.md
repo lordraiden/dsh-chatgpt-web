@@ -2012,10 +2012,6 @@ The three fundamental invariants are:
 
 > **The shared architecture owns the semantics of a text exchange; each provider owns how its web product actually performs that exchange.**
 
-and:
-
-> **The shared architecture owns the semantics of a text exchange; each provider owns how its web product actually performs that exchange.**
-
 A correct implementation therefore looks like:
 
 ~~~text
