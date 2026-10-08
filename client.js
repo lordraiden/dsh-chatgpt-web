@@ -584,20 +584,29 @@ window.__ModuleLoader__.load({
       'Identify correctness problems, missed requirements, risks, and concrete improvements.\n' +
       'Focus on issues that should be addressed before continuing.';
 
-    /** Plain-text of a `user` chat node (all text-bearing content blocks). */
+    /**
+     * Plain-text of a `user` chat node. Per the `ui-chat` contract the message
+     * content lives on the Node data (`data.content`), mirroring the target's
+     * own prompt projection.
+     */
     function userNodeText(node) {
-      if (!node || !Array.isArray(node.content)) return '';
-      return node.content
-        .filter((block) => block && typeof block.text === 'string')
+      const content = node && node.data ? node.data.content : undefined;
+      if (!Array.isArray(content)) return '';
+      return content
+        .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
         .map((block) => block.text)
         .join('\n')
         .trim();
     }
 
-    /** Plain-text of a finalized `assistant` chat node (text blocks only). */
+    /**
+     * Plain-text of an `assistant-step` chat node. The blocks live on the Node
+     * data (`data.blocks`) and only `text` blocks are reviewable material.
+     */
     function assistantNodeText(node) {
-      if (!node || !Array.isArray(node.blocks)) return '';
-      return node.blocks
+      const blocks = node && node.data ? node.data.blocks : undefined;
+      if (!Array.isArray(blocks)) return '';
+      return blocks
         .filter((block) => block && block.kind === 'text' && typeof block.text === 'string')
         .map((block) => block.text)
         .join('\n')
@@ -606,9 +615,14 @@ window.__ModuleLoader__.load({
 
     /**
      * The last completed, reviewable turn of the chat: the latest human
-     * request and the latest FINAL assistant response after it. Returns null
-     * while nothing reviewable exists (no turn yet, empty content, or the
-     * response was interrupted).
+     * request and the latest settled `assistant-step` rendered after it, per
+     * the current `ui-chat` Node contract (`user` data carries `content`,
+     * `assistant-step` data carries `status`/`turn`/`blocks`). `data.status`
+     * IS the target's own completion discriminator (derived there from
+     * `finalNode` plus its `interrupted` marker), so a settled status is the
+     * reviewable one. Render order is the snapshot's own `order`. Returns null
+     * while nothing reviewable exists (no turn yet, a still-running or
+     * interrupted response, or empty content).
      */
     function selectReviewableTurn(chat) {
       if (!chat || !Array.isArray(chat.order) || typeof chat.nodes?.get !== 'function') return null;
@@ -619,23 +633,20 @@ window.__ModuleLoader__.load({
         if (!node) continue;
         if (!user && node.kind === 'user') {
           const text = userNodeText(node);
-          if (text) user = { seq: node.seq, text };
+          if (text) user = { index: i, text };
         }
-        if (!assistant && node.kind === 'assistant' && node.interrupted !== true) {
+        if (!assistant && node.kind === 'assistant-step' && node.data?.status === 'settled') {
           const text = assistantNodeText(node);
-          if (text) assistant = { seq: node.seq, text, node };
+          if (text) assistant = { index: i, text, data: node.data, anchorSeq: node.anchorSeq };
         }
         if (user && assistant) break;
       }
-      if (!user || !assistant || !(user.seq < assistant.seq)) return null;
-      // The DSH turn number (AssistantChatData.turn via the node's resolved
-      // Location) is what the chat turnTail card associates results with — the
-      // node seq alone is not a turn number.
-      const location = assistant.node.location;
-      const dshTurn = location && location.kind === 'turn' && typeof location.turn?.turn === 'number'
-        ? location.turn.turn
-        : undefined;
-      return { humanRequest: user.text, dshResponse: assistant.text, turn: assistant.seq, dshTurn };
+      if (!user || !assistant || !(user.index < assistant.index)) return null;
+      // `AssistantChatData.turn` IS the DSH turn number the chat turnTail card
+      // associates results with; `anchorSeq` is only the node's render
+      // position (the #179 `turn` field), never a turn number.
+      const dshTurn = typeof assistant.data.turn === 'number' ? assistant.data.turn : undefined;
+      return { humanRequest: user.text, dshResponse: assistant.text, turn: assistant.anchorSeq, dshTurn };
     }
 
     /** The button is actionable only with a reviewable turn, no generation, and no in-flight review. */
@@ -1229,6 +1240,7 @@ window.__ModuleLoader__.load({
         selectResultForTurn,
         buildHandoffPrompt,
         createSendStore,
+        AdvisorReviewButton,
         AdvisorResultCard,
       },
     };
