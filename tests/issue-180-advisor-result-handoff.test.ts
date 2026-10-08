@@ -22,34 +22,52 @@ function makeStorage() {
   };
 }
 
-/** A chat node's .location is a ConversationLocation (nested TurnLocation). */
-function nodeTurnLocation(turn: number) {
-  return { kind: "turn" as const, turn: { turn, start: undefined, end: undefined, status: "closed" as const } };
-}
-
 /** TurnTailOwnerProps.turn is a TurnLocation: `.turn` is the DSH turn number directly. */
 function tailTurn(turn: number) {
   return { turn, start: undefined, end: undefined, status: "closed" as const };
 }
 
+/**
+ * Chat fixtures follow the current public `ui-chat` contract (issue #186): an
+ * assistant row is an `assistant-step` Node whose `data.turn` IS the DSH turn
+ * number the turnTail card is keyed by, and `data.status` / `data.blocks`
+ * describe the step.
+ */
 function userNode(seq: number, ...texts: string[]) {
-  return { kind: "user", seq, content: texts.map((text) => ({ type: "text", text })) };
+  return {
+    key: `key-${seq}`,
+    kind: "user",
+    target: "chat",
+    anchorSeq: seq,
+    visibility: "visible",
+    location: { kind: "turn", turn: { turn: seq } },
+    data: { kind: "user", seq, time: seq, content: texts.map((text) => ({ type: "text", text })) },
+  };
 }
 
-function assistantNode(seq: number, turn: number | undefined, ...blocks: Array<Record<string, unknown>>) {
+function assistantStep(seq: number, turn: number | undefined, ...blocks: Array<Record<string, unknown>>) {
   return {
-    kind: "assistant",
-    seq,
-    blocks,
-    interrupted: undefined,
-    location: turn === undefined ? undefined : nodeTurnLocation(turn),
+    key: `key-${seq}`,
+    kind: "assistant-step",
+    target: "chat",
+    anchorSeq: seq,
+    visibility: "visible",
+    location: { kind: "step", turn: { turn: turn ?? seq }, step: { turn: turn ?? seq, step: 1 } },
+    data: {
+      status: "settled",
+      ...(turn === undefined ? {} : { turn }),
+      step: 1,
+      blocks,
+      time: seq,
+      finalNode: { kind: "assistant", seq, turn: turn ?? seq, step: 1, blocks },
+    },
   };
 }
 
 function chatSnapshot(nodes: Array<Record<string, unknown>>) {
-  const order = nodes.map((node) => `key-${node.seq}`);
+  const order = nodes.map((node) => node.key as string);
   const store: Record<string, unknown> = {};
-  for (const node of nodes) store[`key-${node.seq}`] = node;
+  for (const node of nodes) store[node.key as string] = node;
   return { order, nodes: { get: (key: string) => store[key] } };
 }
 
@@ -85,20 +103,20 @@ beforeAll(async () => {
 });
 
 describe("issue #180 — case 1: result associated to the correct turn", () => {
-  test("selectReviewableTurn resolves the DSH turn number from the node location", () => {
+  test("selectReviewableTurn resolves the DSH turn number from the assistant-step data", () => {
     const reviewable = mod.__test.selectReviewableTurn(
       chatSnapshot([
         userNode(1, "hola"),
-        assistantNode(2, 7, { kind: "text", text: "respuesta" }),
+        assistantStep(2, 7, { kind: "text", text: "respuesta" }),
       ]),
     );
     expect(reviewable.dshTurn).toBe(7);
-    expect(reviewable.turn).toBe(2); // node seq preserved (#179 contract)
+    expect(reviewable.turn).toBe(2); // node anchor preserved (#179 contract)
   });
 
-  test("dshTurn is undefined when the node has no resolvable turn location", () => {
+  test("dshTurn is undefined when the assistant-step carries no usable turn number", () => {
     const reviewable = mod.__test.selectReviewableTurn(
-      chatSnapshot([userNode(1, "hola"), assistantNode(2, undefined, { kind: "text", text: "respuesta" })]),
+      chatSnapshot([userNode(1, "hola"), assistantStep(2, undefined, { kind: "text", text: "respuesta" })]),
     );
     expect(reviewable).not.toBeNull();
     expect(reviewable.dshTurn).toBeUndefined();

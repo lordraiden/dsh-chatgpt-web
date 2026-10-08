@@ -23,10 +23,21 @@ function makeStorage() {
   };
 }
 
-function chatSnapshot(nodes: Array<Record<string, unknown>>) {
-  const order = nodes.map((node) => `key-${node.seq}`);
-  const store: Record<string, unknown> = {};
-  for (const node of nodes) store[`key-${node.seq}`] = node;
+/**
+ * Fixtures mirror the CURRENT public `ui-chat` Chat snapshot contract (issue
+ * #186): a final Chat Node carries `kind`/`anchorSeq`/`location`/`data`, a
+ * human message is a `user` Node whose `data.content` holds the message, and
+ * an assistant row is an `assistant-step` Node whose `data.status` /
+ * `data.blocks` / `data.finalNode` describe the step.
+ *
+ * These selection tests only exercise Node recognition, so the step/turn
+ * coordinates are derived from the node seq; #180 and #186 cover the DSH turn
+ * association explicitly.
+ */
+function chatSnapshot(nodes: Array<Record<string, any>>) {
+  const order = nodes.map((node) => node.key as string);
+  const store: Record<string, any> = {};
+  for (const node of nodes) store[node.key as string] = node;
   return {
     order,
     nodes: { get: (key: string) => store[key] },
@@ -34,15 +45,50 @@ function chatSnapshot(nodes: Array<Record<string, unknown>>) {
 }
 
 function userNode(seq: number, ...texts: string[]) {
-  return { kind: "user", seq, content: texts.map((text) => ({ type: "text", text })) };
+  return {
+    key: `key-${seq}`,
+    kind: "user",
+    target: "chat",
+    anchorSeq: seq,
+    visibility: "visible",
+    location: { kind: "turn", turn: { turn: seq } },
+    data: { kind: "user", seq, time: seq, content: texts.map((text) => ({ type: "text", text })) },
+  };
 }
 
-function assistantNode(seq: number, ...blocks: Array<Record<string, unknown>>) {
-  return { kind: "assistant", seq, blocks, interrupted: undefined };
+/** `assistant-step` Node with an explicit lifecycle status. */
+function assistantStep(seq: number, status: string, ...blocks: Array<Record<string, any>>) {
+  return {
+    key: `key-${seq}`,
+    kind: "assistant-step",
+    target: "chat",
+    anchorSeq: seq,
+    visibility: "visible",
+    location: { kind: "step", turn: { turn: seq }, step: { turn: seq, step: 1 } },
+    data: {
+      status,
+      turn: seq,
+      step: 1,
+      blocks,
+      time: seq,
+      ...(status === "running" ? {} : { finalNode: { kind: "assistant", seq, turn: seq, step: 1, blocks } }),
+    },
+  };
 }
 
-function interruptAssistant(seq: number, ...blocks: Array<Record<string, unknown>>) {
-  return { kind: "assistant", seq, blocks, interrupted: true };
+/** A settled `assistant-step`: the only reviewable lifecycle status. */
+function finalAssistant(seq: number, ...blocks: Array<Record<string, any>>) {
+  return assistantStep(seq, "settled", ...blocks);
+}
+
+/** An interrupted `assistant-step` (aborted turn). */
+function interruptAssistant(seq: number, ...blocks: Array<Record<string, any>>) {
+  return assistantStep(seq, "interrupted", ...blocks);
+}
+
+/** A still-streaming `assistant-step`. */
+function runningAssistant(seq: number, ...blocks: Array<Record<string, any>>) {
+  return assistantStep(seq, "running", ...blocks);
 }
 
 beforeAll(async () => {
@@ -82,6 +128,14 @@ describe("issue #179 — reviewable-turn selection (button visibility)", () => {
     expect(mod.__test.selectReviewableTurn(chatSnapshot([userNode(1, "hola")]))).toBeNull();
   });
 
+  test("returns null while the assistant step is still streaming (issue #186, case 2)", () => {
+    expect(
+      mod.__test.selectReviewableTurn(
+        chatSnapshot([userNode(1, "hola"), runningAssistant(2, { kind: "text", text: "a medias" })]),
+      ),
+    ).toBeNull();
+  });
+
   test("returns null when the last assistant response was interrupted or empty", () => {
     expect(
       mod.__test.selectReviewableTurn(
@@ -90,7 +144,7 @@ describe("issue #179 — reviewable-turn selection (button visibility)", () => {
     ).toBeNull();
     expect(
       mod.__test.selectReviewableTurn(
-        chatSnapshot([userNode(1, "hola"), assistantNode(2, { kind: "tool-call", callId: "c1", name: "t", argsRaw: "{}" })]),
+        chatSnapshot([userNode(1, "hola"), finalAssistant(2, { kind: "tool-call", callId: "c1", name: "t", argsRaw: "{}" })]),
       ),
     ).toBeNull();
   });
@@ -98,7 +152,7 @@ describe("issue #179 — reviewable-turn selection (button visibility)", () => {
   test("returns null when the assistant message does not come after the human request", () => {
     expect(
       mod.__test.selectReviewableTurn(
-        chatSnapshot([assistantNode(1, { kind: "text", text: "respuesta" }), userNode(2, "hola")]),
+        chatSnapshot([finalAssistant(1, { kind: "text", text: "respuesta" }), userNode(2, "hola")]),
       ),
     ).toBeNull();
   });
@@ -106,9 +160,9 @@ describe("issue #179 — reviewable-turn selection (button visibility)", () => {
   test("picks the LAST completed pair with full text (not bounded previews)", () => {
     const chat = chatSnapshot([
       userNode(1, "primera petición"),
-      assistantNode(2, { kind: "text", text: "primera respuesta" }),
+      finalAssistant(2, { kind: "text", text: "primera respuesta" }),
       userNode(3, "segunda petición\nlínea dos"),
-      assistantNode(
+      finalAssistant(
         4,
         { kind: "reasoning", text: "razonamiento oculto" },
         { kind: "text", text: "segunda respuesta" },
