@@ -73,6 +73,14 @@ window.__ModuleLoader__.load({
       'advisor.dialog.error': 'The review failed. You can retry.',
       'advisor.errNoEndpoint': 'The sidecar endpoint is not configured.',
       'advisor.errNoToken': 'The sidecar control token is unavailable in this profile.',
+      'advisor.card.title': 'ChatGPT Advisor',
+      'advisor.card.modeNormal': 'Normal',
+      'advisor.card.modeThink': 'Think',
+      'advisor.card.send': 'Send to DSH',
+      'advisor.card.sending': 'Sending…',
+      'advisor.card.sendingStatus': 'Submitting through the normal DSH prompt flow…',
+      'advisor.card.sent': 'Sent to DSH as a new prompt.',
+      'advisor.card.sendError': 'Send failed — the text remains in the composer; you can retry.',
     };
 
     const CSS = `
@@ -127,6 +135,16 @@ window.__ModuleLoader__.load({
       .cwg-advisor-error { font-size: 12px; color: var(--dsw-alias-state-error-primary); }
       .cwg-advisor-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
       .cwg-advisor-foot .cwg-err-msg { margin-right: auto; }
+      .cwg-advisor-card { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 2px; padding: 10px 12px; border: 1px solid var(--dsw-alias-brand-primary); border-left: 3px solid var(--dsw-alias-brand-primary); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); box-sizing: border-box; }
+      .cwg-advisor-card *, .cwg-advisor-card *::before, .cwg-advisor-card *::after { box-sizing: border-box; }
+      .cwg-advisor-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .cwg-advisor-card-title { font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--dsw-alias-brand-primary); }
+      .cwg-advisor-card-meta { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+      .cwg-advisor-card-body { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--dsw-alias-label-primary); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto; }
+      .cwg-advisor-card-foot { display: flex; align-items: center; gap: 8px; }
+      .cwg-advisor-card-status { font-size: 12px; margin-right: auto; }
+      .cwg-advisor-card-status.cwg-ok { color: var(--dsw-alias-state-success-primary); }
+      .cwg-advisor-card-status.cwg-err { color: var(--dsw-alias-state-error-primary); }
     `;
 
     const NS = 'dsh-chatgpt-web';
@@ -605,12 +623,19 @@ window.__ModuleLoader__.load({
         }
         if (!assistant && node.kind === 'assistant' && node.interrupted !== true) {
           const text = assistantNodeText(node);
-          if (text) assistant = { seq: node.seq, text };
+          if (text) assistant = { seq: node.seq, text, node };
         }
         if (user && assistant) break;
       }
       if (!user || !assistant || !(user.seq < assistant.seq)) return null;
-      return { humanRequest: user.text, dshResponse: assistant.text, turn: assistant.seq };
+      // The DSH turn number (AssistantChatData.turn via the node's resolved
+      // Location) is what the chat turnTail card associates results with — the
+      // node seq alone is not a turn number.
+      const location = assistant.node.location;
+      const dshTurn = location && location.kind === 'turn' && typeof location.turn?.turn === 'number'
+        ? location.turn.turn
+        : undefined;
+      return { humanRequest: user.text, dshResponse: assistant.text, turn: assistant.seq, dshTurn };
     }
 
     /** The button is actionable only with a reviewable turn, no generation, and no in-flight review. */
@@ -714,8 +739,20 @@ window.__ModuleLoader__.load({
                 state = { ...state, status: 'error', error: message };
               } else {
                 saveLastInstructions(env.storage, state.instructions);
-                // The result card (#180) and the handoff to the main chat are
-                // separate issues: a successful review closes the dialog.
+                // Issue #180: record the result for the reviewed DSH turn so
+                // the chat turnTail card can show it. This is browser-storage
+                // state, NOT a Session event — the review never enters model
+                // history. A reviewable turn without a resolvable DSH turn
+                // number (dshTurn) is not recordable and skips the card.
+                if (typeof state.context.dshTurn === 'number') {
+                  recordAdvisorResult(env.storage, {
+                    turn: state.context.dshTurn,
+                    reviewId: data.reviewId,
+                    mode: state.mode,
+                    model: data.model,
+                    text: data.text,
+                  });
+                }
                 state = { ...state, open: false, status: 'idle', error: null };
               }
             })
@@ -737,6 +774,249 @@ window.__ModuleLoader__.load({
     }
 
     const advisorStore = createAdvisorStore();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ChatGPT Advisor result card + "Send to DSH" handoff (issue #180).
+    //
+    // The result is recorded in browser storage keyed by the reviewed DSH turn
+    // (latest result per turn). It is NOT written to the Session log, so it
+    // never enters model history: in this harness `Session.append()` cannot
+    // mark external plugin events `ignorable: true`, and the persistence
+    // reader refuses a log containing an unknown non-ignorable type on
+    // restore. Browser storage + a chat turnTail slot card follows the DSH
+    // UI/state patterns already used by this plugin (#179 instructions).
+    //
+    // "Send to DSH" goes through the official input actions of the normal
+    // prompt flow (`inputActions.setDraft` + `inputActions.submit`) — no
+    // direct Session writes from React, no plugin-executed recommendations.
+    // ─────────────────────────────────────────────────────────────────────────
+    const RESULTS_KEY = 'dsh-chatgpt-web.advisor.results';
+
+    /** Validate persisted JSON into normalized result entries; never throws. */
+    function parseAdvisorResults(raw) {
+      if (!raw) return [];
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return [];
+      }
+      if (!Array.isArray(parsed)) return [];
+      const out = [];
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (typeof entry.turn !== 'number' || !Number.isFinite(entry.turn)) continue;
+        if (typeof entry.text !== 'string' || !entry.text.trim()) continue;
+        out.push({
+          turn: entry.turn,
+          reviewId: typeof entry.reviewId === 'string' ? entry.reviewId : '',
+          mode: entry.mode === 'think' ? 'think' : 'normal',
+          model: typeof entry.model === 'string' ? entry.model : '',
+          text: entry.text,
+          at: typeof entry.at === 'number' ? entry.at : 0,
+        });
+      }
+      return out;
+    }
+
+    function loadAdvisorResults(storage) {
+      try {
+        return parseAdvisorResults(storage ? storage.getItem(RESULTS_KEY) : null);
+      } catch {
+        return [];
+      }
+    }
+
+    function saveAdvisorResults(storage, results) {
+      try {
+        if (storage) storage.setItem(RESULTS_KEY, JSON.stringify(results));
+      } catch {
+        // Browser storage may be unavailable; the result stays session-local.
+      }
+    }
+
+    /**
+     * Record one successful review, keeping only the LATEST result per turn
+     * (no history accumulation — the card shows one review per turn).
+     * @returns the normalized result, or null when the input is unusable.
+     */
+    function recordAdvisorResult(storage, result) {
+      if (!result || typeof result.turn !== 'number' || !Number.isFinite(result.turn)) return null;
+      if (typeof result.text !== 'string' || !result.text.trim()) return null;
+      const entry = {
+        turn: result.turn,
+        reviewId: typeof result.reviewId === 'string' ? result.reviewId : '',
+        mode: result.mode === 'think' ? 'think' : 'normal',
+        model: typeof result.model === 'string' ? result.model : '',
+        text: result.text,
+        at: Date.now(),
+      };
+      const next = [...loadAdvisorResults(storage).filter((item) => item.turn !== entry.turn), entry];
+      saveAdvisorResults(storage, next);
+      return entry;
+    }
+
+    /** The result associated with one DSH turn, or null. */
+    function selectResultForTurn(results, turn) {
+      if (!Array.isArray(results) || typeof turn !== 'number') return null;
+      return results.find((entry) => entry && entry.turn === turn) || null;
+    }
+
+    /**
+     * The minimum handoff prompt (issue #180): the full review, clearly marked
+     * as coming from ChatGPT Advisor, asking the agent to evaluate it against
+     * the current task and apply the relevant recommendations. Excludes Advisor
+     * history, internal IDs, HTML/UI markup, bridge details, and transport terms.
+     */
+    function buildHandoffPrompt(result) {
+      const review = result && typeof result.text === 'string' ? result.text.trim() : '';
+      if (!review) return '';
+      return (
+        'ChatGPT Advisor review:\n\n' +
+        review +
+        '\n\n' +
+        'Evaluate this review against the current task and apply the relevant recommendations.\n' +
+        'Do not blindly follow recommendations that are incorrect or inconsistent with the current task.'
+      );
+    }
+
+    /**
+     * Per-turn send states for "Send to DSH" (sending / sent / send-error) with
+     * a single-flight dedup guard: one submission in progress at a time, so a
+     * double activation of the button never produces two prompts.
+     */
+    function createSendStore() {
+      let sending = new Set();
+      let sent = new Set();
+      let errors = new Map();
+      let activeTurn = null;
+      const listeners = new Set();
+      const notify = () => {
+        for (const listener of listeners) {
+          try {
+            listener();
+          } catch {
+            /* listener errors never break the store */
+          }
+        }
+      };
+      const snapshot = () => ({ sending: new Set(sending), sent: new Set(sent), errors: new Map(errors) });
+      return {
+        getSnapshot: snapshot,
+        subscribe: (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        get activeTurn() {
+          return activeTurn;
+        },
+        /**
+         * Deliver the handoff prompt through the normal DSH prompt flow.
+         * @returns 'sent-requested' | 'busy' | 'empty' | 'unavailable' | 'error'.
+         */
+        send({ turn, prompt, inputActions }) {
+          if (activeTurn !== null) return 'busy';
+          if (typeof prompt !== 'string' || !prompt.trim()) return 'empty';
+          if (!inputActions || typeof inputActions.setDraft !== 'function' || typeof inputActions.submit !== 'function') return 'unavailable';
+          activeTurn = turn;
+          sending = new Set(sending).add(turn);
+          sent.delete(turn);
+          errors.delete(turn);
+          notify();
+          try {
+            inputActions.setDraft(prompt);
+            inputActions.submit();
+            return 'sent-requested';
+          } catch (error) {
+            sending.delete(turn);
+            errors.set(turn, error instanceof Error ? error.message : String(error));
+            activeTurn = null;
+            notify();
+            return 'error';
+          }
+        },
+        /** Called by the card when the official flow consumed the draft. */
+        markSent(turn) {
+          sending.delete(turn);
+          sent.add(turn);
+          errors.delete(turn);
+          if (activeTurn === turn) activeTurn = null;
+          notify();
+        },
+      };
+    }
+
+    const advisorSendStore = createSendStore();
+
+    function useAdvisorSendState(store) {
+      const [snapshot, setSnapshot] = React.useState(store.getSnapshot());
+      React.useEffect(() => store.subscribe(() => setSnapshot(store.getSnapshot())), [store]);
+      return { snapshot };
+    }
+
+    /**
+     * Advisor result card for one finalized turn (chat turnTail slot). Renders
+     * only when a recorded result is associated with this turn — a fresh slot
+     * entry whose component returns null leaves the tail unchanged.
+     */
+    function AdvisorResultCard(t, props) {
+      const turn = props && props.turn && typeof props.turn.turn === 'number' ? props.turn.turn : undefined;
+      // Re-render whenever a review completes (advisor store) or send states
+      // change; results themselves come from browser storage.
+      const { snapshot } = useAdvisorState(advisorStore);
+      const { snapshot: sendSnapshot } = useAdvisorSendState(advisorSendStore);
+      const phase = typeof props.useInput === 'function' ? props.useInput((s) => s.phase) : 'plain';
+      const draft = typeof props.useInput === 'function' ? props.useInput((s) => s.draft) : '';
+      const results = React.useMemo(() => loadAdvisorResults(window.localStorage), [snapshot]);
+      const sending = sendSnapshot.sending.has(turn);
+      const sent = sendSnapshot.sent.has(turn);
+      const error = sendSnapshot.errors.get(turn);
+
+      // Hooks stay above every early return: the card mounts with no result
+      // (null) and later re-renders with one, so the hook count must not change.
+      React.useEffect(() => {
+        // The prompt flow consumed the draft (phase back to plain, draft
+        // cleared): the handoff became a normal DSH prompt.
+        if (turn !== undefined && sending && phase === 'plain' && draft === '') advisorSendStore.markSent(turn);
+      }, [turn, sending, phase, draft]);
+
+      if (turn === undefined) return null;
+      const result = selectResultForTurn(results, turn);
+      if (!result) return null;
+
+      function onSend() {
+        advisorSendStore.send({
+          turn,
+          prompt: buildHandoffPrompt(result),
+          inputActions: props.inputActions,
+        });
+      }
+
+      return h('div', { className: 'cwg-advisor-card', 'data-advisor-turn': String(turn) },
+        h('div', { className: 'cwg-advisor-card-head' },
+          h('span', { className: 'cwg-advisor-card-title' }, t('advisor.card.title', 'ChatGPT Advisor')),
+          h('span', { className: 'cwg-advisor-card-meta' },
+            t(result.mode === 'think' ? 'advisor.card.modeThink' : 'advisor.card.modeNormal', result.mode === 'think' ? 'Think' : 'Normal')
+            + (result.model ? ` · ${result.model}` : '')),
+        ),
+        h('pre', { className: 'cwg-advisor-card-body' }, result.text),
+        h('div', { className: 'cwg-advisor-card-foot' },
+          sent
+            ? h('span', { className: 'cwg-advisor-card-status cwg-ok' }, t('advisor.card.sent', 'Sent to DSH as a new prompt.'))
+            : sending
+              ? h('span', { className: 'cwg-advisor-card-status' }, t('advisor.card.sendingStatus', 'Submitting through the normal DSH prompt flow…'))
+              : error
+                ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.sendError', 'Send failed — the text remains in the composer; you can retry.'))
+                : null,
+          !sent && h('button', {
+            type: 'button',
+            className: 'cwg-btn',
+            disabled: sending,
+            onClick: onSend,
+          }, sending ? t('advisor.card.sending', 'Sending…') : t('advisor.card.send', 'Send to DSH')),
+        ),
+      );
+    }
 
     function useAdvisorState(store) {
       const [snapshot, setSnapshot] = React.useState(store.getSnapshot());
@@ -916,6 +1196,14 @@ window.__ModuleLoader__.load({
           order: 2,
           locale: NS,
         }, (props) => AdvisorReviewDialog(t, props, configForm))));
+        // Issue #180: the Advisor result card in the per-turn tail slot
+        // (session-scoped list; entries without content return null).
+        disposers.push(ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+          name: 'conversation.chat.turnTail',
+          id: 'dsh-chatgpt-web-advisor-card',
+          order: 1,
+          locale: NS,
+        }, (props) => AdvisorResultCard(t, props))));
         return () => {
           for (const dispose of disposers) {
             try { dispose(); } catch { /* a seat may already be collapsed */ }
@@ -933,6 +1221,15 @@ window.__ModuleLoader__.load({
         loadLastInstructions,
         saveLastInstructions,
         createAdvisorStore,
+        RESULTS_KEY,
+        parseAdvisorResults,
+        loadAdvisorResults,
+        saveAdvisorResults,
+        recordAdvisorResult,
+        selectResultForTurn,
+        buildHandoffPrompt,
+        createSendStore,
+        AdvisorResultCard,
       },
     };
   },
