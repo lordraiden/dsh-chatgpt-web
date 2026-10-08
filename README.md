@@ -6,7 +6,7 @@
 [![tarball smoke](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/tarball-smoke.yml?style=flat&label=tarball%20smoke)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/tarball-smoke.yml)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-Cordis%20Plugin-0078d4?style=flat)](https://github.com/deepseek-ai/deepseek-harness)
 
-> **DeepSeek Harness Cordis plugin that bridges an authenticated ChatGPT Web session into DSH.**
+> **DeepSeek Harness Cordis plugin that bridges authenticated consumer-web chat into DSH. Today the production provider is ChatGPT Web; the codebase is being evolved toward a shared text-only WebChat architecture for additional web providers.**
 
 <p align="center">
   <img src="./assets/hero-demo.png" alt="dsh-chatgpt-web in DeepSeek Harness" width="100%">
@@ -33,20 +33,32 @@
 
 ## Overview
 
-**dsh-chatgpt-web** bridges an authenticated ChatGPT Web session into DeepSeek Harness (DSH) as a native `ctx.llm` provider. The `/v1/responses` endpoint remains a compatibility ingress for clients that need it; it is not the native provider boundary.
+**dsh-chatgpt-web** currently exposes an authenticated ChatGPT Web session to DeepSeek Harness (DSH) as a native `ctx.llm` provider. The local `/v1/responses` endpoint remains a compatibility ingress for clients that need it; it is not the native DSH provider boundary.
 
-It uses headless or visible Chrome/Chromium automation against `chatgpt.com` and translates the web session into DSH-compatible model requests, streaming responses, reasoning, usage, errors, and cancellation semantics. The browser is an implementation detail of the provider; it is not an official OpenAI API.
+The repository is being refactored toward a provider-neutral **WebChat Core** for authenticated, text-only consumer-web chat providers. ChatGPT Web is the current production implementation. Qwen Chat and DeepSeek Chat are planned provider implementations under the architecture and roadmap; they are **not yet available features in the current release**.
+
+### Current provider status
+
+| Provider | Status | Scope |
+| --- | --- | --- |
+| ChatGPT Web | **Available** | Current production provider. Authenticated consumer-web text chat, streaming, reasoning/mode handling, continuity, cancellation and existing ChatGPT-specific compatibility surfaces. |
+| Qwen Chat | **Planned** | Text-only WebChat provider. Architecture and implementation work are tracked separately; no Qwen route is advertised as available yet. |
+| DeepSeek Chat | **Planned** | Text-only WebChat provider. Architecture and implementation work are tracked separately; no DeepSeek Web route is advertised as available yet. |
 
 ### Architecture and capability boundaries
 
-The project is designed around a clear ownership boundary:
+The architecture has an explicit ownership model:
 
-- **DSH remains the runtime authority** for DSH sessions, tools, skills, approvals, sandbox policy, and provider lifecycle.
-- **ChatGPT remains the model/provider surface** for model reasoning and ChatGPT-native product capabilities.
-- **Browser automation is isolated transport machinery** that handles ChatGPT Web readiness, submission, streaming, completion, cancellation, and recovery.
-- **Compatibility surfaces converge on the same provider execution path** rather than creating separate browser execution implementations.
+- **DSH remains authoritative for provider routing and DSH lifecycle.** WebChat must not create a competing public provider-selection authority.
+- **The DSH session/history remains canonical.** A provider conversation is a continuity handle, not a replacement transcript.
+- **WebChat Core owns provider-neutral conversation affinity, exchange lifecycle, continuation/recovery semantics, cancellation, retry classification and normalized text events.**
+- **Each provider owns authentication/session behavior, model mapping, provider conversation identifiers/cursors, transport mechanics and provider-specific recovery.**
+- **Browser automation is a transport mechanism, not the universal architecture.** A provider may use DOM, browser-network or hybrid exchange.
+- **The common WebChat scope is text-only.** Files, images, MCP, DSH tools, computer-use and provider-native agent loops are not shared WebChat features.
+- **Native Codex passthrough remains separate.** It is not part of the ChatGPT Web provider nor the future text-only WebChat contract.
+- **The local `/v1/responses` compatibility ingress converges on the normal ChatGPT Web execution path rather than owning a second browser execution engine.**
 
-The repository also contains two intentionally separate surfaces: native Codex passthrough, which remains outside the ChatGPT Web ProviderCore, and the local `/v1/responses` compatibility ingress, which converges on that same ProviderCore for normal ChatGPT Web routes.
+The definitive ownership and recovery rules live in [`doc/architecture.md`](./doc/architecture.md). The multi-provider implementation roadmap is tracked in issues [#189](https://github.com/lordraiden/dsh-chatgpt-web/issues/189) through [#199](https://github.com/lordraiden/dsh-chatgpt-web/issues/199).
 
 ### Key Features
 
@@ -100,7 +112,7 @@ dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
 dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
 ```
 
-The package is versioned with SemVer tags such as `v1.0.17`. A release is considered available only after the matching private GitHub Packages version has been published.
+The package is versioned with SemVer tags such as `v1.0.16`; the exact available version is always determined by the matching tag/package release. A release is considered available only after the matching private GitHub Packages version has been published.
 
 This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
 
@@ -374,8 +386,7 @@ Example:
     "responseDomGraceMs": 60000,
     "responseDomGraceMaxMs": 240000,
     "responseDomGracePerCharMs": 2.5,
-    "sendEnableGraceMs": 5000,
-    "generationRunningStallMs": 900000
+    "sendEnableGraceMs": 5000
   }
 }
 ~~~
@@ -387,7 +398,6 @@ Example:
 | responseDomGraceMaxMs | 240000 | Maximum first-token DOM grace period. Must not be lower than responseDomGraceMs. |
 | responseDomGracePerCharMs | 2.5 | Additional first-token grace, in milliseconds per visible prompt character, clamped to the floor/ceiling above. |
 | sendEnableGraceMs | 5000 | Time allowed for the send control to become enabled after the complete prompt is attached. |
-| generationRunningStallMs | 900000 | How long ChatGPT may keep generating (its Stop button visible) without exposing assistant material before the turn is failed as stuck. It measures one continuous generation window, not the total turn time, so long reasoning, long answers and connector waits are not cut short; lower it to fail a stuck generator sooner. |
 | turnTimeoutMs | unset | Optional absolute ceiling for a browser turn. When absent, there is no tuning-level absolute deadline. |
 
 All tuning values must be finite positive numbers. Unknown tuning keys are rejected. turnTimeoutMs is optional; the other defaults are always available.
@@ -543,10 +553,11 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues: browser execut
 
 ## Notes & Limitations
 
-1. **Unofficial Bridge:** Operates via local Playwright browser automation on `chatgpt.com`. Not affiliated with or endorsed by OpenAI.
-2. **Single-Session Concurrency:** Runs within a single browser tab. Sequential queries and normal DSH agent chats work seamlessly; avoid launching parallel multi-subagent swarms against the same tab simultaneously.
+1. **Unofficial Web bridge:** The current ChatGPT provider operates through local browser automation on `chatgpt.com`. It is not the official OpenAI API and is not affiliated with or endorsed by OpenAI.
+2. **Current concurrency behavior:** The current `main` implementation still contains an account-level ChatGPT browser lease that can prevent a second DSH chat from starting while another turn is active on the same authenticated account. This is an implementation limitation, not a fundamental WebChat architecture rule; the intended ownership model is one active turn per logical conversation with concurrency governed by isolated transport resources. The regression/fix is tracked in [#201](https://github.com/lordraiden/dsh-chatgpt-web/issues/201) / [#202](https://github.com/lordraiden/dsh-chatgpt-web/pull/202).
 3. **Capability separation:** DSH-owned tools, skills, approvals, and sandbox policy remain under DSH authority; ChatGPT-native product capabilities must not be treated as DSH permissions.
-4. **Product scope:** The provider supports normal authenticated ChatGPT Web model routes available to supported Free and paid accounts. Codex/Work-quota-bound routes are explicitly excluded. Availability remains subject to the current ChatGPT Web product capability state and account-specific limits.
+4. **Product scope:** The current production provider supports authenticated ChatGPT Web model routes exposed by the account. Codex/Work-quota-bound routes are explicitly excluded. Availability remains subject to the authenticated product capability state and account-specific limits.
+5. **Multi-provider roadmap:** Qwen Chat and DeepSeek Chat are architectural targets for the text-only WebChat layer, not current user-facing provider routes.
 
 ---
 
