@@ -1,8 +1,15 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import {
+  ADVISOR_INPUT_INVALID_CODE,
+  buildAdvisorTurnRequest,
+  resolveAdvisorRouteSlug,
+  runAdvisorReview,
+  validateAdvisorReviewInput,
+} from "./adapters/chatgpt-web/advisor";
 import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
-import { timingSafeEqual, createHash } from "node:crypto";
+import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -997,6 +1004,70 @@ async function nativeDshTurnRequest(
   });
 }
 
+/**
+ * ChatGPT Advisor review endpoint (issue #178). Runs one review of a DSH
+ * development step in the Advisor conversation (an independent, retained
+ * ChatGPT Web conversation per DSH session) and returns the review text, the
+ * mode/model used, and a `reviewId` that associates the result with the
+ * requested review. The sidecar is stateless with respect to DSH history: the
+ * last human request and the last final DSH response arrive in the request
+ * body, and the review turn never participates in the DSH session loop.
+ */
+async function advisorReviewRequest(
+  req: Request,
+  config: AppConfig,
+  adapterFactory: ChatGptWebAdapterFactory,
+  signal: AbortSignal,
+): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await readJsonRequestBody(req);
+  } catch (error) {
+    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Advisor review body must be valid JSON");
+  }
+  let input: ReturnType<typeof validateAdvisorReviewInput>;
+  try {
+    input = validateAdvisorReviewInput(raw);
+  } catch (error) {
+    return Response.json(
+      { ok: false, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
+      { status: 400, headers: controlCorsHeaders() },
+    );
+  }
+  const reviewId = randomUUID();
+  const provider = providerConfig(config);
+  // The route authority is the single source of truth for the account's model
+  // family: the Advisor picks the mode→route mapping, the authority's RESOLVED
+  // capability state (capabilityState folded over the legacy boolean) decides
+  // Sol vs Luna, and requireChatGptWebRoute validates the slug on the same
+  // authority — no second, divergent capability source.
+  const authority = chatGptWebRouteAuthority(config);
+  let route: ChatGptWebModelRoute;
+  try {
+    route = requireChatGptWebRoute(
+      resolveAdvisorRouteSlug(input.mode, authority.capabilities.solAvailable),
+      authority,
+    );
+  } catch (error) {
+    return Response.json(
+      { ok: false, reviewId, mode: input.mode, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
+      { status: 400, headers: controlCorsHeaders() },
+    );
+  }
+  const adapter = adapterFactory(provider);
+  const result = await runAdvisorReview(
+    { runTurn: adapter.runTurn },
+    input,
+    { slug: route.slug, backendModel: route.backendModel, effort: route.adapterEffort },
+    reviewId,
+    // The tracked execution signal (already wired to the client disconnect by
+    // HttpTurnCounter.track): a client disconnect aborts the browser turn and
+    // releases the Advisor surface, exactly like nativeDshTurnRequest.
+    { abortSignal: signal },
+  );
+  return Response.json(result, { status: result.ok ? 200 : 502, headers: controlCorsHeaders() });
+}
+
 export function startServer(
   config: AppConfig,
   dependencies: {
@@ -1111,6 +1182,15 @@ export function startServer(
     if (req.method === "GET" && url.pathname === "/v1/control/recent-turns") {
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 10) || 10, 1), 25);
       return Response.json({ turns: readRecentBrowserTurns(limit) }, { headers: controlCorsHeaders() });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/control/advisor/review") {
+      if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
+      return httpTurns.track(
+        signal => advisorReviewRequest(new Request(req, { signal }), config, adapterFactory, signal),
+        req.signal,
+        process.platform,
+        "unspecified",
+      );
     }
     if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
       if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });

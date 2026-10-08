@@ -270,6 +270,10 @@ export function shouldRetainChatGptWebConversation(
   manualRequest = false,
 ): boolean {
   if (manualRequest || parsed._compactionRequest) return false;
+  // A ChatGPT Advisor review turn (issue #178) always retains its independent
+  // Advisor conversation, even in chat-only mode where ordinary Sol turns do
+  // not retain: the marker is the owner of the Advisor continuity decision.
+  if (parsed._advisorReview !== undefined) return true;
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     const identity = extractChatGptTurnIdentity(parsed);
     return Boolean(identity.threadId && identity.turnId);
@@ -537,6 +541,11 @@ export function createChatGptWebAdapter(
       ? retainedConversationResumeRequest(checkpointInput.parsed)
       : undefined;
     const retainConversation = conversationKey !== undefined;
+    // ChatGPT Advisor review turn (issue #178): its request carries exactly one
+    // user message (never an assistant message), so `resumeInput` is always
+    // undefined and the turn must take the install/continue branch decisions
+    // explicitly, with the continuation compiled from the full input.
+    const advisorTurn = parsed._advisorReview !== undefined;
     const conversationGeneration = conversationKey
       ? replayOptions?.conversationGeneration ?? chatGptTurnSessions.conversationGeneration(conversationKey)
       : undefined;
@@ -550,12 +559,12 @@ export function createChatGptWebAdapter(
     // never rewrites the installed fingerprint, even if DSH's current
     // systemPrompt changed — the installed prefix stays frozen for the rest of
     // this physical conversation.
-    const systemInstalledThisTurn = resumeInput !== undefined
+    const systemInstalledThisTurn = conversationKey !== undefined && (resumeInput !== undefined || advisorTurn)
       ? systemFingerprintRecordedOnBranch(
         resolveChatGptResumeBranch(
           chatGptTurnSessions,
-          conversationKey!,
-          chatGptTurnSessions.conversationGeneration(conversationKey!),
+          conversationKey,
+          chatGptTurnSessions.conversationGeneration(conversationKey),
         ),
       )
       : retainConversation;
@@ -927,9 +936,12 @@ export function createChatGptWebAdapter(
         }),
         // A retained conversation (managed-chrome, issue #171) continues on the existing surface,
         // so it compiles the composer delta (issue #172) when the prefix is installed in the
-        // current physical generation, and installs it as plain composer text otherwise.
-        ...(resumeInput ? { prepareResume: async () => ({
-          ...compileResume(resumeInput),
+        // current physical generation, and installs it as plain composer text otherwise. An
+        // Advisor review turn (issue #178) always needs a resume prompt too: its request carries
+        // no assistant message (so `resumeInput` is undefined), and a reused Advisor surface
+        // continues through the composer delta compiled from the full single-message input.
+        ...(resumeInput !== undefined || advisorTurn ? { prepareResume: async () => ({
+          ...compileResume(resumeInput ?? parsed),
           release: () => {},
         }) } : {}),
         ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
