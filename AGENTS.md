@@ -406,21 +406,21 @@ Prefer verified behavior over stale memory.
 
 The numbered WebChat migration issues #189–#199 are released **one PR at a time**. Each completed migration PR produces exactly one stable patch release.
 
-The current `main` package version is `1.0.16`. Therefore the planned sequence is:
+The current `main` package version is `1.0.17`. Version `1.0.17` is a normal maintenance/consolidation release for the merged #202/#205 work and is therefore no longer reserved for the WebChat migration sequence. The migration sequence begins at `v1.0.18`.
 
 | Migration PR | Issue | Release |
 | --- | --- | --- |
-| PR 1/11 | #189 | `v1.0.17` |
-| PR 2/11 | #190 | `v1.0.18` |
-| PR 3/11 | #191 | `v1.0.19` |
-| PR 4/11 | #192 | `v1.0.20` |
-| PR 5/11 | #193 | `v1.0.21` |
-| PR 6/11 | #194 | `v1.0.22` |
-| PR 7/11 | #195 | `v1.0.23` |
-| PR 8/11 | #196 | `v1.0.24` |
-| PR 9/11 | #197 | `v1.0.25` |
-| PR 10/11 | #198 | `v1.0.26` |
-| PR 11/11 | #199 | `v1.0.27` |
+| PR 1/11 | #189 | `v1.0.18` |
+| PR 2/11 | #190 | `v1.0.19` |
+| PR 3/11 | #191 | `v1.0.20` |
+| PR 4/11 | #192 | `v1.0.21` |
+| PR 5/11 | #193 | `v1.0.22` |
+| PR 6/11 | #194 | `v1.0.23` |
+| PR 7/11 | #195 | `v1.0.24` |
+| PR 8/11 | #196 | `v1.0.25` |
+| PR 9/11 | #197 | `v1.0.26` |
+| PR 10/11 | #198 | `v1.0.27` |
+| PR 11/11 | #199 | `v1.0.28` |
 
 For these PRs:
 
