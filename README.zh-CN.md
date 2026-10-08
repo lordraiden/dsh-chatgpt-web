@@ -6,7 +6,7 @@
 [![tarball smoke](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/tarball-smoke.yml?style=flat&label=tarball%20smoke)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/tarball-smoke.yml)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-Cordis%20Plugin-0078d4?style=flat)](https://github.com/deepseek-ai/deepseek-harness)
 
-> **将已认证的 ChatGPT Web 会话桥接到 DSH 的 DeepSeek Harness Cordis 插件。**
+> **将已认证的消费级 Web Chat 会话桥接到 DSH 的 DeepSeek Harness Cordis 插件。当前生产 provider 是 ChatGPT Web；仓库正在演进为共享的纯文本 WebChat 架构，以支持后续 Web provider。**
 
 <p align="center">
   <img src="./assets/hero-demo.png" alt="dsh-chatgpt-web 在 DeepSeek Harness 中" width="100%">
@@ -32,20 +32,32 @@
 
 ## 概述
 
-**dsh-chatgpt-web** 将经过认证的 ChatGPT Web 会话作为原生 `ctx.llm` provider 接入 DeepSeek Harness (DSH)。`/v1/responses` 仅作为兼容性入口保留，并不是原生 provider 边界。
+**dsh-chatgpt-web** 当前将经过认证的 ChatGPT Web 会话作为原生 `ctx.llm` provider 接入 DeepSeek Harness (DSH)。`/v1/responses` 仅作为兼容性入口保留，并不是原生 DSH provider 边界。
 
-它通过无头或可视的 Chrome/Chromium 浏览器自动化连接至 `chatgpt.com`，将网页会话转换为 DSH 可用的模型请求，并流式传递回答、推理、使用量、错误以及取消语义。浏览器只是 provider 的实现细节，并不是 OpenAI 官方 API。
+仓库正在演进为 provider-neutral 的 **WebChat Core**，面向经过认证的消费级 Web Chat、纯文本输入与流式文本输出。ChatGPT Web 是当前生产实现。Qwen Chat 与 DeepSeek Chat 是架构和路线图中的后续 provider，**尚未作为当前版本的可用功能发布**。
+
+### 当前 provider 状态
+
+| Provider | 状态 | 范围 |
+| --- | --- | --- |
+| ChatGPT Web | **可用** | 当前生产 provider。经过认证的消费级 Web Chat、流式输出、推理/模式、连续对话、取消，以及现有 ChatGPT 专属兼容能力。 |
+| Qwen Chat | **计划中** | 纯文本 WebChat provider。正在按统一架构推进，当前版本不会宣传为可用 route。 |
+| DeepSeek Chat | **计划中** | 纯文本 WebChat provider。正在按统一架构推进，当前版本不会宣传为可用 route。 |
 
 ### 架构与能力边界
 
 项目遵循明确的所有权边界：
 
-- **DSH 仍是运行时权威：** 负责 DSH 会话、工具、技能、审批、沙箱策略以及 provider 生命周期。
-- **ChatGPT 负责模型能力：** 包括模型推理和 ChatGPT 原生产品能力。
-- **浏览器自动化只是传输层：** 负责 ChatGPT Web 的就绪、提交、流式、完成、取消和恢复。
-- **兼容性入口共享同一执行路径：** 避免为不同入口维护重复的浏览器执行实现。
+- **DSH 负责 provider 路由和 DSH 生命周期。** WebChat 不得建立第二套公开的 provider 选择权威。
+- **DSH 会话/历史是规范来源。** provider conversation 只是连续性 handle，而不是第二份 transcript。
+- **WebChat Core 负责 provider-neutral 的会话 affinity、exchange 生命周期、continuation/recovery、取消、retry 分类和标准化文本事件。**
+- **各 provider 自己负责认证/session、模型映射、provider conversation ID/cursor、传输机制和 provider 专属恢复逻辑。**
+- **浏览器自动化只是传输方式，不是通用架构。** provider 可以选择 DOM、browser-network 或 hybrid。
+- **共享 WebChat 范围是纯文本。** 文件、图片、MCP、DSH tools、computer-use 和 provider 专属 agent loop 不属于共享 WebChat contract。
+- **原生 Codex passthrough 保持独立。** 它不属于 ChatGPT Web provider，也不属于未来的纯文本 WebChat contract。
+- 本地 `/v1/responses` 兼容入口会汇聚到 ChatGPT Web 的标准执行路径，而不是建立第二套浏览器执行 authority。
 
-仓库还保留两个有意隔离的入口：原生 Codex passthrough 始终位于 ChatGPT Web ProviderCore 之外；本地 `/v1/responses` 兼容入口则在普通 ChatGPT Web 路由下汇聚到同一个 ProviderCore。
+完整的 ownership 与 recovery 规则以 [`doc/architecture.md`](./doc/architecture.md) 为准。多 provider 实现路线图见 [#189](https://github.com/lordraiden/dsh-chatgpt-web/issues/189) 到 [#199](https://github.com/lordraiden/dsh-chatgpt-web/issues/199)。
 
 ### 核心功能
 
@@ -54,9 +66,7 @@
 - **运行时模型/账户发现：** 根据已认证会话发现可用的 ChatGPT Web 模型与账户能力。
 - **流式与 provider 语义：** 向 DSH 侧暴露流式文本、推理、使用量、错误和取消语义。
 - **控制与诊断入口：** 提供 setup/login/doctor 工具，以及用于传输状态和调优的本地控制入口。
-- **可移植且经过校验的发布产物：** 发布的 tarball 在到达仓库（registry）之前会由 CI 校验（干净安装、运行时冒烟测试、依赖解析、无构建环境路径污染）。
-
----
+- **可移植且经过校验的发布产物：** 发布的 tarball 在发布前由 CI 校验（干净安装、运行时冒烟测试、依赖解析、无构建环境路径污染）。
 
 ## 环境要求
 
@@ -99,7 +109,7 @@ dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
 dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
 ```
 
-发布版本使用 SemVer tag，例如 `v1.0.17`。只有对应版本已经发布到私有 GitHub Packages 后，DSH 才能通过 package manager 获取该版本。
+发布版本使用 SemVer tag，例如 `v1.0.16`；具体可用版本以对应 tag 和 package release 为准。
 
 这会将插件注册到 profile 的 `package.json` bundles 中，其 Cordis 条目会被自动组合——无需手动 `insert`。
 
@@ -217,12 +227,11 @@ Doctor result: ready
 
 ## 注意事项与使用限制
 
-1. **非官方桥接：** 通过本地 Playwright 自动化驱动 `chatgpt.com` 网页。与 OpenAI 官方无隶属或背书关系。
-2. **单会话并发：** 运行在单个浏览器标签页中。顺序查询和正常的 DSH 智能体对话完全顺畅；请避免同时对同一标签页发起多个高并发子智能体任务。
-3. **能力边界：** DSH 所拥有的工具、技能、审批和沙箱策略仍由 DSH 控制；ChatGPT 原生产品能力不应被视为 DSH 权限。
-4. **产品范围：** provider 支持受支持的 Free 和付费账户可用的正常 ChatGPT Web 模型路由。使用 Codex/Work 配额的路由明确排除。实际可用性仍由当前 ChatGPT Web 产品能力状态和账户级限制决定。
-
----
+1. **非官方 Web 桥接：** 当前 ChatGPT provider 通过 `chatgpt.com` 上的本地浏览器自动化运行，并非 OpenAI 官方 API，也未获 OpenAI 背书。
+2. **当前并发行为：** 当前 `main` 实现仍存在 ChatGPT authenticated account 级别的 browser lease，因此同一账号上的第二个 DSH chat 可能在前一个 turn 运行时被阻止。这是当前实现限制，不是目标 WebChat 架构规则；目标模型是每个 logical conversation 单独串行，同时允许彼此隔离的 transport resources 并行。相关修复见 [#201](https://github.com/lordraiden/dsh-chatgpt-web/issues/201) / [#202](https://github.com/lordraiden/dsh-chatgpt-web/pull/202)。
+3. **能力隔离：** DSH 所拥有的 tools、skills、审批和 sandbox 策略始终由 DSH 控制；不得将 ChatGPT 原生 product capabilities 视为 DSH 权限。
+4. **产品范围：** 当前生产 provider 支持认证账户实际暴露的 ChatGPT Web model routes。Codex/Work quota 路由明确不在范围内。实际可用性取决于认证后的产品能力状态和账户限制。
+5. **多 provider 路线图：** Qwen Chat 与 DeepSeek Chat 是纯文本 WebChat 的架构目标，目前尚未作为用户可用 provider 发布。
 
 ## 相关文档
 
