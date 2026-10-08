@@ -58,6 +58,7 @@ import {
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
+  CHATGPT_COMPOSER_SELECTORS,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
@@ -69,6 +70,7 @@ import {
   parseChatGptEffortSliderState,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
+import { selectCanonicalWebComposer } from "../web-composer-resolver";
 import {
   connectLauncherBrowserHost,
   LauncherBrowserTurnCancelledError,
@@ -2624,19 +2626,61 @@ export class ChatGptBrowserWorker {
     timeoutMs = 30_000,
     abortSignal?: AbortSignal,
   ): Promise<Locator> {
-    const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
     const deadline = Date.now() + timeoutMs;
-    let count = 0;
+    let candidateCount = 0;
+    let usableCount = 0;
     while (Date.now() < deadline) {
       throwIfPromptAttachmentAborted(abortSignal);
-      count = await withBrowserTurnAbort(
-        withChatGptBrowserObservationTimeout(
-          composers.count(),
-          Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
-        ),
-        abortSignal,
-      );
-      if (count === 1) return composers.first();
+      const candidates: Array<{
+        id: string;
+        locator: Locator;
+        selectorPriority: number;
+        visible: boolean;
+        editable: boolean;
+        enabled: boolean;
+        area: number;
+      }> = [];
+      candidateCount = 0;
+      for (const [selectorPriority, selector] of CHATGPT_COMPOSER_SELECTORS.entries()) {
+        const matches = page.locator(selector);
+        const count = await withBrowserTurnAbort(
+          withChatGptBrowserObservationTimeout(
+            matches.count(),
+            Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
+          ),
+          abortSignal,
+        );
+        candidateCount += count;
+        for (let index = 0; index < count; index += 1) {
+          const locator = matches.nth(index);
+          const [visible, editable, enabled, box] = await withBrowserTurnAbort(
+            Promise.all([
+              locator.isVisible().catch(() => false),
+              locator.isEditable().catch(() => false),
+              locator.isEnabled().catch(() => false),
+              locator.boundingBox().catch(() => null),
+            ]),
+            abortSignal,
+          );
+          candidates.push({
+            id: `${selectorPriority}:${index}`,
+            locator,
+            selectorPriority,
+            visible,
+            editable,
+            enabled,
+            area: box ? box.width * box.height : 0,
+          });
+        }
+      }
+      usableCount = candidates.filter(candidate =>
+        candidate.visible && candidate.editable && candidate.enabled && candidate.area > 0,
+      ).length;
+      const selectedId = selectCanonicalWebComposer(candidates);
+      if (selectedId) {
+        const selected = candidates.find(candidate => candidate.id === selectedId);
+        if (selected) return selected.locator;
+      }
       await withBrowserTurnAbort(
         new Promise(resolveSleep => setTimeout(resolveSleep, 50)),
         abortSignal,
@@ -2644,7 +2688,11 @@ export class ChatGptBrowserWorker {
     }
     throw new Error(
       "ChatGPT composer is unavailable. Reload ChatGPT and retry the task.",
-      { cause: new Error(`Visible ChatGPT composer count was ${count}`) },
+      {
+        cause: new Error(
+          `Composer candidates=${candidateCount}; usable=${usableCount}; selectors=${CHATGPT_COMPOSER_SELECTOR}`,
+        ),
+      },
     );
   }
 
