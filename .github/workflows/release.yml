@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME}"
+          test "${tag#v}" = "$version"
+
+      - name: Wait for npm publication
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+
+          for attempt in {1..60}; do
+            published="$(npm view "@lordraiden/dsh-chatgpt-web@${version}" version 2>/dev/null || true)"
+            if [ "$published" = "$version" ]; then
+              echo "npm publication is available: @lordraiden/dsh-chatgpt-web@${version}"
+              exit 0
+            fi
+
+            echo "Waiting for npm publication of ${version} (attempt ${attempt}/60)"
+            sleep 10
+          done
+
+          echo "Timed out waiting for @lordraiden/dsh-chatgpt-web@${version} on npmjs.com" >&2
+          exit 1
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --verify-tag --title "${GITHUB_REF_NAME}" --generate-notes --latest
