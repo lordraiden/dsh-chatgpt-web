@@ -306,7 +306,7 @@ A provider may bypass them entirely if its transport does not require them.
 |       |                                                                    |
 |       +--> Cancellation / Shutdown                                         |
 |       |                                                                    |
-|       +--> Provider Health                                                 |
+|       +--> Provider health delegation                                     |
 |                                                                            |
 +-------------+----------------------+----------------------+----------------+
               |                      |                      |
