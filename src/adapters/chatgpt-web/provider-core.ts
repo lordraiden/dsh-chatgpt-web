@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CapabilitySnapshot } from "./capability-projector";
+import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concurrency";
 
 export const CHATGPT_WEB_PROVIDER_CORE_SERVICE = "chatgpt-web" as const;
 
@@ -169,10 +170,30 @@ export class BrowserAccountLease {
 export class BrowserAccountLeaseRegistry {
   private readonly leases = new Map<string, BrowserAccountLease>();
   private readonly physicalResources = new Map<string, BrowserAccountLease>();
-  private readonly accountLeases = new Map<string, BrowserAccountLease>();
+  /**
+   * Active leases per authenticated account. The account is a bounded, not an
+   * exclusive, resource: this registry owns the account fan-out ceiling that
+   * MAX_CHATGPT_BROWSER_TABS defines for the browser layer, nothing more. Every
+   * per-turn exclusion is owned elsewhere — the conversationKey surface registry
+   * rejects a busy conversation (issue #171), a shared physical resource is
+   * rejected below, and `begin()` rejects a second turn for one active native
+   * DSH thread — so two distinct DSH chats may hold their own leases at once,
+   * each on its own retained page.
+   */
+  private readonly accountLeases = new Map<string, Set<BrowserAccountLease>>();
 
   private accountKey(descriptor: BrowserAccountLeaseDescriptor): string {
     return `${descriptor.serviceId}:${fingerprint(descriptor.accountIdentity)}`;
+  }
+
+  /** Live account leases, dropping settled entries a caller never handed back. */
+  private liveAccountLeases(accountKey: string): Set<BrowserAccountLease> {
+    const leases = this.accountLeases.get(accountKey);
+    if (!leases) return new Set();
+    for (const lease of leases) {
+      if (!lease.isActive()) leases.delete(lease);
+    }
+    return leases;
   }
 
   acquire(descriptor: BrowserAccountLeaseDescriptor): BrowserAccountLease {
@@ -182,12 +203,11 @@ export class BrowserAccountLeaseRegistry {
       throw new Error(`Browser resource is already leased for turn ${descriptor.turnId}`);
     }
     const accountKey = this.accountKey(descriptor);
-    const accountOwner = this.accountLeases.get(accountKey);
-    if (accountOwner?.isActive() && accountOwner !== existing) {
-      throw new Error(`Authenticated ChatGPT account is already leased by turn ${accountOwner.descriptor.turnId}`);
-    }
+    const accountLeases = this.liveAccountLeases(accountKey);
+    if (accountLeases.size >= MAX_CHATGPT_BROWSER_TABS) throw chatGptBrowserTurnLimitError();
     this.leases.set(lease.leaseId, lease);
-    this.accountLeases.set(accountKey, lease);
+    accountLeases.add(lease);
+    this.accountLeases.set(accountKey, accountLeases);
     return lease;
   }
 
@@ -215,7 +235,11 @@ export class BrowserAccountLeaseRegistry {
     lease.release();
     if (this.leases.get(lease.leaseId) === lease) this.leases.delete(lease.leaseId);
     const accountKey = this.accountKey(lease.descriptor);
-    if (this.accountLeases.get(accountKey) === lease) this.accountLeases.delete(accountKey);
+    const accountLeases = this.accountLeases.get(accountKey);
+    if (accountLeases) {
+      accountLeases.delete(lease);
+      if (accountLeases.size === 0) this.accountLeases.delete(accountKey);
+    }
   }
 
   activeCount(): number {
