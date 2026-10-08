@@ -1,0 +1,62 @@
+name: One-shot branch cleanup
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/cleanup-old-branches.yml"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  cleanup:
+    if: contains(github.event.head_commit.message, '[cleanup-branches]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete stale branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t protected < <(
+            {
+              echo main
+              gh pr list --repo "${GITHUB_REPOSITORY}" --state open --json headRefName --jq '.[].headRefName'
+            } | sort -u
+          )
+
+          is_protected() {
+            local branch="$1"
+            for protected_branch in "${protected[@]}"; do
+              if [ "$branch" = "$protected_branch" ]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name' |
+            while IFS= read -r branch; do
+              if is_protected "$branch"; then
+                echo "Keeping $branch"
+                continue
+              fi
+
+              echo "Deleting $branch"
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"
+            done
+
+      - name: Remove one-shot workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          path=".github/workflows/cleanup-old-branches.yml"
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=main" --jq '.sha')"
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/contents/${path}"             -f message="chore: remove one-shot branch cleanup workflow [skip ci]"             -f sha="$sha"             -f branch=main
