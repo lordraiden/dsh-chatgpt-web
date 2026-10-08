@@ -28,7 +28,7 @@ import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface }
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { compileChatGptWebPrompt, compileRetainedChatGptWebContinuation, type CompiledChatGptWebPrompt } from "./prompt";
+import { compileChatGptWebPrompt, compileRetainedChatGptWebContinuation, compileRetainedChatGptWebInstall, type CompiledChatGptWebPrompt } from "./prompt";
 import { projectCanonicalChatGptWebContext } from "./context-projection";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
@@ -65,8 +65,10 @@ import {
 import {
   chatGptConversationKey,
   chatGptSystemFingerprint,
+  isStableSystemContinuation,
   resolveChatGptResumeBranch,
   retainedConversationResumeRequest,
+  systemFingerprintRecordedOnBranch,
 } from "./conversation-key";
 import {
   ChatGptWebProviderCore,
@@ -538,6 +540,26 @@ export function createChatGptWebAdapter(
     const conversationGeneration = conversationKey
       ? replayOptions?.conversationGeneration ?? chatGptTurnSessions.conversationGeneration(conversationKey)
       : undefined;
+    // Whether THIS turn physically installs the prefix into the current
+    // conversation generation (issue #172 fingerprint semantics): a retained
+    // first turn installs; a retained resume installs only when the branch is
+    // `install` — computed here with the SAME pure decision production uses in
+    // `compileResume` (same inputs, same result; `prepare` runs later, inside
+    // the browser worker, so the decision must be made synchronously here).
+    // The system fingerprint is recorded only in this case: a continuation
+    // never rewrites the installed fingerprint, even if DSH's current
+    // systemPrompt changed — the installed prefix stays frozen for the rest of
+    // this physical conversation.
+    const systemInstalledThisTurn = resumeInput !== undefined
+      ? systemFingerprintRecordedOnBranch(
+        resolveChatGptResumeBranch(
+          chatGptTurnSessions,
+          conversationKey!,
+          chatGptTurnSessions.conversationGeneration(conversationKey!),
+          checkpointInput.parsed.context.systemPrompt,
+        ),
+      )
+      : retainConversation;
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
       ? async () => {
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
@@ -555,14 +577,20 @@ export function createChatGptWebAdapter(
           : {}),
       };
     };
-    // Retained continuation (issue #171/#172): the physical ChatGPT conversation
-    // already carries the fixed transport contract, the DSH system block, and the
-    // complete prior history. When the system block is unchanged IN THE CURRENT
-    // PHYSICAL GENERATION (fingerprint match), send only the delta plus the
-    // per-turn contracts. A missing, mismatched, or stale-generation fingerprint
-    // re-installs the full contract and system, which is what a brand-new
-    // physical conversation (first turn, process restart, or a replayed
-    // replacement epoch) needs.
+    // Retained composer transport (issue #171/#172, round 4): the physical
+    // ChatGPT conversation keeps everything sent from its first turn onward,
+    // so the transport sends plain composer text — never a JSON envelope, a
+    // transport contract, or a resume marker.
+    //
+    // - `continue`: the prefix is already installed in THIS physical
+    //   generation (a fingerprint was recorded for it) → only the new human
+    //   content. A recorded-but-different fingerprint freezes the prefix for
+    //   the rest of the physical conversation: a persona/system change takes
+    //   effect in the next physical conversation, never by re-injecting the
+    //   envelope machinery mid-conversation.
+    // - `install`: no fingerprint for the current generation (first turn,
+    //   process restart, failed predecessor, replayed replacement epoch) →
+    //   prefix + workspace reference + projected conversation as composer text.
     //
     // Identities kept apart: conversationKey (logical DSH chat, #170),
     // conversationGeneration (physical epoch, #170/#171), and the system
@@ -570,14 +598,26 @@ export function createChatGptWebAdapter(
     const compileResume = (input: CodexParsedRequest): CompiledChatGptWebPrompt => {
       // The branch decision is shared with the deterministic regression tests:
       // one implementation of "which compile path" lives in
-      // conversation-key.ts (returns fullCompile for an undefined conversationKey).
+      // conversation-key.ts (returns install for an undefined conversationKey).
       const branch = resolveChatGptResumeBranch(
         chatGptTurnSessions,
         conversationKey,
         conversationKey === undefined ? 1 : chatGptTurnSessions.conversationGeneration(conversationKey),
         input.context.systemPrompt,
       );
-      if (branch === "minimalContinuation") {
+      if (branch === "continue") {
+        if (conversationKey !== undefined && !isStableSystemContinuation(
+          chatGptTurnSessions,
+          conversationKey,
+          chatGptTurnSessions.conversationGeneration(conversationKey),
+          input.context.systemPrompt,
+        )) {
+          console.info("[chatgpt-web] system block changed mid-conversation; the prefix stays frozen for this physical conversation (the change takes effect in the next one)");
+        }
+        // No fallback to the legacy envelope inside a retained conversation:
+        // a delta without human content throws the explicit
+        // CHATGPT_RETAINED_DELTA_EMPTY_CODE adapter error and the turn fails
+        // without re-introducing <codex_context_json>/<dsh_transport_resume>.
         const experimentalMultipartParts = experimentalBiggerContext
           ? resolveBiggerContextMultipartParts(input, turnCapabilities)
           : undefined;
@@ -586,7 +626,7 @@ export function createChatGptWebAdapter(
           ...(experimentalMultipartParts !== undefined ? { experimentalMultipartParts } : {}),
         });
       }
-      return compileChatGptWebPrompt(input, turnCapabilities, undefined, compileOptionsFor(input));
+      return compileRetainedChatGptWebInstall(input, compileOptionsFor(input));
     };
     // The fingerprint is recorded ONLY after a successful settlement of the
     // turn that carried the system block, and is associated with the physical
@@ -598,6 +638,12 @@ export function createChatGptWebAdapter(
     // generation-N fingerprint.
     const recordSentSystemFingerprint = (browser: Promise<string>): void => {
       if (!retainConversation || !conversationKey) return;
+      // The fingerprint represents the system block PHYSICALLY INSTALLED in the
+      // current generation: it is only (re)written by a turn that performed the
+      // install. A continuation never rewrites it, even if DSH's current
+      // systemPrompt changed — the installed prefix stays frozen for the rest
+      // of this physical conversation (issue #172).
+      if (!systemInstalledThisTurn) return;
       void browser.then(
         () => {
           const key = conversationKey!;
@@ -868,17 +914,22 @@ export function createChatGptWebAdapter(
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
         prepare: async () => ({
-          ...compileChatGptWebPrompt(
-            checkpointInput.parsed,
-            turnCapabilities,
-            undefined,
-            compileOptionsFor(checkpointInput.parsed),
-          ),
+          // Retained routes (Luna with identity) install the composer prefix on
+          // their first physical turn; non-retained read-only turns keep the
+          // full envelope compile (each turn is a fresh conversation for them).
+          ...(retainConversation
+            ? compileRetainedChatGptWebInstall(checkpointInput.parsed, compileOptionsFor(checkpointInput.parsed))
+            : compileChatGptWebPrompt(
+              checkpointInput.parsed,
+              turnCapabilities,
+              undefined,
+              compileOptionsFor(checkpointInput.parsed),
+            )),
           release: () => {},
         }),
         // A retained conversation (managed-chrome, issue #171) continues on the existing surface,
-        // so it compiles the minimal continuation delta (issue #172) when the system block is
-        // unchanged, and re-installs the full contract otherwise.
+        // so it compiles the composer delta (issue #172) when the prefix is installed in the
+        // current physical generation, and installs it as plain composer text otherwise.
         ...(resumeInput ? { prepareResume: async () => ({
           ...compileResume(resumeInput),
           release: () => {},
@@ -928,11 +979,14 @@ export function createChatGptWebAdapter(
         token.resolve(turnToken);
       }
       try {
-        // A retained resume sends the minimal continuation delta (issue #172) when the
-        // system block is unchanged; the broker token is still registered for the turn.
+        // A retained first turn installs the composer prefix (issue #172, round 4);
+        // a retained resume sends only the new human content; non-retained turns
+        // keep the full envelope. The broker token is registered for the turn either way.
         const compiled = isResume
           ? compileResume(input)
-          : compileChatGptWebPrompt(input, turnCapabilities, turnToken, compileOptionsFor(input));
+          : retainConversation
+            ? compileRetainedChatGptWebInstall(input, compileOptionsFor(input))
+            : compileChatGptWebPrompt(input, turnCapabilities, turnToken, compileOptionsFor(input));
         return { ...compiled, release: () => {} };
       } catch (error) {
         await broker.revoke(turnToken);
