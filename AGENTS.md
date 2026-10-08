@@ -167,3 +167,40 @@ Do not implement a technically questionable user proposal blindly. First determi
 4. which invariants or persistence boundaries are affected.
 
 State assumptions when evidence is incomplete. Prefer verified behavior and current code over plausible behavior or stale memory.
+
+## Release and DSH update contract
+
+Releases are tag-based. A merge to `main` is not itself a release.
+
+- `package.json` `version` is the package version source of truth.
+- Stable tags must be `vX.Y.Z` and must match `package.json` without the leading `v`.
+- A release tag must point to the exact commit already merged into `main`.
+- Do not release from feature, fix, archive, or release branches.
+
+Release sequence:
+
+1. Bump `package.json` version in a normal PR.
+2. Merge into `main` and wait for green CI/tarball smoke.
+3. Tag the exact `main` commit and push the tag:
+   `git tag vX.Y.Z <main-sha>`
+   `git push origin vX.Y.Z`
+4. Tag CI validates the version and publishes `@lordraiden/dsh-chatgpt-web` to GitHub Packages and npmjs.com.
+5. The Release workflow waits for the npm publication and creates the corresponding published GitHub Release with generated notes.
+6. A stable version is complete only when the matching tag, npm package, and GitHub Release exist.
+
+DSH automatic updates must never follow `main` or feature branches. Compare the installed plugin version against the stable npm version, require a newer SemVer, and install the exact published version. Use the matching GitHub Release/tag as release provenance. Do not infer a release from a green `main` CI run or from `package.json` alone.
+
+The intended update chain is:
+
+`main` merge -> green CI -> `vX.Y.Z` tag -> npm publication -> GitHub Release -> DSH version discovery/update.
+
+Before any manual release operation, verify the target commit explicitly:
+
+```bash
+git checkout main
+git pull --ff-only
+node -p "require('./package.json').version"
+git rev-parse HEAD
+```
+
+The tag must be created from that exact `HEAD`. Never retag an already-published version with a different commit.
