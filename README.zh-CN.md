@@ -109,7 +109,7 @@ dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
 dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
 ```
 
-发布版本使用 SemVer tag，例如 `v1.0.16`；具体可用版本以对应 tag 和 package release 为准。
+发布版本使用 SemVer tag，例如 `v1.0.17`；具体可用版本以对应 tag 和 package release 为准。
 
 这会将插件注册到 profile 的 `package.json` bundles 中，其 Cordis 条目会被自动组合——无需手动 `insert`。
 
