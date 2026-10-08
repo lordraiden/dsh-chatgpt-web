@@ -45,6 +45,13 @@ export interface CodexParsedRequest {
    */
   _compactionRequest?: boolean;
   /**
+   * Internal retention marker for a ChatGPT Advisor review turn (issue #178). Present when the
+   * turn belongs to the Advisor conversation of a DSH session: the turn retains the Advisor
+   * conversation (an independent, synthetic threadId) even in chat-only mode, and a reused
+   * Advisor surface continues through the composer delta. Never a wire field.
+   */
+  _advisorReview?: { reviewId: string };
+  /**
    * True when Codex MultiAgent V2 delegated an agent_message as provider-private encrypted_content.
    * ChatGPT Web has no OpenAI backend key for that blob; the Responses HTTP boundary rejects it
    * before constructing the browser adapter.
