@@ -5,6 +5,7 @@ import {
   ChatGptWebProviderCore,
 } from "../src/adapters/chatgpt-web/provider-core";
 import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { MAX_CHATGPT_BROWSER_TABS } from "../src/adapters/chatgpt-web/concurrency";
 import { mapStream } from "../src/adapters/chatgpt-web/llm-adapter";
 import { projectChatGptCapabilities, type CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 import {
@@ -361,35 +362,86 @@ function leaseInput(turnId: string) {
     /physical account does not match its logical account identity/i,
   );
 
-  assert.throws(
-    () => registry.acquire({
-      ...descriptor,
-      pageIdentity: "page-account-conflict",
-      turnId: "trace-account-conflict",
-    }),
-    /authenticated ChatGPT account is already leased/i,
-  );
-
-  const second = registry.acquire({
+  // Issue #201: one authenticated account is BOUNDED, not exclusive. A second DSH chat may
+  // hold its own lease while the first turn is still running (distinct page, turn and thread).
+  const secondChat = registry.acquire({
     ...descriptor,
-    accountIdentity: "account-2",
-    pageIdentity: "page-2",
-    turnId: "trace-2",
+    pageIdentity: "page-account-conflict",
+    turnId: "trace-account-conflict",
   });
+  assert.equal(registry.activeCount(), 2);
+  // Isolation inside the account is still enforced: two leases never own one physical surface.
   assert.throws(
-    () => registry.bindPhysicalResource(second, {
+    () => registry.bindPhysicalResource(secondChat, {
       resourceId: "surface-1",
       browserContextId: "ctx-1",
-      pageId: "page-2",
+      pageId: "page-account-conflict",
       profileId: "profile-1",
       accountId: "chatgpt-account:account-1",
     }),
     /already leased by turn trace-1/i,
   );
-  registry.release(second);
+
+  // The account ceiling is the same MAX_CHATGPT_BROWSER_TABS bound the browser layer enforces.
+  const extraLeases = [];
+  for (let index = 3; index <= MAX_CHATGPT_BROWSER_TABS; index += 1) {
+    extraLeases.push(registry.acquire({
+      ...descriptor,
+      pageIdentity: `page-${index}`,
+      turnId: `trace-${index}`,
+    }));
+  }
+  assert.equal(registry.activeCount(), MAX_CHATGPT_BROWSER_TABS);
+  assert.throws(
+    () => registry.acquire({ ...descriptor, pageIdentity: "page-overflow", turnId: "trace-overflow" }),
+    /supports at most 5 simultaneous browser turns/i,
+  );
+  // A different account keeps its own independent ceiling.
+  const otherAccount = registry.acquire({
+    ...descriptor,
+    accountIdentity: "account-2",
+    pageIdentity: "page-account-2",
+    turnId: "trace-account-2",
+  });
+  assert.equal(registry.activeCount(), MAX_CHATGPT_BROWSER_TABS + 1);
+  // Releasing a turn frees exactly one account slot.
+  registry.release(extraLeases[0]);
+  const replacement = registry.acquire({
+    ...descriptor,
+    pageIdentity: "page-replacement",
+    turnId: "trace-replacement",
+  });
+  assert.equal(registry.activeCount(), MAX_CHATGPT_BROWSER_TABS + 1);
+  for (const extra of extraLeases.slice(1)) registry.release(extra);
+  registry.release(replacement);
+  registry.release(otherAccount);
+  registry.release(secondChat);
   registry.release(lease);
   assert.equal(registry.activeCount(), 0);
   console.log("ok browser/account lease physical ownership");
+}
+
+{
+  // Issue #201: the reported failure — a second DSH chat while the first turn is running —
+  // must lease normally instead of failing the turn, and the same DSH chat must still refuse
+  // a synchronous second turn.
+  const leases = new BrowserAccountLeaseRegistry();
+  const core = new ChatGptWebProviderCore("chatgpt-web", leases);
+  const sharedAccount = { accountIdentity: "account-shared" };
+  const chatA = core.begin({ ...leaseInput("chat-a"), ...sharedAccount, nativeThreadId: "thread-chat-a" });
+  const chatB = core.begin({ ...leaseInput("chat-b"), ...sharedAccount, nativeThreadId: "thread-chat-b" });
+  assert.equal(leases.activeCount(), 2);
+  assert.notEqual(chatA.lease.leaseId, chatB.lease.leaseId);
+  assert.equal(chatA.snapshot().state, "LEASED");
+  assert.equal(chatB.snapshot().state, "LEASED");
+  assert.throws(
+    () => core.begin({ ...leaseInput("chat-a-second"), ...sharedAccount, nativeThreadId: "thread-chat-a" }),
+    /cannot synchronously start a second provider turn for an active native DSH thread/i,
+  );
+  leases.release(chatA.lease);
+  leases.release(chatB.lease);
+  assert.equal(leases.activeCount(), 0);
+  console.log("ok concurrent DSH chats on one authenticated account");
 }
 
 {

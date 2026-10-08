@@ -84,7 +84,7 @@ import {
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concurrency";
 import {
   ChatGptSurfaceStaleError,
   ChatGptWebAdapterError,
@@ -2237,9 +2237,7 @@ export class ChatGptBrowserWorker {
       return Promise.reject(new Error(`Duplicate ChatGPT web browser turn: ${turn.traceId}`));
     }
     if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
-      return Promise.reject(new Error(
-        `ChatGPT Web supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
-      ));
+      return Promise.reject(chatGptBrowserTurnLimitError());
     }
     const useHelper = this.config.browserHost === "launcher"
       && process.env.DSH_CHATGPT_FREE_BROWSER_HELPER_PROCESS !== "1";
