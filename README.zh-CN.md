@@ -76,11 +76,30 @@
 dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
 ```
 
-发布到软件包仓库后，也可以直接安装已发布的软件包：
+本插件仅发布到仓库对应的**私有 GitHub Packages npm registry**，不会发布到 npmjs.com。
+
+在安装或更新前，为 profile 配置 `@lordraiden` scope：
+
+```ini
+@lordraiden:registry=https://npm.pkg.github.com
+```
+
+另外使用 GitHub personal access token (classic) 并授予 `read:packages` 权限进行认证。Token 应保存在用户的 `~/.npmrc` 或启动 DSH 的环境中，绝不能提交到仓库。
+
+例如：
+
+```ini
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+```
+
+之后正常安装或更新：
 
 ```bash
 dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
+dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
 ```
+
+发布版本使用 SemVer tag，例如 `v1.0.17`。只有对应版本已经发布到私有 GitHub Packages 后，DSH 才能通过 package manager 获取该版本。
 
 这会将插件注册到 profile 的 `package.json` bundles 中，其 Cordis 条目会被自动组合——无需手动 `insert`。
 
