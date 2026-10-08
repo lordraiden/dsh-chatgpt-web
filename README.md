@@ -112,7 +112,7 @@ dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
 dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
 ```
 
-The package is versioned with SemVer tags such as `v1.0.16`; the exact available version is always determined by the matching tag/package release. A release is considered available only after the matching private GitHub Packages version has been published.
+The package is versioned with SemVer tags such as `v1.0.17`; the exact available version is always determined by the matching tag/package release. A release is considered available only after the matching private GitHub Packages version has been published.
 
 This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
 
