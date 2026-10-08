@@ -109,6 +109,11 @@ export const CHATGPT_WEB_TUNING_DEFAULTS: Omit<Required<ChatGptWebTuning>, "turn
   responseDomGraceMaxMs: 240_000,
   responseDomGracePerCharMs: 2.5,
   sendEnableGraceMs: 5_000,
+  // ChatGPT Free/Think routes and connector waits routinely keep generating past five minutes
+  // while the visible Stop button proves the turn is still alive, so the stuck-generator budget
+  // is generous by default and user-tunable. It measures one continuous visible generation
+  // window, never the total turn time.
+  generationRunningStallMs: 900_000,
 };
 
 /** Tuning with every default applied; turnTimeoutMs stays optional (absent = no absolute deadline). */
@@ -118,6 +123,7 @@ export interface ResolvedChatGptWebTuning {
   responseDomGraceMaxMs: number;
   responseDomGracePerCharMs: number;
   sendEnableGraceMs: number;
+  generationRunningStallMs: number;
   turnTimeoutMs?: number;
 }
 
@@ -132,6 +138,7 @@ export function resolveChatGptWebTuning(tuning?: ChatGptWebTuning): ResolvedChat
   resolved.responseDomGraceMaxMs = pick(tuning.responseDomGraceMaxMs, resolved.responseDomGraceMaxMs);
   resolved.responseDomGracePerCharMs = pick(tuning.responseDomGracePerCharMs, resolved.responseDomGracePerCharMs);
   resolved.sendEnableGraceMs = pick(tuning.sendEnableGraceMs, resolved.sendEnableGraceMs);
+  resolved.generationRunningStallMs = pick(tuning.generationRunningStallMs, resolved.generationRunningStallMs);
   if (typeof tuning.turnTimeoutMs === "number" && Number.isFinite(tuning.turnTimeoutMs) && tuning.turnTimeoutMs > 0) {
     resolved.turnTimeoutMs = tuning.turnTimeoutMs;
   }

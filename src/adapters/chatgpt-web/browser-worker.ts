@@ -166,13 +166,29 @@ export function chatGptResponseDomGraceMs(maxChars: number, tuning: ResolvedChat
  */
 export const CHATGPT_PAGE_REHYDRATION_STALL_MS = 90_000;
 /**
- * How long ChatGPT may keep its Stop button visible (generation running) without exposing an
- * assistant turn before the turn is failed. Free accounts run the "Think" reasoning model
- * noticeably slower than the flat response-dom grace floor, so while the Stop button is present
- * the assistant-turn deadline is paused. This cap aligns with the provider streamIdleTimeoutMs
- * (300 s) so a genuinely stuck generator still fails with a clear diagnosis instead of hanging.
+ * Whether one continuous visible-generation window has passed its stall budget.
+ *
+ * The Stop button is the only liveness evidence ChatGPT exposes before assistant material
+ * appears, and it stays visible for the whole reasoning, connector-wait and answer window, so
+ * the budget lives in the browser transport tuning (`generationRunningStallMs`, 15 minutes by
+ * default) instead of a hardcoded cap that failed legitimately long turns. `runningSince` is
+ * dropped whenever the Stop button disappears, so this measures one continuous generation
+ * window and never the total turn time; `turnTimeoutMs` stays the optional absolute ceiling.
+ *
+ * @param runningSince - start of the current continuous visible generation window, when one is
+ *   visible; `undefined` means ChatGPT is not generating and nothing can be stalled.
+ * @param now - observation time.
+ * @param tuning - resolved browser transport tuning owning the budget.
+ * @returns whether the generator must be treated as stuck.
  */
-export const CHATGPT_GENERATION_RUNNING_STALL_MS = 300_000;
+export function chatGptGenerationRunningStallExceeded(
+  runningSince: number | undefined,
+  now: number,
+  tuning: ResolvedChatGptWebTuning,
+): boolean {
+  if (runningSince === undefined) return false;
+  return now - runningSince > tuning.generationRunningStallMs;
+}
 /**
  * True while the temporary-chat surface shows a visible "Loading chats" / "Loading profile"
  * rehydration overlay. Free accounts rehydrate the conversation SPA mid-turn unpredictably, so
@@ -3072,12 +3088,14 @@ export class ChatGptBrowserWorker {
       // While ChatGPT is actively generating (a visible Stop button), the first assistant token
       // is imminent even on Free accounts, where the "Think" reasoning model can take well over
       // the flat response-dom grace floor. Pause the deadline while the Stop button is present;
-      // a generator that stays running past the running-stall budget is stuck, not merely slow.
+      // a generator that stays running past the tuning budget is stuck, not merely slow.
       if (state.visibleStopButtonCount > 0) {
         runningSince ??= Date.now();
-        if (Date.now() - runningSince > CHATGPT_GENERATION_RUNNING_STALL_MS) {
+        if (chatGptGenerationRunningStallExceeded(runningSince, Date.now(), this.config.tuning)) {
           throw new Error(
-            "ChatGPT kept showing its Stop button (generation running) without exposing an assistant turn",
+            "ChatGPT kept showing its Stop button (generation running) for more than "
+            + `${this.config.tuning.generationRunningStallMs} ms without exposing an assistant turn; `
+            + "raise chatgptWeb.tuning.generationRunningStallMs if the turn is genuinely still running",
           );
         }
         responseDeadline = Math.min(
