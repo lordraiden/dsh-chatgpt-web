@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Volatile } from "@deepseek-ai/cordis";
+import { z } from "zod";
 import schemastery from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
 import { loadConfig } from "./config";
@@ -32,10 +33,27 @@ export interface CordisContext {
   llm: {
     registerAdapter(providers: string[], adapter: ChatGptWebLlmAdapter): { (): void };
   };
+  /**
+   * Session-projection registry (DSH session-projection capability seam). The
+   * plugin registers one immutable unit so the Client UI can receive the
+   * sidecar control token through the official `useProjection` hook without
+   * any parallel channel. Structural and optional: profiles without the
+   * capability simply skip the registration.
+   */
+  sessionProjections?: {
+    register(definition: {
+      key: string;
+      stateSchema: z.ZodType<unknown>;
+      init: (header: unknown, inheritedEventCount: number) => unknown;
+      apply: (state: unknown, event: unknown) => unknown;
+      wire: { viewSchema: z.ZodType<unknown>; view: (state: unknown) => unknown };
+      stateVersion: number;
+    }): () => void;
+  };
 }
 
 export const name = "dsh-chatgpt-web";
-export const inject = ["llm"];
+export const inject = ["llm", "sessionProjections"];
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 17841;
 
@@ -367,24 +385,53 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
     return { adapter, dispose };
   };
 
+  /**
+   * Expose the sidecar control token to the Client UI through the official
+   * session-projection seam (`useProjection` on the Client): the token is the
+   * single stable value the Advisor dialog (#179) needs to call the loopback
+   * control API, and the projection is the framework channel for a
+   * session-derived value — no parallel transport. The state is immutable:
+   * `apply` always returns the previous reference, so the eager drive does
+   * zero downstream work for every session event.
+   */
+  const registerSidecarProjection = (): (() => void) | undefined => {
+    const projections = ctx.sessionProjections;
+    if (!projections || typeof projections.register !== "function") return undefined;
+    const token = loadConfig().controlToken;
+    const state = { controlToken: token };
+    const schema = z.object({ controlToken: z.string() });
+    return projections.register({
+      key: "dsh-chatgpt-web:sidecar",
+      stateSchema: schema,
+      init: () => state,
+      apply: (previous) => previous,
+      wire: { viewSchema: schema, view: (s) => s },
+      stateVersion: 1,
+    });
+  };
+
   if (typeof ctx.effect === "function") {
     ctx.effect(() => {
       const { adapter, dispose } = registerAdapter();
+      const disposeProjection = registerSidecarProjection();
       void startDaemon();
       return async () => {
         await adapter.shutdown();
         await stopDaemon();
         dispose();
+        disposeProjection?.();
       };
     });
   } else {
     const { adapter, dispose } = registerAdapter();
+    const disposeProjection = registerSidecarProjection();
     void startDaemon();
     process.once("beforeExit", () => {
       void (async () => {
         await adapter.shutdown();
         await stopDaemon();
         dispose();
+        disposeProjection?.();
       })();
     });
   }

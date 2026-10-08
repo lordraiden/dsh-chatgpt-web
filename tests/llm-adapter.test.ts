@@ -382,7 +382,9 @@ describe("ChatGptWebLlmAdapter cancellation", () => {
 describe("native path does not enter the Responses server", () => {
   test("plugin declares the LLM service as a hard Cordis dependency", () => {
     const source = readFileSync(join(HERE, "..", "src", "plugin.ts"), "utf8");
-    expect(source).toContain('export const inject = ["llm"];');
+    // llm stays a hard (unconditionally injected) Cordis dependency; the Advisor
+    // UI (#179) additionally injects sessionProjections to carry the control token.
+    expect(source).toMatch(/export const inject = \["llm", "sessionProjections"\];/);
     expect(source).toMatch(/const dispose\s*=\s*ctx\.llm\.registerAdapter\(\[CHATGPT_WEB_PROVIDER_ID\], adapter\);/);
     expect(source).not.toContain("if (ctx.llm)");
   });
