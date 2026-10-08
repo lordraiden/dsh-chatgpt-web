@@ -11,6 +11,7 @@ import {
 } from "../src/adapters/chatgpt-web/prompt";
 import {
   chatGptSystemFingerprint,
+  isStableSystemContinuation,
   resolveChatGptResumeBranch,
   retainedConversationResumeRequest,
   systemFingerprintRecordedOnBranch,
@@ -738,7 +739,6 @@ describe("issue #172 compileResume orchestration (prefix frozen per physical con
       sessions,
       conversationKey,
       generation,
-      input.context.systemPrompt,
     );
     return {
       branch,
@@ -816,7 +816,7 @@ describe("issue #172 compileResume orchestration (prefix frozen per physical con
     generation: number,
     system: string[],
   ): void {
-    const branch = resolveChatGptResumeBranch(sessions, conversationKey, generation, system);
+    const branch = resolveChatGptResumeBranch(sessions, conversationKey, generation);
     if (systemFingerprintRecordedOnBranch(branch)) {
       sessions.recordSentSystemFingerprint(conversationKey, generation, chatGptSystemFingerprint(system));
     }
@@ -838,7 +838,7 @@ describe("issue #172 compileResume orchestration (prefix frozen per physical con
     // Every subsequent turn keeps seeing the same (frozen) mismatch, so the
     // branch keeps choosing continue with only the human delta — the change
     // takes effect in the next physical conversation, not by re-install.
-    expect(resolveChatGptResumeBranch(sessions, key, 1, [NEW_SYSTEM])).toBe("continue");
+    expect(resolveChatGptResumeBranch(sessions, key, 1)).toBe("continue");
     const { branch, text } = resume(sessions, key, 1, deltaParsed([NEW_SYSTEM]));
     expect(branch).toBe("continue");
     expect(text).toBe("pregunta actual");
@@ -853,7 +853,7 @@ describe("issue #172 compileResume orchestration (prefix frozen per physical con
     expect(sessions.sentSystemFingerprint(key, 1)).toBe(chatGptSystemFingerprint([SYSTEM]));
     // Generation 2 starts with no fingerprint of its own → install.
     expect(sessions.sentSystemFingerprint(key, 2)).toBeUndefined();
-    expect(resolveChatGptResumeBranch(sessions, key, 2, [NEW_SYSTEM])).toBe("install");
+    expect(resolveChatGptResumeBranch(sessions, key, 2)).toBe("install");
     // The first settled turn of generation 2 installs B → records B for 2.
     settleTurn(sessions, key, 2, [NEW_SYSTEM]);
     expect(sessions.sentSystemFingerprint(key, 2)).toBe(chatGptSystemFingerprint([NEW_SYSTEM]));
@@ -866,15 +866,68 @@ describe("issue #172 compileResume orchestration (prefix frozen per physical con
     sessions.recordSentSystemFingerprint(key, 1, chatGptSystemFingerprint([SYSTEM]));
     // Same generation → valid (continue).
     expect(sessions.sentSystemFingerprint(key, 1)).toBe(chatGptSystemFingerprint([SYSTEM]));
-    expect(resolveChatGptResumeBranch(sessions, key, 1, [SYSTEM])).toBe("continue");
+    expect(resolveChatGptResumeBranch(sessions, key, 1)).toBe("continue");
     // Replacement epoch (N+1) → the generation-1 fingerprint is NOT valid → install.
     expect(sessions.sentSystemFingerprint(key, 2)).toBeUndefined();
-    expect(resolveChatGptResumeBranch(sessions, key, 2, [SYSTEM])).toBe("install");
+    expect(resolveChatGptResumeBranch(sessions, key, 2)).toBe("install");
     // A system delivered to generation 2 settles → bound to generation 2;
     // generation 1 no longer reports a fingerprint.
     sessions.recordSentSystemFingerprint(key, 2, chatGptSystemFingerprint([SYSTEM]));
     expect(sessions.sentSystemFingerprint(key, 1)).toBeUndefined();
     expect(sessions.sentSystemFingerprint(key, 2)).toBe(chatGptSystemFingerprint([SYSTEM]));
-    expect(resolveChatGptResumeBranch(sessions, key, 2, [SYSTEM])).toBe("continue");
+    expect(resolveChatGptResumeBranch(sessions, key, 2)).toBe("continue");
+  });
+});
+
+describe("issue #172 resolveChatGptResumeBranch decision (fingerprint-only)", () => {
+  const SYSTEM = "You are a concise conversational assistant.";
+  const NEW_SYSTEM = "You are a verbose analytical assistant.";
+
+  // The branch decision takes ONLY the conversation key, the physical
+  // generation, and the fingerprint store. It deliberately has no
+  // systemPrompt parameter: what is physically installed, not what DSH
+  // currently holds, selects the composer transport.
+
+  test("no fingerprint for the generation → install", () => {
+    const sessions = new ChatGptTurnSessions();
+    expect(resolveChatGptResumeBranch(sessions, "conversation-x", 1)).toBe("install");
+  });
+
+  test("no conversation key → install", () => {
+    const sessions = new ChatGptTurnSessions();
+    expect(resolveChatGptResumeBranch(sessions, undefined, 1)).toBe("install");
+  });
+
+  test("fingerprint present for the generation → continue", () => {
+    const sessions = new ChatGptTurnSessions();
+    const key = "conversation-y";
+    sessions.recordSentSystemFingerprint(key, 1, chatGptSystemFingerprint([SYSTEM]));
+    expect(resolveChatGptResumeBranch(sessions, key, 1)).toBe("continue");
+  });
+
+  test("a changed system prompt does not change continue into install", () => {
+    // The fingerprint for generation 1 records SYSTEM. DSH's current system
+    // block is now NEW_SYSTEM, but the branch decision cannot see it — it
+    // depends only on the existence of the installed fingerprint, so the
+    // retained conversation keeps continuing (prefix frozen) instead of
+    // re-installing.
+    const sessions = new ChatGptTurnSessions();
+    const key = "conversation-z";
+    sessions.recordSentSystemFingerprint(key, 1, chatGptSystemFingerprint([SYSTEM]));
+    expect(resolveChatGptResumeBranch(sessions, key, 1)).toBe("continue");
+    // The diagnostic — not the branch — reports the mismatch, so the caller
+    // can log the frozen prefix.
+    expect(isStableSystemContinuation(sessions, key, 1, [NEW_SYSTEM])).toBe(false);
+    expect(isStableSystemContinuation(sessions, key, 1, [SYSTEM])).toBe(true);
+  });
+
+  test("the branch decision ignores the system prompt entirely across generations", () => {
+    const sessions = new ChatGptTurnSessions();
+    const key = "conversation-w";
+    sessions.recordSentSystemFingerprint(key, 1, chatGptSystemFingerprint([SYSTEM]));
+    // Generation 1: installed → continue, independent of any system block.
+    expect(resolveChatGptResumeBranch(sessions, key, 1)).toBe("continue");
+    // Generation 2: nothing installed yet → install, independent of any system block.
+    expect(resolveChatGptResumeBranch(sessions, key, 2)).toBe("install");
   });
 });
