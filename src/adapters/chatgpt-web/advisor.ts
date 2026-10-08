@@ -25,6 +25,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { AdapterEvent, CodexMessage, CodexParsedRequest } from "../../types";
+import { projectContextName } from "./prompt";
 import type { IncomingMeta } from "../base";
 
 export type AdvisorMode = "normal" | "think";
@@ -92,12 +93,25 @@ export function advisorConversationThread(sessionId: string): string {
  * model family. `normal` maps to the lightest non-Pro route; `think` maps to
  * the deepest non-Pro route: Sol accounts use `chatgpt-web/light` /
  * `chatgpt-web/high`, Luna-only accounts use `chatgpt-web/luna` /
- * `chatgpt-web/think`. The caller validates the slug through the existing
- * route authority (`requireChatGptWebRoute`), which also yields the backend
- * model and the adapter effort — no model discovery or new configuration.
+ * `chatgpt-web/think`.
+ *
+ * The model FAMILY decision takes the route authority's RESOLVED capability
+ * state (`ChatgptWebRouteAuthority.capabilities.solAvailable`), never a raw
+ * boolean: the authority is the single source of truth for what the account
+ * can use (it folds `capabilityState` over the legacy boolean). `unknown`
+ * refuses model selection fail-closed, exactly like the rest of the route
+ * authority. The caller validates the slug through `requireChatGptWebRoute`
+ * on the same authority, which also yields the backend model and the adapter
+ * effort — no model discovery or new configuration.
  */
-export function resolveAdvisorRouteSlug(mode: AdvisorMode, solAvailable: boolean): string {
-  if (!solAvailable) return mode === "think" ? "chatgpt-web/think" : "chatgpt-web/luna";
+export function resolveAdvisorRouteSlug(
+  mode: AdvisorMode,
+  solAvailable: "supported" | "unsupported" | "unknown",
+): string {
+  if (solAvailable === "unknown") {
+    throw new Error("ChatGPT Web Sol capability is unknown; the Advisor cannot select a model family");
+  }
+  if (solAvailable === "unsupported") return mode === "think" ? "chatgpt-web/think" : "chatgpt-web/luna";
   return mode === "think" ? "chatgpt-web/high" : "chatgpt-web/light";
 }
 
@@ -141,13 +155,19 @@ export function validateAdvisorReviewInput(body: unknown): AdvisorReviewInput {
   if (project !== undefined && (typeof project !== "string" || project.trim().length === 0)) {
     throw new Error('Advisor review field "project" must be a non-empty string when present');
   }
+  // Normalize the project identifier through the same owner the retained
+  // install uses (`projectContextName`): a bare name passes through
+  // unchanged, a path collapses to its last segment, so a local filesystem
+  // path can never reach the review content. A name that resolves to
+  // nothing is omitted, mirroring the install's "line omitted" behavior.
+  const projectName = typeof project === "string" ? projectContextName(project.trim()) : undefined;
   return {
     sessionId: stringField("sessionId"),
     humanRequest: stringField("humanRequest"),
     dshResponse: stringField("dshResponse"),
     instructions: stringField("instructions"),
     mode,
-    ...(typeof project === "string" && project.trim().length > 0 ? { project: project.trim() } : {}),
+    ...(projectName !== undefined ? { project: projectName } : {}),
   };
 }
 
@@ -211,12 +231,18 @@ export interface AdvisorTurnRunner {
  * endpoint); the Advisor writes nothing to the main DSH history because the
  * sidecar never participates in the DSH session loop. A turn failure becomes a
  * typed `ok: false` result, never an unhandled rejection.
+ *
+ * `options.abortSignal` (the tracked HTTP execution signal) is forwarded into
+ * the turn's incoming meta exactly like `nativeDshTurnRequest` does: when the
+ * client disconnects, the sidecar aborts the browser turn and releases the
+ * Advisor surface instead of letting it run on in the background.
  */
 export async function runAdvisorReview(
   runner: AdvisorTurnRunner,
   input: AdvisorReviewInput,
   route: AdvisorRoute,
   reviewId?: string,
+  options: { abortSignal?: AbortSignal } = {},
 ): Promise<AdvisorReviewResult> {
   const id = reviewId ?? randomUUID();
   const parsed = buildAdvisorTurnRequest(input, route, id);
@@ -225,7 +251,7 @@ export async function runAdvisorReview(
   let terminal: "done" | "incomplete" | "error" | undefined;
   let failure: { code?: string; message?: string } | undefined;
   try {
-    await runner.runTurn(parsed, { headers: new Headers() }, event => {
+    await runner.runTurn(parsed, { headers: new Headers(), abortSignal: options.abortSignal }, event => {
       switch (event.type) {
         case "text_delta":
           text += event.text;

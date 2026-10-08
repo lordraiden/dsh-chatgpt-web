@@ -1017,6 +1017,7 @@ async function advisorReviewRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory,
+  signal: AbortSignal,
 ): Promise<Response> {
   let raw: unknown;
   try {
@@ -1035,10 +1036,18 @@ async function advisorReviewRequest(
   }
   const reviewId = randomUUID();
   const provider = providerConfig(config);
-  const routeSlug = resolveAdvisorRouteSlug(input.mode, provider.chatgptWeb?.solAvailable !== false);
+  // The route authority is the single source of truth for the account's model
+  // family: the Advisor picks the mode→route mapping, the authority's RESOLVED
+  // capability state (capabilityState folded over the legacy boolean) decides
+  // Sol vs Luna, and requireChatGptWebRoute validates the slug on the same
+  // authority — no second, divergent capability source.
+  const authority = chatGptWebRouteAuthority(config);
   let route: ChatGptWebModelRoute;
   try {
-    route = requireChatGptWebRoute(routeSlug, chatGptWebRouteAuthority(config));
+    route = requireChatGptWebRoute(
+      resolveAdvisorRouteSlug(input.mode, authority.capabilities.solAvailable),
+      authority,
+    );
   } catch (error) {
     return Response.json(
       { ok: false, reviewId, mode: input.mode, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
@@ -1051,6 +1060,10 @@ async function advisorReviewRequest(
     input,
     { slug: route.slug, backendModel: route.backendModel, effort: route.adapterEffort },
     reviewId,
+    // The tracked execution signal (already wired to the client disconnect by
+    // HttpTurnCounter.track): a client disconnect aborts the browser turn and
+    // releases the Advisor surface, exactly like nativeDshTurnRequest.
+    { abortSignal: signal },
   );
   return Response.json(result, { status: result.ok ? 200 : 502, headers: controlCorsHeaders() });
 }
@@ -1173,7 +1186,7 @@ export function startServer(
     if (req.method === "POST" && url.pathname === "/v1/control/advisor/review") {
       if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
       return httpTurns.track(
-        signal => advisorReviewRequest(new Request(req, { signal }), config, adapterFactory),
+        signal => advisorReviewRequest(new Request(req, { signal }), config, adapterFactory, signal),
         req.signal,
         process.platform,
         "unspecified",

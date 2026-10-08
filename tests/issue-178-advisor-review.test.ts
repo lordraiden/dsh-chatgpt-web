@@ -91,11 +91,20 @@ describe("issue #178 advisor payload", () => {
 });
 
 describe("issue #178 advisor mode/model resolution", () => {
-  test("normal/think resolve per account family", () => {
-    expect(resolveAdvisorRouteSlug("normal", true)).toBe("chatgpt-web/light");
-    expect(resolveAdvisorRouteSlug("think", true)).toBe("chatgpt-web/high");
-    expect(resolveAdvisorRouteSlug("normal", false)).toBe("chatgpt-web/luna");
-    expect(resolveAdvisorRouteSlug("think", false)).toBe("chatgpt-web/think");
+  test("normal/think resolve per resolved capability state", () => {
+    expect(resolveAdvisorRouteSlug("normal", "supported")).toBe("chatgpt-web/light");
+    expect(resolveAdvisorRouteSlug("think", "supported")).toBe("chatgpt-web/high");
+    expect(resolveAdvisorRouteSlug("normal", "unsupported")).toBe("chatgpt-web/luna");
+    expect(resolveAdvisorRouteSlug("think", "unsupported")).toBe("chatgpt-web/think");
+    // No Pro/xhigh/max route ever surfaces for the Advisor.
+    for (const slug of ["chatgpt-web/light", "chatgpt-web/high", "chatgpt-web/luna", "chatgpt-web/think"]) {
+      expect(slug).not.toMatch(/xhigh|max/);
+    }
+  });
+
+  test("an unknown Sol capability refuses model selection fail-closed", () => {
+    expect(() => resolveAdvisorRouteSlug("normal", "unknown")).toThrow("Sol capability is unknown");
+    expect(() => resolveAdvisorRouteSlug("think", "unknown")).toThrow("Sol capability is unknown");
   });
 
   test("the routes map to the expected backend models and efforts", () => {
@@ -113,6 +122,23 @@ describe("issue #178 advisor mode/model resolution", () => {
     expect(() => validateAdvisorReviewInput({ ...INPUT, instructions: "" })).toThrow("instructions");
     expect(() => validateAdvisorReviewInput("nope")).toThrow("object");
     expect(ADVISOR_INPUT_INVALID_CODE).toBe("advisor_input_invalid");
+  });
+
+  test("a bare project name passes through unchanged", () => {
+    expect(validateAdvisorReviewInput(INPUT).project).toBe("dsh-chatgpt-web");
+    // Nested-style names (monorepo package paths) keep their last segment.
+    expect(validateAdvisorReviewInput({ ...INPUT, project: "packages/web" }).project).toBe("web");
+  });
+
+  test("a local filesystem path is normalized to its name and never leaks the path", () => {
+    const unix = validateAdvisorReviewInput({ ...INPUT, project: "/home/raiden/Documents/dsh-chatgpt-web" });
+    expect(unix.project).toBe("dsh-chatgpt-web");
+    expect(composeAdvisorMessage(unix)).not.toContain("/home/raiden");
+    const win = validateAdvisorReviewInput({ ...INPUT, project: "C:\\repo\\dsh-chatgpt-web" });
+    expect(win.project).toBe("dsh-chatgpt-web");
+    // A name that resolves to nothing is omitted, mirroring the install.
+    const empty = validateAdvisorReviewInput({ ...INPUT, project: "///" });
+    expect(empty.project).toBeUndefined();
   });
 });
 
@@ -278,5 +304,36 @@ describe("issue #178 advisor error handling", () => {
     expect(result.model).toBe(SOL_THINK.slug);
     expect(result.reviewId).toBe("review-ok");
     expect(result.code).toBeUndefined();
+  });
+
+  test("the tracked execution signal is propagated into the turn's incoming meta", async () => {
+    let observed: AbortSignal | undefined;
+    const capturing: AdvisorTurnRunner = {
+      async runTurn(_parsed, incoming, emit) {
+        observed = incoming.abortSignal;
+        emit({ type: "done" });
+      },
+    };
+    const controller = new AbortController();
+    await runAdvisorReview(capturing, INPUT, SOL_NORMAL, "review-signal", { abortSignal: controller.signal });
+    expect(observed).toBe(controller.signal);
+    // An already-aborted signal is forwarded verbatim (the adapter decides the outcome).
+    const aborted = new AbortController();
+    aborted.abort("client disconnected");
+    const captured: { signal?: AbortSignal } = {};
+    await runAdvisorReview(
+      {
+        async runTurn(_parsed, incoming, emit) {
+          captured.signal = incoming.abortSignal;
+          emit({ type: "done" });
+        },
+      },
+      INPUT,
+      SOL_NORMAL,
+      "review-signal-aborted",
+      { abortSignal: aborted.signal },
+    );
+    expect(captured.signal?.aborted).toBe(true);
+    expect(captured.signal?.reason).toBe("client disconnected");
   });
 });
