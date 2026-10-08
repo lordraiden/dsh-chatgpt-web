@@ -1,1605 +1,1922 @@
 # dsh-chatgpt-web Architecture
 
-**Status:** Definitive architecture and implementation boundary  
-**Implementation status:** Target architecture; implementation follows the phased backlog below  
-**Document role:** Single architectural source of truth for issues #8–#14  
+**Status:** Target architecture for multi-provider text-only Web Chat  
+**Implementation status:** Partially implemented; the repository currently contains the ChatGPT Web implementation and the extraction path defined below  
+**Document role:** Single architectural source of truth for the Web Chat provider architecture  
 **Repository:** lordraiden/dsh-chatgpt-web  
-**Last updated:** 2026-10-03
+**Last updated:** 2026-10-08
 
-> API-like outside, product-native inside.
+> **Provider-neutral core, provider-owned conversation, transport-independent exchange.**
 
-This project makes an authenticated ChatGPT Web session available to DeepSeek Harness (DSH) as a native LLM provider. The public boundary is a normal DSH provider contract. The Phase 1 implementation is ChatGPT-Web-specific, while the browser execution seams are intentionally service-neutral enough to support future browser-backed providers without creating a generic provider framework. Browser interaction, product-side tool looping, account state, and UI recovery remain provider/service internals.
+This project exposes authenticated consumer-web chat services to DeepSeek Harness (DSH) as native LLM providers.
 
-The architecture is intentionally conservative. Phase 1 contains only the boundaries and invariants required for a solid first pilot. Phase 2 contains compatibility convergence, cleanup, and optional hardening that does not need to block the first native provider.
+The architecture is being expanded from a single ChatGPT Web integration into a **text-only Web Chat provider layer** that can support ChatGPT, Qwen Chat, and DeepSeek Chat without duplicating the execution engine.
 
-### 1.3 Supported account matrix: normal ChatGPT Web Free + paid
+The key design decision is:
 
-The supported product target for this plugin is normal authenticated **ChatGPT Web usage through the chatgpt.com product surface**, on both **Free and paid ChatGPT accounts**. The target is the Web/product usage path and its available models, not Codex consumption.
+> **Abstract the logical conversation and text exchange, not the browser page.**
 
-Routes whose usage is accounted against the **Codex allocation, ChatGPT Work allocation, or a shared Codex/Work credit pool are explicitly out of scope**. Native Codex passthrough remains a separate protocol boundary and must never be pulled into the ChatGPT Web ProviderCore.
+A provider may use a retained web page, a browser network session, a private web endpoint reached through an authenticated browser, or a hybrid of these. Those are provider transport decisions. The shared core must not depend on any one of them.
 
-Eligibility is established from observable ChatGPT Web product/account capability rather than plan name, display label, or backend model ID. When the product route cannot be established, capability state is `unknown` and automatic selection fails closed.
-
-This distinction is architectural, not cosmetic:
-
-- OpenAI API model cards, API context windows, API token limits, and API pricing are **not authoritative** for this provider's browser transport budget.
-- Official ChatGPT product documentation is authoritative for current Web product availability and plan-level limits, but those limits can change independently of the API.
-- ChatGPT Web transport limits used by this adapter are provider measurements/guardrails for the Free Web surface. They must be documented as such and must not be presented as official API or model limits.
-- Any paid-account compatibility code retained elsewhere in the repository is outside the supported #11-A/#11-B contract and must not influence the Free-account context policy.
-
-The current OpenAI Free-plan documentation confirms that Free users have access to ChatGPT features through the product UI and that usage limits are plan/model dependent and mutable. The image-input documentation likewise states that the number of images that can be added depends on image size and accompanying text; therefore this provider may impose a conservative transport cap without treating that number as an OpenAI product maximum.
-
+This document replaces the previous ChatGPT-centric architecture. Older design sections and issue mappings that were built around a single ChatGPTWebProviderCore, ChatGPT-native MCP/capability execution, or the Responses server as an architectural concern are historical and must not be used as the basis for new provider work.
 
 ---
 
-## 1. Goals and non-goals
-
-### 1.1 Goals
-
-The pilot must provide:
-
-- a first-class DSH provider registered through ctx.llm;
-- ChatGPT Web as the actual model execution surface;
-- deterministic turn ownership and account/browser concurrency;
-- DSH as the authority for all DSH-projected tools and skills;
-- one provider execution core for all ChatGPT Web entrypoints;
-- one canonical DSH-to-ChatGPT context projection;
-- isolated browser/DOM mechanics;
-- deterministic cancellation, settlement, retry, and recovery;
-- clear provenance between DSH-authorized capability activity and ChatGPT-native product activity;
-- a small architecture that an implementation agent can follow without inventing parallel abstractions.
-
-### 1.2 Non-goals
-
-This architecture does not attempt to:
-
-- reproduce an OpenAI API internally;
-- make ChatGPT Web behave like an ordinary stateless HTTP provider in every respect;
-- reimplement the DSH agent loop;
-- reimplement DSH tools or skills;
-- turn ChatGPT-native product features into DSH tools;
-- guarantee arbitrary browser concurrency;
-- promise theoretical model context as usable web transport capacity;
-- force the first-party Codex passthrough through the browser provider;
-- build a generic provider framework above DSH ctx.llm;
-- implement additional browser-backed providers as part of the Phase 1 pilot.
-
----
-
-## 2. Phased delivery
-
-The repository keeps seven implementation issues. The issues are implementation slices, not competing design documents.
-
-| Issue | Phase | Purpose |
-|---|---|---|
-| #8 | Phase 1 | Native DSH LLM provider boundary |
-| #9 | Phase 1 | ProviderCore, execution authority, account/browser lease, turn state, continuity and control-protocol boundary |
-| #10 | Phase 1 | DSH capability projection, capability transport, broker binding and immutable turn snapshot |
-| #11 | Phase 1 | Canonical context/replay/compaction projection and transport budgeting |
-| #12 | Phase 1 | WebSurfaceTransport and browser resilience boundary |
-| #13 | Phase 2 | Responses compatibility convergence and compatibility demotion |
-| #14 | Phase 2 | Provenance, architecture verification and removal of proven redundancy |
-
-### 2.1 Phase 1 definition
-
-Phase 1 is complete when the native DSH path can execute a real ChatGPT Web turn through the architecture below without relying on the localhost Responses endpoint as its semantic provider boundary.
-
-Phase 1 must include the minimum hardening that protects correctness:
-
-- native provider registration;
-- narrow ProviderCore;
-- explicit authenticated account/browser resource ownership;
-- monotonic turn state;
-- logical versus physical settlement;
-- safe retry boundary;
-- exact resume versus replay versus failed recovery;
-- untrusted model-visible control protocol parsing;
-- DSH capability authority and turn snapshotting;
-- canonical context projection;
-- effective transport budget;
-- isolated WebSurfaceTransport;
-- explicit reentrancy rules.
-
-Phase 1 does not require a multi-account pool, advanced capability caching, arbitrary parallel browser lanes, a generic browser abstraction framework, or a broad observability platform.
-
-### 2.2 Phase 2 definition
-
-Phase 2 improves integration completeness without changing the Phase 1 authority model:
-
-- Responses compatibility becomes a thin ingress adapter over ProviderCore;
-- provenance and architecture tests become explicit cross-layer contracts;
-- redundant compatibility/legacy state is removed only after parity is demonstrated;
-- optional capability cache/epoch optimizations may be added;
-- optional support for multiple authenticated browser sessions may be added;
-- future transport substitution may be pursued without changing the DSH-facing provider contract.
-
-Phase 2 features must not introduce a second authority or a second ChatGPT Web execution core.
-
----
-
-## 3. Architectural principles
-
-### 3.1 API-like outside, product-native inside
-
-DSH sees:
-
-~~~text
-DSH -> ctx.llm -> ChatGPT Web provider -> stream
-~~~
-
-The implementation is allowed to be:
-
-~~~text
-ProviderCore -> account/browser lease -> WebSurfaceTransport -> ChatGPT Web
-                            |
-                            +-> capability transport -> DSH runtime
-~~~
-
-The project must not emulate an OpenAI-compatible API internally just to make browser transport look familiar.
-
-### 3.2 One authority per concern
-
-- DSH owns DSH runtime authority.
-- ChatGPT owns model reasoning and ChatGPT-native product behavior.
-- ProviderCore owns ChatGPT Web provider orchestration.
-- CapabilityProjector decides what DSH exposes to ChatGPT.
-- CapabilityTransport decides how that projection crosses the boundary.
-- TurnBroker coordinates asynchronous turn-bound capability traffic.
-- WebSurfaceTransport owns browser and DOM mechanics.
-
-No lower layer may become an alternative source of truth for a higher layer.
-
-### 3.3 Hide mechanism, preserve semantics
-
-The adapter must hide browser mechanics from DSH while preserving DSH-visible provider semantics such as model resolution, streaming, cancellation, provider errors, and replay state.
-
-Not every web property is equivalent to an API property. The provider must publish the strongest contract the browser can actually satisfy.
-
-A browser-backed provider has two kinds of state:
-
-- shared execution machinery that is independent of the upstream web service;
-- service-specific semantics such as authentication/session state, model catalogue, model selection, reasoning controls, context rules, submission/completion mechanics, native capabilities, and WebSurfaceTransport behavior.
-
-The first category may be reused by later providers. The second category must remain behind the provider-specific service profile. Phase 1 implements only ChatGPT Web.
-
----
-
-## 4. Identity model
-
-The architecture distinguishes four identities.
-
-~~~text
-DSH Session
-  = canonical DSH conversation and lifecycle
-
-ChatGPT Conversation / Thread
-  = provider-private product continuity
-
-Browser Page / Context
-  = physical transport resource
-
-Authenticated ChatGPT Account
-  = authenticated product resource shared by one or more browser contexts
-~~~
-
-These identities must never be conflated.
-
-### 4.1 Required relationships
-
-The default pilot policy is:
-
-~~~text
-one DSH session
-  -> one stable ChatGPT conversation affinity
-
-one active DSH turn
-  -> one turn-bound browser interaction lane
-
-many DSH turns
-  -> may share one authenticated account only through explicit account/browser arbitration
-~~~
-
-The system must never silently switch a DSH session to another ChatGPT conversation.
-
-### 4.2 BrowserAccountLease
-
-Phase 1 introduces a small internal concept equivalent to BrowserAccountLease.
-
-It is not a new public abstraction. It is a lifecycle/coordination primitive whose identity is service-scoped:
-
-~~~text
-serviceId
-account/session identity
-browser profile identity
-browser context/page
-DSH turn identity
-ownership state
-~~~
-
-For ChatGPT Web, the serviceId is chatgpt-web. A future DeepSeek Web or Grok Web implementation would use its own service/session identity and must not share authenticated product state merely because it shares Chromium.
-
-The lease answers:
-
-- which authenticated service account/session is being used;
-- which browser profile/context/page owns the active turn;
-- whether that resource is available;
-- which DSH turn currently holds it;
-- when it may be reused;
-- how it is released after physical settlement;
-- how shutdown/crash revokes it.
-
-The lease owns resource ownership, not authorization policy. It must not contain the canonical DSH tool registry, sandbox policy, approval state, or skill policy.
-
----
-
-## 5. Trust and authority
-
-### 5.1 DSH authority
-
-DSH remains authoritative for:
-
-- provider selection;
-- DSH session and agent identity;
-- workspace roots;
-- sandbox;
-- approvals and guards;
-- DSH tools;
-- DSH skills and their policy;
-- capability authorization;
-- cancellation authority;
-- DSH lifecycle.
-
-### 5.2 ChatGPT authority
-
-ChatGPT Web remains authoritative for:
-
-- model reasoning;
-- model-generated content;
-- ChatGPT-native product behavior;
-- ChatGPT-native product capabilities supplied by the authenticated account.
-
-ChatGPT-native capabilities are not DSH tools and are not made safe by the DSH sandbox.
-
-### 5.3 ProviderCore authority
-
-ProviderCore is an orchestrator, not an alternative runtime authority.
-
-It may own:
-
-- provider-specific turn identity;
-- provider-private continuity;
-- trusted bindings between DSH state and a ChatGPT turn;
-- provider-specific retry classification;
-- browser/account coordination;
-- provider diagnostics and provenance.
-
-It may not redefine:
-
-- DSH session history;
-- DSH tool authorization;
-- sandbox policy;
-- approval state;
-- skill policy;
-- agent identity.
-
----
-
-## 6. Target architecture
-
-~~~text
-                                  DeepSeek Harness
-+----------------------------------------------------------------------------+
-|                                                                            |
-|  Agent / Session Runtime                                                   |
-|       |                                                                    |
-|       +----------------------+                                             |
-|       |                      |                                             |
-|       v                      v                                             |
-|    ctx.llm              ctx.tools / ctx.skills                             |
-|       |                      |                                             |
-|       v                      v                                             |
-| ChatGptWebLlmAdapter   CapabilityProjector                                |
-|       |                      |                                             |
-|       +----------+-----------+                                             |
-|                  v                                                         |
-|        ChatGPTWebProviderCore                                              |
-|        |     |       |       |                                             |
-|        |     |       |       +--> Diagnostics / Provenance                  |
-|        |     |       +----------> ContextProjector                         |
-|        |     +------------------> TurnCoordinator                           |
-|        +------------------------> AccountBrowserLease                      |
-|                                  |                                        |
-+----------------------------------|-----------------------------------------+
-                                   |
-                        +----------+-----------+
-                        |                      |
-                        v                      v
-                CapabilityTransport     WebSurfaceTransport
-                        |                      |
-                   MCP today              Playwright today
-                        |                      |
-                     TurnBroker           browser context/page
-                        |                      |
-                        v                      v
-                 DSH capability         chatgpt.com
-                    runtime
-~~~
-
-Compatibility entrypoints:
-
-~~~text
-Responses compatibility -> thin ingress adapter -> ProviderCore
-
-Native Codex passthrough -> first-party Codex backend
-                             (separate protocol boundary)
-~~~
-
-The browser ProviderCore is the single execution core for ChatGPT Web, not a universal execution core for every upstream protocol in the repository.
-
-### 6.1 Future browser-backed providers
-
-The reusable architectural role is a browser-backed provider execution core, but Phase 1 does not require a generic framework or a second implementation.
-
-Future provider routes may look like:
-
-~~~text
-chatgpt-web -> ChatGPT service profile -> ChatGPT WebSurfaceTransport
-deepseek-web -> DeepSeek service profile -> DeepSeek WebSurfaceTransport
-grok-web -> Grok service profile -> Grok WebSurfaceTransport
-~~~
-
-Shared machinery may include:
-
-- browser/account resource leasing;
-- turn lifecycle and physical settlement;
-- retry/submit safety;
-- capability snapshot/binding;
-- broker coordination;
-- transport budgeting;
-- browser process lifecycle.
-
-Service-specific machinery remains provider-local:
-
-- authenticated account/session semantics;
-- model catalogue and model selection;
-- reasoning/configuration controls;
-- context and transport limits;
-- submission/completion mechanics;
-- provider-private continuity and replay rules;
-- model-visible control protocol;
-- native product capabilities;
-- DOM/browser surface behavior.
-
-The first implementation remains ChatGPT Web. Later services should reuse only seams proven useful by the first implementation rather than forcing premature abstraction.
-
----
-
-## 7. Native DSH provider boundary
-
-The native provider is registered through the DSH LLM runtime.
-
-~~~text
-Cordis plugin
-    |
-    +-> inject llm
-    |
-    v
-ctx.llm.registerAdapter(["chatgpt-web"], ChatGptWebLlmAdapter)
-~~~
-
-The adapter translates between the DSH GenerateOptions/StreamChunk contract and ProviderCore.
-
-It is responsible for:
-
-- provider registration;
-- model listing/resolution;
-- provider capability metadata;
-- reasoning-effort mapping;
-- multimodal capability declarations;
+## 1. Scope
+
+### 1.1 In scope
+
+The target architecture covers:
+
+- native DSH LLM provider integration;
+- authenticated consumer-web chat services;
+- text input and streamed text output;
+- provider model discovery and model selection;
+- provider-specific reasoning/mode selection where the web product exposes it;
+- persistent conversation affinity per DSH session;
+- provider-native conversation identifiers and continuation cursors;
+- safe first-turn and continuation behavior;
+- explicit recovery when provider continuity is lost;
+- deterministic cancellation;
+- submission/stream/completion state;
+- authentication/session health;
 - provider-neutral error normalization;
-- stream conversion;
-- cancellation propagation;
-- provider retry policy at the adapter boundary.
+- provider-specific browser or network transport;
+- provider conformance tests.
 
-It must not know:
+The first target services are:
 
-- DOM selectors;
-- Playwright objects;
-- MCP message details;
-- broker internals;
-- sandbox implementation;
-- skill registry internals;
-- Responses HTTP protocol details.
+- ChatGPT Web;
+- Qwen Chat;
+- DeepSeek Chat.
 
-Provider registration must not require a logged-in browser merely to load the plugin. Authentication/account capability discovery may be lazy and must fail with stable provider errors when needed.
+The architecture must also allow another text-only web provider to be added without changing the DSH-facing adapter or the shared conversation/exchange state machine.
 
-The exact DSH contract is defined by the supported DSH release, not by a plugin-local adapter abstraction.
+### 1.2 Explicitly out of scope for the common core
+
+The common Web Chat architecture does **not** standardize:
+
+- files;
+- image input/output;
+- video/audio;
+- MCP;
+- DSH tool execution;
+- browser computer-use actions;
+- provider-native tool loops;
+- sandbox execution;
+- arbitrary agent orchestration;
+- API/OAuth integrations used instead of the consumer-web surface.
+
+Those features may continue to exist in the current ChatGPT-specific implementation, but they are provider-specific compatibility features and must not leak into the shared Web Chat core.
 
 ---
 
-## 8. ChatGPTWebProviderCore
+## 2. Goals and non-goals
 
-ProviderCore is the single ChatGPT Web provider orchestration boundary.
+### 2.1 Goals
 
-Its purpose is intentionally narrower than "everything."
+The architecture must provide:
 
-It coordinates:
+1. One DSH-facing LLM adapter boundary for all text-only Web Chat providers.
+2. One shared execution state machine for submission, streaming, completion, cancellation, timeout, and recovery.
+3. Stable conversation affinity between one DSH chat and one provider conversation.
+4. Provider-native continuation state as an opaque provider-owned handle.
+5. No silent conversation fork after a continuity failure.
+6. No automatic duplicate submission after an ambiguous send.
+7. Provider transport freedom: DOM, browser-network, hybrid, or another web-native mechanism.
+8. Provider-specific authentication and model behavior without contaminating the core.
+9. Explicit separation between:
+   - DSH session identity,
+   - provider account/session identity,
+   - provider conversation identity,
+   - transport resource identity,
+   - individual turn identity.
+10. A conformance suite that every provider must satisfy.
+11. Incremental migration from the existing ChatGPT implementation without a green-field rewrite.
 
-- provider/model resolution;
-- account capability resolution;
-- creation and settlement of logical turns;
-- account/browser lease acquisition and release;
-- provider-private continuity;
-- canonical context projection;
-- capability snapshot binding;
-- WebSurfaceTransport delegation;
-- cancellation;
-- retry classification;
-- usage normalization;
-- provider diagnostics/provenance.
+### 2.2 Non-goals
 
-It delegates rather than owns:
+The architecture does not attempt to:
 
-- browser selectors -> WebSurfaceTransport;
-- DSH tool authorization -> DSH;
-- skill policy -> DSH;
-- asynchronous capability delivery -> CapabilityTransport/TurnBroker;
-- DSH session history -> DSH session subsystem.
+- create a universal browser-automation framework;
+- create a universal reverse-engineered API layer;
+- make Qwen, DeepSeek, and ChatGPT expose the same private protocol;
+- emulate the OpenAI API internally;
+- force every provider to retain a browser page;
+- force every provider to resend the complete DSH history on every turn;
+- make provider-private conversation state authoritative over DSH session state;
+- unify provider-specific model identifiers into one universal backend ID;
+- preserve provider-native features that cannot be expressed safely through text-only DSH semantics.
 
-### 8.1 Internal seams
+---
 
-The minimum internal seams are:
+## 3. Why the architecture is changing
+
+The previous document centered the design on:
 
 ~~~text
-ChatGPTWebProviderCore
-├── ModelResolver / service profile
-├── BrowserAccountLease
-├── TurnCoordinator
-├── ContextProjector
-├── CapabilityProjector
-├── CapabilitySnapshot / Binding
-├── CapabilityTransport
-├── WebSurfaceTransport
-├── Continuity / Replay state
-├── Result / Stream normalization
-└── Diagnostics / Provenance
+DSH
+  -> ChatGPTWebProviderCore
+      -> retained ChatGPT page
+      -> ChatGPT DOM transport
 ~~~
 
-These are responsibilities, not a requirement for one class per box.
+That model is correct for the current implementation but is the wrong long-term abstraction.
 
-The implementation should prefer existing modules and small interfaces over introducing a large framework.
+The three target web services have materially different implementation characteristics.
+
+### ChatGPT Web
+
+The current implementation can maintain a physical conversation surface in a retained browser page and continue by writing only the new turn into the existing conversation.
+
+### Qwen Chat
+
+Current independent implementations of the Qwen Web surface show that conversation continuity can be represented by a server-side chat_id plus a provider response/parent cursor. Other implementations also rely on persistent browser state and anti-bot/session data. These details are not stable public contracts and therefore must remain inside a Qwen-specific driver.
+
+### DeepSeek Chat
+
+Current independent implementations of the DeepSeek Web surface use a server-side chat session and message lineage such as chat_session_id / parent_message_id, with additional web-session protections such as proof-of-work in some flows. DeepSeek officially documents chat.deepseek.com as the consumer chat surface and continues to evolve its web models independently of its API.
+
+Therefore:
+
+~~~text
+Wrong abstraction:
+    Web Provider == Browser Page
+
+Correct abstraction:
+    Web Provider
+        |
+        +-- Conversation Handle
+        +-- Text Exchange
+        +-- Authentication Session
+        +-- Provider Transport
+~~~
+
+The common layer owns the semantics. The provider owns the mechanism.
 
 ---
 
-## 9. Turn lifecycle
+## 4. Core architectural principles
 
-Each provider invocation has one logical turn with monotonic state.
+### 4.1 One DSH adapter, many provider drivers
+
+DSH should not know how ChatGPT, Qwen, or DeepSeek talks to its website.
+
+The target shape is:
 
 ~~~text
+DSH
+ |
+ v
+WebChatLlmAdapter
+ |
+ v
+WebChatRuntime
+ |
+ +-----------------------------+
+ |              |              |
+ v              v              v
+ChatGPT       Qwen         DeepSeek
+Driver        Driver        Driver
+ |              |              |
+ v              v              v
+provider       provider       provider
+transport      transport      transport
+~~~
+
+The DSH-facing adapter remains provider-neutral.
+
+### 4.2 Provider-private mechanisms stay behind the driver
+
+The provider driver owns:
+
+- login/authentication semantics;
+- session cookies/browser profile semantics;
+- model selection controls;
+- model identifiers;
+- reasoning/mode controls;
+- conversation identifiers;
+- continuation cursors;
+- response parsing;
+- submission/completion detection;
+- provider-specific transport;
+- provider-specific recovery rules;
+- provider-specific limitations.
+
+The shared core never parses:
+
+- ChatGPT thread IDs;
+- Qwen chat_id;
+- DeepSeek chat_session_id;
+- Qwen/DeepSeek parent IDs;
+- provider DOM selectors;
+- provider-specific network endpoints.
+
+### 4.3 Logical conversation is not a physical browser surface
+
+A logical provider conversation may be implemented through:
+
+- a retained page;
+- a new page in the same authenticated browser context;
+- browser-network requests;
+- a browser context plus provider session identifiers;
+- a provider API exposed only through the authenticated product session.
+
+The common core therefore stores an **opaque conversation handle**, not a Page.
+
+### 4.4 The DSH session remains canonical
+
+The DSH session remains the source of truth for:
+
+- session identity;
+- model request history;
+- user/assistant message history;
+- provider selection;
+- lifecycle.
+
+A provider conversation is continuity state, not a replacement transcript.
+
+### 4.5 No silent fork
+
+If the provider conversation is lost, expired, corrupted, or no longer matches the stored continuation state, the system must not silently create a new provider conversation and pretend that continuity was preserved.
+
+The result must explicitly distinguish:
+
+- exact continuation;
+- explicit replay/rebuild;
+- continuity failure.
+
+### 4.6 No duplicate send after ambiguity
+
+Once a provider may have accepted a message, a timeout is not sufficient evidence that nothing happened.
+
+After the submit boundary, automatic retry is prohibited unless the provider driver can prove that no duplicate request can be generated.
+
+This is the central at-most-once submission invariant.
+
+### 4.7 Do not over-generalize the browser
+
+A shared browser helper may exist for:
+
+- profile management;
+- Chrome/Chromium startup;
+- context lifecycle;
+- CDP;
+- persistent cookies.
+
+But those utilities are infrastructure, not the Web Chat provider contract.
+
+A provider may bypass them entirely if its transport does not require them.
+
+---
+
+## 5. Target architecture
+
+~~~text
++--------------------------------------------------------------------------+
+|                           DeepSeek Harness                               |
+|                                                                          |
+|   Session / Agent Runtime                                                |
+|            |                                                             |
+|            v                                                             |
+|       DSH LLM Runtime                                                    |
+|            |                                                             |
+|            v                                                             |
+|      WebChatLlmAdapter                                                     |
++------------|-------------------------------------------------------------+
+             |
+             v
++----------------------------------------------------------------------------+
+|                              WebChat Core                                  |
+|                                                                            |
+|  Provider Registry                                                         |
+|       |                                                                    |
+|       +--> Model Resolver                                                  |
+|       |                                                                    |
+|       +--> Conversation Affinity Store                                     |
+|       |                                                                    |
+|       +--> Exchange State Machine                                          |
+|       |                                                                    |
+|       +--> Continuation / Replay Coordinator                               |
+|       |                                                                    |
+|       +--> Stream / Error Normalization                                    |
+|       |                                                                    |
+|       +--> Cancellation / Shutdown                                         |
+|       |                                                                    |
+|       +--> Provider Health                                                 |
+|                                                                            |
++-------------+----------------------+----------------------+----------------+
+              |                      |                      |
+              v                      v                      v
+      +---------------+      +---------------+      +---------------+
+      | ChatGPT Driver|      | Qwen Driver   |      | DeepSeek Driver|
+      +---------------+      +---------------+      +---------------+
+      | Auth          |      | Auth          |      | Auth          |
+      | Models        |      | Models        |      | Models        |
+      | Conversation  |      | Conversation  |      | Conversation  |
+      | Transport     |      | Transport     |      | Transport     |
+      +-------+-------+      +-------+-------+      +-------+-------+
+              |                      |                      |
+              v                      v                      v
+       ChatGPT Web              Qwen Chat             DeepSeek Chat
+~~~
+
+There is no requirement for the three provider drivers to share a browser worker implementation.
+
+---
+
+## 6. The five identities that must stay separate
+
+### 6.1 DSH Session Identity
+
+This is the DSH conversation/session identity.
+
+It is the stable logical anchor used by DSH.
+
+Example:
+
+~~~text
+dshSessionId = "session-123"
+~~~
+
+The Web Chat layer must never replace this identity with a provider identifier.
+
+### 6.2 Provider Account Binding
+
+This identifies the authenticated product account/profile used for the provider.
+
+It should be represented internally by a stable non-secret binding identifier.
+
+Example:
+
+~~~text
+bindingId = "qwen-profile-default"
+~~~
+
+Do not use email addresses, cookies, bearer tokens, or browser storage blobs as the logical identifier.
+
+### 6.3 Provider Conversation Handle
+
+This is an opaque provider-owned continuity record.
+
+Conceptually:
+
+~~~text
+ProviderConversationHandle
+  providerId
+  bindingId
+  generation
+  opaqueState
+~~~
+
+Examples of opaqueState:
+
+- ChatGPT-specific thread/generation information;
+- Qwen chat ID plus continuation cursor;
+- DeepSeek session ID plus parent message ID.
+
+The core stores and passes this state. It does not interpret provider fields.
+
+### 6.4 Transport Resource
+
+A provider may hold a physical resource such as:
+
+- Playwright page;
+- browser context;
+- CDP session;
+- authenticated web session;
+- provider-network connection.
+
+The core sees this only through a provider-owned resource/lease boundary.
+
+### 6.5 Turn Identity
+
+Each DSH model call receives a unique logical turn identity.
+
+Example:
+
+~~~text
+turnId = "turn-456"
+~~~
+
+Turn identity is used for:
+
+- cancellation;
+- stream correlation;
+- logging;
+- duplicate protection;
+- stale-result rejection.
+
+A turn is never itself the conversation.
+
+---
+
+## 7. Conversation affinity
+
+Conversation affinity maps one DSH session and one provider/account binding to one provider conversation.
+
+Conceptually:
+
+~~~text
+conversationKey =
+    providerId
+    + accountBindingId
+    + dshSessionId
+~~~
+
+Hashing or internal normalization is implementation detail.
+
+The important invariant is that the key must include the provider and account binding.
+
+This prevents an accidental cross-provider collision:
+
+~~~text
+DSH session 123
+  -> ChatGPT conversation A
+
+DSH session 123
+  -> Qwen conversation B
+
+DSH session 123
+  -> DeepSeek conversation C
+~~~
+
+Changing provider must therefore never reuse another provider's conversation handle.
+
+### 7.1 Model changes
+
+A model change does not automatically create a new conversation.
+
+The driver must declare whether a requested model can continue the current provider conversation.
+
+The continuation decision is:
+
+~~~text
+CONTINUE
+  provider confirms that the conversation can continue
+
+NEW_CONVERSATION_REQUIRED
+  provider requires a new remote conversation
+
+UNSUPPORTED
+  the requested model/option cannot be served
+~~~
+
+The core must not silently convert NEW_CONVERSATION_REQUIRED into a new conversation.
+
+The default policy is fail-closed unless the caller explicitly requests a new provider conversation or a replay path is part of the product contract.
+
+### 7.2 Conversation generation
+
+A provider conversation may need generations.
+
+Generation changes are allowed only for explicit lifecycle events such as:
+
+- provider continuity loss;
+- intentional replay;
+- provider-required model transition;
+- provider-required reset;
+- explicit user action.
+
+Every generation transition must be recorded in the conversation store and must invalidate stale transport resources.
+
+---
+
+## 8. Provider-neutral contracts
+
+The common layer should stay small.
+
+### 8.1 Provider driver
+
+Conceptually:
+
+~~~text
+WebChatProviderDriver
+  id
+
+  inspectAccount()
+  listModels()
+  resolveModel()
+
+  createConversation()
+  continueConversation()
+  replayConversation()
+
+  health()
+  shutdown()
+~~~
+
+The exact TypeScript interface may differ.
+
+The driver must not return Playwright objects as part of its public provider contract.
+
+### 8.2 Provider conversation
+
+Conceptually:
+
+~~~text
+WebChatConversation
+  key
+  provider
+  bindingId
+  generation
+  handle
+  status
+~~~
+
+handle is provider-owned opaque state.
+
+### 8.3 Text exchange
+
+The normalized exchange is deliberately text-only.
+
+~~~text
+WebChatExchange
+  submit(text)
+  stream()
+  abort()
+~~~
+
+The event vocabulary should be small:
+
+~~~text
+ready
+submitted
+text_delta
+completed
+cancelled
+error
+~~~
+
+Providers may internally have much richer events, but only the semantics needed by the shared core should be normalized.
+
+### 8.4 Error contract
+
+Core error classes should describe the semantic failure:
+
+~~~text
+AUTH_REQUIRED
+AUTH_EXPIRED
+ACCOUNT_UNAVAILABLE
+MODEL_UNAVAILABLE
+CONVERSATION_LOST
+CONVERSATION_STATE_MISMATCH
+SUBMISSION_AMBIGUOUS
+RESPONSE_TIMEOUT
+UPSTREAM_RATE_LIMITED
+UPSTREAM_ERROR
+INPUT_TOO_LARGE
+CANCELLED
+TRANSPORT_UNAVAILABLE
+UNSUPPORTED_OPTION
+SHUTDOWN
+~~~
+
+Provider-specific diagnostic detail stays attached to the error but does not change the shared category.
+
+---
+
+## 9. Exchange state machine
+
+Every text request follows the same high-level lifecycle.
+
+~~~text
+CREATED
+   |
+   v
 PREPARING
    |
    v
-LEASED / BOUND
+TRANSPORT_READY
    |
    v
-SURFACE_READY
+SUBMITTING
    |
    v
 SUBMITTED
    |
    v
-RUNNING <----+
-   |          |
-   |          +-- CAPABILITY_WAIT
+STREAMING
    |
-   +--> COMPLETED
-   +--> CANCELLED
-   +--> FAILED
-            |
-            v
-         SETTLING
-            |
-            v
-          RETIRED
+   v
+COMPLETED
 ~~~
 
-The exact internal enum names may differ, but:
-
-- state is monotonic;
-- a retired turn cannot become running;
-- a stale binding cannot execute against a newer turn;
-- cancellation is idempotent;
-- cleanup is safe to repeat.
-
-### 9.1 Logical versus physical settlement
-
-Two different events must be tracked.
-
-Logical settlement means the provider has determined the DSH-visible result.
-
-Physical settlement means the browser/page/account resource is no longer capable of continuing the old turn.
-
-Examples:
+Terminal alternatives:
 
 ~~~text
-logical failure
-    !=
-browser already idle
-
-logical failure
-    !=
-safe resource reuse
+PREPARING --------> FAILED
+TRANSPORT_READY --> FAILED
+SUBMITTING -------> SUBMISSION_AMBIGUOUS
+SUBMITTED --------> RESPONSE_TIMEOUT / UPSTREAM_ERROR
+STREAMING --------> CANCELLED / FAILED
 ~~~
 
-A timeout, cancellation, or unknown browser outcome must not release the BrowserAccountLease until physical settlement is proven or the browser resource is forcibly retired.
+### 9.1 Submission boundary
 
-This prevents a subsequent turn from inheriting a still-running browser operation.
-
----
-
-## 10. Retry and submit boundary
-
-The provider has an explicit submit boundary.
+The critical boundary is:
 
 ~~~text
-PRE_SUBMIT
+before submit
     |
     v
-SUBMIT_INTENT
+submit activation
     |
     v
-SUBMITTED_CONFIRMED
+submission accepted
     |
     v
-RUNNING
+response stream
 ~~~
 
-Automatic retry is permitted only while the system can prove that the previous attempt was not submitted.
+Before the submit boundary, a failed attempt may normally be retried.
 
-After SUBMITTED_CONFIRMED, an ambiguous failure is not automatically retried if the turn may already have executed or triggered a side effect.
+After the provider may have accepted the message, the runtime must not resend automatically unless the driver can prove duplicate suppression.
 
-This is an at-most-once safety invariant for provider submission.
+### 9.2 Cancellation
 
-Retry classification must distinguish at least:
+Cancellation is idempotent.
 
-- pre-submit UI/attachment failure;
-- submission accepted;
-- post-submit but no first response;
-- active generation;
-- capability execution;
-- completion observed but settlement uncertain.
+The sequence is:
 
-Rate-limit/account-capability errors must not be retried as generic browser failures.
+~~~text
+logical cancellation
+    ->
+abort provider exchange
+    ->
+wait for or force physical settlement
+    ->
+release transport resource
+~~~
+
+A logical turn can finish before the physical resource is safe to reuse.
+
+Therefore the shared core must track both logical result and physical settlement.
+
+### 9.3 Physical settlement
+
+The core does not assume that:
+
+~~~text
+error returned == browser/network operation stopped
+~~~
+
+A provider driver must report or enforce physical settlement before reusing a resource that could still produce late output.
+
+This is particularly important for retained browser pages.
 
 ---
 
-## 11. Continuity and recovery
+## 10. Continuation, replay and recovery
 
-DSH session state is canonical. ChatGPT conversation state is provider-private.
+The common core defines three semantic outcomes.
 
-The provider defines three explicit recovery outcomes:
+### EXACT_RESUME
+
+The provider conversation handle remains valid and the next turn continues the same provider conversation.
 
 ~~~text
-EXACT_RESUME
-  same intended ChatGPT conversation and trusted continuity retained
-
-REPLAY
-  new ChatGPT conversation or rebuilt browser continuity
-  reconstructed from canonical DSH state
-
-FAILED
-  safe continuity cannot be established
+DSH session
+    |
+    v
+same provider conversation
+    |
+    v
+new turn
 ~~~
 
-The critical rule is:
+### REPLAY
 
-> EXACT_RESUME must never silently degrade into REPLAY.
+Provider continuity is unavailable or intentionally replaced.
 
-A caller must be able to distinguish "the original ChatGPT continuity resumed" from "a new ChatGPT conversation was reconstructed."
+The new provider conversation is rebuilt from canonical DSH text state.
 
-Replay boundaries are trusted execution-state artifacts, not caller-provided transcript interpretations. A replay boundary must be created from the canonical DSH projection plus authoritative DSH/ProviderCore settled/pending execution state, and must prove that every canonical tool call is classified exactly once. Browser transcript position cannot satisfy this proof.
+~~~text
+DSH canonical history
+    |
+    v
+provider replay projection
+    |
+    v
+new provider conversation
+~~~
 
-A replay may restore DSH-visible messages, tools, images, reasoning material needed by the provider, and other reconstructible state. It cannot restore undocumented ChatGPT hidden product state that is not represented in DSH state.
+Replay is a deliberate recovery mode, not a hidden fallback.
 
-Provider-private continuity must never redefine:
+### FAILED
 
-- DSH session id;
-- agent identity;
-- workspace;
-- sandbox;
-- approvals;
-- tool scope.
+The system cannot safely establish continuity or cannot prove that replay is safe.
+
+The request fails explicitly.
+
+### 10.1 No silent downgrade
+
+Never:
+
+~~~text
+EXACT_RESUME failed
+    ->
+silently create new conversation
+    ->
+pretend success
+~~~
+
+Instead:
+
+~~~text
+EXACT_RESUME failed
+    ->
+CONVERSATION_LOST
+    ->
+explicit recovery decision
+    -> EXACT_RESUME
+    -> REPLAY
+    -> FAILED
+~~~
+
+### 10.2 Ambiguous submission is different
+
+A lost conversation after a confirmed submit is not equivalent to a pre-submit failure.
+
+Example:
+
+~~~text
+message sent
+    |
+    v
+network timeout
+    |
+    v
+unknown whether provider generated an answer
+~~~
+
+The correct state is SUBMISSION_AMBIGUOUS.
+
+The system must not replay the same prompt automatically merely because the response was not observed.
 
 ---
 
-## 12. Model-visible control protocol
+## 11. Canonical text history
 
-The browser integration may need a textual control protocol because ChatGPT Web is a product surface rather than a structured provider API.
+The DSH session remains canonical.
 
-This protocol is explicitly untrusted.
+The Web Chat layer must distinguish:
+
+- canonical DSH history;
+- provider-native continuation state;
+- transport payload.
+
+These are not the same thing.
+
+### 11.1 Normal continuation
+
+When provider continuity is healthy, the driver should prefer native continuation.
+
+For a provider with server-side conversation memory:
 
 ~~~text
-trusted DSH state
+DSH canonical history
+      |
+      +---- provider conversation already contains prior turns
       |
       v
-ControlProtocolEncoder
-      |
-      v
-ChatGPT Web / model-visible content
-      |
-      v
-model-generated text
-      |
-      v
-ControlProtocolParser
-      |
-      v
-validation
-      |
-      v
-trusted broker/capability binding
+only current text is submitted
 ~~~
 
-The model-visible protocol must be treated as a wire format, not as natural-language interpretation.
+This reduces:
 
-Phase 1 requirements:
+- repeated prompt transfer;
+- browser composer size;
+- serialization cost;
+- risk of formatting drift.
 
-- explicit protocol version;
-- unambiguous framing;
-- maximum frame size;
-- required fields;
-- strict field types;
-- correlation id that is opaque to the model;
-- duplicate detection;
-- incomplete-frame rejection;
-- malformed/ambiguous frame rejection;
-- no authority derived from free-form text;
-- no "best effort" interpretation for executable requests.
+### 11.2 Initial conversation
 
-The parser must never turn arbitrary prose into a tool invocation.
+The first turn may need the complete relevant system/user context.
 
-Any identifier echoed in model-visible content is advisory. Trusted state comes from the runtime and its binding tables.
+The driver owns how the provider's web product must receive it.
 
-Advanced protocol evolution, compatibility negotiation, and richer typed event schemas can remain Phase 2.
+The shared core should not contain a universal prompt compiler.
+
+### 11.3 Replay
+
+Replay may need to reconstruct prior text.
+
+The driver receives a canonical replay projection rather than provider-specific transcript markup.
+
+Provider-specific formatting remains in the driver.
+
+### 11.4 System instructions
+
+System/developer instructions are part of DSH request semantics.
+
+Whether a provider:
+
+- stores them in a persistent conversation prefix;
+- repeats them every turn;
+- embeds them in the first prompt;
+- requires conversation recreation when they change;
+
+is provider-specific.
+
+The common core should model this as continuation compatibility rather than as a ChatGPT-specific fingerprint algorithm.
 
 ---
 
-## 13. Capability architecture
+## 12. Transport architecture
 
-The previous "capability plane" is decomposed into three responsibilities.
+The transport layer is intentionally more flexible than the old browser-only design.
 
-~~~text
-DSH ctx.tools / ctx.skills
-          |
-          v
-CapabilityProjector
-  what may be exposed
-          |
-          v
-CapabilityTransport
-  how it crosses the ChatGPT boundary
-          |
-          v
-TurnBroker / transport endpoint
-  which turn owns the request
-          |
-          v
-DSH runtime
-  executes under DSH authority
-~~~
+### 12.1 DOM transport
 
-MCP is one CapabilityTransport implementation today. It is not the architectural identity of the provider.
-
-### 13.1 CapabilityProjector
-
-The projector decides:
-
-- which DSH tools are model-visible;
-- which schemas and names are exposed;
-- which skill projection is available;
-- which scope applies;
-- which capability snapshot belongs to the turn.
-
-It must derive from current DSH runtime state and must not create a second authoritative registry.
-
-### 13.2 CapabilityTransport
-
-The transport serializes and carries a capability request.
-
-Today this is MCP where required by the ChatGPT Web surface.
-
-Future transports may differ without changing DSH authority or ProviderCore semantics.
-
-### 13.3 TurnBroker
-
-The broker owns transport-time coordination:
-
-- correlation;
-- turn binding;
-- request lifetime;
-- expiration/lease;
-- delivery;
-- cancellation;
-- late-call rejection;
-- settlement.
-
-It does not decide whether a DSH operation is authorized.
-
-### 13.4 Capability snapshot
-
-Each logical turn receives an immutable capability snapshot.
-
-Conceptually:
+The provider uses the product UI directly.
 
 ~~~text
-CapabilitySnapshot
-├── snapshotId
-├── dshSessionId
-├── agentId
-├── turnId
-├── visible tool/skill identities
-├── relevant authorization binding
-└── expiration / lifecycle binding
-~~~
-
-Execution validates the requested capability against that trusted snapshot.
-
-The broker must not simply consult "current tools" during an old turn, because DSH capability state can change while ChatGPT is still thinking.
-
-A monotonically increasing epoch/cache layer is optional Phase 2 optimization. The immutable turn snapshot itself is Phase 1.
-
----
-
-## 14. Reentrancy
-
-A ChatGPT-owned turn may re-enter DSH through DSH-projected capability execution.
-
-This is allowed:
-
-~~~text
-ChatGPT turn
+browser page
    |
-   +--> DSH capability
-           |
-           +--> child work
-~~~
-
-This is not allowed:
-
-~~~text
-ChatGPT turn A
+composer
    |
-   +--> synchronous re-entry into ChatGPT turn A
-           |
-           +--> wait on A's own capability channel
+send
+   |
+visible response stream
 ~~~
 
-A nested agent must have independent DSH identity and independent turn/channel state.
+Suitable when:
 
-A provider-owned turn may therefore re-enter DSH, but it may not synchronously re-enter itself or block on its own capability channel.
+- the DOM is the only stable product surface;
+- authentication is easiest through the UI;
+- web requests are inaccessible or too volatile to reproduce.
 
-This rule prevents provider/broker deadlocks without requiring a general-purpose nested execution framework.
+ChatGPT currently uses this class of transport.
 
----
+### 12.2 Browser-network transport
 
-## 15. Context, replay and compaction
-
-DSH-native message/context structures remain canonical until the final ChatGPT Web projection.
-
-The target is:
+The provider uses the authenticated browser session as the trust/session anchor but exchanges text through the web application's network surface.
 
 ~~~text
-DSH structures
-    |
-    v
-one canonical ChatGPT Web projection
-    |
-    v
-browser composer
+authenticated browser context
+          |
+          +--> cookies / session state
+          |
+          +--> provider web request
+          |
+          +--> streamed response
 ~~~
 
-Avoid:
+This is useful when:
 
-~~~text
-DSH
- -> ad-hoc JSON
- -> custom prompt object
- -> protocol text
- -> prompt text
- -> browser
-~~~
+- the web UI's internal request protocol is more stable than DOM scraping;
+- conversation IDs/cursors are explicit in web requests;
+- the browser session provides authentication and anti-bot state.
 
-where each stage independently changes semantics.
+Qwen and DeepSeek have current independent implementations following variants of this model.
 
-### 15.1 Trusted versus model-visible state
+### 12.3 Hybrid transport
 
-The following remain trusted and out-of-band whenever possible:
+A provider may:
 
-- DSH session/agent identity;
-- turn identity;
-- browser/account lease;
-- workspace roots;
-- sandbox policy;
-- approvals;
-- capability snapshot;
-- broker binding;
-- cancellation authority.
+1. authenticate through the browser;
+2. maintain the browser profile/context;
+3. execute text exchange through a network path;
+4. fall back to DOM interaction only where the network path cannot safely express an operation.
 
-A model-visible copy is advisory only.
+This must remain provider-local.
 
-### 15.2 Roles and content
+### 12.4 What the core must never assume
 
-Projection must preserve, where supported:
+The core must never require:
 
-- system/developer priority;
-- user content;
-- assistant content;
-- tool results;
-- agent-message semantics;
-- reasoning material required by replay;
-- image inputs and tool-returned images.
-
-The adapter should preserve structured images until the web transport boundary.
-
-### 15.3 Compaction ownership
-
-DSH session history remains canonical.
-
-Provider-specific compaction, rolling checkpoints, and replay handoff are optimization/transport state.
-
-They may reduce the amount of material physically re-submitted to ChatGPT Web, but they do not become a second DSH session log. For #11-B's deterministic transport reduction, required developer instructions, the latest user/agent/assistant continuity, and settled tool-call/result pairs are protected; older ordinary conversation may be omitted from the transport projection without mutating DSH's canonical history.
-
-If provider-private continuity is lost, replay comes from DSH state, not from a provider-owned substitute history.
-
----
-
-## 16. Context budget model
-
-A model context window and a browser transport limit are different quantities.
-
-~~~text
-ResolvedModel
-├── contextWindowTokens
-└── providerTransportBudget
-    ├── max serialized input
-    ├── per-part limits
-    ├── image budget
-    ├── protocol overhead
-    └── reserved output headroom
-~~~
-
-DSH receives a conservative provider-safe context capacity.
-
-ProviderCore uses transport-specific budgets internally.
-
-Before submit:
-
-1. estimate the projected request;
-2. compare it with the transport budget;
-3. compact if necessary;
-4. reduce transport-only overhead where safe;
-5. use a supported multipart strategy if already available;
-6. otherwise return a deterministic context error.
-
-Never rely on browser/editor truncation as context management.
-### 16.1 Free Web guardrails are empirical transport policy
-
-The current #11-B Free Web policy uses conservative measurements from the ChatGPT Web surface, not OpenAI API limits:
-
-- the visible browser input token ceiling is `128,000`;
-- the Luna composer boundary is `120,000` characters;
-- the transport image guardrail is `10` images per request;
-- the compaction-control envelope is capped at `110,000` JSON bytes.
-
-These values are adapter guardrails, not claims about the ChatGPT product's universal limits. OpenAI documents that Free-plan limits are mutable and that the number of image inputs depends on image size and accompanying text. When the Web surface changes, these measurements must be revalidated independently of API model documentation.
-
-The underlying model-context field used in diagnostics is informational only. It must never be used to admit a Free Web request beyond the measured browser transport budget.
-
----
-
-## 17. WebSurfaceTransport
-
-All service-specific DOM/browser knowledge belongs behind one small WebSurfaceTransport boundary for each browser-backed provider.
-
-Conceptual contract:
-
-~~~text
-ensureReady()
-detectCapabilities()
-selectModel()
-selectReasoning()
-submit()
-observeTurn()
-readResponse()
-cancel()
-recover()
-close()
-~~~
-
-The exact TypeScript interface may differ.
-
-The caller must not receive:
-
-- Playwright Locator objects;
+- a Playwright Page;
 - CSS selectors;
-- ARIA selector knowledge;
-- ProseMirror details;
-- DOM traversal helpers;
-- response-container selectors.
+- an editable composer;
+- browser DOM traversal;
+- a specific web endpoint;
+- a provider's private JSON schema.
 
-### 17.1 Surface state
-
-The transport must distinguish, at minimum:
-
-- page loaded;
-- composer attached;
-- composer editable;
-- model control available;
-- reasoning control available;
-- send enabled;
-- submission accepted;
-- generation running;
-- response completed;
-- physical browser settlement.
-
-### 17.2 Capability detection
-
-Account/product capability detection is dynamic.
-
-Do not treat today's UI or account limits as a permanent provider contract.
-
-The transport may cache a result, but stale capability data must be invalidated when the observed surface contradicts the cached result.
-
-A full capability cache/epoch strategy is Phase 2. Runtime detection and safe invalidation are Phase 1.
-
-### 17.3 Completion
-
-No single UI string is a completion protocol.
-
-ChatGPT Web product context exhaustion is a transport-owned terminal condition. The browser surface may detect it from a structural error surface and localized equivalent copy, but the provider exposes only the semantic `context_exhausted` error to DSH. Detection never authorizes replay or creates a replacement conversation. Once confirmed, the retained conversation handle is invalidated while physical browser settlement remains independent and must complete before the retained resource is released.
-
-Context-exhaustion recovery consumes that semantic condition through the existing #11 replay boundary. The recovery creates a new ChatGPT conversation epoch only after the exhausted browser execution has physically settled, blocks the replacement before prompt submission until surface readiness is acknowledged, binds the replacement without changing DSH session/agent/turn/capability identity, and then releases generation from the same canonical DSH projection. The old epoch is permanently stale; a replacement retry never reuses its browser event stream. A failed replacement or readiness proof fails closed.
-
-Completion must use transport state and authoritative signals such as:
-
-- turn identity;
-- response observation;
-- generation state;
-- known terminal state;
-- browser settlement.
-
-Visible phrases are model output, not trusted lifecycle signals.
-
-### 17.4 Special browser profiles
-
-Automatic/manual/other supported browser interaction modes are transport policy.
-
-They do not create new providers or model identities.
-
-The normalized provider input is conceptually:
-
-~~~text
-provider = chatgpt-web
-model = luna
-browserInteractionMode = automatic | manual
-~~~
-
-For a future browser-backed provider, the same DSH boundary remains:
-
-~~~text
-provider = <service-specific route>
-model = <service-specific model id>
-~~~
-
-while service-specific browser mechanics remain inside that provider's WebSurfaceTransport. A service does not inherit ChatGPT-specific DOM assumptions merely by reusing the common lifecycle machinery.
+The core sees only semantic exchange operations.
 
 ---
 
-## 18. Browser process boundary
+## 13. Authentication and provider sessions
 
-The browser worker may run in a separate local process.
+Authentication is provider-owned.
 
-The process boundary is allowed for:
-
-- Playwright isolation;
-- browser crash containment;
-- dependency isolation;
-- lifecycle separation;
-- independent browser recovery.
-
-The key invariant is:
-
-> local HTTP/IPC is private infrastructure, not the semantic DSH provider boundary.
-
-Therefore:
+The shared layer should expose only a minimal semantic state:
 
 ~~~text
-DSH ctx.llm
+AUTHENTICATED
+AUTH_REQUIRED
+AUTH_EXPIRED
+AUTH_UNAVAILABLE
+UNKNOWN
+~~~
+
+Provider drivers own:
+
+- login URL;
+- cookie/session semantics;
+- browser profile;
+- session refresh;
+- account detection;
+- anti-bot/session requirements;
+- logout or invalidation.
+
+Credentials and session-bearing browser state must never be stored in conversation records or written to logs.
+
+### 13.1 Browser profiles
+
+A persistent browser profile is an implementation detail.
+
+It may be reused by several conversations of one provider/account, but:
+
+~~~text
+browser profile != conversation
+browser context != conversation
+page != conversation
+~~~
+
+The conversation store must not use a browser object as its identity.
+
+---
+
+## 14. Model architecture
+
+Model selection is provider-owned.
+
+The common model descriptor should contain only semantics useful to DSH:
+
+~~~text
+WebChatModel
+  providerId
+  id
+  displayName
+  reasoningModes?
+  capabilities
+~~~
+
+The provider owns:
+
+- exact web UI/model identifier;
+- display label;
+- reasoning mode mapping;
+- availability;
+- account eligibility;
+- provider-specific limitations.
+
+The common core must not assume that model IDs are globally unique.
+
+Use:
+
+~~~text
+providerId + modelId
+~~~
+
+as the logical identity.
+
+### 14.1 Reasoning modes
+
+Reasoning is optional provider metadata.
+
+Examples might include:
+
+~~~text
+off
+low
+medium
+high
+~~~
+
+or provider-specific web modes.
+
+The common layer treats these as opaque ordered identifiers supplied by the driver.
+
+It must not invent a universal mapping such as thinking=true.
+
+---
+
+## 15. Concurrency and resource ownership
+
+The default policy is conservative.
+
+### 15.1 One active exchange per provider conversation
+
+A single logical provider conversation must not accept two concurrent turns unless the provider driver explicitly proves that its conversation protocol is concurrency-safe.
+
+Default:
+
+~~~text
+conversation A
+   |
+   +--> turn 1  [active]
+   |
+   X--> turn 2  [reject or queue]
+~~~
+
+This prevents:
+
+- interleaved prompt submission;
+- parent-cursor corruption;
+- page/composer races;
+- response misattribution.
+
+### 15.2 Account sharing
+
+One authenticated provider account may serve multiple DSH sessions.
+
+This is permitted only when provider transport resources can be safely separated.
+
+Example:
+
+~~~text
+Qwen account
+  |
+  +--> DSH session A -> conversation A -> transport resource A
+  |
+  +--> DSH session B -> conversation B -> transport resource B
+~~~
+
+If the provider cannot safely isolate those sessions, the provider driver must serialize them.
+
+### 15.3 Transport lease
+
+A provider may expose an internal resource lease.
+
+The lease owns:
+
+- transport resource;
+- exclusive ownership;
+- release;
+- forced retirement;
+- physical settlement.
+
+It does not own:
+
+- DSH authorization;
+- provider conversation identity;
+- canonical history.
+
+---
+
+## 16. DSH integration
+
+DeepSeek Harness already provides a provider-neutral adapter contract:
+
+~~~text
+LlmAdapter
+  stream(GenerateOptions)
+      -> AsyncIterable<StreamChunk>
+~~~
+
+The Web Chat integration should follow that contract rather than create another public LLM protocol.
+
+The DSH adapter is responsible for:
+
+- provider route registration;
+- translating DSH request fields into the shared Web Chat request;
+- translating normalized text stream events into DSH StreamChunk;
+- resolving model metadata;
+- forwarding cancellation;
+- exposing unsupported-option errors.
+
+It must not know:
+
+- provider DOM;
+- provider network payloads;
+- session cookies;
+- conversation cursors;
+- browser worker internals.
+
+DSH's own adapter documentation also provides an important continuity seam: provider-specific follow-up metadata can be retained as opaque replay state when the adapter owns that continuation. The Web Chat architecture may use this mechanism where useful, but long-lived conversation affinity remains a Web Chat responsibility rather than a caller-visible provider ID.
+
+---
+
+## 17. Provider registry
+
+The plugin should move from:
+
+~~~text
+register exactly one ChatGPT adapter
+~~~
+
+to:
+
+~~~text
+WebChatProviderRegistry
+  |
+  +--> chatgpt-web
+  +--> qwen-web
+  +--> deepseek-web
+~~~
+
+The registry owns only provider registration and lifecycle.
+
+It does not become a giant factory containing provider-specific logic.
+
+Each driver is independently testable.
+
+Provider configuration should be namespaced:
+
+~~~text
+webChat:
+  providers:
+    chatgpt-web: ...
+    qwen-web: ...
+    deepseek-web: ...
+~~~
+
+The repository package name remains dsh-chatgpt-web during this architectural migration to avoid breaking existing installation/configuration. A future package rename is optional and is not required for the architecture to be correct.
+
+---
+
+## 18. Target code organization
+
+The exact filenames may evolve, but the conceptual ownership should converge toward:
+
+~~~text
+src/
+  adapters/
+    base.ts
+
+    web-chat/
+      llm-adapter.ts
+
+  web-chat/
+    core/
+      errors.ts
+      events.ts
+      exchange.ts
+      exchange-state.ts
+      conversation.ts
+      conversation-key.ts
+      conversation-store.ts
+      continuation.ts
+      runtime.ts
+      model.ts
+      provider.ts
+
+    transport/
+      text-transport.ts
+      transport-lease.ts
+
+    auth/
+      account-binding.ts
+      auth-state.ts
+
+    providers/
+      chatgpt/
+        driver.ts
+        auth.ts
+        models.ts
+        conversation.ts
+        transport/
+          dom.ts
+          ...
+      qwen/
+        driver.ts
+        auth.ts
+        models.ts
+        conversation.ts
+        transport/
+          browser-network.ts
+          ...
+      deepseek/
+        driver.ts
+        auth.ts
+        models.ts
+        conversation.ts
+        transport/
+          browser-network.ts
+          ...
+~~~
+
+### 18.1 Core import rule
+
+The dependency direction is:
+
+~~~text
+DSH adapter
     |
     v
-ProviderCore
+WebChat core
+    |
+    +--> provider driver interface
+    |
+    +--> transport interface
+           ^
+           |
+     provider implementation
+~~~
+
+The core must never import:
+
+- ChatGPT browser worker code;
+- Qwen selectors;
+- DeepSeek endpoint definitions;
+- provider-specific cookies;
+- provider-specific response DTOs.
+
+Provider drivers may import shared core contracts.
+
+---
+
+## 19. Migration of the current ChatGPT implementation
+
+The current repository already contains useful seams. The goal is extraction and ownership cleanup, not a rewrite.
+
+### 19.1 Keep
+
+These ideas are architecturally sound:
+
+- stable DSH conversation identity;
+- one conversation affinity per DSH chat/provider binding;
+- explicit physical resource retention;
+- tombstoning a lost retained surface instead of silently creating another;
+- explicit submission activation;
+- explicit submission confirmation;
+- logical versus physical settlement;
+- normalized adapter events;
+- cancellation;
+- provider-specific model metadata.
+
+### 19.2 Extract into the common core
+
+The following responsibilities should become provider-neutral:
+
+~~~text
+src/adapters/base.ts
+    -> remains the lowest adapter seam
+
+chatgpt-web/conversation-key.ts
+    -> generic conversation-key / continuation core
+       with ChatGPT-specific rules removed
+
+chatgpt-web/retained-surface.ts
+    -> generic retained-resource/transport lease mechanism
+       with Page-specific typing removed from the core
+
+ChatGPT turn state
+    -> generic exchange state machine
+
+ChatGPT adapter stream normalization
+    -> generic WebChat event normalization
+~~~
+
+### 19.3 Keep provider-local
+
+The following remain ChatGPT-specific:
+
+~~~text
+src/browser-login.ts
+src/chatgpt-session.ts
+src/chatgpt-web-models.ts
+src/chatgpt-web-authority.ts
+src/adapters/chatgpt-web/browser-worker.ts
+src/adapters/chatgpt-web/prompt.ts
+src/adapters/chatgpt-web/compaction-*.ts
+src/adapters/chatgpt-web/rolling-checkpoint.ts
+src/adapters/chatgpt-web/mcp-*.ts
+src/adapters/chatgpt-web/native-*.ts
+~~~
+
+Some of these may later be retired or reduced, but they should not be generalized simply because another provider exists.
+
+### 19.4 WebSurfaceTransport change
+
+The existing WebSurfaceTransport concept is useful but too ChatGPT-shaped.
+
+It should become two layers:
+
+~~~text
+WebChat core
     |
     v
-private browser IPC
+TextExchangeTransport
     |
-    v
-browser worker
+    +--> provider transport
+            |
+            +--> DOM
+            +--> browser-network
+            +--> hybrid
 ~~~
 
-The Responses compatibility HTTP server is a different concern and must not be confused with this internal process boundary.
+The current ChatGPT surface transport then becomes one implementation of the provider transport seam.
+
+It must not define the universal Web Chat interface.
 
 ---
 
-## 19. Compatibility architecture
+## 20. ChatGPT-specific features outside the common architecture
 
-### 19.1 Responses compatibility
+The current repository includes functionality beyond text-only exchange.
 
-The local Responses endpoint remains supported where useful, but it is Phase 2 compatibility.
+Examples include:
 
-Its responsibility is only to translate:
+- MCP/capability bridging;
+- native Codex-related routes;
+- Responses compatibility;
+- Advisor review;
+- compaction/control protocols;
+- image/tool payloads.
 
-- request shape;
-- model aliases;
-- tools/input representation where required;
-- streaming;
-- errors;
-- usage/compatibility fields.
+These may remain operational for ChatGPT.
 
-It must delegate execution to the same ProviderCore used by native DSH.
-
-It must not own:
-
-- browser execution;
-- turn lifecycle;
-- capability authority;
-- independent compaction;
-- provider-private continuity authority.
-
-### 19.1.1 Responses seam audit evidence (#78)
-
-`src/dev-chat/driver.ts` is a DEV-only simulator and intentionally imports the Responses parser/server to exercise the compatibility surface end-to-end. It is test infrastructure, not a production provider entrypoint or authority.
-
-`src/adapters/chatgpt-web/rolling-checkpoint.ts` may reuse `src/responses/parser.ts` to rebuild a synthetic checkpointed `CodexParsedRequest` because this is wire translation only; the checkpoint code does not select routes, authorize capabilities, own retry/settlement state, or execute browser turns. This is an explicit dependency, not a second Responses execution path.
-
-
-
-The Responses compatibility layer is intentionally limited to translation and compatibility state. The retained components are classified as follows:
-
-- **Required public compatibility translation:** `src/responses/schema.ts`, `src/responses/parser.ts`, `src/responses/compaction.ts`, `src/responses/reasoning-envelope.ts`, and `src/bridge.ts`. They translate the Responses wire representation to/from the existing provider request/event representation.
-- **Required compatibility state:** `src/responses/state.ts` stores a bounded representation of completed Responses items so `previous_response_id` can continue across requests and process restarts. It is a cache only: it contains no browser handles, ProviderCore turn state, capability/sandbox authority, retry budget, or route decision, and it cannot initiate execution. Missing state fails closed at the Responses ingress.
-- **Required operational transport outside the Web core:** `src/native-passthrough.ts` serves first-party native Codex endpoints. It remains a separate protocol path and is not a ChatGPT Web execution authority.
-
-The executable audit in `tests/issue-78-responses-seam.test.ts` covers the seam behavior rather than only source structure: unary and streaming `/v1/responses` delegation through an injected Web adapter, Web route/capability parity and fail-closed behavior, Web catalog fallback when native Codex models are unavailable or malformed, Codex isolation for `/v1/responses` and `/v1/responses/compact`, Web compaction delegation, restart/reload and corruption behavior for the continuation cache, and a repository-wide Responses import/ownership scan. The repository-wide dependency scan explicitly permits only the ingress/bridge/native-passthrough consumers plus the Luna rolling-checkpoint parser reuse described below; every Responses module remains barred from ProviderCore, browser, retry, capability and transport authorities.
-
-No additional Responses execution core, model catalogue, capability authority, retry authority, or provider lifecycle state is retained. The existing `/v1/responses/compact` implementation calls the same `responseRequest` path rather than maintaining a second execution implementation; its extra logic is only Responses compaction representation and validation.
-
-### 19.2 Native Codex passthrough
-
-The repository's first-party Codex passthrough is a separate upstream protocol.
-
-It must remain outside ChatGPTWebProviderCore.
-
-It may share transport-independent utilities such as:
-
-- authentication checks;
-- bridge-artifact scrubbing;
-- stable error normalization;
-- provenance.
-
-It must not be forced through the browser execution path.
-
----
-
-## 20. Native ChatGPT capabilities
-
-Native capabilities supplied by a browser-backed product are a separate trust domain.
-
-For ChatGPT Web these include product-provided web search or other account-controlled features. Future providers may expose different native capabilities.
-
-They must be represented as:
+They are intentionally classified as:
 
 ~~~text
-origin = chatgpt-native
-authorization = outside DSH
+ChatGPT-specific compatibility/features
+        |
+        v
+outside WebChat Core
 ~~~
 
-They must not be represented as:
+The shared Web Chat contract must remain text-only.
+
+A future provider does not inherit ChatGPT MCP, capability, Codex, or Advisor semantics merely by implementing WebChatProviderDriver.
+
+This separation is essential to prevent the new architecture from becoming a generic agent runtime.
+
+---
+
+## 21. Provider-specific design expectations
+
+### 21.1 ChatGPT driver
+
+Expected characteristics:
+
+- browser-authenticated consumer product;
+- retained conversation surface may be useful;
+- DOM text transport is currently the primary mechanism;
+- conversation affinity can map to a retained physical generation;
+- existing ChatGPT-specific model and system-prefix rules remain provider-local.
+
+The migration must preserve current ChatGPT continuity before adding other providers.
+
+### 21.2 Qwen driver
+
+The driver should be designed to accommodate:
+
+- authenticated browser session/profile state;
+- provider conversation ID;
+- provider parent/response cursor;
+- web-network exchange where useful;
+- DOM fallback only if required;
+- provider anti-bot/session requirements;
+- provider-specific model/mode selection.
+
+Current independent work against chat.qwen.ai demonstrates server-side chat_id and parent/response chaining and also shows that browser/session state may be part of the transport strategy. Those details must remain opaque to the common core.
+
+### 21.3 DeepSeek driver
+
+The driver should be designed to accommodate:
+
+- authenticated web session;
+- provider conversation/session ID;
+- provider message-parent lineage;
+- streamed web responses;
+- browser-network or DOM transport;
+- current product modes such as reasoning/non-reasoning;
+- web-session protections that may change over time.
+
+DeepSeek's current web service is explicitly separate from the API product surface, so API model IDs or API transport assumptions must not be used as the provider architecture.
+
+---
+
+## 22. Failure and recovery rules
+
+The following rules are mandatory.
+
+### 22.1 Authentication loss
 
 ~~~text
-origin = DSH tool
-authorization = DSH-approved
+AUTH_EXPIRED
+  ->
+stop before submit
+  ->
+refresh/re-authenticate if the provider supports it
+  ->
+resume only if the conversation handle remains valid
 ~~~
 
-The architecture therefore does not try to make DSH sandbox or authorize ChatGPT's own first-party product actions.
+No new conversation is silently substituted.
 
-This distinction is important for both diagnostics and user expectations.
-
----
-
-## 21. Lifecycle
-
-The Cordis/plugin lifecycle is split between provider registration and browser availability.
-
-Target sequence:
+### 22.2 Conversation loss
 
 ~~~text
-plugin load
-   |
-   +--> register ctx.llm provider
-   |
-   +--> initialize ProviderCore
-   |
-   +--> browser/account infrastructure attaches lazily or eagerly
-   |
-   v
-provider callable
+CONVERSATION_LOST
+  ->
+invalidate old generation
+  ->
+explicit recovery decision
 ~~~
 
-Provider registration must not depend on an already authenticated browser.
+A dead conversation handle is never reused.
 
-At call time, missing prerequisites become deterministic provider errors such as:
+### 22.3 Transport failure before submit
 
-- AUTH_REQUIRED;
-- ACCOUNT_CAPABILITY_UNAVAILABLE;
-- BROWSER_UNAVAILABLE;
-- SURFACE_UNAVAILABLE;
-- PROVIDER_SHUTDOWN.
+Safe retry may occur within the configured retry policy.
 
-Shutdown:
+### 22.4 Transport failure after submit
 
-1. stop accepting new provider calls;
-2. cancel active logical turns;
-3. revoke capability bindings;
-4. wait for physical settlement where possible;
-5. close broker/transport channels;
-6. flush required provider state;
-7. stop browser infrastructure.
+Classify as SUBMISSION_AMBIGUOUS unless the provider proves a different outcome.
+
+No automatic duplicate send.
+
+### 22.5 Stream failure after partial output
+
+The DSH-facing result must clearly distinguish incomplete output from a clean completion.
+
+The provider must not fabricate a normal completion merely because some text was received.
 
 ---
 
-## 22. Concurrency
+## 23. Observability and provenance
 
-Phase 1 defaults to conservative sequencing.
+Every turn should be traceable with internal identifiers:
 
-The provider must not promise arbitrary parallel calls on one ChatGPT account.
+~~~text
+provider
+accountBinding
+conversationKey
+conversationGeneration
+turnId
+transportResourceId
+~~~
 
-Parallel execution is allowed only when the implementation can prove isolation of:
+These identifiers are implementation telemetry, not model-visible instructions.
 
-- DSH session;
-- ChatGPT conversation;
-- browser page/context;
-- turn;
-- capability snapshot;
-- broker binding.
+Never log:
 
-Two unrelated turns must never race on the same composer.
+- cookies;
+- bearer tokens;
+- browser storage;
+- full authentication headers;
+- raw private browser profile data;
+- sensitive user prompts by default.
 
-If safe parallelism cannot be established, queue or reject explicitly.
-
-A future multi-account/session pool is Phase 2.
+Provider-specific diagnostic detail may be attached to normalized errors, but the core must remain responsible for semantic classification.
 
 ---
 
-## 23. Streaming and errors
+## 24. Testing strategy
 
-The native adapter returns DSH StreamChunk values.
+The test strategy is contract-first.
+
+### 24.1 Core tests
+
+The shared core must verify:
+
+- stable conversation-key derivation;
+- provider/account/session isolation;
+- first-turn creation;
+- same-conversation continuation;
+- model compatibility decisions;
+- generation changes;
+- monotonic exchange state;
+- cancellation;
+- logical/physical settlement separation;
+- post-submit retry prohibition;
+- ambiguous submission classification;
+- stale-handle rejection;
+- explicit replay;
+- failed recovery.
+
+### 24.2 Provider conformance suite
+
+Every provider driver should pass the same semantic suite:
+
+~~~text
+1. authenticate
+2. resolve model
+3. create first conversation
+4. submit first text
+5. stream response
+6. continue second turn
+7. continue third turn
+8. verify remote continuity
+9. cancel an active turn
+10. simulate/handle auth loss
+11. handle provider error
+12. reject duplicate concurrent turn
+13. handle lost conversation
+14. perform explicit replay
+15. restore continuation after process restart when supported
+~~~
+
+The exact transport assertions are provider-specific.
+
+### 24.3 Transport tests
+
+DOM/network/hybrid transports should have separate tests for:
+
+- readiness;
+- submit activation;
+- submission confirmation;
+- text extraction;
+- completion;
+- abort;
+- resource close;
+- physical-settlement guarantees.
+
+### 24.4 Architecture tests
+
+Add automated import/layering tests that fail when:
+
+- core imports provider-specific modules;
+- provider code imports another provider's implementation;
+- ChatGPT-specific capability/MCP code leaks into the common text contract;
+- browser Page types appear in common conversation types;
+- provider-private identifiers are interpreted by core.
+
+---
+
+## 25. Security boundaries
+
+The main security boundary remains authentication and session ownership.
+
+The architecture must guarantee:
+
+1. provider sessions never cross providers;
+2. conversation handles never cross providers;
+3. authenticated browser profiles remain provider-scoped;
+4. provider-private state is treated as sensitive;
+5. model-visible text is never a source of authorization;
+6. transport code cannot widen DSH authority;
+7. failed continuity does not cause silent cross-session reuse;
+8. browser resources are never reused after their physical ownership has become uncertain.
+
+The text-only common core deliberately has no tool-authority or sandbox semantics. Those belong to DSH or to provider-specific features outside this architecture.
+
+---
+
+## 26. Rejected architectures
+
+### 26.1 One giant generic BrowserProvider
+
+Rejected.
+
+Reason:
+
+- different providers use different transport mechanisms;
+- a browser page is not a universal conversation abstraction;
+- this would force all providers into the ChatGPT implementation model.
+
+### 26.2 Copy browser-worker.ts three times
+
+Rejected.
+
+Reason:
+
+- duplicated lifecycle logic;
+- duplicated retry/settlement bugs;
+- duplicated conversation affinity;
+- inconsistent recovery behavior.
+
+Provider-specific code should implement the driver/transport contract instead.
+
+### 26.3 Make private web endpoints the common protocol
+
+Rejected.
+
+Reason:
+
+- endpoints and payloads are provider-specific;
+- private contracts change;
+- the common architecture would become reverse-engineering debt.
+
+Private web endpoints may be used inside an individual provider driver.
+
+### 26.4 Make DOM interaction the common protocol
+
+Rejected.
+
+Reason:
+
+- some providers are better represented by their web network exchange;
+- DOM structure is unstable and service-specific;
+- conversation continuity may live outside the page.
+
+### 26.5 Make the provider conversation ID the DSH conversation ID
+
+Rejected.
+
+Reason:
+
+- one DSH session can use multiple providers;
+- provider IDs may expire/change;
+- DSH session semantics must survive provider replacement or replay.
+
+### 26.6 Resend the complete DSH history on every normal turn
+
+Rejected as the default.
+
+Reason:
+
+- inefficient;
+- unnecessary for providers with server-side conversation state;
+- increases transport size and failure surface.
+
+Full history remains the canonical replay source, not the mandatory normal transport payload.
+
+### 26.7 Automatically fork on continuity failure
+
+Rejected.
+
+Reason:
+
+- it silently changes the conversation;
+- the user cannot distinguish resume from replay;
+- it makes duplicate/lineage bugs hard to detect.
+
+---
+
+## 27. Implementation roadmap
+
+The migration should be delivered as small reviewable slices.
+
+### PR 1 — Web Chat contracts
+
+Introduce:
+
+- provider-neutral model descriptor;
+- provider driver interface;
+- conversation handle;
+- conversation key;
+- normalized exchange events;
+- normalized error taxonomy.
+
+No behavior change for ChatGPT.
+
+### PR 2 — Conversation affinity and continuation store
+
+Extract:
+
+- stable DSH/provider/account key;
+- opaque provider handle;
+- conversation generation;
+- atomic continuation-state update;
+- lost-conversation tombstone.
+
+Reuse the current ChatGPT retention semantics where they are already correct.
+
+### PR 3 — Exchange state machine
+
+Extract:
+
+- submit boundary;
+- submitted/streaming/completed states;
+- ambiguous submission;
+- cancellation;
+- physical settlement;
+- stale turn rejection.
+
+The current ChatGPT browser worker becomes one transport consumer.
+
+### PR 4 — Transport seam
+
+Split the current ChatGPT surface into:
+
+~~~text
+WebChat core
+   |
+TextExchangeTransport
+   |
+ChatGPT DOM transport
+~~~
+
+No Qwen/DeepSeek implementation yet.
+
+### PR 5 — ChatGPT migration
+
+Refactor the current ChatGPT implementation to consume the new core.
+
+Acceptance criterion:
+
+> ChatGPT behaves exactly as before; only ownership boundaries changed.
+
+### PR 6 — Provider registry and model catalog
+
+Introduce:
+
+~~~text
+chatgpt-web
+qwen-web
+deepseek-web
+~~~
+
+as provider registrations without implementing the new providers yet.
+
+### PR 7 — Conformance suite
+
+Make provider-independent lifecycle and continuity tests mandatory.
+
+### PR 8 — Qwen text provider
+
+Implement only:
+
+- authentication/session;
+- text model selection;
+- conversation creation/continuation;
+- streamed text exchange;
+- provider recovery;
+- provider health.
+
+No files, images, tools, or MCP.
+
+### PR 9 — DeepSeek text provider
+
+Implement the same text-only contract with DeepSeek-specific transport/session behavior.
+
+---
+
+## 28. Current repository mapping
+
+The existing repository already contains several useful architectural pieces.
+
+### Existing generic seams
+
+- src/adapters/base.ts
+  - already defines a provider-neutral internal adapter boundary.
+- src/types.ts
+  - already contains a normalized internal event vocabulary and provider-private context.
+- src/adapters/web-composer-resolver.ts
+  - already contains service-neutral web-composer selection logic.
+- src/adapters/chatgpt-web/retained-surface.ts
+  - already proves that physical retention can be isolated from transcript state.
+- src/adapters/chatgpt-web/conversation-key.ts
+  - already proves stable DSH-thread affinity can be separated from model/turn properties.
+
+These are extraction candidates, not designs that need to be replaced wholesale.
+
+### Current ChatGPT-specific seams
+
+- src/browser-login.ts
+- src/chatgpt-session.ts
+- src/chatgpt-web-authority.ts
+- src/chatgpt-web-models.ts
+- src/model-catalog.ts where ChatGPT-specific authority is still embedded
+- src/adapters/chatgpt-web/browser-worker.ts
+- src/adapters/chatgpt-web/prompt.ts
+- src/adapters/chatgpt-web/turn-execution.ts
+- ChatGPT-specific compaction/checkpoint modules
+- ChatGPT-specific MCP/capability modules
+
+These remain provider-local until there is a concrete reason to extract a smaller reusable seam.
+
+### Current plugin boundary
+
+src/plugin.ts currently registers the ChatGPT adapter and manages the local sidecar lifecycle.
+
+The target is to preserve the sidecar lifecycle responsibility while replacing single-provider registration with a provider registry.
+
+---
+
+## 29. Compatibility policy
+
+The package remains named @lordraiden/dsh-chatgpt-web during the migration.
+
+Do not make a package rename a prerequisite for architectural correctness.
+
+Existing ChatGPT configuration should continue to work through compatibility aliases.
 
 Conceptually:
 
 ~~~text
-browser/provider events
-       |
-       v
-ProviderCore normalized events
-       |
-       v
-ChatGptWebLlmAdapter
-       |
-       v
-DSH StreamChunk
+legacy ChatGPT route
+      |
+      v
+ChatGPT driver
+      |
+      v
+WebChat Core
 ~~~
 
-Provider-internal ChatGPT tool calls are not fabricated as DSH AgentLoop tool calls when the ChatGPT-side loop owns them.
+Provider-neutral internal names may therefore be introduced without breaking the external package/configuration surface.
 
-Usage is authoritative only when the provider can prove it. Otherwise it is explicitly estimated/best-effort.
-
-Errors should be normalized to stable provider categories where possible:
-
-- authentication/session unavailable;
-- account capability unavailable;
-- rate limited;
-- context too large;
-- browser/surface unavailable;
-- provider timeout;
-- user aborted;
-- stale/retired turn;
-- unsupported option.
-
-Structured runtime state is preferred over parsing arbitrary error strings.
+A later package rename can be handled independently once multi-provider support is mature.
 
 ---
 
-## 24. Provenance
+## 30. External evidence and references
 
-Phase 1 requires enough internal identity to debug one turn across boundaries.
-
-At minimum, trusted state should correlate:
-
-- DSH provider call;
-- logical provider turn;
-- account/browser lease;
-- capability snapshot;
-- capability request;
-- broker binding;
-- browser turn.
-
-Phase 2 may expose richer user-facing provenance and broader cross-layer diagnostics.
-
-All correlation values used for authorization come from trusted runtime state. Model-authored text is never a trusted correlation source.
-
----
-
-## 25. Testing strategy
-
-The tests are contract tests at the architecture boundaries, not exhaustive browser simulation.
-
-### Phase 1 minimum
-
-Provider boundary:
-
-- native registration;
-- model resolution;
-- stream conversion;
-- cancellation;
-- missing-auth failure.
-
-ProviderCore:
-
-- monotonic turn states;
-- lease acquisition/release;
-- logical versus physical settlement;
-- post-submit retry prohibition;
-- stale/retired turn rejection;
-- exact resume/replay/failed distinction.
-
-Control protocol:
-
-- valid frame;
-- malformed frame rejection;
-- oversize frame rejection;
-- duplicate/correlation rejection;
-- free-form text cannot trigger execution.
-
-Capabilities:
-
-- snapshot isolation;
-- authorization and sandbox remain in DSH;
-- broker cannot widen authority;
-- late calls rejected;
-- cancellation reaches DSH execution.
-
-Context:
-
-- role/order preservation;
-- image preservation;
-- stale handle neutralization;
-- deterministic oversize handling.
-
-Surface:
-
-- readiness states;
-- capability detection;
-- submission detection;
-- completion detection;
-- cancellation;
-- recovery.
-
-### Phase 2 minimum
-
-- Responses compatibility parity with native DSH;
-- provenance assertions;
-- architecture import/layering checks;
-- redundant-path audit;
-- retirement verification.
-
----
-
-## WebSurfaceTransport boundary
-
-ChatGPT browser and DOM mechanics are isolated behind the `WebSurfaceTransport` boundary. ProviderCore consumes only semantic turn operations and lifecycle callbacks such as physical-surface binding, surface readiness, send activation, and submission acceptance. Playwright objects, selectors, DOM traversal, and ChatGPT-specific UI structures remain implementation details of the concrete browser worker behind the boundary.
-
-This boundary is not a second lifecycle or authorization authority: DSH/ProviderCore continue to own session, turn, capability, tool, retry, and settlement semantics. The surface transport only reports and performs provider-specific browser mechanics needed by those owners.
-
-## 26. Architecture invariants
-
-The following are non-negotiable.
-
-1. DSH session history is canonical.
-2. DSH owns authorization for DSH-projected capabilities.
-3. ChatGPT-native capabilities remain outside DSH authorization.
-4. ProviderCore coordinates; it does not become a second DSH runtime.
-5. Account/browser resource ownership is explicit.
-6. A logical turn and physical browser settlement are separate states.
-7. Automatic retry stops at confirmed submission.
-8. EXACT_RESUME is never silently downgraded to REPLAY.
-9. Model-visible text is untrusted.
-10. No model-visible identifier can create or widen authority.
-11. Each turn has an immutable capability snapshot.
-12. Broker/MCP transport cannot widen capability authority.
-13. ChatGPT Web DOM knowledge exists only in WebSurfaceTransport.
-14. ChatGPT Web provider entrypoints share one ProviderCore.
-15. Native Codex passthrough remains outside that core.
-16. Browser transport capacity is not the same as theoretical model context.
-17. A provider-owned turn may re-enter DSH, but cannot synchronously re-enter itself.
-18. Compatibility is an ingress concern, not a second execution core.
-19. Browser execution seams must not require ChatGPT-specific semantics when a service-neutral contract is sufficient.
-20. Additional browser-backed providers reuse proven execution seams but provide their own service profile and WebSurfaceTransport.
-
----
-
-## 27. Rejected approaches
-
-### Keep llm-pi-ai + localhost Responses as canonical DSH integration
-
-Rejected because it adds a semantic protocol boundary and makes compatibility transport part of provider identity.
-
-### Put Playwright into the DSH AgentLoop
-
-Rejected because DOM mechanics belong in a transport layer.
-
-### Make ProviderCore the owner of all DSH state
-
-Rejected because that creates a second runtime and duplicates authority.
-
-### Let MCP own tool authorization
-
-Rejected because MCP is transport, not the DSH security boundary.
-
-### Treat ChatGPT-native actions as DSH tools
-
-Rejected because the DSH sandbox cannot govern capabilities owned by ChatGPT.
-
-### Retry after an ambiguous submission
-
-Rejected because browser timeouts cannot prove that the original turn did not execute.
-
-### Use natural-language parsing to authorize operations
-
-Rejected because model output is untrusted data.
-
-### Build multi-account/session pooling in Phase 1
-
-Rejected as unnecessary pilot complexity.
-
-### Build a generic multi-service browser framework before a second provider exists
-
-Rejected because the reusable boundaries can be defined now without inventing factories, registries, or plugin hierarchies whose value has not yet been demonstrated. DeepSeek Web and Grok Web remain future provider additions, not Phase 1 abstraction requirements.
-
----
-
-## 28. Migration and issue mapping
-
-### Phase 1
-
-**#8 Native DSH provider boundary**
-
-Only the DSH-facing seam changes. Existing browser execution is reused.
-
-**#9 ProviderCore and execution authority**
-
-Extract the ChatGPT Web provider orchestration while keeping its internal seams service-neutral. Introduce BrowserAccountLease, turn lifecycle, logical/physical settlement, retry boundary, continuity states, reentrancy rule, and control-protocol trust boundary. Do not build a multi-provider framework.
-
-**#10 Capability architecture**
-
-Make DSH tools/skills authoritative. Introduce CapabilityProjector, CapabilityTransport, capability snapshot, and broker binding without creating a second registry.
-
-**#11 Canonical context/replay**
-
-Unify projection, replay, compaction handoff, stale-handle removal, and transport budgeting.
-
-**#12 WebSurfaceTransport**
-
-Isolate DOM/browser mechanics, readiness, capability detection, submission, completion, cancellation, and recovery.
-
-### Phase 2
-
-**#13 Compatibility convergence**
-
-Make Responses compatibility a thin adapter over ProviderCore. Keep native Codex separate.
-
-**#14 Verification and retirement**
-
-Add cross-layer provenance and architecture contract tests, then remove only redundant code proven obsolete.
-
----
-
-## 29. Definition of done for the pilot
-
-Phase 1 is structurally sound when all of the following are true:
-
-~~~text
-ctx.llm
-   |
-   v
-ChatGptWebLlmAdapter
-   |
-   v
-ChatGPTWebProviderCore
-   |
-   +--> AccountBrowserLease
-   +--> TurnCoordinator
-   +--> ContextProjector
-   +--> CapabilityProjector
-   +--> CapabilityTransport
-   +--> WebSurfaceTransport
-   |
-   v
-ChatGPT Web
-~~~
-
-and:
-
-- no Responses server is required for native DSH calls;
-- browser/DOM details do not leak into the DSH adapter;
-- DSH remains the authority for DSH-projected execution;
-- browser/account ownership is explicit;
-- post-submit retries are safe by construction;
-- continuity recovery is explicit;
-- model-visible protocol text is parsed as untrusted data;
-- capability state is turn-scoped;
-- the provider can report precise failure categories;
-- the architecture does not require any Phase 2 feature to remain correct.
-
----
-
-## 30. Current repository evidence
-
-The architecture is grounded in existing repository components:
-
-- src/plugin.ts — current Cordis/plugin lifecycle and sidecar integration.
-- src/adapters/chatgpt-web/index.ts — current ChatGPT Web provider/turn execution.
-- src/adapters/chatgpt-web/environment.ts — trusted turn environment.
-- src/adapters/chatgpt-web/turn-broker.ts — cross-process turn/capability coordination.
-- src/adapters/chatgpt-web/mcp-server.ts — ChatGPT-facing capability bridge.
-- src/adapters/chatgpt-web/prompt.ts — context/control projection.
-- src/adapters/chatgpt-web/turn-execution.ts — turn execution and settlement.
-- src/adapters/chatgpt-web/thread-environment.ts — persisted thread environment.
-- src/adapters/chatgpt-web/compaction-handoff.ts — compaction handoff.
-- src/adapters/chatgpt-web/rolling-checkpoint.ts — provider continuity checkpoints.
-- src/chatgpt-session.ts — browser surface and DOM selectors.
-- src/chatgpt-web-models.ts — account/model capability definitions.
-- src/native-passthrough.ts — native Codex passthrough.
-- src/server.ts — Responses compatibility server.
-- package.json — supported DSH version constraint and runtime dependencies.
-
-The current code confirms that the project already has substantial browser, turn, broker, checkpoint, compaction and capability machinery. The architecture therefore favors extraction and ownership cleanup over a green-field rewrite.
-
----
-
-## 31. External references used
-
-These references were used to verify the architecture's external contracts and current product constraints.
+The following references inform the architecture. They are evidence about current implementations or upstream contracts, not universal web-provider protocols.
 
 ### DeepSeek Harness
 
-- LLM runtime and LlmAdapter contract:  
-  https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/index.ts
-- LLM types / GenerateOptions / StreamChunk:  
-  https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/types.ts
-- Official LLM adapter cookbook:  
+- LLM adapter cookbook:
   https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cookbook/adding-an-llm-adapter.md
-- LLM adapter developer guide:  
+- LLM adapter development guide:
   https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/practice/llm-adapter.md
-- DSH LLM streaming semantics:  
+- LLM runtime and adapter contract:
+  https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/index.ts
+- LLM streaming semantics:
   https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/llm-streaming.md
-- DSH tools subsystem:  
-  https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/tools.md
-- DSH skills subsystem:  
-  https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/skills.md
-- DSH skill tool projection:  
-  https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/skill/tool-skill/src/index.ts
 
-### OpenAI / ChatGPT product constraints
+These establish the DSH-side rule: provider implementations are LlmAdapter instances, GenerateOptions is provider-neutral, and provider-specific continuation metadata may be retained as opaque replay state when appropriate.
 
-- ChatGPT Free Tier FAQ:  
-  https://help.openai.com/en/articles/9275245-chatgpt-free-tier-faq
-- ChatGPT image input FAQ:  
-  https://help.openai.com/en/articles/8400551-chatgpt-image-inputs-faq
-- Developer mode and MCP apps in ChatGPT:  
-  https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt
-- ChatGPT Search:  
-  https://help.openai.com/en/articles/9237897-chatgpt-search
+### Qwen
 
-These pages describe mutable ChatGPT product behavior for the supported Free Web account matrix. They are not OpenAI API contracts. API model documentation, even when it describes the same underlying model family, MUST NOT be used to derive this browser adapter's Free Web transport budget. The supported account matrix and measured browser limits must be re-checked when ChatGPT Free product behavior changes.
+- Qwen official web/product surface:
+  https://chat.qwen.ai/
+- Qwen cookie/session notice:
+  https://qwen.ai/cookies-notice
+- Current independent Qwen web reverse-engineering reference:
+  https://github.com/AnonymoDGH/Qwen-Reverse
+- Current Playwright-based Qwen proxy/reference:
+  https://github.com/pedrofariasx/qwenproxy
 
-### Model Context Protocol
+The independent projects are used only to validate the architectural observation that Qwen conversation state and web transport are provider-specific and may require persistent browser/session state. Their private endpoints, anti-bot headers, and internal schemas are not architectural contracts for this repository.
 
-- MCP 2026-07-28 specification release:  
-  https://blog.modelcontextprotocol.io/posts/2026-07-28/
-- MCP 2026 roadmap / transport direction:  
-  https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/
+### DeepSeek
 
-MCP is treated here as a capability transport, not as the identity of the provider architecture.
+- Official DeepSeek V4 announcement and web service:
+  https://deepseek.com/en/news/v4-preview/
+- Current independent DeepSeek Web protocol reference:
+  https://github.com/kittors/deepseek-web-api
+- Current independent DeepSeek Web API reference:
+  https://github.com/ForgetMeAI/FreeDeepseekAPI
+
+The independent projects are used only to validate that DeepSeek Web can expose server-side conversation/message lineage and streamed text exchange through its consumer-web session. Private endpoint names, PoW details, and headers remain strictly provider-local implementation details.
 
 ---
 
-## 31.1 Route-policy enforcement evidence (#71)
-
-ChatGPT Web product eligibility is owned exclusively by `src/chatgpt-web-authority.ts`. Public Web model slugs are the only externally selectable Web identifiers; backend model IDs such as `gpt-5.6-sol`, `gpt-5.6-luna`, and Zero Risk's internal backend values are implementation details and are rejected by `requireChatGptWebRoute()`.
-
-The Web catalog, native DSH route resolution, and Responses ingestion all converge on that same authority. Native Codex/Work routes remain outside it and therefore cannot consume the ChatGPT Web ProviderCore.
-
-Issue #71 contract coverage is in `tests/issue-71-route-scope.test.ts`, including Free/Paid/Luna route matrices, unknown-capability fail-closed behavior, Codex/Work rejection, backend-model escape-hatch rejection, catalog separation, and shared DSH/Responses route resolution.
-
-## 31.2 Responses convergence evidence (#72)
-
-The `/v1/responses` compatibility ingress is not an execution authority. For ChatGPT Web models it performs wire translation, route validation, continuation expansion, streaming/output bridging, compatibility errors, and compatibility usage/state handling; execution is delegated to the existing ChatGPT Web adapter/ProviderCore path used by native DSH.
-
-Native Codex remains a separate first-party passthrough outside the Web ProviderCore. Responses continuation state remains bounded compatibility cache state and does not own DSH context, capabilities, browser resources, retries, replay policy, or settlement.
-
-Contract coverage is in `tests/issue-72-responses-provider-core.test.ts`.
-
-## 31.3 Native DSH / Responses execution authority
-
-The browser execution authority is the local ChatGPT Web sidecar process. The native DSH LLM adapter is a DSH-facing translation boundary only: it resolves the trusted DSH session/sandbox context, builds the canonical provider request, and sends that request over an authenticated loopback transport to the sidecar.
-
-The sidecar creates one shared ChatGptWebProviderCore for its lifetime. Both /v1/responses and the internal native-DSH transport obtain Web adapters bound to that same ProviderCore, so leases, capability ownership, retry budget, submission/settlement state, replay and provenance cannot diverge merely because the caller used a different ingress.
-
-The native DSH transport carries the trusted _dshContext out-of-band from model-visible content. The sidecar validates the public Web route against the same ChatGPT Web authority and rejects requests whose public route/backend mapping is inconsistent. It does not infer or reconstruct DSH sandbox authority from browser state or Responses compatibility state.
-
-This is a process boundary, not a second provider authority: ChatGptWebProviderCore remains the single lifecycle/lease/retry authority for the ChatGPT Web execution process.
-## 32. Final ownership model
+## 31. Final ownership model
 
 ~~~text
 DSH
-  = canonical session history
+  = canonical conversation/session history
   = provider selection
-  = DSH tools / skills
-  = authorization
-  = sandbox / approvals / guards
   = agent lifecycle
+  = DSH cancellation lifecycle
 
-ChatGPT
-  = model reasoning
-  = model output
-  = ChatGPT-native product behavior
+WebChat Core
+  = provider registry
+  = provider-neutral model metadata
+  = conversation affinity
+  = opaque provider continuation state
+  = turn/exchange lifecycle
+  = submission boundary
+  = logical/physical settlement
+  = cancellation
+  = continuity/replay decisions
+  = normalized text events
+  = normalized provider errors
+  = provider conformance semantics
 
-Browser-backed ProviderCore role
-  = provider orchestration
-  = turn lifecycle
-  = account/browser coordination
-  = provider-private continuity
-  = context projection
-  = capability binding
-  = cancellation/retry/settlement
-  = provider diagnostics
+Provider Driver
+  = authentication
+  = account/session binding
+  = provider model IDs
+  = provider reasoning/modes
+  = provider conversation IDs/cursors
+  = provider recovery rules
+  = provider transport selection
 
-ChatGPTWebProviderCore (Phase 1)
-  = first concrete implementation of that role
+Provider Transport
+  = DOM
+  = browser-network
+  = hybrid
+  = provider-specific response parsing
+  = provider-specific readiness/submission/completion detection
 
-CapabilityProjector
-  = what DSH exposes
-
-CapabilityTransport
-  = how it crosses into ChatGPT
-
-TurnBroker
-  = which turn owns the transport request
-
-WebSurfaceTransport
-  = browser/DOM mechanics
-
-Responses compatibility
-  = alternate ingress into ProviderCore
-
-Native Codex passthrough
-  = separate first-party upstream protocol
+Browser Runtime
+  = optional infrastructure for profiles, contexts, pages, CDP and lifecycle
 ~~~
 
-The core invariant is:
+The two fundamental invariants are:
 
-> **ChatGPT decides what it wants to do; DSH decides what it is allowed to do.**
+> **The DSH session is canonical; the provider conversation is a continuity handle.**
 
-The provider invariant is:
+and:
 
-> **Every ChatGPT Web provider entrypoint converges on one ProviderCore, while browser mechanics remain isolated behind WebSurfaceTransport.**
+> **The shared architecture owns the semantics of a text exchange; each provider owns how its web product actually performs that exchange.**
+
+A correct implementation therefore looks like:
+
+~~~text
+               +----------------------+
+               |      DSH Session     |
+               +----------+-----------+
+                          |
+                          v
+                +-------------------+
+                | WebChat Core      |
+                |                   |
+                | affinity          |
+                | exchange state    |
+                | continuation      |
+                | recovery          |
+                +---------+---------+
+                          |
+          +---------------+----------------+
+          |               |                |
+          v               v                v
+      ChatGPT           Qwen           DeepSeek
+       driver           driver           driver
+          |               |                |
+       DOM/Browser     Network/Browser   Network/Browser
+          |               |                |
+          v               v                v
+       Web Chat         Web Chat         Web Chat
+~~~
+
+That is the architecture to implement. Everything else in the repository should be evaluated against these ownership boundaries.
