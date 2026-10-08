@@ -733,6 +733,36 @@ A provider driver must report or enforce physical settlement before reusing a re
 
 This is particularly important for retained browser pages.
 
+### 9.4 Retry authority
+
+There are two different retry layers and they must never become competing execution authorities.
+
+**WebChat exchange retry** is internal to one logical turn. It may recover a provider transport failure only while the provider can prove that the text was not submitted.
+
+**DSH LLM retry** is route-level orchestration around the adapter. It may re-invoke the provider according to the DSH retry policy only when the WebChat adapter has declared the failure retry-safe.
+
+The adapter must therefore expose enough semantic failure information to prevent DSH from retrying a turn after ambiguous or confirmed submission.
+
+At minimum:
+
+~~~text
+pre-submit transport failure
+    -> may be retryable
+
+submission confirmed
+    -> not automatically retryable
+
+submission ambiguous
+    -> never automatically retryable
+
+completed stream with consumer-side failure
+    -> not an instruction to resend
+~~~
+
+A lower-level transport retry must settle before the DSH retry layer sees the operation as failed.
+
+This prevents a provider from accidentally implementing two independent retry loops around the same user message.
+
 ---
 
 ## 10. Continuation, replay and recovery
