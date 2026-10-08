@@ -298,6 +298,12 @@ export interface ChatGptWebTuning {
   responseDomGracePerCharMs?: number;
   /** How long the send button may stay disabled after the complete prompt was attached. */
   sendEnableGraceMs?: number;
+  /**
+   * How long ChatGPT may keep generating (Stop button visible) without exposing assistant
+   * material before the turn is failed as stuck. Raise it when a legitimately long reasoning,
+   * answer or connector wait is cut short; lower it to fail a stuck generator sooner.
+   */
+  generationRunningStallMs?: number;
   /** Optional absolute ceiling for one browser turn. */
   turnTimeoutMs?: number;
 }

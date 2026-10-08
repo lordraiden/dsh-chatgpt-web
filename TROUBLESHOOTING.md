@@ -72,6 +72,22 @@ dsh-chatgpt-web setup --chrome "C:\Program Files\Google\Chrome\Application\chrom
 - Wait until ChatGPT makes the route available again, or select another supported Web route.
 - Avoid spawning parallel multi-agent requests against a single ChatGPT browser session.
 
+### 7. `ChatGPT stopped responding after the task started` while the ChatGPT tab is still generating
+**Cause:** The browser worker fails a turn whose assistant material has not appeared yet once ChatGPT has kept its Stop button visible (generation running) for the whole generation-stall budget. Long reasoning, long answers and connector waits on slower Free/Think routes can legitimately exceed the old hardcoded five-minute budget, and the error copy is generic for any post-submission failure, so it also covers this stall.
+**Solution:**
+- Check the ChatGPT tab before retrying: a generation that was still running when the turn failed continues there, and its answer is not lost in the conversation.
+- Raise the budget in the browser transport tuning:
+
+~~~json
+{
+  "tuning": {
+    "generationRunningStallMs": 1800000
+  }
+}
+~~~
+
+- The value measures one continuous generation window (from the Stop button appearing until it disappears), not the total turn time, so a long but healthy turn is never cut short. Lower it to fail a stuck generator sooner; `turnTimeoutMs` remains the optional absolute ceiling for one browser turn. The full transport tuning table is in [README.md](./README.md#browser-transport-tuning).
+
 ## Update and Uninstall
 
 To update `dsh-chatgpt-web`, pull the latest changes and rebuild:

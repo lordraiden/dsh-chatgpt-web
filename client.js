@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
       'tuning.responseDomGraceMaxMs': 'First-token grace ceiling (ms)',
       'tuning.responseDomGracePerCharMs': 'Grace growth per prompt char (ms)',
       'tuning.sendEnableGraceMs': 'Send-button grace (ms)',
+      'tuning.generationRunningStallMs': 'Generation stall budget (ms)',
       'tuning.turnTimeoutMs': 'Turn timeout (ms)',
       'turns.title': 'Recent browser turns',
       'turns.empty': 'No recorded turns yet.',
@@ -211,6 +212,7 @@ window.__ModuleLoader__.load({
       ['responseDomGraceMaxMs', 'tuning.responseDomGraceMaxMs'],
       ['responseDomGracePerCharMs', 'tuning.responseDomGracePerCharMs'],
       ['sendEnableGraceMs', 'tuning.sendEnableGraceMs'],
+      ['generationRunningStallMs', 'tuning.generationRunningStallMs'],
       ['turnTimeoutMs', 'tuning.turnTimeoutMs'],
     ];
 

@@ -374,7 +374,8 @@ Example:
     "responseDomGraceMs": 60000,
     "responseDomGraceMaxMs": 240000,
     "responseDomGracePerCharMs": 2.5,
-    "sendEnableGraceMs": 5000
+    "sendEnableGraceMs": 5000,
+    "generationRunningStallMs": 900000
   }
 }
 ~~~
@@ -386,6 +387,7 @@ Example:
 | responseDomGraceMaxMs | 240000 | Maximum first-token DOM grace period. Must not be lower than responseDomGraceMs. |
 | responseDomGracePerCharMs | 2.5 | Additional first-token grace, in milliseconds per visible prompt character, clamped to the floor/ceiling above. |
 | sendEnableGraceMs | 5000 | Time allowed for the send control to become enabled after the complete prompt is attached. |
+| generationRunningStallMs | 900000 | How long ChatGPT may keep generating (its Stop button visible) without exposing assistant material before the turn is failed as stuck. It measures one continuous generation window, not the total turn time, so long reasoning, long answers and connector waits are not cut short; lower it to fail a stuck generator sooner. |
 | turnTimeoutMs | unset | Optional absolute ceiling for a browser turn. When absent, there is no tuning-level absolute deadline. |
 
 All tuning values must be finite positive numbers. Unknown tuning keys are rejected. turnTimeoutMs is optional; the other defaults are always available.
