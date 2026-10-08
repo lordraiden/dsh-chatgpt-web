@@ -292,7 +292,7 @@ A provider may bypass them entirely if its transport does not require them.
 +----------------------------------------------------------------------------+
 |                              WebChat Core                                  |
 |                                                                            |
-|  Provider Registry                                                         |
+|  Driver Resolver for DSH-selected routes                                 |
 |       |                                                                    |
 |       +--> Model Resolver                                                  |
 |       |                                                                    |
@@ -1177,31 +1177,33 @@ The adapter must also reject unsupported GenerateOptions content rather than sil
 
 ---
 
-## 17. Provider registry
+## 17. Provider driver resolution
 
-The plugin should move from:
+The plugin must move from a ChatGPT-only adapter boundary to a WebChat adapter capable of resolving multiple provider drivers.
 
-~~~text
-register exactly one ChatGPT adapter
-~~~
-
-to:
+Conceptually:
 
 ~~~text
-WebChatProviderRegistry
-  |
-  +--> chatgpt-web
-  +--> qwen-web
-  +--> deepseek-web
+DSH provider route
+       |
+       v
+WebChatLlmAdapter
+       |
+       v
+Driver Resolver
+       |
+       +--> chatgpt-web
+       +--> qwen-web
+       +--> deepseek-web
 ~~~
 
-The registry owns only provider registration and lifecycle.
+The DSH LLM runtime remains the authority that selects the provider route. The internal driver resolver only maps that already-selected route to an implementation.
 
-It does not become a giant factory containing provider-specific logic.
+It must not become a second public provider registry, routing policy, or model authority.
 
 Each driver is independently testable.
 
-Provider configuration should be namespaced:
+Provider configuration may be namespaced by provider:
 
 ~~~text
 webChat:
@@ -1210,6 +1212,8 @@ webChat:
     qwen-web: ...
     deepseek-web: ...
 ~~~
+
+Configuration namespacing is not provider routing. The selected DSH route remains authoritative.
 
 The repository package name remains dsh-chatgpt-web during this architectural migration to avoid breaking existing installation/configuration. A future package rename is optional and is not required for the architecture to be correct.
 
