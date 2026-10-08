@@ -1,0 +1,64 @@
+name: One-time v1.0.17 publish bootstrap
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    name: Tag v1.0.17 and clean stale branches
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Gate on synchronized v1.0.17 build
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test "$version" = "1.0.17"
+          grep -Fq 'VERSION = "1.0.17"' lib/plugin.js
+          git fetch --tags origin
+          if git rev-parse --verify -q "refs/tags/v1.0.17" >/dev/null; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create release tag
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag -a v1.0.17 -m "Release v1.0.17" "$GITHUB_SHA"
+          git push origin v1.0.17
+
+      - name: Delete stale branches
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for branch in \
+            "docs/current-state-alignment" \
+            "docs/current-state-alignment-sync" \
+            "docs/current-state-alignment-sync2" \
+            "docs/current-state-alignment-sync3" \
+            "docs/readme-agents-architecture-alignment" \
+            "docs/web-chat-architecture" \
+            "docs/webchat-architecture-readme-agents" \
+            "fix/186-advisor-ui-chat-nodes" \
+            "fix/201-account-lease-concurrency" \
+            "fix/201-account-lease-concurrency-sync" \
+            "fix/203-generation-stall-budget" \
+            "release/1.0.17" \
+            "ops/bootstrap-v1.0.17"; do
+            git push origin --delete "$branch" || true
+          done
