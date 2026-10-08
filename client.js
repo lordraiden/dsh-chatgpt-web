@@ -57,6 +57,22 @@ window.__ModuleLoader__.load({
       'runtime.readOnly': 'Runtime configuration is not writable in this profile.',
       'runtime.portInvalid': 'Port must be an integer between 1 and 65535.',
       'runtime.timeoutInvalid': 'Ready timeout must be zero or a positive number of milliseconds.',
+      'advisor.btn': 'Review with ChatGPT',
+      'advisor.btnHint': 'Review the last completed turn with ChatGPT in a separate Advisor conversation.',
+      'advisor.dialog.title': 'Review with ChatGPT',
+      'advisor.dialog.mode': 'Model',
+      'advisor.dialog.modeNormal': 'Normal',
+      'advisor.dialog.modeThink': 'Think',
+      'advisor.dialog.instructions': 'Review instructions',
+      'advisor.dialog.context': 'Context (read-only)',
+      'advisor.dialog.humanRequest': 'Last human request',
+      'advisor.dialog.dshResponse': 'Last DSH response',
+      'advisor.dialog.cancel': 'Cancel',
+      'advisor.dialog.review': 'Review',
+      'advisor.dialog.reviewing': 'Reviewing…',
+      'advisor.dialog.error': 'The review failed. You can retry.',
+      'advisor.errNoEndpoint': 'The sidecar endpoint is not configured.',
+      'advisor.errNoToken': 'The sidecar control token is unavailable in this profile.',
     };
 
     const CSS = `
@@ -90,6 +106,27 @@ window.__ModuleLoader__.load({
       .cwg-table td { padding: 6px 8px; color: var(--dsw-alias-label-primary); border-bottom: 1px solid var(--dsw-alias-border-l1); }
       .cwg-table .cwg-err { color: var(--dsw-alias-state-error-primary); }
       .cwg-table .cwg-ok { color: var(--dsw-alias-state-success-primary); }
+      .cwg-advisor-btn { font-size: 12px; padding: 4px 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-primary); cursor: pointer; white-space: nowrap; }
+      .cwg-advisor-btn:hover:not(:disabled) { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+      .cwg-advisor-btn:disabled { opacity: .5; cursor: default; }
+      .cwg-advisor-dialog { display: flex; flex-direction: column; gap: 12px; width: min(560px, 100%); padding: 16px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 8px 28px rgb(0 0 0 / .18); box-sizing: border-box; }
+      .cwg-advisor-dialog *, .cwg-advisor-dialog *::before, .cwg-advisor-dialog *::after { box-sizing: border-box; }
+      .cwg-advisor-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .cwg-advisor-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+      .cwg-advisor-close { border: none; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 16px; line-height: 1; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+      .cwg-advisor-close:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover-solid); }
+      .cwg-advisor-section-label { font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--dsw-alias-label-secondary); margin-bottom: 6px; }
+      .cwg-advisor-mode { display: flex; gap: 6px; }
+      .cwg-advisor-mode button { flex: 1; font-size: 13px; padding: 6px 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-primary); cursor: pointer; }
+      .cwg-advisor-mode button[aria-pressed="true"] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-interactive-bg-hover-solid); }
+      .cwg-advisor-instructions { width: 100%; min-height: 72px; resize: vertical; font-size: 13px; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: inherit; }
+      .cwg-advisor-instructions:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+      .cwg-advisor-context { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
+      .cwg-advisor-context-label { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-bottom: 2px; }
+      .cwg-advisor-context pre { margin: 0; font-size: 12px; line-height: 1.45; color: var(--dsw-alias-label-primary); white-space: pre-wrap; word-break: break-word; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 8px; }
+      .cwg-advisor-error { font-size: 12px; color: var(--dsw-alias-state-error-primary); }
+      .cwg-advisor-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+      .cwg-advisor-foot .cwg-err-msg { margin-right: auto; }
     `;
 
     const NS = 'dsh-chatgpt-web';
@@ -514,6 +551,327 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // ChatGPT Advisor (issue #179): composer button + review dialog. The dialog
+    // calls the #178 sidecar endpoint POST /v1/control/advisor/review; the
+    // control token arrives through the official session-projection channel
+    // (`useProjection('dsh-chatgpt-web:sidecar')`), the port through the live
+    // plugin config form, and the review context through the Chat snapshot
+    // selector hooks — no parallel state machinery.
+    // ─────────────────────────────────────────────────────────────────────────
+    const ADVISOR_PROJECTION_KEY = 'dsh-chatgpt-web:sidecar';
+    const LAST_INSTRUCTIONS_KEY = 'dsh-chatgpt-web.advisor.lastInstructions';
+    const DEFAULT_INSTRUCTIONS =
+      'Review this development step as a senior software engineer.\n' +
+      'Identify correctness problems, missed requirements, risks, and concrete improvements.\n' +
+      'Focus on issues that should be addressed before continuing.';
+
+    /** Plain-text of a `user` chat node (all text-bearing content blocks). */
+    function userNodeText(node) {
+      if (!node || !Array.isArray(node.content)) return '';
+      return node.content
+        .filter((block) => block && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
+    }
+
+    /** Plain-text of a finalized `assistant` chat node (text blocks only). */
+    function assistantNodeText(node) {
+      if (!node || !Array.isArray(node.blocks)) return '';
+      return node.blocks
+        .filter((block) => block && block.kind === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
+    }
+
+    /**
+     * The last completed, reviewable turn of the chat: the latest human
+     * request and the latest FINAL assistant response after it. Returns null
+     * while nothing reviewable exists (no turn yet, empty content, or the
+     * response was interrupted).
+     */
+    function selectReviewableTurn(chat) {
+      if (!chat || !Array.isArray(chat.order) || typeof chat.nodes?.get !== 'function') return null;
+      let user = null;
+      let assistant = null;
+      for (let i = chat.order.length - 1; i >= 0; i -= 1) {
+        const node = chat.nodes.get(chat.order[i]);
+        if (!node) continue;
+        if (!user && node.kind === 'user') {
+          const text = userNodeText(node);
+          if (text) user = { seq: node.seq, text };
+        }
+        if (!assistant && node.kind === 'assistant' && node.interrupted !== true) {
+          const text = assistantNodeText(node);
+          if (text) assistant = { seq: node.seq, text };
+        }
+        if (user && assistant) break;
+      }
+      if (!user || !assistant || !(user.seq < assistant.seq)) return null;
+      return { humanRequest: user.text, dshResponse: assistant.text, turn: assistant.seq };
+    }
+
+    /** The button is actionable only with a reviewable turn, no generation, and no in-flight review. */
+    function canStartReview({ running, inFlight, reviewable }) {
+      return Boolean(reviewable) && running !== true && inFlight !== true;
+    }
+
+    /** Workspace basename for the optional `project` field (never a path). */
+    function selectProjectName(items, sessionId) {
+      if (!Array.isArray(items) || !sessionId) return undefined;
+      const item = items.find((w) => w && Array.isArray(w.sessionIds) && w.sessionIds.includes(sessionId));
+      if (!item || typeof item.path !== 'string') return undefined;
+      const segments = item.path.split(/[\\/]+/).filter(Boolean);
+      return segments.length > 0 ? segments[segments.length - 1] : undefined;
+    }
+
+    /** Pure request builder for the #178 endpoint (testable without fetch). */
+    function buildAdvisorFetch({ base, token, sessionId, humanRequest, dshResponse, instructions, mode, project, signal }) {
+      const body = { sessionId, humanRequest, dshResponse, instructions, mode };
+      if (project) body.project = project;
+      return {
+        url: `${base}/v1/control/advisor/review`,
+        options: {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          ...(signal ? { signal } : {}),
+        },
+      };
+    }
+
+    function loadLastInstructions(storage) {
+      try {
+        const value = storage ? storage.getItem(LAST_INSTRUCTIONS_KEY) : null;
+        return typeof value === 'string' && value.trim() ? value : DEFAULT_INSTRUCTIONS;
+      } catch {
+        return DEFAULT_INSTRUCTIONS;
+      }
+    }
+
+    function saveLastInstructions(storage, value) {
+      try {
+        if (storage && typeof value === 'string' && value.trim()) storage.setItem(LAST_INSTRUCTIONS_KEY, value);
+      } catch {
+        // Browser storage may be unavailable; the preference is best-effort.
+      }
+    }
+
+    /**
+     * Shared dialog state, module-scoped so the button slot and the overlay
+     * slot (two distinct slot entries) drive one dialog. Plain listeners —
+     * the framework drives both components to re-render on change.
+     */
+    function createAdvisorStore() {
+      let state = { open: false, mode: 'normal', instructions: DEFAULT_INSTRUCTIONS, context: null, status: 'idle', error: null };
+      let inFlight = false;
+      let abortController = null;
+      const listeners = new Set();
+      const notify = () => { for (const listener of listeners) { try { listener(); } catch { /* listener errors never break the store */ } } };
+      return {
+        getSnapshot: () => state,
+        subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+        get inFlight() { return inFlight; },
+        openDialog(context, instructions) {
+          state = { ...state, open: true, status: 'idle', error: null, context, instructions: typeof instructions === 'string' && instructions.trim() ? instructions : DEFAULT_INSTRUCTIONS };
+          notify();
+        },
+        closeDialog() {
+          if (abortController) { try { abortController.abort(); } catch { /* already settled */ } }
+          state = { ...state, open: false, status: 'idle', error: null };
+          notify();
+        },
+        setMode(mode) { state = { ...state, mode: mode === 'think' ? 'think' : 'normal' }; notify(); },
+        setInstructions(text) { state = { ...state, instructions: typeof text === 'string' ? text : '' }; notify(); },
+        fail(message) { state = { ...state, status: 'error', error: message }; notify(); },
+        runReview(env) {
+          if (inFlight || !state.open || !state.context) return;
+          inFlight = true;
+          const controller = new AbortController();
+          abortController = controller;
+          state = { ...state, status: 'loading', error: null };
+          notify();
+          const finish = () => { inFlight = false; abortController = null; };
+          const { url, options } = buildAdvisorFetch({
+            base: env.base,
+            token: env.token,
+            sessionId: env.sessionId,
+            humanRequest: state.context.humanRequest,
+            dshResponse: state.context.dshResponse,
+            instructions: state.instructions,
+            mode: state.mode,
+            project: env.project,
+            signal: controller.signal,
+          });
+          env.fetch(url, options)
+            .then(async (res) => {
+              let data = null;
+              try { data = await res.json(); } catch { /* non-JSON body */ }
+              if (!res.ok || !data || data.ok !== true) {
+                const message = data && typeof data.message === 'string' && data.message ? data.message : `HTTP ${res.status}`;
+                state = { ...state, status: 'error', error: message };
+              } else {
+                saveLastInstructions(env.storage, state.instructions);
+                // The result card (#180) and the handoff to the main chat are
+                // separate issues: a successful review closes the dialog.
+                state = { ...state, open: false, status: 'idle', error: null };
+              }
+            })
+            .catch((error) => {
+              const aborted = error && (error.name === 'AbortError' || error.code === 20);
+              if (aborted && !state.open) {
+                state = { ...state, status: 'idle', error: null };
+              } else if (aborted) {
+                // The dialog stayed open while the request was cancelled
+                // externally: surface it as a retryable error.
+                state = { ...state, status: 'error', error: 'cancelled' };
+              } else {
+                state = { ...state, status: 'error', error: error instanceof Error ? error.message : String(error) };
+              }
+            })
+            .finally(() => { finish(); notify(); });
+        },
+      };
+    }
+
+    const advisorStore = createAdvisorStore();
+
+    function useAdvisorState(store) {
+      const [snapshot, setSnapshot] = React.useState(store.getSnapshot());
+      React.useEffect(() => store.subscribe(() => setSnapshot(store.getSnapshot())), [store]);
+      return { snapshot, inFlight: store.inFlight };
+    }
+
+    /** Composer control: visible only with a reviewable turn; disabled while DSH generates or a review is in flight. */
+    function AdvisorReviewButton(t, props) {
+      // Two stable-reference selectors (never a fresh object): the selector
+      // hooks cache by reference, and order/nodes are stable across snapshots.
+      const order = typeof props.useChat === 'function' ? props.useChat((s) => s.order) : undefined;
+      const nodes = typeof props.useChat === 'function' ? props.useChat((s) => s.nodes) : undefined;
+      const chat = order && nodes ? { order, nodes } : null;
+      const running = typeof props.useSession === 'function' ? props.useSession((s) => s.running) : false;
+      const { snapshot, inFlight } = useAdvisorState(advisorStore);
+      if (!props.sessionId) return null;
+      const reviewable = selectReviewableTurn(chat);
+      if (!reviewable) return null;
+      return h('button', {
+        type: 'button',
+        className: 'cwg-advisor-btn',
+        disabled: !canStartReview({ running, inFlight, reviewable }),
+        title: t('advisor.btnHint', 'Review the last completed turn with ChatGPT in a separate Advisor conversation.'),
+        'aria-label': t('advisor.btn', 'Review with ChatGPT'),
+        onClick: () => advisorStore.openDialog(reviewable, loadLastInstructions(window.localStorage)),
+      }, t('advisor.btn', 'Review with ChatGPT'));
+    }
+
+    /** Review dialog rendered inside the resident composer card. */
+    function AdvisorReviewDialog(t, props, configForm) {
+      const { snapshot, inFlight } = useAdvisorState(advisorStore);
+      const projection = typeof props.useProjection === 'function' ? props.useProjection(ADVISOR_PROJECTION_KEY) : undefined;
+      const workspaceItems = typeof props.useWorkspaces === 'function' ? props.useWorkspaces((s) => s.items) : undefined;
+
+      React.useEffect(() => {
+        if (!snapshot.open) return undefined;
+        const onKey = (event) => { if (event.key === 'Escape') advisorStore.closeDialog(); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [snapshot.open]);
+
+      if (!snapshot.open || !snapshot.context) return null;
+
+      const project = selectProjectName(workspaceItems, props.sessionId);
+
+      function onReview() {
+        const base = resolveSidecarBase(configForm);
+        const token = projection && typeof projection.controlToken === 'string' ? projection.controlToken : undefined;
+        if (!base) { advisorStore.fail(t('advisor.errNoEndpoint', 'The sidecar endpoint is not configured.')); return; }
+        if (!token) { advisorStore.fail(t('advisor.errNoToken', 'The sidecar control token is unavailable in this profile.')); return; }
+        advisorStore.runReview({
+          base,
+          token,
+          sessionId: props.sessionId,
+          project,
+          storage: window.localStorage,
+          fetch: (url, options) => fetch(url, options),
+        });
+      }
+
+      return h('div', { className: 'cwg-advisor-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('advisor.dialog.title', 'Review with ChatGPT') },
+        h('style', null, CSS),
+        h('div', { className: 'cwg-advisor-head' },
+          h('span', { className: 'cwg-advisor-title' }, t('advisor.dialog.title', 'Review with ChatGPT')),
+          h('button', {
+            type: 'button',
+            className: 'cwg-advisor-close',
+            'aria-label': t('advisor.dialog.cancel', 'Cancel'),
+            disabled: snapshot.status === 'loading',
+            onClick: () => advisorStore.closeDialog(),
+          }, '×'),
+        ),
+        h('div', null,
+          h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.mode', 'Model')),
+          h('div', { className: 'cwg-advisor-mode' },
+            h('button', {
+              type: 'button',
+              'aria-pressed': String(snapshot.mode === 'normal'),
+              disabled: snapshot.status === 'loading',
+              onClick: () => advisorStore.setMode('normal'),
+            }, t('advisor.dialog.modeNormal', 'Normal')),
+            h('button', {
+              type: 'button',
+              'aria-pressed': String(snapshot.mode === 'think'),
+              disabled: snapshot.status === 'loading',
+              onClick: () => advisorStore.setMode('think'),
+            }, t('advisor.dialog.modeThink', 'Think')),
+          ),
+        ),
+        h('div', null,
+          h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.instructions', 'Review instructions')),
+          h('textarea', {
+            className: 'cwg-advisor-instructions',
+            value: snapshot.instructions,
+            disabled: snapshot.status === 'loading',
+            onChange: (event) => advisorStore.setInstructions(event.target.value),
+          }),
+        ),
+        h('div', null,
+          h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.context', 'Context (read-only)')),
+          h('div', { className: 'cwg-advisor-context' },
+            h('div', null,
+              h('div', { className: 'cwg-advisor-context-label' }, t('advisor.dialog.humanRequest', 'Last human request')),
+              h('pre', null, snapshot.context.humanRequest),
+            ),
+            h('div', null,
+              h('div', { className: 'cwg-advisor-context-label' }, t('advisor.dialog.dshResponse', 'Last DSH response')),
+              h('pre', null, snapshot.context.dshResponse),
+            ),
+          ),
+        ),
+        snapshot.status === 'error' && snapshot.error
+          ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
+              t('advisor.dialog.error', 'The review failed. You can retry.'),
+              snapshot.error !== 'cancelled' ? ` (${snapshot.error})` : '',
+            )
+          : null,
+        h('div', { className: 'cwg-advisor-foot' },
+          h('button', {
+            type: 'button',
+            className: 'cwg-btn cwg-secondary',
+            disabled: snapshot.status === 'loading',
+            onClick: () => advisorStore.closeDialog(),
+          }, t('advisor.dialog.cancel', 'Cancel')),
+          h('button', {
+            type: 'button',
+            className: 'cwg-btn',
+            disabled: snapshot.status === 'loading' || inFlight,
+            onClick: onReview,
+          }, snapshot.status === 'loading' ? t('advisor.dialog.reviewing', 'Reviewing…') : t('advisor.dialog.review', 'Review')),
+        ),
+      );
+    }
+
     return {
       inject: ['slots', 'locale', 'configForms'],
       apply(ctx) {
@@ -534,15 +892,47 @@ window.__ModuleLoader__.load({
         const t = makeT(translate);
         const configForm = ctx.configForms.get(CONFIG_ID);
 
-        // DSH 0.2's canonical plugin configuration seat is the bundle detail page.
-        // The Host owns schema/defaults/persistence; this page only edits the plugin's
-        // volatile Config fields through configForms. No parallel settings namespace or
-        // browser-local persistence is created here.
-        return ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+        // Three slot seats, all owned by this plugin's context: the bundle
+        // configuration page (DSH 0.2's canonical plugin settings seat — the
+        // Host owns schema/defaults/persistence, this page only edits the
+        // volatile Config fields through configForms), and the two Advisor
+        // seats (issue #179): the composer control in conversation.input.right
+        // and the review dialog in conversation.input.overlay (inside the
+        // resident composer card, per-session scope like message-feedback).
+        const disposers = [];
+        disposers.push(ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
           name: 'plugins.bundle.config',
           key: BUNDLE_CONFIG_KEY,
           locale: NS,
-        }, (props) => props && props.view === 'page' ? ChatGptWebSettings(t, configForm) : null));
+        }, (props) => props && props.view === 'page' ? ChatGptWebSettings(t, configForm) : null)));
+        disposers.push(ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+          name: 'conversation.input.right',
+          id: 'dsh-chatgpt-web-advisor-review',
+          locale: NS,
+        }, (props) => AdvisorReviewButton(t, props))));
+        disposers.push(ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
+          name: 'conversation.input.overlay',
+          id: 'dsh-chatgpt-web-advisor-dialog',
+          order: 2,
+          locale: NS,
+        }, (props) => AdvisorReviewDialog(t, props, configForm))));
+        return () => {
+          for (const dispose of disposers) {
+            try { dispose(); } catch { /* a seat may already be collapsed */ }
+          }
+        };
+      },
+      __test: {
+        ADVISOR_PROJECTION_KEY,
+        LAST_INSTRUCTIONS_KEY,
+        DEFAULT_INSTRUCTIONS,
+        selectReviewableTurn,
+        canStartReview,
+        selectProjectName,
+        buildAdvisorFetch,
+        loadLastInstructions,
+        saveLastInstructions,
+        createAdvisorStore,
       },
     };
   },
