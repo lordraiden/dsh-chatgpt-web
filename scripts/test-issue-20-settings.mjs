@@ -154,8 +154,11 @@ async function exerciseClient(port) {
       inject(_slot, register) {
         return register();
       },
-      register(_definition, Component) {
-        page = Component;
+      register(definition, Component) {
+        // This contract test exercises only the canonical bundle-settings seat.
+        // Client plugins may register additional conversation slots, and those
+        // registrations must not replace the settings page under test.
+        if (definition?.name === "plugins.bundle.config") page = Component;
         return {};
       },
     },
