@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.16
+
+- send the retained ChatGPT Web first turn as plain composer text with the persona prefix, project name, and human message.
+- send only the new human message on normal retained continuations.
+- keep the installed system fingerprint frozen for the physical ChatGPT conversation generation.
+- remove the legacy JSON-envelope fallback from retained continuations and fail explicitly when no human delta remains.
+- strip Aegis and operational transport content while preserving the persona system prompt.
+
 ## 1.0.15
 
 - retain the managed-Chrome ChatGPT Web surface across turns of the same DSH conversation.
