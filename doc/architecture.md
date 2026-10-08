@@ -158,31 +158,32 @@ The common layer owns the semantics. The provider owns the mechanism.
 
 ## 4. Core architectural principles
 
-### 4.1 One DSH adapter, many provider drivers
+### 4.1 One DSH-facing contract, many provider drivers
 
 DSH should not know how ChatGPT, Qwen, or DeepSeek talks to its website.
 
-The target shape is:
+The public routing authority remains the DSH LLM runtime. The WebChat layer sits behind that contract and resolves the already-selected provider route to the appropriate driver.
 
 ~~~text
-DSH
- |
- v
+DSH LLM runtime
+      |
+      | provider route already selected
+      v
 WebChatLlmAdapter
- |
- v
-WebChatRuntime
- |
- +-----------------------------+
- |              |              |
- v              v              v
-ChatGPT       Qwen         DeepSeek
-Driver        Driver        Driver
- |              |              |
- v              v              v
-provider       provider       provider
-transport      transport      transport
+      |
+      v
+WebChat Core
+      |
+      +--> driver resolver
+              |
+              +--> ChatGPT driver
+              +--> Qwen driver
+              +--> DeepSeek driver
 ~~~
+
+The internal driver resolver is not a second DSH provider registry or a second user-visible routing authority. It only answers:
+
+"Given the provider route DSH already selected, which WebChat implementation owns it?"
 
 The DSH-facing adapter remains provider-neutral.
 
@@ -223,6 +224,8 @@ A logical provider conversation may be implemented through:
 - a provider API exposed only through the authenticated product session.
 
 The common core therefore stores an **opaque conversation handle**, not a Page.
+
+A physical browser object may be retained by a provider transport, but it must never become the identity of the logical conversation.
 
 ### 4.4 The DSH session remains canonical
 
@@ -480,6 +483,31 @@ Generation changes are allowed only for explicit lifecycle events such as:
 
 Every generation transition must be recorded in the conversation store and must invalidate stale transport resources.
 
+### 7.3 Durable conversation state
+
+Conversation continuity is durable provider state, not merely in-memory runtime state.
+
+The conversation store must preserve enough non-secret state to restore or explicitly recover a provider conversation after a WebChat runtime restart when the provider itself still supports continuation.
+
+A durable record conceptually contains:
+
+~~~text
+conversationKey
+providerId
+accountBindingId
+generation
+opaqueProviderHandle
+status
+lastConfirmedTurn
+revision
+~~~
+
+The record must not contain cookies, bearer tokens, browser storage, or other authentication secrets.
+
+Updates to the record must be atomic from the core's perspective. Provider-specific handle changes are committed only after the provider reaches the semantic checkpoint that makes the new handle authoritative.
+
+A crash or transport failure at an unknown checkpoint must never be interpreted as successful continuation merely because a request was attempted. The driver must be able to report an uncertain or lost state and the core must then choose explicit resume, replay, or failure according to the provider's recovery contract.
+
 ---
 
 ## 8. Provider-neutral contracts
@@ -498,8 +526,9 @@ WebChatProviderDriver
   listModels()
   resolveModel()
 
+  assessConversation()
   createConversation()
-  continueConversation()
+  resumeConversation()
   replayConversation()
 
   health()
@@ -507,6 +536,8 @@ WebChatProviderDriver
 ~~~
 
 The exact TypeScript interface may differ.
+
+assessConversation() is important: the driver decides whether the current provider conversation is compatible with the requested turn state. That decision may depend on provider-specific model rules, reasoning or mode selection, system/developer instructions, remote conversation state, or other provider facts.
 
 The driver must not return Playwright objects as part of its public provider contract.
 
@@ -530,12 +561,34 @@ handle is provider-owned opaque state.
 
 The normalized exchange is deliberately text-only.
 
+The core does not define provider-specific prompt syntax. It carries a small semantic input that the driver can project into the selected web product:
+
+~~~text
+WebChatTurnInput
+  systemInstructions?
+  userText
+  replayHistory?
+  model
+  reasoningMode?
+~~~
+
+replayHistory is present only when the provider cannot continue the existing remote conversation and an explicit replay has been selected. It is derived from canonical DSH text history; it is never a second persistent transcript.
+
+Normal continuation should prefer the provider's own conversation memory and send only the new turn plus whatever provider-specific state is required to maintain the contract.
+
+Unsupported DSH input such as files, images, or tool definitions must result in a stable UNSUPPORTED_OPTION-class failure. Providers must not silently drop or reinterpret unsupported content.
+
+The normalized exchange is:
+
 ~~~text
 WebChatExchange
-  submit(text)
+  prepare()
+  submit()
   stream()
   abort()
 ~~~
+
+The provider driver owns how the semantic input becomes transport data.
 
 The event vocabulary should be small:
 
@@ -550,7 +603,22 @@ error
 
 Providers may internally have much richer events, but only the semantics needed by the shared core should be normalized.
 
-### 8.4 Error contract
+### 8.4 DSH routing and replay-state boundary
+
+The DSH LLM runtime remains the public authority for provider routing and model dispatch.
+
+The WebChat Core must not replace:
+
+- ctx.llm provider registration;
+- DSH provider selection;
+- DSH model catalog/discovery semantics;
+- DSH retry policy ownership.
+
+A WebChat implementation may expose one multi-route adapter instance or provider-specific adapter instances. Both are valid, provided that provider selection remains owned by DSH and all routes converge on the same WebChat semantics.
+
+DSH provider replay state is optional transport metadata, not the durable WebChat conversation store. If finish.replayState is used, it must always be tagged or validated with provider identity and may only be consumed when the WebChat ownership rules prove that the state belongs to the requested provider conversation. Cross-provider replay state must fail closed.
+
+### 8.5 Error contract
 
 Core error classes should describe the semantic failure:
 
@@ -923,7 +991,24 @@ Provider drivers own:
 
 Credentials and session-bearing browser state must never be stored in conversation records or written to logs.
 
-### 13.1 Browser profiles
+### 13.1 Session bootstrap and interactive verification
+
+Authentication is broader than cookie loading.
+
+A provider may require:
+
+- an already authenticated persistent browser profile;
+- user-assisted login;
+- access verification or anti-bot challenges;
+- browser-derived session material;
+- provider-specific challenge computation;
+- revalidation before each transport mode is allowed.
+
+These mechanisms remain provider-local.
+
+The common core must not assume that a headless or automated browser can always establish a valid consumer-web session. A provider driver may require an existing real browser profile, an interactive bootstrap step, or a browser-assisted network transport. The semantic result exposed to the core remains only the provider authentication/session state.
+
+### 13.2 Browser profiles
 
 A persistent browser profile is an implementation detail.
 
@@ -1087,6 +1172,8 @@ It must not know:
 - browser worker internals.
 
 DSH's own adapter documentation also provides an important continuity seam: provider-specific follow-up metadata can be retained as opaque replay state when the adapter owns that continuation. The Web Chat architecture may use this mechanism where useful, but long-lived conversation affinity remains a Web Chat responsibility rather than a caller-visible provider ID.
+
+The adapter must also reject unsupported GenerateOptions content rather than silently discard it. In particular, a text-only WebChat route must not quietly strip tool definitions, file/image content, or other unsupported request features simply to make a call succeed. This preserves DSH's stable provider error semantics.
 
 ---
 
@@ -1363,7 +1450,7 @@ The driver should be designed to accommodate:
 - provider anti-bot/session requirements;
 - provider-specific model/mode selection.
 
-Current independent work against chat.qwen.ai demonstrates server-side chat_id and parent/response chaining and also shows that browser/session state may be part of the transport strategy. Those details must remain opaque to the common core.
+Current independent work against chat.qwen.ai demonstrates server-side chat_id and parent/response chaining, while separate recon work reports that automated browser sessions can encounter the site's access-verification layer. This reinforces the architectural rule that session bootstrap, browser profile choice, anti-bot handling and network transport remain Qwen-local implementation decisions.
 
 ### 21.3 DeepSeek driver
 
@@ -1377,7 +1464,7 @@ The driver should be designed to accommodate:
 - current product modes such as reasoning/non-reasoning;
 - web-session protections that may change over time.
 
-DeepSeek's current web service is explicitly separate from the API product surface, so API model IDs or API transport assumptions must not be used as the provider architecture.
+DeepSeek's current web service is explicitly separate from the API product surface, even though the Web and API model families evolve rapidly in parallel. API model IDs, API request formats, API pricing and API context limits therefore must not be used as the Web provider architecture. The DeepSeek driver must establish current Web model availability and Web session behavior independently.
 
 ---
 
@@ -1766,7 +1853,7 @@ These remain provider-local until there is a concrete reason to extract a smalle
 
 src/plugin.ts currently registers the ChatGPT adapter and manages the local sidecar lifecycle.
 
-The target is to preserve the sidecar lifecycle responsibility while replacing single-provider registration with a provider registry.
+The target is to preserve the sidecar lifecycle responsibility while replacing single-provider registration with a provider-neutral WebChat adapter and driver resolver. The DSH LLM runtime remains the actual provider routing authority; WebChat does not create a competing public registry.
 
 ---
 
@@ -1824,7 +1911,7 @@ These establish the DSH-side rule: provider implementations are LlmAdapter insta
 - Current Playwright-based Qwen proxy/reference:
   https://github.com/pedrofariasx/qwenproxy
 
-The independent projects are used only to validate the architectural observation that Qwen conversation state and web transport are provider-specific and may require persistent browser/session state. Their private endpoints, anti-bot headers, and internal schemas are not architectural contracts for this repository.
+The independent projects are used only to validate the architectural observation that Qwen conversation state and web transport are provider-specific and may require persistent browser/session state. Current Qwen web recon also reports an access-verification layer that can reject automated browser sessions, reinforcing that authentication/session bootstrap must remain provider-local. Their private endpoints, anti-bot headers, fingerprinting and internal schemas are not architectural contracts for this repository.
 
 ### DeepSeek
 
@@ -1849,7 +1936,8 @@ DSH
   = DSH cancellation lifecycle
 
 WebChat Core
-  = provider registry
+  = provider-neutral WebChat semantics
+  = driver resolution for already-selected DSH provider routes
   = provider-neutral model metadata
   = conversation affinity
   = opaque provider continuation state
@@ -1882,9 +1970,13 @@ Browser Runtime
   = optional infrastructure for profiles, contexts, pages, CDP and lifecycle
 ~~~
 
-The two fundamental invariants are:
+The three fundamental invariants are:
+
+> **The DSH LLM runtime selects the provider; WebChat only resolves and executes the already-selected provider route.**
 
 > **The DSH session is canonical; the provider conversation is a continuity handle.**
+
+> **The shared architecture owns the semantics of a text exchange; each provider owns how its web product actually performs that exchange.**
 
 and:
 
