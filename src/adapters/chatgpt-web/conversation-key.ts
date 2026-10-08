@@ -40,10 +40,12 @@ export function retainedConversationResumeRequest(
 /**
  * Stable identity of the DSH system block for one retained conversation.
  *
- * A retained continuation omits the system block entirely while this identity
- * matches the one installed in the current physical generation; a change (or a
- * new physical epoch) propagates only the new complete block, never a full
- * context rebuild.
+ * The fingerprint of the system block that was PHYSICALLY INSTALLED in a
+ * conversation generation is recorded once, when the install turn settles.
+ * A later system-prompt change does not propagate into an existing
+ * generation: the physically installed prefix stays frozen for the rest of
+ * that physical conversation and the change takes effect only in the next
+ * physical epoch, which installs the new block.
  */
 export function chatGptSystemFingerprint(systemPrompt?: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify(systemPrompt ?? [])).digest("hex");
@@ -60,21 +62,23 @@ export interface ChatGptSystemFingerprintStore {
 }
 
 /**
- * Decision for a retained continuation (issue #171/#172). True only when the
- * CURRENT physical generation already has this exact system block installed:
+ * Diagnostic/observability check for a retained continuation (issue
+ * #171/#172). True only when the CURRENT physical generation's recorded
+ * fingerprint matches this exact system block:
  *
  * - no conversationKey → false (nothing to continue);
- * - no fingerprint recorded for the current generation → false (full compile
- *   re-installs the contract + system — the safe direction);
- * - the current generation's recorded fingerprint differs → false (the system
- *   block changed, so the full compile re-sends the new one);
- * - the current generation's recorded fingerprint matches → true (minimal
- *   continuation; the stable system block is omitted).
+ * - no fingerprint recorded for the current generation → false;
+ * - the current generation's recorded fingerprint differs → false (the
+ *   system block changed since the install — the prefix is frozen);
+ * - the current generation's recorded fingerprint matches → true.
  *
- * A fingerprint recorded for generation N is never considered for generation
- * N+1: a replacement physical epoch re-installs the system, so the stale
- * fingerprint must not apply. This is the exact predicate the adapter's
- * `compileResume` uses, exported for deterministic regression testing.
+ * This does NOT control the resume branch: `resolveChatGptResumeBranch`
+ * selects `continue`/`install` from the mere EXISTENCE of a fingerprint for
+ * the generation, so a system-prompt change never triggers a re-install or a
+ * fallback to the legacy transport. The adapter consults this predicate only
+ * to LOG a mid-conversation system change (frozen-prefix observability). A
+ * fingerprint recorded for generation N is never considered for generation
+ * N+1: a replacement physical epoch re-installs the system.
  */
 export function isStableSystemContinuation(
   store: ChatGptSystemFingerprintStore,
@@ -95,8 +99,8 @@ export function isStableSystemContinuation(
  *   prefix frozen for the rest of this physical conversation — the persona
  *   change takes effect in the next physical conversation);
  * - `install` → `compileRetainedChatGptWebInstall` (effective system prompt
- *   + workspace reference + projected conversation, as plain composer text —
- *   no JSON envelope, no transport contract).
+ *   + project name + projected conversation, as plain composer text — no
+ *   JSON envelope, no transport contract).
  */
 export type ChatGptResumeBranch = "continue" | "install";
 
@@ -106,27 +110,29 @@ export type ChatGptResumeBranch = "continue" | "install";
  * This is the exact decision the adapter's `compileResume` executes, extracted
  * here so production and the deterministic regression tests share ONE
  * implementation of the decision instead of the test re-stating the condition
- * it protects. It is a pure function of its dependencies — conversationKey,
- * the current physical generation, the system block, and the fingerprint
- * store — and performs no compilation: the caller applies the returned branch
- * to the real compile functions (which own the per-turn options).
+ * it protects. It is a pure function of its dependencies — the conversation
+ * key, the current physical generation, and the fingerprint store — and
+ * performs no compilation: the caller applies the returned branch to the real
+ * compile functions (which own the per-turn options).
  *
- * - no conversationKey, or no fingerprint recorded for the current generation
- *   → `install` (the prefix is not established in this physical epoch, so it
- *   must be installed);
+ * - no conversationKey → `install`;
+ * - no fingerprint recorded for the current generation → `install` (the
+ *   prefix is not established in this physical epoch, so it must be
+ *   installed);
  * - a fingerprint recorded for the current generation (matching OR
  *   mismatched) → `continue` (the prefix is installed in this physical
- *   conversation and stays frozen; the mismatch is logged by the caller).
+ *   conversation and stays frozen; the mismatch is only logged by the caller
+ *   through `isStableSystemContinuation`).
  *
- * A fingerprint recorded for generation N is never considered for generation
- * N+1 (see `isStableSystemContinuation`): a replacement physical epoch
- * re-installs the prefix.
+ * The current system block deliberately does NOT influence the decision: the
+ * branch depends only on what is physically installed. A fingerprint
+ * recorded for generation N is never considered for generation N+1: a
+ * replacement physical epoch re-installs the prefix.
  */
 export function resolveChatGptResumeBranch(
   store: ChatGptSystemFingerprintStore,
   conversationKey: string | undefined,
   generation: number,
-  systemPrompt: readonly string[] | undefined,
 ): ChatGptResumeBranch {
   if (conversationKey === undefined) return "install";
   return store.sentSystemFingerprint(conversationKey, generation) === undefined

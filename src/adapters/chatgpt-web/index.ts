@@ -556,7 +556,6 @@ export function createChatGptWebAdapter(
           chatGptTurnSessions,
           conversationKey!,
           chatGptTurnSessions.conversationGeneration(conversationKey!),
-          checkpointInput.parsed.context.systemPrompt,
         ),
       )
       : retainConversation;
@@ -603,7 +602,6 @@ export function createChatGptWebAdapter(
         chatGptTurnSessions,
         conversationKey,
         conversationKey === undefined ? 1 : chatGptTurnSessions.conversationGeneration(conversationKey),
-        input.context.systemPrompt,
       );
       if (branch === "continue") {
         if (conversationKey !== undefined && !isStableSystemContinuation(
