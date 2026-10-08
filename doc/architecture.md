@@ -1718,103 +1718,103 @@ Reason:
 
 ## 27. Implementation roadmap
 
-The migration should be delivered as small reviewable slices.
+The migration should be delivered as small reviewable slices. The issue/PR numbering below refers to implementation order.
 
-### PR 1 — Web Chat contracts
+### PR 1 — WebChat contracts
 
-Introduce:
+Establish the provider-neutral semantic contracts:
 
+- provider driver contract;
 - provider-neutral model descriptor;
-- provider driver interface;
+- DSH-to-WebChat text projection;
 - conversation handle;
 - conversation key;
 - normalized exchange events;
-- normalized error taxonomy.
+- normalized error taxonomy;
+- explicit unsupported-option behavior.
 
-No behavior change for ChatGPT.
+No functional Qwen or DeepSeek provider is introduced.
 
-### PR 2 — Conversation affinity and continuation store
+### PR 2 — Conversation affinity and durable continuation
 
-Extract:
+Establish the durable continuity layer:
 
-- stable DSH/provider/account key;
+- provider/account/DSH conversation identity;
 - opaque provider handle;
 - conversation generation;
-- atomic continuation-state update;
-- lost-conversation tombstone.
+- durable conversation record;
+- atomic continuation-state updates;
+- continuation compatibility assessment;
+- lost/stale state;
+- explicit replay/rebuild.
 
-Reuse the current ChatGPT retention semantics where they are already correct.
+Do not create a second transcript store.
 
-### PR 3 — Exchange state machine
+### PR 3 — Exchange state machine and transport ownership
 
 Extract:
 
-- submit boundary;
+- submission boundary;
 - submitted/streaming/completed states;
 - ambiguous submission;
 - cancellation;
-- physical settlement;
+- logical/physical settlement;
+- transport lease/resource ownership;
 - stale turn rejection.
 
-The current ChatGPT browser worker becomes one transport consumer.
+The common layer remains unaware of DOM and provider network protocols.
 
-### PR 4 — Transport seam
+### PR 4 — ChatGPT migration to WebChat
 
-Split the current ChatGPT surface into:
+Make ChatGPT the first concrete provider using the new contracts.
 
-~~~text
-WebChat core
-   |
-TextExchangeTransport
-   |
-ChatGPT DOM transport
-~~~
+Preserve current behavior. Keep ChatGPT-specific product features outside the common text-only core.
 
-No Qwen/DeepSeek implementation yet.
+### PR 5 — DSH route integration and driver resolution
 
-### PR 5 — ChatGPT migration
+Connect the WebChat architecture to the current DSH LLM runtime:
 
-Refactor the current ChatGPT implementation to consume the new core.
+- provider-route registration;
+- driver resolution for selected routes;
+- provider-scoped configuration;
+- model discovery/resolution;
+- authentication and health state;
+- backward-compatible ChatGPT route handling.
 
-Acceptance criterion:
+Do not introduce a second public provider registry or replace DSH provider routing.
 
-> ChatGPT behaves exactly as before; only ownership boundaries changed.
+### PR 6 — Provider conformance and architecture suite
 
-### PR 6 — Provider registry and model catalog
+Make the common lifecycle and layering rules executable and reusable by every provider.
 
-Introduce:
+### PR 7 — Qwen Chat text provider
 
-~~~text
-chatgpt-web
-qwen-web
-deepseek-web
-~~~
+Implement the Qwen-specific driver and transport for text-only web exchange, including its authentication/session bootstrap and provider-native conversation continuity.
 
-as provider registrations without implementing the new providers yet.
+The transport strategy remains an implementation decision based on the current Web surface.
 
-### PR 7 — Conformance suite
+### PR 8 — Qwen real-session validation and recovery hardening
 
-Make provider-independent lifecycle and continuity tests mandatory.
+Validate the provider against real Qwen Web behavior and harden provider-specific authentication/session, continuity, concurrency and recovery behavior without changing WebChat Core semantics.
 
-### PR 8 — Qwen text provider
+This PR handles operational behavior that cannot be established from generic contract tests alone.
 
-Implement only:
+### PR 9 — DeepSeek Chat text provider
 
-- authentication/session;
-- text model selection;
-- conversation creation/continuation;
-- streamed text exchange;
-- provider recovery;
-- provider health.
+Implement the DeepSeek-specific driver and transport for text-only web exchange, including its authentication/session bootstrap and provider-native conversation continuity.
 
-No files, images, tools, or MCP.
+The transport strategy remains an implementation decision based on the current Web surface.
 
-### PR 9 — DeepSeek text provider
+### PR 10 — DeepSeek real-session validation and recovery hardening
 
-Implement the same text-only contract with DeepSeek-specific transport/session behavior.
+Validate the provider against real DeepSeek Web behavior and harden provider-specific authentication/session, streaming, continuity and recovery behavior without changing WebChat Core semantics.
+
+### PR 11 — Cross-provider integration validation
+
+Validate all providers together and verify that the architecture remains one shared text-only execution model with independent provider implementations.
 
 ---
-
+ 
 ## 28. Current repository mapping
 
 The existing repository already contains several useful architectural pieces.
