@@ -177,22 +177,40 @@ Releases are tag-based. A merge to `main` is not itself a release.
 - A release tag must point to the exact commit already merged into `main`.
 - Do not release from feature, fix, archive, or release branches.
 
-Release sequence:
+### Release sequence
 
 1. Bump `package.json` version in a normal PR.
 2. Merge into `main` and wait for green CI/tarball smoke.
 3. Tag the exact `main` commit and push the tag:
    `git tag vX.Y.Z <main-sha>`
    `git push origin vX.Y.Z`
-4. Tag CI validates the version and publishes `@lordraiden/dsh-chatgpt-web` to GitHub Packages and npmjs.com.
-5. The Release workflow waits for the npm publication and creates the corresponding published GitHub Release with generated notes.
-6. A stable version is complete only when the matching tag, npm package, and GitHub Release exist.
+4. The tag CI validates the version and publishes the package **only to the private GitHub Packages npm registry** at `https://npm.pkg.github.com`.
+5. The Release workflow waits until that exact version is available in GitHub Packages and then creates the corresponding published GitHub Release with generated notes.
+6. A stable version is complete only when the matching tag, private GitHub package, and GitHub Release exist.
 
-DSH automatic updates must never follow `main` or feature branches. Compare the installed plugin version against the stable npm version, require a newer SemVer, and install the exact published version. Use the matching GitHub Release/tag as release provenance. Do not infer a release from a green `main` CI run or from `package.json` alone.
+There is **no npmjs.com publication**. Do not add an npmjs.com publish step, token, or registry entry.
+
+### DSH update contract
+
+DSH's `dsh plugin update @lordraiden/dsh-chatgpt-web` delegates package resolution to pnpm. For this private package, pnpm must resolve the `@lordraiden` scope through GitHub Packages:
+
+```ini
+@lordraiden:registry=https://npm.pkg.github.com
+```
+
+Authentication must be supplied outside the repository, for example through the user's `~/.npmrc` or the environment used by DSH:
+
+```ini
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+```
+
+Never commit a token to the repository or to a DSH profile file.
+
+DSH updates must use stable SemVer versions from the private registry. Do not follow `main`, feature branches, or moving Git refs for normal updates. The matching GitHub Release/tag provides release provenance; the private GitHub Packages registry is the package source actually consumed by `dsh plugin update`.
 
 The intended update chain is:
 
-`main` merge -> green CI -> `vX.Y.Z` tag -> npm publication -> GitHub Release -> DSH version discovery/update.
+`main` merge -> green CI -> `vX.Y.Z` tag -> private GitHub Packages publication -> GitHub Release -> `dsh plugin update`.
 
 Before any manual release operation, verify the target commit explicitly:
 
