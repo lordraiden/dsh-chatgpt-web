@@ -77,11 +77,30 @@ Install the plugin directly from this GitHub repository:
 dsh plugin --profile <profile> add github:lordraiden/dsh-chatgpt-web
 ```
 
-The published package can also be installed from the package registries:
+The package is distributed only through the repository's private GitHub Packages npm registry; it is not published to npmjs.com.
+
+Configure the `@lordraiden` scope for the profile before installing or updating the package:
+
+```ini
+@lordraiden:registry=https://npm.pkg.github.com
+```
+
+Authenticate separately with a GitHub personal access token (classic) that has `read:packages` access. Store the token in the user's `~/.npmrc` or the environment used to start DSH; never commit it.
+
+For example:
+
+```ini
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+```
+
+Then install or update normally:
 
 ```bash
 dsh plugin --profile <profile> add @lordraiden/dsh-chatgpt-web
+dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
 ```
+
+The package is versioned with SemVer tags such as `v1.0.17`. A release is considered available only after the matching private GitHub Packages version has been published.
 
 This registers the plugin in the profile's `package.json` bundles, so its Cordis entries are composed automatically — no manual `insert` is needed.
 
