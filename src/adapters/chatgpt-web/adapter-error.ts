@@ -69,6 +69,26 @@ export function chatGptRetainedConversationUnavailableError(): ChatGptWebAdapter
   );
 }
 
+export const CHATGPT_RETAINED_DELTA_EMPTY_CODE = "retained_delta_empty";
+
+/**
+ * A retained continuation turn sanitized to no human content. Inside a
+ * retained physical conversation the composer transport may only carry the
+ * new human content — there is no envelope to fall back to (issue #172).
+ * The turn fails explicitly instead of re-introducing the legacy transport.
+ */
+export function chatGptRetainedDeltaEmptyError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "The retained ChatGPT Web continuation carried no human content to send; the turn was not submitted.",
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: CHATGPT_RETAINED_DELTA_EMPTY_CODE,
+      retryable: false,
+    },
+  );
+}
+
 export const CHATGPT_RETAINED_SURFACE_LOST_CODE = "retained_surface_lost";
 
 /**

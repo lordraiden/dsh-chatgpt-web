@@ -68,6 +68,7 @@ import {
   isStableSystemContinuation,
   resolveChatGptResumeBranch,
   retainedConversationResumeRequest,
+  systemFingerprintRecordedOnBranch,
 } from "./conversation-key";
 import {
   ChatGptWebProviderCore,
@@ -539,6 +540,26 @@ export function createChatGptWebAdapter(
     const conversationGeneration = conversationKey
       ? replayOptions?.conversationGeneration ?? chatGptTurnSessions.conversationGeneration(conversationKey)
       : undefined;
+    // Whether THIS turn physically installs the prefix into the current
+    // conversation generation (issue #172 fingerprint semantics): a retained
+    // first turn installs; a retained resume installs only when the branch is
+    // `install` — computed here with the SAME pure decision production uses in
+    // `compileResume` (same inputs, same result; `prepare` runs later, inside
+    // the browser worker, so the decision must be made synchronously here).
+    // The system fingerprint is recorded only in this case: a continuation
+    // never rewrites the installed fingerprint, even if DSH's current
+    // systemPrompt changed — the installed prefix stays frozen for the rest of
+    // this physical conversation.
+    const systemInstalledThisTurn = resumeInput !== undefined
+      ? systemFingerprintRecordedOnBranch(
+        resolveChatGptResumeBranch(
+          chatGptTurnSessions,
+          conversationKey!,
+          chatGptTurnSessions.conversationGeneration(conversationKey!),
+          checkpointInput.parsed.context.systemPrompt,
+        ),
+      )
+      : retainConversation;
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
       ? async () => {
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
@@ -593,20 +614,17 @@ export function createChatGptWebAdapter(
         )) {
           console.info("[chatgpt-web] system block changed mid-conversation; the prefix stays frozen for this physical conversation (the change takes effect in the next one)");
         }
-        try {
-          const experimentalMultipartParts = experimentalBiggerContext
-            ? resolveBiggerContextMultipartParts(input, turnCapabilities)
-            : undefined;
-          return compileRetainedChatGptWebContinuation(input, {
-            captureLunaCheckpoint,
-            ...(experimentalMultipartParts !== undefined ? { experimentalMultipartParts } : {}),
-          });
-        } catch (error) {
-          // A delta that sanitizes to no human content falls back to the full
-          // envelope compile — the safe direction.
-          console.info(`[chatgpt-web] continuation composer delta carries no human content; falling back to the full envelope compile (${safeErrorDescriptor(error)})`);
-          return compileChatGptWebPrompt(input, turnCapabilities, undefined, compileOptionsFor(input));
-        }
+        // No fallback to the legacy envelope inside a retained conversation:
+        // a delta without human content throws the explicit
+        // CHATGPT_RETAINED_DELTA_EMPTY_CODE adapter error and the turn fails
+        // without re-introducing <codex_context_json>/<dsh_transport_resume>.
+        const experimentalMultipartParts = experimentalBiggerContext
+          ? resolveBiggerContextMultipartParts(input, turnCapabilities)
+          : undefined;
+        return compileRetainedChatGptWebContinuation(input, {
+          captureLunaCheckpoint,
+          ...(experimentalMultipartParts !== undefined ? { experimentalMultipartParts } : {}),
+        });
       }
       return compileRetainedChatGptWebInstall(input, compileOptionsFor(input));
     };
@@ -620,6 +638,12 @@ export function createChatGptWebAdapter(
     // generation-N fingerprint.
     const recordSentSystemFingerprint = (browser: Promise<string>): void => {
       if (!retainConversation || !conversationKey) return;
+      // The fingerprint represents the system block PHYSICALLY INSTALLED in the
+      // current generation: it is only (re)written by a turn that performed the
+      // install. A continuation never rewrites it, even if DSH's current
+      // systemPrompt changed — the installed prefix stays frozen for the rest
+      // of this physical conversation (issue #172).
+      if (!systemInstalledThisTurn) return;
       void browser.then(
         () => {
           const key = conversationKey!;

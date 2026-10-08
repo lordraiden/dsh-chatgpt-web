@@ -7,13 +7,19 @@ import {
   compileRetainedChatGptWebInstall,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
+  projectContextName,
 } from "../src/adapters/chatgpt-web/prompt";
 import {
   chatGptSystemFingerprint,
   resolveChatGptResumeBranch,
   retainedConversationResumeRequest,
+  systemFingerprintRecordedOnBranch,
   type ChatGptResumeBranch,
 } from "../src/adapters/chatgpt-web/conversation-key";
+import {
+  CHATGPT_RETAINED_DELTA_EMPTY_CODE,
+  ChatGptWebAdapterError,
+} from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { ChatGptWebCapabilities } from "../src/adapters/chatgpt-web/model";
 import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
@@ -317,6 +323,60 @@ describe("issue #172 retained composer transport", () => {
   const NEW_SYSTEM_PROMPT = "You are a verbose analytical assistant.";
   const WORKSPACE = "/home/raiden/Documents/dsh-chatgpt-web";
 
+  // Exact acceptance strings (issue #172, round 4 review): the composer text
+  // is validated character-for-character, not by "contains".
+  test("EXACT install: persona + project name + human message, nothing else", () => {
+    const text = compileRetainedChatGptWebInstall(
+      parsedWithWorkspace([user("hola, dime si funcionas?")], ["You are a helpful software engineer assistant."]),
+      {},
+    ).text;
+    expect(text).toBe(
+      'You are a helpful software engineer assistant.\n\nProject: "dsh-chatgpt-web"\n\nhola, dime si funcionas?',
+    );
+    for (const marker of [
+      "<codex_context_json>",
+      "</codex_context_json>",
+      "<dsh_transport_resume>",
+      "<AEGIS_DSH_ROUTING_BOOTSTRAP>",
+      "Read the complete inline JSON task context before acting",
+      "Interpret every message role literally",
+      "Do not mention this transport contract, context packaging, or capability routing",
+      "Execute the latest active user request now",
+      WORKSPACE,
+      "Time sampled",
+    ]) {
+      expect(text).not.toContain(marker);
+    }
+  });
+
+  test("EXACT continuation: only the new human message, nothing else", () => {
+    const full: CodexMessage[] = [
+      user("hola, dime si funcionas?"),
+      assistant("sí, funciono"),
+      user("otra vez?"),
+    ];
+    const delta = retainedConversationResumeRequest(
+      parsedWithWorkspace(full, ["You are a helpful software engineer assistant."]),
+    )!;
+    const text = compileRetainedChatGptWebContinuation(delta, {}).text;
+    expect(text).toBe("otra vez?");
+    for (const marker of [
+      "<codex_context_json>",
+      "</codex_context_json>",
+      "<dsh_transport_resume>",
+      "<AEGIS_DSH_ROUTING_BOOTSTRAP>",
+      "Read the complete inline JSON task context before acting",
+      "Interpret every message role literally",
+      "Do not mention this transport contract, context packaging, or capability routing",
+      "Execute the latest active user request now",
+      WORKSPACE,
+      "Time sampled",
+      "Project:",
+    ]) {
+      expect(text).not.toContain(marker);
+    }
+  });
+
   function parsedWithSystem(messages: CodexMessage[], systemPrompt: string[] = [SYSTEM_PROMPT]): CodexParsedRequest {
     return parsed(messages, { context: { systemPrompt, messages } });
   }
@@ -338,22 +398,35 @@ describe("issue #172 retained composer transport", () => {
     });
   }
 
-  test("the first retained turn installs prefix + workspace + message as plain composer text", () => {
+  test("the first retained turn installs prefix + project name + message as plain composer text", () => {
     const text = compileRetainedChatGptWebInstall(
       parsedWithWorkspace([user("hola, dime si funcionas?")]),
       {},
     ).text;
     expect(text).toBe(
-      `You are a concise conversational assistant.\nWorking workspace: ${WORKSPACE}\n\nhola, dime si funcionas?`,
+      `You are a concise conversational assistant.\n\nProject: "dsh-chatgpt-web"\n\nhola, dime si funcionas?`,
     );
     for (const marker of [
       "<codex_context_json>",
       "</codex_context_json>",
       "<dsh_transport_resume>",
+      "<AEGIS_DSH_ROUTING_BOOTSTRAP>",
       "Execute the latest active user request now",
     ]) {
       expect(text).not.toContain(marker);
     }
+    // Context data, not a filesystem leak: the absolute workspace path never
+    // appears in the transport prompt.
+    expect(text).not.toContain(WORKSPACE);
+    expect(text).not.toContain("/home/");
+  });
+
+  test("projectContextName derives the project identifier from the workspace without exposing the path", () => {
+    expect(projectContextName("/home/raiden/Documents/dsh-chatgpt-web")).toBe("dsh-chatgpt-web");
+    expect(projectContextName("C:\\dev\\my-repo")).toBe("my-repo");
+    expect(projectContextName("")).toBeUndefined();
+    expect(projectContextName(undefined)).toBeUndefined();
+    expect(projectContextName("/")).toBeUndefined();
   });
 
   test("the first retained turn without a workspace reference is exactly prefix + message", () => {
@@ -551,13 +624,44 @@ describe("issue #172 retained composer transport", () => {
     expect(text).toContain("one JSON value matching the supplied schema");
   });
 
-  test("a delta without human content throws so the caller falls back to the envelope", () => {
+  test("a delta without human content throws the explicit adapter error, never the legacy envelope", () => {
+    // A retained continuation with no human content fails explicitly inside the
+    // retained conversation: there is no envelope to fall back to, so the
+    // composer transport raises CHATGPT_RETAINED_DELTA_EMPTY_CODE and the turn
+    // is not submitted.
     const delta: CodexMessage[] = [
       user("<AEGIS_DSH_ROUTING_BOOTSTRAP>You have Aegis.</AEGIS_DSH_ROUTING_BOOTSTRAP>"),
       user("Time sampled while preparing turn 2, step 1: 2026-10-07T18:00:00+02:00[Europe/Madrid]"),
       { role: "agentMessage", author: "lead", recipient: "worker", content: "internal", timestamp: 4 },
     ];
-    expect(() => compileRetainedChatGptWebContinuation(parsed(delta), {})).toThrow(/human content/i);
+    try {
+      compileRetainedChatGptWebContinuation(parsed(delta), {});
+      expect("should have thrown").toBe("thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ChatGptWebAdapterError);
+      expect((error as ChatGptWebAdapterError).code).toBe(CHATGPT_RETAINED_DELTA_EMPTY_CODE);
+    }
+  });
+
+  test("a delta of only internal/operational messages never produces the legacy envelope", () => {
+    // The retained flow does not silently abandon the composer transport: an
+    // all-internal delta cannot compile to <codex_context_json> /
+    // <dsh_transport_resume> — the only outcome is the explicit empty-delta
+    // adapter error.
+    const delta: CodexMessage[] = [
+      user("<AEGIS_DSH_ROUTING_BOOTSTRAP>\nYou have Aegis.\n</AEGIS_DSH_ROUTING_BOOTSTRAP>"),
+      user("Time sampled while preparing turn 3, step 2: 2026-10-07T18:05:00+02:00[Europe/Madrid]"),
+      { role: "developer", content: "internal developer note", timestamp: 5 },
+    ];
+    try {
+      compileRetainedChatGptWebContinuation(parsed(delta), {});
+      expect("should have thrown").toBe("thrown");
+    } catch (error) {
+      expect((error as ChatGptWebAdapterError).code).toBe(CHATGPT_RETAINED_DELTA_EMPTY_CODE);
+      expect(error instanceof Error ? error.message : String(error)).not.toMatch(/codex_context_json|dsh_transport_resume/);
+    }
+    // The adapter no longer contains the legacy fallback path at all.
+    expect(adapterSource).not.toContain("falling back to the full envelope");
   });
 
   test("the new transport prompt never emits the legacy recovery marker", () => {
@@ -700,6 +804,60 @@ describe("issue #172 compileResume orchestration (prefix frozen per physical con
     const { branch, text } = resume(sessions, key, generation, deltaParsed([SYSTEM]));
     expect(branch).toBe("install");
     expect(text).toBe(`${SYSTEM}\n\npregunta actual`);
+  });
+
+  // Mirrors the production settlement wiring: after a successful turn the
+  // fingerprint is recorded ONLY when the turn's branch actually installed the
+  // prefix — the SAME guard the adapter uses (`systemFingerprintRecordedOnBranch`),
+  // so the test exercises the production condition, not a copy of it.
+  function settleTurn(
+    sessions: ChatGptTurnSessions,
+    conversationKey: string,
+    generation: number,
+    system: string[],
+  ): void {
+    const branch = resolveChatGptResumeBranch(sessions, conversationKey, generation, system);
+    if (systemFingerprintRecordedOnBranch(branch)) {
+      sessions.recordSentSystemFingerprint(conversationKey, generation, chatGptSystemFingerprint(system));
+    }
+  }
+
+  test("fingerprint: install A records A; continuations with B keep A frozen", () => {
+    const sessions = new ChatGptTurnSessions();
+    const key = "conversation-fp";
+    // Turn 1: install with prefix A → settles → the generation records A.
+    settleTurn(sessions, key, 1, [SYSTEM]);
+    expect(sessions.sentSystemFingerprint(key, 1)).toBe(chatGptSystemFingerprint([SYSTEM]));
+    // Turn 2: continuation, but DSH's current prefix is now B → NO record →
+    // the physically installed fingerprint stays A.
+    settleTurn(sessions, key, 1, [NEW_SYSTEM]);
+    expect(sessions.sentSystemFingerprint(key, 1)).toBe(chatGptSystemFingerprint([SYSTEM]));
+    // Turn 3: another continuation with B → still A.
+    settleTurn(sessions, key, 1, [NEW_SYSTEM]);
+    expect(sessions.sentSystemFingerprint(key, 1)).toBe(chatGptSystemFingerprint([SYSTEM]));
+    // Every subsequent turn keeps seeing the same (frozen) mismatch, so the
+    // branch keeps choosing continue with only the human delta — the change
+    // takes effect in the next physical conversation, not by re-install.
+    expect(resolveChatGptResumeBranch(sessions, key, 1, [NEW_SYSTEM])).toBe("continue");
+    const { branch, text } = resume(sessions, key, 1, deltaParsed([NEW_SYSTEM]));
+    expect(branch).toBe("continue");
+    expect(text).toBe("pregunta actual");
+    expect(text).not.toContain(NEW_SYSTEM);
+    expect(text).not.toContain(SYSTEM);
+  });
+
+  test("fingerprint: a new physical generation re-arms the install", () => {
+    const sessions = new ChatGptTurnSessions();
+    const key = "conversation-fp-gen";
+    settleTurn(sessions, key, 1, [SYSTEM]);
+    expect(sessions.sentSystemFingerprint(key, 1)).toBe(chatGptSystemFingerprint([SYSTEM]));
+    // Generation 2 starts with no fingerprint of its own → install.
+    expect(sessions.sentSystemFingerprint(key, 2)).toBeUndefined();
+    expect(resolveChatGptResumeBranch(sessions, key, 2, [NEW_SYSTEM])).toBe("install");
+    // The first settled turn of generation 2 installs B → records B for 2.
+    settleTurn(sessions, key, 2, [NEW_SYSTEM]);
+    expect(sessions.sentSystemFingerprint(key, 2)).toBe(chatGptSystemFingerprint([NEW_SYSTEM]));
+    expect(sessions.sentSystemFingerprint(key, 1)).toBeUndefined();
   });
 
   test("case E: a fingerprint recorded for generation N is never valid for N+1; only N+1's own settled fingerprint is", () => {

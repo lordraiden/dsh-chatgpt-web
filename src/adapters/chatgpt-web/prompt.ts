@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { chatGptRetainedDeltaEmptyError } from "./adapter-error";
 import { sanitizeConversationText } from "../../conversation-projection";
 import { type CodexMessage, type CodexParsedRequest } from "../../types";
 import {
@@ -268,11 +269,26 @@ export function projectRetainedComposerDelta(messages: readonly CodexMessage[]):
 }
 
 /**
+ * Derive a minimal PROJECT identifier from the workspace root: the last
+ * non-empty path segment (the repository/project directory name). The retained
+ * install exposes this as context data — `Project: "<name>"` — never an
+ * absolute local filesystem path (issue #172: no private local paths in the
+ * transport prompt). Returns `undefined` when the workspace cannot be
+ * resolved to a useful name; the caller then omits the line.
+ */
+export function projectContextName(cwd: string | undefined): string | undefined {
+  if (cwd === undefined) return undefined;
+  const segments = cwd.split(/[\\/]+/).filter(segment => segment.length > 0);
+  const name = segments[segments.length - 1];
+  return name && name.length > 0 ? name : undefined;
+}
+
+/**
  * Composer transport for the first turn of a retained conversation (issue
  * #171/#172, round 4): the physical ChatGPT conversation does not exist yet,
  * so the composer receives, as plain text — no JSON envelope, no transport
  * contract, no resume marker — the effective system prompt (the profile
- * persona prefix), the workspace reference, and the current human message.
+ * persona prefix), the project reference, and the current human message.
  * The physical conversation keeps everything sent from here on, so later
  * turns send only their new human content
  * (`compileRetainedChatGptWebContinuation`).
@@ -299,7 +315,7 @@ export function compileRetainedChatGptWebInstall(
   const system = (parsed.context.systemPrompt ?? [])
     .map(part => sanitizeConversationText(part))
     .filter(part => part.length > 0);
-  const workspace = parsed._dshContext?.environment?.cwd;
+  const project = projectContextName(parsed._dshContext?.environment?.cwd);
   const humanMessages: Array<{ role: "user" | "assistant"; text: string }> = [];
   const images: ChatGptWebPromptImage[] = [];
   for (const message of parsed.context.messages) {
@@ -331,10 +347,6 @@ export function compileRetainedChatGptWebInstall(
   const body = humanMessages.length === 1
     ? [humanMessages[0]!.text]
     : humanMessages.map(entry => `${entry.role === "user" ? "User" : "Assistant"}: ${entry.text}`);
-  const header = [
-    ...system,
-    ...(workspace ? [`Working workspace: ${workspace}`] : []),
-  ];
   if (multipartEnabled) {
     const records: MultipartContextRecord[] = [
       ...system.map((content, system_index) => ({ kind: "system" as const, system_index, content })),
@@ -347,23 +359,29 @@ export function compileRetainedChatGptWebInstall(
     const multipart: ChatGptWebMultipartPrompt = {
       parts: partitionMultipartContext(records, multipartParts!),
       commit: [
-        ...(workspace ? [`Working workspace: ${workspace}`] : []),
+        ...(project ? [`Project: "${project}"`] : []),
         "The staged JSON records are this conversation's system and prior messages; the complete earlier history is already in this conversation. Act on the latest user message.",
       ].join("\n"),
     };
     return { text: multipart.commit, images: images.slice(0, CHATGPT_MAX_INPUT_IMAGES), multipart };
   }
-  console.info("[chatgpt-web] install: systemItems=" + system.length + ", workspace=" + (workspace ?? "none")
-    + ", humanMessages=" + humanMessages.length + " (" + body.join("").length + " chars)");
+  const systemBlock = system.join("\n");
+  const projectBlock = project ? `Project: "${project}"` : "";
+  const bodyBlock = body.join("\n");
+  console.info("[chatgpt-web] install: systemItems=" + system.length + ", project=" + (project ?? "none")
+    + ", humanMessages=" + humanMessages.length + " (" + bodyBlock.length + " chars)");
+  // Plain composer text in three blocks separated by blank lines: the persona
+  // prefix, the project reference (a name, never an absolute path), and the
+  // human conversation. Empty blocks are omitted.
   return {
-    text: [...header, ...(header.length > 0 ? [""] : []), ...body].join("\n"),
+    text: [systemBlock, projectBlock, bodyBlock].filter(block => block.length > 0).join("\n\n"),
     images: images.slice(0, CHATGPT_MAX_INPUT_IMAGES),
   };
 }
 
 /**
  * Composer transport for a retained continuation (issue #171/#172, round 4):
- * the physical ChatGPT conversation already carries the prefix, the workspace
+ * the physical ChatGPT conversation already carries the prefix, the project
  * reference, and the complete prior history, so the composer receives ONLY
  * the new human content — plain text, no JSON envelope, no transport
  * contract, no resume marker — plus the per-turn contracts (verbosity,
@@ -372,8 +390,10 @@ export function compileRetainedChatGptWebInstall(
  * The prefix is frozen per physical conversation: a system-block change does
  * not re-install anything here (the caller detects it through
  * `chatGptSystemFingerprint` and logs the frozen prefix). A delta that
- * sanitizes to no human content throws; the caller falls back to the full
- * envelope compile, which is the safe direction.
+ * sanitizes to no human content throws the explicit
+ * `CHATGPT_RETAINED_DELTA_EMPTY_CODE` adapter error: inside a retained
+ * physical conversation there is NO envelope to fall back to, so the turn
+ * fails explicitly instead of re-introducing the legacy transport.
  */
 export function compileRetainedChatGptWebContinuation(
   parsed: CodexParsedRequest,
@@ -396,7 +416,7 @@ export function compileRetainedChatGptWebContinuation(
   }
   const delta = projectRetainedComposerDelta(parsed.context.messages);
   if (delta.text.length === 0) {
-    throw new Error("A retained continuation delta must carry human content; the caller falls back to the full envelope compile");
+    throw chatGptRetainedDeltaEmptyError();
   }
   const outputControlContract = outputControlContractFor(parsed);
   const checkpointContract = checkpointContractFor(captureLunaCheckpoint);

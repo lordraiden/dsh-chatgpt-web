@@ -133,3 +133,19 @@ export function resolveChatGptResumeBranch(
     ? "install"
     : "continue";
 }
+
+/**
+ * Whether the system fingerprint may be (re)recorded after a settled turn
+ * (issue #172, fingerprint semantics): the fingerprint represents the system
+ * block PHYSICALLY INSTALLED in the current conversation generation, so it is
+ * only written when the turn actually performed the install. A continuation
+ * never rewrites the installed fingerprint even if DSH's current
+ * `systemPrompt` has changed — the physically installed prefix stays frozen
+ * for the rest of the physical conversation.
+ *
+ * Production and the deterministic regression tests share this single
+ * implementation of the guard.
+ */
+export function systemFingerprintRecordedOnBranch(branch: ChatGptResumeBranch): boolean {
+  return branch === "install";
+}
