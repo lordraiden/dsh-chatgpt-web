@@ -67,10 +67,15 @@ assert.equal(
 );
 assert.throws(() => authorizeCapability(isolated, { wireName: "view_image" }), /not authorized/);
 
+// `createdAt` is part of the canonical identity, so two projections that must compare equal pin
+// the same creation time instead of racing the wall clock (the previous flake: the two
+// `Date.now()` reads straddled a millisecond and the ids differed).
+const CREATED_AT = 1_700_000_000_000;
 const reordered = projectChatGptCapabilities({
   sessionId: "session-2",
   agentId: "agent-2",
   turnId: "turn-2",
+  createdAt: CREATED_AT,
   tools: [{
     ...canonicalEnvironmentTool,
     parameters: {
@@ -85,6 +90,7 @@ const reorderedEquivalent = projectChatGptCapabilities({
   sessionId: "session-2",
   agentId: "agent-2",
   turnId: "turn-2",
+  createdAt: CREATED_AT,
   tools: [{
     ...canonicalEnvironmentTool,
     parameters: {
@@ -96,6 +102,26 @@ const reorderedEquivalent = projectChatGptCapabilities({
   }],
 });
 assert.equal(reordered.snapshotId, reorderedEquivalent.snapshotId);
+// The clock is why the old comparison raced: the same canonical inputs at a different creation
+// time are a different snapshot, which is the identity rule this assertion exists to pin.
+const recreatedLater = projectChatGptCapabilities({
+  sessionId: "session-2",
+  agentId: "agent-2",
+  turnId: "turn-2",
+  createdAt: CREATED_AT + 1,
+  tools: [{
+    ...canonicalEnvironmentTool,
+    parameters: {
+      additionalProperties: false,
+      required: ["cmd"],
+      type: "object",
+      properties: { cmd: { type: "string" } },
+    },
+  }],
+});
+assert.notEqual(recreatedLater.snapshotId, reordered.snapshotId);
+assert.equal(recreatedLater.createdAt, CREATED_AT + 1);
+console.log("ok capability snapshot identity is key-order stable and clock-explicit");
 
 const differentTurn = projectChatGptCapabilities({
   sessionId: "session-2",
