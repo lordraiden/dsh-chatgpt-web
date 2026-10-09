@@ -112,14 +112,24 @@ export function projectChatGptCapabilities(input: {
   turnId: string;
   tools: readonly CodexTool[];
   expiresAt?: number;
+  /**
+   * Explicit snapshot creation time. Defaults to the wall clock. `createdAt` is part of the
+   * canonical identity on purpose — two projections of the same turn are two different snapshots —
+   * so a caller that needs a reproducible identity (a contract test, a replay) pins it instead of
+   * racing the clock.
+   */
+  createdAt?: number;
 }): CapabilitySnapshot {
   const sessionId = input.sessionId.trim();
   const agentId = input.agentId?.trim() || "default";
   const turnId = input.turnId.trim();
-  const createdAt = Date.now();
+  const createdAt = input.createdAt ?? Date.now();
   if (!sessionId) throw new Error("Capability snapshot requires a DSH session identity");
   if (!agentId) throw new Error("Capability snapshot requires a DSH agent identity");
   if (!turnId) throw new Error("Capability snapshot requires a DSH turn identity");
+  if (!Number.isFinite(createdAt) || createdAt < 0) {
+    throw new Error("Capability snapshot createdAt must be a non-negative finite timestamp");
+  }
   if (input.expiresAt !== undefined && (!Number.isFinite(input.expiresAt) || input.expiresAt <= createdAt)) {
     throw new Error("Capability snapshot expiry must be a future finite timestamp");
   }
