@@ -23,6 +23,7 @@
 - [概述](#%E6%A6%82%E8%BF%B0)
 - [环境要求](#%E7%8E%AF%E5%A2%83%E8%A6%81%E6%B1%82)
 - [快速上手](#%E5%BF%AB%E9%80%9F%E4%B8%8A%E6%89%8B)
+- [ChatGPT Advisor](#chatgpt-advisor)
 - [诊断与健康检查](#%E8%AF%8A%E6%96%AD%E4%B8%8E%E5%81%A5%E5%BA%B7%E6%A3%80%E6%9F%A5)
 - [故障排查](#%E6%95%85%E9%9A%9C%E6%8E%92%E6%9F%A5)
 - [注意事项与使用限制](#%E6%B3%A8%E6%84%8F%E4%BA%8B%E9%A1%B9%E4%B8%8E%E4%BD%BF%E7%94%A8%E9%99%90%E5%88%B6)
@@ -198,6 +199,23 @@ dsh --profile <profile> web
 ```
 
 插件会注册 provider、启动本地浏览器 sidecar，并连接到已认证的 ChatGPT Web 会话。
+
+## ChatGPT Advisor
+
+在会话中最后一个已完成的 `user → assistant` 回合上，输入区会提供 **Review with ChatGPT**。审查只携带该回合的内容——项目名、该回合运行所用的 DSH agent preset、你的审查说明、最后一条人类请求与最后一条最终回复——并发送到**独立保留的 ChatGPT Web 会话**，因此审查不会进入 DSH 会话历史，也不会与该聊天自身的会话相互干扰。
+
+审查对话框是以输入区为基准、居中显示的模态窗口：
+
+- **Model** —— `Normal`（最轻量的非 Pro 路由）或 `Think`（最深入的非 Pro 路由）。
+- **DSH agent preset** —— 由 DSH 读取的本部署 preset 列表（无法激活的 preset 不会列出）。默认预选当前会话正在运行的 preset，并作为审查上下文随请求发送：它会标注该次审查、显示在结果卡片上，并带入 `Send to DSH`。它不会创建 DSH 会话，也不会改变模型路由。若部署中没有 agent preset 注册表，则只提供 `No preset`。
+- **Review instructions** —— 可编辑，并在本浏览器中记住。
+- **Context (read-only)** —— 被审查的人类请求与 DSH 回复。
+
+`Escape`、关闭按钮以及点击遮罩都会关闭对话框；审查进行中时，点击外部不会取消该次审查。
+
+审查成功后，会在该回合末尾显示 **ChatGPT Advisor** 卡片，标注模式、模型与 preset。**Send to DSH** 通过 DSH 常规 prompt 流程把完整审查作为新 prompt 提交，插件自身不会执行任何操作。
+
+---
 
 ## 诊断与健康检查
 

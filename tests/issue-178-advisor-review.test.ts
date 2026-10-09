@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ADVISOR_INPUT_INVALID_CODE,
+  ADVISOR_PRESET_LABEL_MAX,
   ADVISOR_TURN_FAILED_CODE,
   ADVISOR_SYSTEM_PROMPT,
   advisorConversationThread,
@@ -26,7 +27,7 @@ import {
   chatGptWebExecutionNamespace,
   shouldRetainChatGptWebConversation,
 } from "../src/adapters/chatgpt-web/index";
-import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptTurnSessions, chatGptTurnRoundKey } from "../src/adapters/chatgpt-web/turn-execution";
 import type { AdapterEvent, CodexParsedRequest } from "../src/types";
 
 const PROVIDER = { adapter: "chatgpt-web" as const, baseUrl: "http://127.0.0.1:17841" };
@@ -335,5 +336,95 @@ describe("issue #178 advisor error handling", () => {
     );
     expect(captured.signal?.aborted).toBe(true);
     expect(captured.signal?.reason).toBe("client disconnected");
+  });
+});
+
+describe("issue #208 advisor round identity", () => {
+  test("an internal advisor turn resolves a round identity instead of failing", () => {
+    // The reported failure: the round key demanded the complete native Responses input, which a
+    // request built by `buildAdvisorTurnRequest` never carries, so the review never reached the
+    // browser turn.
+    const parsed = buildAdvisorTurnRequest(INPUT, LUNA_NORMAL, "review-round");
+    expect(() => chatGptTurnRoundKey(parsed)).not.toThrow();
+    const key = chatGptTurnRoundKey(parsed);
+    // Same canonical review -> same round; a different review stays a different round.
+    expect(chatGptTurnRoundKey(buildAdvisorTurnRequest(INPUT, LUNA_NORMAL, "review-round"))).toBe(key);
+    const other = buildAdvisorTurnRequest(
+      { ...INPUT, instructions: "Review it as a security engineer instead" },
+      LUNA_NORMAL,
+      "review-round",
+    );
+    expect(chatGptTurnRoundKey(other)).not.toBe(key);
+  });
+
+  test("a wire request without its complete input still fails closed", () => {
+    const parsed = buildAdvisorTurnRequest(INPUT, LUNA_NORMAL, "review-wire");
+    const wire = { ...parsed, _dshContext: undefined, _rawBody: { model: "gpt" } } as unknown as CodexParsedRequest;
+    expect(() => chatGptTurnRoundKey(wire)).toThrow(/complete native Codex input/i);
+  });
+
+  test("a wire request keys by its own input, not by the canonical user revision", () => {
+    const parsed = buildAdvisorTurnRequest(INPUT, LUNA_NORMAL, "review-input");
+    const first = { ...parsed, _rawBody: { input: [{ role: "user", content: "one" }] } } as CodexParsedRequest;
+    const second = { ...parsed, _rawBody: { input: [{ role: "user", content: "two" }] } } as CodexParsedRequest;
+    expect(chatGptTurnRoundKey(first)).not.toBe(chatGptTurnRoundKey(second));
+  });
+});
+
+describe("issue #208 advisor agent-preset context", () => {
+  const WITH_PRESET = { ...INPUT, preset: "Senior reviewer" };
+
+  test("the preset label is review context and never a DSH session", () => {
+    const text = composeAdvisorMessage(WITH_PRESET);
+    expect(text).toContain('Agent preset: "Senior reviewer"');
+    const parsed = buildAdvisorTurnRequest(WITH_PRESET, LUNA_NORMAL, "review-preset");
+    expect(parsed.context.messages[0]!.content).toContain('Agent preset: "Senior reviewer"');
+    // The preset never changes the synthetic Advisor identity or the retention marker.
+    expect(parsed._dshContext).toEqual({
+      dshSessionId: SESSION,
+      threadId: advisorConversationThread(SESSION),
+      turnId: "review-preset",
+    });
+    expect(parsed._advisorReview).toEqual({ reviewId: "review-preset" });
+  });
+
+  test("the preset line is omitted when no preset is provided", () => {
+    expect(composeAdvisorMessage(INPUT)).not.toContain("Agent preset:");
+    expect(buildAdvisorTurnRequest(INPUT, LUNA_NORMAL, "review-none").context.messages[0]!.content)
+      .not.toContain("Agent preset:");
+  });
+
+  test("validateAdvisorReviewInput trims, bounds and rejects an invalid preset", () => {
+    expect(validateAdvisorReviewInput({ ...INPUT, preset: "  Senior reviewer  " })).toMatchObject({ preset: "Senior reviewer" });
+    expect(validateAdvisorReviewInput(INPUT).preset).toBeUndefined();
+    expect(() => validateAdvisorReviewInput({ ...INPUT, preset: "" })).toThrow(/preset/);
+    expect(() => validateAdvisorReviewInput({ ...INPUT, preset: "   " })).toThrow(/preset/);
+    expect(() => validateAdvisorReviewInput({ ...INPUT, preset: 42 })).toThrow(/preset/);
+    expect(() => validateAdvisorReviewInput({ ...INPUT, preset: "x".repeat(ADVISOR_PRESET_LABEL_MAX + 1) }))
+      .toThrow(/must not exceed/);
+  });
+
+  test("the successful result echoes the requested preset", async () => {
+    const runner: AdvisorTurnRunner = {
+      async runTurn(_parsed, _incoming, emit) {
+        emit({ type: "text_delta", text: "review body" });
+        emit({ type: "done" });
+      },
+    };
+    const result = await runAdvisorReview(runner, WITH_PRESET, LUNA_NORMAL, "review-echo");
+    expect(result.ok).toBe(true);
+    expect(result.preset).toBe("Senior reviewer");
+    expect(result.text).toBe("review body");
+  });
+
+  test("a failure without a preset stays preset-free", async () => {
+    const result = await runAdvisorReview(
+      { async runTurn(_parsed, _incoming, emit) { emit({ type: "error", message: "browser turn failed" }); } },
+      INPUT,
+      LUNA_NORMAL,
+      "review-no-preset",
+    );
+    expect(result.ok).toBe(false);
+    expect(result.preset).toBeUndefined();
   });
 });
