@@ -89,6 +89,26 @@ export function chatGptRetainedDeltaEmptyError(): ChatGptWebAdapterError {
   );
 }
 
+export const CHATGPT_ANSWER_RECOVERY_UNAVAILABLE_CODE = "answer_recovery_unavailable";
+
+/**
+ * No finalized answer could be read from the retained ChatGPT conversation within the recovery
+ * window: the conversation exists but its render never exposed a finalized assistant turn in
+ * time. Read-only failure — nothing was submitted, navigated or created, so asking again later
+ * (once ChatGPT finishes) is safe.
+ */
+export function chatGptAnswerRecoveryUnavailableError(timeoutMs: number): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `The retained ChatGPT Web conversation did not expose a finalized answer within ${timeoutMs} ms.`,
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: CHATGPT_ANSWER_RECOVERY_UNAVAILABLE_CODE,
+      retryable: false,
+    },
+  );
+}
+
 export const CHATGPT_RETAINED_SURFACE_LOST_CODE = "retained_surface_lost";
 
 /**

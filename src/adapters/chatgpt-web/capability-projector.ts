@@ -127,8 +127,11 @@ export function projectChatGptCapabilities(input: {
   if (!sessionId) throw new Error("Capability snapshot requires a DSH session identity");
   if (!agentId) throw new Error("Capability snapshot requires a DSH agent identity");
   if (!turnId) throw new Error("Capability snapshot requires a DSH turn identity");
-  if (!Number.isFinite(createdAt) || createdAt < 0) {
-    throw new Error("Capability snapshot createdAt must be a non-negative finite timestamp");
+  // The same invariant `assertCapabilitySnapshotIntegrity` enforces on the built snapshot: a
+  // fractional or unsafe creation time must be rejected here, not constructed and then refused by
+  // integrity/authorizeCapability.
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
+    throw new Error("Capability snapshot createdAt must be a non-negative safe integer timestamp");
   }
   if (input.expiresAt !== undefined && (!Number.isFinite(input.expiresAt) || input.expiresAt <= createdAt)) {
     throw new Error("Capability snapshot expiry must be a future finite timestamp");

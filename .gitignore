@@ -10,3 +10,4 @@ storageState.*.json
 launcher/
 graphify-out/
 *.tgz
+artifacts/

@@ -58,6 +58,10 @@ function fakeBackend(calls: string[]): WebSurfaceTransportBackend {
         proAvailable: false,
       });
     },
+    recoverRetainedAnswer(conversationKey, options) {
+      calls.push(`recover:${conversationKey}:${options.timeoutMs ?? "default"}`);
+      return Promise.resolve({ text: "recovered", capturedAt: 0, waitedMs: 0 });
+    },
     smokeTest() {
       calls.push("smoke");
       return Promise.resolve({ effort: "low", response: "ok" });
@@ -101,6 +105,7 @@ test("WebSurfaceTransport preserves owning-turn cancellation semantics", async (
       url: "https://chatgpt.com/",
     }),
     smokeTest: async () => ({ effort: "low", response: "ok" }),
+    recoverRetainedAnswer: async () => ({ text: "recovered", capturedAt: 0, waitedMs: 0 }),
     close: () => Promise.resolve(),
   };
   const transport = new ChatGptWebSurfaceTransport(backend);

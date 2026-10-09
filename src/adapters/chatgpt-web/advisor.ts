@@ -62,6 +62,13 @@ export interface AdvisorReviewResult {
   model: string;
   /** The requested agent-preset label, echoed when the request carried one. */
   preset?: string;
+  /**
+   * True when the text was read back from the retained Advisor conversation instead of produced
+   * by a fresh review turn (issue #214).
+   */
+  recovered?: boolean;
+  /** When a recovered answer was read from the conversation (epoch ms). */
+  capturedAt?: number;
   /** The final review text (ok only). */
   text?: string;
   /** Stable failure code (not-ok only). */
@@ -316,4 +323,118 @@ export async function runAdvisorReview(
     code: failure?.code ?? ADVISOR_TURN_FAILED_CODE,
     message: failure?.message ?? "Advisor turn produced no text",
   };
+}
+
+/** One read-only recovery request (issue #214). */
+export interface AdvisorRecoveryInput {
+  /** The DSH session whose retained Advisor conversation is read. */
+  sessionId: string;
+  /** Review mode the route is resolved from; echoed like a review. */
+  mode?: AdvisorMode;
+  /** Bounded wait for the finalized answer; the caller's default applies when absent. */
+  timeoutMs?: number;
+}
+
+export const ADVISOR_RECOVERY_UNAVAILABLE_CODE = "advisor_recovery_unavailable";
+/** Upper bound the control API accepts for one recovery wait (30 minutes). */
+export const ADVISOR_RECOVERY_TIMEOUT_MAX_MS = 30 * 60_000;
+
+/** Validate the public recovery input. Throws with a stable message on failure. */
+export function validateAdvisorRecoveryInput(body: unknown): AdvisorRecoveryInput {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("Advisor recovery body must be an object");
+  }
+  const raw = body as Record<string, unknown>;
+  const sessionId = raw.sessionId;
+  if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+    throw new Error('Advisor recovery field "sessionId" must be a non-empty string');
+  }
+  const mode = raw.mode;
+  if (mode !== undefined && mode !== "normal" && mode !== "think") {
+    throw new Error('Advisor recovery field "mode" must be "normal" or "think" when present');
+  }
+  const timeoutMs = raw.timeoutMs;
+  if (timeoutMs !== undefined) {
+    if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error('Advisor recovery field "timeoutMs" must be a positive finite number when present');
+    }
+    if (timeoutMs > ADVISOR_RECOVERY_TIMEOUT_MAX_MS) {
+      throw new Error(`Advisor recovery field "timeoutMs" must not exceed ${ADVISOR_RECOVERY_TIMEOUT_MAX_MS}`);
+    }
+  }
+  return {
+    sessionId: sessionId.trim(),
+    ...(mode !== undefined ? { mode } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  };
+}
+
+/**
+ * The request identity a recovery reads through. It carries the same synthetic Advisor identity
+ * as the review turn — so both resolve to the one retained Advisor conversation of a DSH session,
+ * independently of the reviewId — and no message at all: a recovery reads, it never submits.
+ */
+export function buildAdvisorRecoveryRequest(
+  input: AdvisorRecoveryInput,
+  route: AdvisorRoute,
+  reviewId: string,
+): CodexParsedRequest {
+  return {
+    modelId: route.backendModel,
+    context: { systemPrompt: [], messages: [] },
+    stream: false,
+    options: { reasoning: route.effort },
+    _dshContext: {
+      dshSessionId: input.sessionId,
+      threadId: advisorConversationThread(input.sessionId),
+      turnId: reviewId,
+    },
+    _advisorReview: { reviewId },
+  };
+}
+
+/** The seam `runAdvisorRecovery` reads one finalized answer through. */
+export interface AdvisorRecoveryRunner {
+  recoverAnswer(
+    parsed: CodexParsedRequest,
+    options: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<{ text: string; capturedAt: number; waitedMs: number }>;
+}
+
+/**
+ * Read the finalized answer of one DSH session's retained Advisor conversation. This is the
+ * safety net behind a review that the plugin's own browser turn gave up on (issue #214): it never
+ * submits, navigates or creates a conversation, so whatever ChatGPT finished stays available
+ * without opening the ChatGPT tab. Every failure — nothing retained, surface lost, another turn
+ * owns the conversation, or no finalized answer inside the window — becomes a typed `ok: false`
+ * result with `advisor_recovery_unavailable`.
+ */
+export async function runAdvisorRecovery(
+  runner: AdvisorRecoveryRunner,
+  input: AdvisorRecoveryInput,
+  route: AdvisorRoute,
+  reviewId?: string,
+  options: { abortSignal?: AbortSignal } = {},
+): Promise<AdvisorReviewResult> {
+  const id = reviewId ?? randomUUID();
+  const mode = input.mode ?? "normal";
+  const parsed = buildAdvisorRecoveryRequest(input, route, id);
+  const base: AdvisorReviewResult = { ok: false, reviewId: id, mode, model: route.slug, recovered: true };
+  try {
+    const recovered = await runner.recoverAnswer(parsed, {
+      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(options.abortSignal ? { signal: options.abortSignal } : {}),
+    });
+    const text = typeof recovered?.text === "string" ? recovered.text.trim() : "";
+    if (!text) {
+      return { ...base, code: ADVISOR_RECOVERY_UNAVAILABLE_CODE, message: "The retained Advisor conversation exposed an empty answer" };
+    }
+    return { ...base, ok: true, text, capturedAt: recovered.capturedAt };
+  } catch (error) {
+    return {
+      ...base,
+      code: ADVISOR_RECOVERY_UNAVAILABLE_CODE,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 }

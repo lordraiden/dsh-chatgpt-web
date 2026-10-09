@@ -91,6 +91,20 @@ function findAll(tree: any, className: string): any[][] {
   return found;
 }
 
+function textOf(node: any): string {
+  if (typeof node === "string") return node;
+  if (!Array.isArray(node)) return "";
+  return node.slice(2).map(textOf).join("");
+}
+
+function buttonByText(tree: any, text: string): any[] | undefined {
+  let found: any[] | undefined;
+  walk(tree, (element) => {
+    if (!found && element[0] === "button" && textOf(element).includes(text)) found = element;
+  });
+  return found;
+}
+
 const T = (_key: string, fallback: string) => fallback;
 
 const ROSTER = [
@@ -282,6 +296,71 @@ describe("issue #208 — the DSH agent-preset selector", () => {
     const withoutPreset = mod.__test.buildAdvisorFetch(base);
     expect("preset" in JSON.parse(withoutPreset.options.body)).toBe(false);
     expect("preset" in JSON.parse(mod.__test.buildAdvisorFetch({ ...base, preset: "" }).options.body)).toBe(false);
+  });
+});
+
+describe("issue #208 review finding — a refused roster read is not an empty deployment", () => {
+  async function renderWithStore(store: any, read: () => Promise<any>) {
+    const chat = chatSnapshot([textUserNode(1, 1, "arregla el bug"), settledStep(2, 1, "hecho")]);
+    const button = mod.__test.AdvisorReviewButton(T, {
+      sessionId: "sess-1",
+      useChat: (selector: (snapshot: unknown) => unknown) => selector(chat),
+      useSession: (selector: (session: unknown) => unknown) => selector({ running: false }),
+    });
+    button[1].onClick();
+    return mod.__test.AdvisorReviewDialog(T, {
+      sessionId: "sess-1",
+      useProjection: (key: string) => (key === mod.__test.SESSION_PRESET_PROJECTION_KEY ? "reviewer" : undefined),
+      useWorkspaces: (selector: (snapshot: unknown) => unknown) => selector({ items: [] }),
+    }, undefined, { store, read });
+  }
+
+  test("a rejected read keeps its own status, message and retry path", async () => {
+    let reads = 0;
+    const read = async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("agent preset roster refused the read");
+      return mod.__test.advisorPresetOptions(ROSTER);
+    };
+    const store = mod.__test.createAdvisorPresetStore();
+    await store.load(read);
+    expect(store.getSnapshot().status).toBe("error");
+    expect(store.getSnapshot().error).toBe("agent preset roster refused the read");
+    expect(store.getSnapshot().options).toEqual([]);
+
+    const tree = await renderWithStore(store, read);
+    const error = find(tree, "cwg-advisor-error");
+    expect(error).toBeDefined();
+    expect(textOf(error)).toContain("The DSH agent presets could not be read.");
+    expect(textOf(error)).toContain("agent preset roster refused the read");
+    // The empty-deployment sentence must NOT be shown for a refused read.
+    expect(textOf(tree)).not.toContain("No DSH agent presets are available in this deployment.");
+
+    // Retry re-reads and recovers the roster.
+    const retry = buttonByText(tree, "Retry");
+    expect(retry).toBeDefined();
+    retry![1].onClick();
+    for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    expect(reads).toBe(2);
+    expect(store.getSnapshot().status).toBe("ready");
+    expect(store.getSnapshot().options.map((option: any) => option.id)).toEqual(["standard", "reviewer"]);
+  });
+
+  test("an available but empty roster stays the empty-deployment case", async () => {
+    const store = mod.__test.createAdvisorPresetStore();
+    await store.load(async () => []);
+    expect(store.getSnapshot()).toMatchObject({ status: "unavailable", error: null });
+    const tree = await renderWithStore(store, async () => []);
+    expect(textOf(tree)).toContain("No DSH agent presets are available in this deployment.");
+    expect(find(tree, "cwg-advisor-error")).toBeUndefined();
+  });
+
+  test("an unavailable gateway invocation is the empty-deployment case, not an error", async () => {
+    const store = mod.__test.createAdvisorPresetStore();
+    await store.load(() => mod.__test.loadAdvisorPresetOptions({
+      agentPresets: { list: async () => ({ ok: false, error: { code: "gateway/invocation-unavailable", message: "no service" } }) },
+    }));
+    expect(store.getSnapshot()).toMatchObject({ status: "unavailable", error: null });
   });
 });
 

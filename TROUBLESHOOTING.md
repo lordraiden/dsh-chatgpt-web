@@ -252,6 +252,17 @@ submission ambiguous
 
 First determine whether the provider conversation can be safely resumed or whether an explicit recovery/replay path is required.
 
+### 11.1 `ChatGPT stopped responding after the task started` while ChatGPT is still working
+
+Observed as a failed **Review with ChatGPT** (or any long ChatGPT Web turn) whose tab keeps working and produces the answer anyway.
+
+The generic sentence is the adapter's copy for *any* post-submission failure; the precise cause is in the sidecar log and in the per-turn diagnostic (`diagnostics/browser-turns/<traceId>/12-turn-failed.json`). Two causes have been seen:
+
+- `ChatGPT response DOM disappeared while the browser turn was active` — ChatGPT's work/commentary phase replaces the assistant turn element with its activity view. The worker now treats a visible **Stop button** as proof that the model is still working, so that re-render no longer fails the turn (issue #214). A generator that keeps running without ever exposing material is still bounded by `tuning.generationRunningStallMs`.
+- the generation-running stall budget itself (`tuning.generationRunningStallMs`, 15 minutes by default) — a genuinely stuck generator. Raise it in the browser transport tuning when a legitimate review takes longer.
+
+If a review still fails while ChatGPT finishes the answer, do **not** resend the review: open the Advisor dialog (the composer's **Review with ChatGPT** control) and use **Recover answer from ChatGPT**. The recovery is read-only — it never submits or navigates — reads the finalized answer from the retained Advisor conversation, shows it in a selectable field with a **Copy** action, and records it for the turn, so it also appears in the turn card and can be sent to DSH. A recovery that finds nothing yet can simply be retried once ChatGPT finishes.
+
 ## 12. Conversation continuity was lost
 
 A provider conversation is not the DSH session.
