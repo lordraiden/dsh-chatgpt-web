@@ -200,20 +200,35 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   });
 }
 
-/** Exact canonical Responses request identity inside one long-lived browser execution. */
+/** Exact canonical round identity inside one long-lived browser execution. */
 export function chatGptTurnRoundKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for round replay");
+  const purpose = parsed._compactionRequest ? "compaction" : "response";
   const body = parsed._rawBody;
-  if (!body || typeof body !== "object" || Array.isArray(body)
-    || !Array.isArray((body as { input?: unknown }).input)) {
-    throw new Error("ChatGPT web requires the complete native Codex input for round replay");
+  const input = body && typeof body === "object" && !Array.isArray(body)
+    ? (body as { input?: unknown }).input
+    : undefined;
+  if (!Array.isArray(input)) {
+    // An internal DSH-owned turn (the Advisor review, #178) is routed straight to `runTurn` and
+    // carries the native `_dshContext` instead of a Responses wire body. Its round identity is
+    // the canonical user revision the same turn is already keyed by — never a fabricated wire
+    // input. A wire ingress (Responses/Codex) still fails closed without its complete input.
+    if (parsed._dshContext === undefined) {
+      throw new Error("ChatGPT web requires the complete native Codex input for round replay");
+    }
+    return executionKey(parsed, {
+      threadId: identity.threadId,
+      turnId: identity.turnId,
+      purpose,
+      revision: extractChatGptTurnUserRevision(parsed),
+    });
   }
   return executionKey(parsed, {
     threadId: identity.threadId,
     turnId: identity.turnId,
-    purpose: parsed._compactionRequest ? "compaction" : "response",
-    input: (body as { input: unknown[] }).input,
+    purpose,
+    input,
   });
 }
 

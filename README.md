@@ -24,6 +24,7 @@
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [Configuration Reference](#configuration-reference)
+- [ChatGPT Advisor](#chatgpt-advisor)
 - [Diagnostics & Health Check](#diagnostics--health-check)
 - [Troubleshooting](#troubleshooting)
 - [Notes & Limitations](#notes--limitations)
@@ -66,6 +67,7 @@ The definitive ownership and recovery rules live in [`doc/architecture.md`](./do
 - **Cordis Plugin-First Lifecycle:** Managed by DSH via `ctx.effect`. DeepSeek Harness starts the background sidecar automatically on launch and shuts it down on exit.
 - **Runtime model/account discovery:** Detects the ChatGPT Web account/model surface available to the authenticated session.
 - **Streaming and provider semantics:** Exposes streamed text, reasoning, usage, errors, and cancellation through the DSH-facing transport.
+- **ChatGPT Advisor:** Reviews the last completed turn in a separate retained ChatGPT Web conversation and hands the review back to DSH on request.
 - **Control and diagnostics surfaces:** Includes setup/login/doctor tooling plus a local control surface for transport status and tuning.
 - **Portable, Validated Artifacts:** The published tarball is validated by CI (clean install, runtime smoke test, dependency resolution, no build-environment path contamination) before it can reach the registries.
 
@@ -524,6 +526,23 @@ For plugin storage location, the effective order is:
 For browser path, an explicit --chrome setup value overrides automatic executable discovery.
 
 For capability/model selection, the authenticated ChatGPT Web product surface is authoritative. Local route names or backend IDs cannot override a failed capability check.
+
+## ChatGPT Advisor
+
+The composer offers **Review with ChatGPT** on the last completed `user → assistant` turn of the session. The review carries that step only — the project name, the DSH agent preset it ran under, your review instructions, the last human request and the last final response — into a **separate retained ChatGPT Web conversation**, so a review never enters the DSH session history and never collides with the chat's own conversation.
+
+The review dialog is a modal centred over the composer:
+
+- **Model** — `Normal` (lightest non-Pro route) or `Think` (deepest non-Pro route).
+- **DSH agent preset** — the presets this deployment composes, read from DSH (broken presets are not offered). It is preselected to the preset the session already runs and travels with the review as context: it labels the review, appears on the result card, and is carried into `Send to DSH`. It never composes a DSH session and never changes the model route. A deployment with no agent-preset registry simply offers `No preset`.
+- **Review instructions** — editable, and remembered in this browser.
+- **Context (read-only)** — the human request and the DSH response under review.
+
+`Escape`, the close control and a click on the backdrop dismiss the dialog. A review that is already running is never cancelled by an outside click.
+
+A successful review appears as a **ChatGPT Advisor** card in that turn's tail, with its mode, model and preset. **Send to DSH** submits the full review through the normal DSH prompt flow as a new prompt, and the plugin executes nothing by itself.
+
+---
 
 ## Diagnostics & Health Check
 
