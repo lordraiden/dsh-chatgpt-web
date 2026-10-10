@@ -24,7 +24,7 @@ import {
   isWebChatProviderReplayState,
   rejectUnsupportedWebChatFeatures,
   webChatConversationHandle,
-  webChatConversationKey,
+  legacyWebChatThreadKey,
   webChatError,
   webChatReplayStateOwnedBy,
   type WebChatExchangeEvent,
@@ -226,17 +226,17 @@ describe("issue #189 — text-only admission", () => {
 describe("issue #189 — conversation key and opaque handle", () => {
   test("the key derivation is unchanged from the pre-extraction implementation", () => {
     for (const fixture of PINNED_CONVERSATION_KEYS) {
-      expect(webChatConversationKey(fixture.namespace, fixture.threadId)).toBe(fixture.key);
+      expect(legacyWebChatThreadKey(fixture.namespace, fixture.threadId)).toBe(fixture.key);
       // The ChatGPT owner resolves the same key through the core derivation.
       expect(chatGptConversationKey(chatGptRequest(fixture.threadId), fixture.namespace)).toBe(fixture.key);
     }
   });
 
   test("namespace and thread both participate, and the key is stable", () => {
-    const left = webChatConversationKey("ns", "thread");
-    expect(left).toBe(webChatConversationKey("ns", "thread"));
-    expect(left).not.toBe(webChatConversationKey("other", "thread"));
-    expect(left).not.toBe(webChatConversationKey("ns", "other"));
+    const left = legacyWebChatThreadKey("ns", "thread");
+    expect(left).toBe(legacyWebChatThreadKey("ns", "thread"));
+    expect(left).not.toBe(legacyWebChatThreadKey("other", "thread"));
+    expect(left).not.toBe(legacyWebChatThreadKey("ns", "other"));
     expect(left).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -253,7 +253,7 @@ describe("issue #189 — conversation key and opaque handle", () => {
 describe("issue #189 — driver contract and resolution", () => {
   function fakeDriver(id: string): WebChatProviderDriver {
     const conversation = {
-      key: webChatConversationKey("ns", "thread"),
+      key: legacyWebChatThreadKey("ns", "thread"),
       providerId: id,
       bindingId: "binding-1",
       generation: 1,

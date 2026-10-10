@@ -60,7 +60,35 @@ export {
   type WebChatDshSessionIdentity,
 } from "./conversation";
 
-export { webChatConversationKey } from "./conversation-key";
+export { legacyWebChatThreadKey, webChatAffinityKey, type WebChatAffinityKeyInput } from "./conversation-key";
+
+export { webChatAccountBindingId, type WebChatAccountBindingId } from "./account-binding";
+
+export {
+  assertCurrentWebChatGeneration,
+  assertNoWebChatSecrets,
+  commitWebChatConversationDraft,
+  createMemoryConversationStore,
+  isWebChatInitializationCurrent,
+  validateWebChatConversationRecord,
+  type WebChatConversationDraft,
+  type WebChatConversationIdentity,
+  type WebChatConversationInitialization,
+  type WebChatConversationRecord,
+  type WebChatConversationStore,
+  type WebChatConversationStoreOptions,
+} from "./conversation-store";
+
+export {
+  beginWebChatConversationAttempt,
+  confirmWebChatConversation,
+  resolveWebChatContinuation,
+  webChatContinuationIdentity,
+  type WebChatContinuationIntent,
+  type WebChatContinuationOutcome,
+  type WebChatContinuationPlan,
+  type WebChatContinuationRequest,
+} from "./continuation";
 
 export {
   isWebChatModelDescriptor,
