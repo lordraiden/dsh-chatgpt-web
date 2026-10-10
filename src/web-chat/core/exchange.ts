@@ -11,6 +11,8 @@
  */
 import { webChatError } from "./errors";
 import type { WebChatExchangeEvent } from "./events";
+import type { WebChatExchangeSnapshot } from "./exchange-state";
+import type { WebChatRetrySafety } from "./retry-authority";
 
 /** One canonical text message used only for an explicit replay. */
 export interface WebChatReplayMessage {
@@ -69,6 +71,15 @@ export interface WebChatExchange {
   stream(): AsyncIterable<WebChatExchangeEvent>;
   /** Cancel this exchange. Idempotent. */
   abort(reason?: unknown): Promise<void>;
+  /** The lifecycle facts of this exchange (state, submission phase, settlements). */
+  snapshot(): WebChatExchangeSnapshot;
+  /**
+   * What the host layer may do with this turn if it failed.
+   *
+   * The exchange owns the classification, so the host's route-level retry and the exchange's own
+   * retry cannot both act on the same submitted turn.
+   */
+  retrySafety(): WebChatRetrySafety;
 }
 
 /**
