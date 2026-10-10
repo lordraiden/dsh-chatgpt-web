@@ -44,6 +44,17 @@ export interface WebChatTextTransport {
    * The returned phase is the provider's own admission of what it proved:
    * `prepared` (nothing was sent — retry-safe), `send_activated` (it may have been sent — ambiguous),
    * or `accepted` (the provider confirmed acceptance — never automatically retried).
+   *
+   * A failure must be reported in exactly one of two ways, because the core cannot tell them apart
+   * after the fact:
+   *
+   * - **return `prepared`** when the provider can *prove* nothing was submitted (the attempt never
+   *   reached the product), which keeps the turn retry-safe;
+   * - **throw (or return `send_activated`)** when the outcome is unknown — the send may have been
+   *   activated before the failure. The runner then fails closed: the exchange becomes ambiguous,
+   *   nothing is retried automatically, and the resource is settled through {@link settle}.
+   *
+   * Throwing is never a way to say "nothing happened".
    */
   submit(context: WebChatTextTransportContext): Promise<WebChatSubmissionPhase>;
   /**
@@ -57,7 +68,10 @@ export interface WebChatTextTransport {
    * Establish or report physical settlement.
    *
    * An error or a timeout is never proof that the provider's operation stopped, so this is the only
-   * authority on whether the transport resource is safe to reuse.
+   * authority on whether the transport resource is safe to reuse. Report `pending` when the outcome
+   * cannot be established yet, and `rejected` when it cannot be established at all: the core then
+   * retires the resource instead of declaring it free. A provider that cannot even answer must let
+   * this reject — the core treats that as `rejected`, never as settled.
    */
   settle(context: WebChatTextTransportContext): Promise<WebChatPhysicalSettlement>;
   /** Abort the provider exchange. Idempotent from the caller's perspective. */
