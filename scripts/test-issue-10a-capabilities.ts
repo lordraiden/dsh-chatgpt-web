@@ -123,6 +123,26 @@ assert.notEqual(recreatedLater.snapshotId, reordered.snapshotId);
 assert.equal(recreatedLater.createdAt, CREATED_AT + 1);
 console.log("ok capability snapshot identity is key-order stable and clock-explicit");
 
+{
+  // The constructor and the integrity/authorization validators must enforce the SAME creation-time
+  // invariant: a fractional or unsafe timestamp may not be constructed and then refused later.
+  const base = { sessionId: "session-clock", agentId: "agent-clock", turnId: "turn-clock", tools: [canonicalEnvironmentTool] };
+  for (const invalid of [1.5, Number.MAX_SAFE_INTEGER + 1, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => projectChatGptCapabilities({ ...base, createdAt: invalid }),
+      /createdAt must be a non-negative safe integer/,
+      `createdAt ${invalid} must be refused at construction`,
+    );
+  }
+  const explicit = projectChatGptCapabilities({ ...base, createdAt: CREATED_AT });
+  assert.equal(explicit.createdAt, CREATED_AT);
+  assert.doesNotThrow(() => assertCapabilitySnapshotIntegrity(explicit));
+  assert.doesNotThrow(() => authorizeCapability(explicit, { wireName: "codex__exec_command" }));
+  const fromClock = projectChatGptCapabilities(base);
+  assert.ok(Number.isSafeInteger(fromClock.createdAt) && fromClock.createdAt > 0);
+  console.log("ok capability snapshot creation time is a safe integer everywhere");
+}
+
 const differentTurn = projectChatGptCapabilities({
   sessionId: "session-2",
   agentId: "agent-2",

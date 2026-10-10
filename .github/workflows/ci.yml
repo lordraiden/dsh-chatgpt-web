@@ -86,6 +86,9 @@ jobs:
       - name: Issue contract tests
         run: node scripts/test-issue-20-settings.mjs
 
+      - name: Advisor dialog layout verification (real Chromium)
+        run: node scripts/verify-advisor-dialog-ui.mjs
+
       - name: Pack validated artifact
         id: package
         shell: bash

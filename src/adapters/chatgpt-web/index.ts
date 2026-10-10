@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
-import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
+import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint, resolveChatGptWebTuning } from "../../config";
 import {
   cancelLauncherManualTurn,
   endLauncherManualTurn,
@@ -24,7 +24,7 @@ import { safeErrorDescriptor, toolCallDiagnosticSummary } from "../../lib/safe-d
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
-import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface } from "./web-surface-transport";
+import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface, type WebSurfaceRetainedAnswer } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -437,6 +437,39 @@ export function resolveChatGptCapabilitySnapshotForTurn(
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
 
+/** Bounded wait and cancellation for one retained-answer read (issue #214). */
+export interface ChatGptAnswerRecoveryOptions {
+  /** How long to wait for ChatGPT to expose a finalized answer. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * The ChatGPT Web provider adapter: the generic provider seam plus the ChatGPT-specific reads.
+ * A retained-answer read is provider-specific because what it reads (a retained physical
+ * conversation) is provider-specific state, so it is not added to the shared provider contract.
+ *
+ * `recoverRetainedAnswer` is optional because an adapter injected by a harness or a test may not
+ * own retained conversations at all; the recovery route reports that explicitly instead of every
+ * adapter double having to fake the capability. The provider built by this module always
+ * implements it.
+ */
+export interface ChatGptWebProviderAdapter extends ProviderAdapter {
+  /**
+   * Read the finalized answer of the retained ChatGPT conversation described by one parsed
+   * request (issue #214). Read-only: it resolves the conversationKey the same way the turn does,
+   * never creates a conversation, never navigates and never submits.
+   *
+   * @param parsed - the request whose identity owns the retained conversation.
+   * @param options - bounded wait and cancellation; the configured generation budget applies when absent.
+   * @returns the finalized answer text and when it was read.
+   */
+  recoverRetainedAnswer?(
+    parsed: CodexParsedRequest,
+    options?: ChatGptAnswerRecoveryOptions,
+  ): Promise<WebSurfaceRetainedAnswer>;
+}
+
 export function createChatGptWebAdapter(
   provider: CodexProviderConfig,
   dependencies: {
@@ -445,7 +478,7 @@ export function createChatGptWebAdapter(
     /** Shared lifecycle authority owned by the server process. */
     providerCore?: ChatGptWebProviderCore;
   } = {},
-): ProviderAdapter {
+): ChatGptWebProviderAdapter {
   const transport = chatGptWebSurfaceTransportForProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
@@ -1076,6 +1109,19 @@ export function createChatGptWebAdapter(
         if (ownsProviderCore) await providerCore.shutdown();
       })();
       return shutdownPromise;
+    },
+    async recoverRetainedAnswer(parsed, options = {}) {
+      // The identity owner is the same one the turn uses: one retained conversation per DSH
+      // session/thread, resolved from the request the caller built (the Advisor builds the same
+      // synthetic identity as its review turn).
+      const conversationKey = chatGptConversationKey(parsed, executionNamespace);
+      if (!conversationKey) {
+        throw new Error("The retained ChatGPT Web conversation identity is unavailable for this request");
+      }
+      return transport.recoverRetainedAnswer(conversationKey, {
+        timeoutMs: options.timeoutMs ?? resolveChatGptWebTuning(provider.chatgptWeb?.tuning).generationRunningStallMs,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
     },
     async runTurn(parsed, incoming, emit) {
       console.info(`[chatgpt-web] runTurn model=${parsed.modelId} chatOnly=true`);

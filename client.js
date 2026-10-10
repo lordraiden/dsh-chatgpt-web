@@ -40,6 +40,18 @@ window.__ModuleLoader__.load({
       'advisor.dialog.preset': 'DSH agent preset',
       'advisor.dialog.presetNone': 'No preset',
       'advisor.dialog.presetUnavailable': 'No DSH agent presets are available in this deployment.',
+      'advisor.dialog.presetError': 'The DSH agent presets could not be read.',
+      'advisor.dialog.presetRetry': 'Retry',
+      'advisor.recover.action': 'Recover answer from ChatGPT',
+      'advisor.recover.loading': 'Reading the answer from ChatGPT',
+      'advisor.recover.hint': 'Read the answer ChatGPT already produced in this Advisor conversation. Nothing is sent.',
+      'advisor.recover.failed': 'The answer could not be read.',
+      'advisor.result.title': 'Recovered review',
+      'advisor.result.copy': 'Copy',
+      'advisor.result.copied': 'Copied.',
+      'advisor.result.copyFailed': 'Select the text and copy it manually.',
+      'advisor.result.recorded': 'Recorded for this turn: it also appears in the turn card and can be sent to DSH.',
+      'advisor.card.recovered': 'recovered',
       'turns.title': 'Recent browser turns',
       'turns.empty': 'No recorded turns yet.',
       'turns.time': 'Time',
@@ -146,6 +158,12 @@ window.__ModuleLoader__.load({
       .cwg-advisor-context-label { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-bottom: 2px; }
       .cwg-advisor-context pre { margin: 0; font-size: 12px; line-height: 1.45; color: var(--dsw-alias-label-primary); white-space: pre-wrap; word-break: break-word; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 8px; }
       .cwg-advisor-error { font-size: 12px; color: var(--dsw-alias-state-error-primary); }
+      .cwg-advisor-recover { display: flex; flex-direction: column; gap: 6px; }
+      .cwg-advisor-recover-actions { display: flex; align-items: center; gap: 8px; }
+      .cwg-advisor-result { display: flex; flex-direction: column; gap: 8px; }
+      .cwg-advisor-result-body { width: 100%; min-height: 140px; max-height: 320px; resize: vertical; overflow-y: auto; font-family: var(--ds-font-family-code, monospace); font-size: 12px; line-height: 1.45; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 8px; }
+      .cwg-advisor-result-body:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+      .cwg-advisor-result-note { font-size: 11px; color: var(--dsw-alias-label-secondary); }
       .cwg-advisor-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
       .cwg-advisor-foot .cwg-err-msg { margin-right: auto; }
       .cwg-advisor-card { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 2px; padding: 10px 12px; border: 1px solid var(--dsw-alias-brand-primary); border-left: 3px solid var(--dsw-alias-brand-primary); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); box-sizing: border-box; }
@@ -695,6 +713,26 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /**
+     * Pure request builder for the #214 recovery endpoint (testable without fetch). A recovery is
+     * read-only: it identifies the session whose retained Advisor conversation is read, and
+     * nothing else.
+     */
+    function buildAdvisorRecoverFetch({ base, token, sessionId, mode, timeoutMs, signal }) {
+      const body = { sessionId };
+      if (mode === 'think' || mode === 'normal') body.mode = mode;
+      if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0) body.timeoutMs = timeoutMs;
+      return {
+        url: `${base}/v1/control/advisor/recover`,
+        options: {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          ...(signal ? { signal } : {}),
+        },
+      };
+    }
+
     function loadLastInstructions(storage) {
       try {
         const value = storage ? storage.getItem(LAST_INSTRUCTIONS_KEY) : null;
@@ -718,7 +756,7 @@ window.__ModuleLoader__.load({
      * the framework drives both components to re-render on change.
      */
     function createAdvisorStore() {
-      let state = { open: false, mode: 'normal', instructions: DEFAULT_INSTRUCTIONS, preset: '', context: null, status: 'idle', error: null };
+      let state = { open: false, mode: 'normal', instructions: DEFAULT_INSTRUCTIONS, preset: '', context: null, status: 'idle', error: null, recovery: { status: 'idle', text: '', error: null } };
       let inFlight = false;
       let abortController = null;
       const listeners = new Set();
@@ -733,6 +771,7 @@ window.__ModuleLoader__.load({
             open: true,
             status: 'idle',
             error: null,
+            recovery: { status: 'idle', text: '', error: null },
             context,
             // `null` defers to the dialog default (the preset the session runs, else the
             // deployment default); `''` is an explicit "no preset" choice.
@@ -743,7 +782,14 @@ window.__ModuleLoader__.load({
         },
         closeDialog() {
           if (abortController) { try { abortController.abort(); } catch { /* already settled */ } }
-          state = { ...state, open: false, status: 'idle', error: null };
+          state = { ...state, open: false, status: 'idle', error: null, recovery: { status: 'idle', text: '', error: null } };
+          notify();
+        },
+        /** Clear a previous recovered answer (a new review or a new recovery starts clean). */
+        clearRecovery() { state = { ...state, recovery: { status: 'idle', text: '', error: null } }; notify(); },
+        /** Fail the recovery itself without replacing the review error beside it. */
+        failRecovery(message) {
+          state = { ...state, recovery: { status: 'error', text: '', error: typeof message === 'string' ? message : String(message) } };
           notify();
         },
         setMode(mode) { state = { ...state, mode: mode === 'think' ? 'think' : 'normal' }; notify(); },
@@ -814,6 +860,62 @@ window.__ModuleLoader__.load({
             })
             .finally(() => { finish(); notify(); });
         },
+        /**
+         * Read the finalized answer of this session's retained Advisor conversation (issue #214).
+         * This is the recovery path behind a review the browser turn already gave up on: it never
+         * submits anything, so it can be retried freely, and a successful read is recorded exactly
+         * like a produced review (turn card + "Send to DSH").
+         */
+        recover(env) {
+          if (inFlight || !state.open || !state.context) return;
+          inFlight = true;
+          const controller = new AbortController();
+          abortController = controller;
+          state = { ...state, recovery: { status: 'loading', text: '', error: null } };
+          notify();
+          const finish = () => { inFlight = false; abortController = null; };
+          const preset = typeof env.preset === 'string' ? env.preset.trim() : '';
+          const { url, options } = buildAdvisorRecoverFetch({
+            base: env.base,
+            token: env.token,
+            sessionId: env.sessionId,
+            mode: state.mode,
+            ...(env.timeoutMs !== undefined ? { timeoutMs: env.timeoutMs } : {}),
+            signal: controller.signal,
+          });
+          env.fetch(url, options)
+            .then(async (res) => {
+              let data = null;
+              try { data = await res.json(); } catch { /* non-JSON body */ }
+              const text = data && typeof data.text === 'string' ? data.text.trim() : '';
+              if (!res.ok || !data || data.ok !== true || !text) {
+                const message = data && typeof data.message === 'string' && data.message ? data.message : `HTTP ${res.status}`;
+                state = { ...state, recovery: { status: 'error', text: '', error: message } };
+                return;
+              }
+              if (typeof state.context.dshTurn === 'number') {
+                recordAdvisorResult(env.storage, {
+                  turn: state.context.dshTurn,
+                  reviewId: typeof data.reviewId === 'string' ? data.reviewId : '',
+                  mode: state.mode,
+                  model: typeof data.model === 'string' ? data.model : '',
+                  preset,
+                  recovered: true,
+                  text,
+                });
+              }
+              state = { ...state, recovery: { status: 'ready', text, error: null } };
+            })
+            .catch((error) => {
+              const aborted = error && (error.name === 'AbortError' || error.code === 20);
+              if (aborted) {
+                state = { ...state, recovery: { status: 'idle', text: '', error: null } };
+              } else {
+                state = { ...state, recovery: { status: 'error', text: '', error: error instanceof Error ? error.message : String(error) } };
+              }
+            })
+            .finally(() => { finish(); notify(); });
+        },
       };
     }
 
@@ -844,7 +946,9 @@ window.__ModuleLoader__.load({
           loading = Promise.resolve()
             .then(() => read())
             .then((options) => { set({ status: options.length > 0 ? 'ready' : 'unavailable', options, error: null }); })
-            .catch((error) => { set({ status: 'unavailable', options: [], error: error instanceof Error ? error.message : String(error) }); })
+            // A refused read is not an empty deployment: the dialog shows the reason and offers a
+            // retry, while "unavailable" stays reserved for a deployment that composes no presets.
+            .catch((error) => { set({ status: 'error', options: [], error: error instanceof Error ? error.message : String(error) }); })
             .finally(() => { loading = null; });
           return loading;
         },
@@ -946,6 +1050,7 @@ window.__ModuleLoader__.load({
           mode: entry.mode === 'think' ? 'think' : 'normal',
           model: typeof entry.model === 'string' ? entry.model : '',
           preset: typeof entry.preset === 'string' ? entry.preset : '',
+          recovered: entry.recovered === true,
           text: entry.text,
           at: typeof entry.at === 'number' ? entry.at : 0,
         });
@@ -983,6 +1088,7 @@ window.__ModuleLoader__.load({
         mode: result.mode === 'think' ? 'think' : 'normal',
         model: typeof result.model === 'string' ? result.model : '',
         preset: typeof result.preset === 'string' ? result.preset.trim() : '',
+        recovered: result.recovered === true,
         text: result.text,
         at: Date.now(),
       };
@@ -1135,7 +1241,8 @@ window.__ModuleLoader__.load({
           h('span', { className: 'cwg-advisor-card-meta' },
             t(result.mode === 'think' ? 'advisor.card.modeThink' : 'advisor.card.modeNormal', result.mode === 'think' ? 'Think' : 'Normal')
             + (result.model ? ` · ${result.model}` : '')
-            + (result.preset ? ` · ${result.preset}` : '')),
+            + (result.preset ? ` · ${result.preset}` : '')
+            + (result.recovered ? ` · ${t('advisor.card.recovered', 'recovered')}` : '')),
         ),
         h('pre', { className: 'cwg-advisor-card-body' }, result.text),
         h('div', { className: 'cwg-advisor-card-foot' },
@@ -1207,6 +1314,8 @@ window.__ModuleLoader__.load({
       const projection = typeof props.useProjection === 'function' ? props.useProjection(ADVISOR_PROJECTION_KEY) : undefined;
       const sessionPreset = typeof props.useProjection === 'function' ? props.useProjection(SESSION_PRESET_PROJECTION_KEY) : undefined;
       const workspaceItems = typeof props.useWorkspaces === 'function' ? props.useWorkspaces((s) => s.items) : undefined;
+      // Transient copy feedback for the recovered answer ('' = nothing to say).
+      const [copyState, setCopyState] = React.useState('');
 
       const open = snapshot.open === true;
       React.useEffect(() => {
@@ -1263,6 +1372,37 @@ window.__ModuleLoader__.load({
           storage: window.localStorage,
           fetch: (url, options) => fetch(url, options),
         });
+      }
+
+      /** Read the answer ChatGPT already produced; read-only, so it can be retried freely. */
+      function onRecover() {
+        const base = resolveSidecarBase(configForm);
+        const token = projection && typeof projection.controlToken === 'string' ? projection.controlToken : undefined;
+        if (!base) { advisorStore.failRecovery(t('advisor.errNoEndpoint', 'The sidecar endpoint is not configured.')); return; }
+        if (!token) { advisorStore.failRecovery(t('advisor.errNoToken', 'The sidecar control token is unavailable in this profile.')); return; }
+        advisorStore.recover({
+          base,
+          token,
+          sessionId: props.sessionId,
+          preset: presetLabel,
+          storage: window.localStorage,
+          fetch: (url, options) => fetch(url, options),
+        });
+      }
+
+      /** Copy the recovered answer, falling back to telling the user to select it. */
+      function onCopyRecovered() {
+        const text = snapshot.recovery.text;
+        if (!text) return;
+        const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+        if (!clipboard || typeof clipboard.writeText !== 'function') {
+          setCopyState(t('advisor.result.copyFailed', 'Select the text and copy it manually.'));
+          return;
+        }
+        clipboard.writeText(text).then(
+          () => setCopyState(t('advisor.result.copied', 'Copied.')),
+          () => setCopyState(t('advisor.result.copyFailed', 'Select the text and copy it manually.')),
+        );
       }
 
       return h('div', {
@@ -1337,6 +1477,19 @@ window.__ModuleLoader__.load({
               ? h('div', { className: 'cwg-advisor-context-label' },
                   t('advisor.dialog.presetUnavailable', 'No DSH agent presets are available in this deployment.'))
               : null,
+            presetState.status === 'error'
+              ? h('div', { className: 'cwg-advisor-recover-actions' },
+                  h('span', { className: 'cwg-advisor-error', role: 'alert' },
+                    t('advisor.dialog.presetError', 'The DSH agent presets could not be read.'),
+                    presetState.error ? ` (${presetState.error})` : ''),
+                  h('button', {
+                    type: 'button',
+                    className: 'cwg-btn cwg-secondary',
+                    disabled: snapshot.status === 'loading',
+                    onClick: () => { void presets.store.load(presets.read); },
+                  }, t('advisor.dialog.presetRetry', 'Retry')),
+                )
+              : null,
           ),
           h('div', null,
             h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.instructions', 'Review instructions')),
@@ -1364,6 +1517,51 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
                 t('advisor.dialog.error', 'The review failed. You can retry.'),
                 snapshot.error !== 'cancelled' ? ` (${snapshot.error})` : '',
+              )
+            : null,
+          // A failed turn is not a lost answer: ChatGPT usually finished it in the retained
+          // conversation, and the recovery reads it back without sending anything (issue #214).
+          snapshot.status === 'error' && snapshot.recovery.status !== 'ready'
+            ? h('div', { className: 'cwg-advisor-recover' },
+                h('div', { className: 'cwg-advisor-recover-actions' },
+                  h('button', {
+                    type: 'button',
+                    className: 'cwg-btn cwg-secondary',
+                    title: t('advisor.recover.hint', 'Read the answer ChatGPT already produced in this Advisor conversation. Nothing is sent.'),
+                    disabled: snapshot.recovery.status === 'loading' || inFlight,
+                    onClick: onRecover,
+                  }, snapshot.recovery.status === 'loading'
+                    ? t('advisor.recover.loading', 'Reading the answer from ChatGPT')
+                    : t('advisor.recover.action', 'Recover answer from ChatGPT')),
+                ),
+                snapshot.recovery.status === 'error' && snapshot.recovery.error
+                  ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
+                      t('advisor.recover.failed', 'The answer could not be read.'),
+                      ` (${snapshot.recovery.error})`)
+                  : null,
+              )
+            : null,
+          snapshot.recovery.status === 'ready' && snapshot.recovery.text
+            ? h('div', { className: 'cwg-advisor-result' },
+                h('div', { className: 'cwg-advisor-section-label' }, t('advisor.result.title', 'Recovered review')),
+                h('textarea', {
+                  className: 'cwg-advisor-result-body',
+                  readOnly: true,
+                  spellCheck: false,
+                  value: snapshot.recovery.text,
+                  'aria-label': t('advisor.result.title', 'Recovered review'),
+                  onFocus: (event) => { if (typeof event.target.select === 'function') event.target.select(); },
+                }),
+                h('div', { className: 'cwg-advisor-result-note' },
+                  t('advisor.result.recorded', 'Recorded for this turn: it also appears in the turn card and can be sent to DSH.')),
+                h('div', { className: 'cwg-advisor-recover-actions' },
+                  h('button', {
+                    type: 'button',
+                    className: 'cwg-btn cwg-secondary',
+                    onClick: onCopyRecovered,
+                  }, t('advisor.result.copy', 'Copy')),
+                  copyState ? h('span', { className: 'cwg-advisor-context-label' }, copyState) : null,
+                ),
               )
             : null,
           h('div', { className: 'cwg-advisor-foot' },
@@ -1454,6 +1652,7 @@ window.__ModuleLoader__.load({
         canStartReview,
         selectProjectName,
         buildAdvisorFetch,
+        buildAdvisorRecoverFetch,
         loadLastInstructions,
         saveLastInstructions,
         createAdvisorStore,

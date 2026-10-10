@@ -62,6 +62,20 @@ export interface WebSurfaceTurn {
   onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
 }
 
+/**
+ * One finalized answer read back from a retained conversation through this transport boundary.
+ * Declared here (Playwright-free) so upper provider layers never import browser implementation
+ * types; the browser backend maps its own shape onto it.
+ */
+export interface WebSurfaceRetainedAnswer {
+  /** Finalized answer text, trimmed. */
+  text: string;
+  /** When the answer was read (epoch ms). */
+  capturedAt: number;
+  /** How long the read waited for the finalized turn. */
+  waitedMs: number;
+}
+
 export interface WebSurfaceInspection {
   authenticated: true;
   temporary: false;
@@ -81,6 +95,11 @@ export interface WebSurfaceTransportBackend {
   verifyConnector(traceId?: string): Promise<string>;
   inspectSession(detectCapabilities: boolean): Promise<WebSurfaceInspection>;
   smokeTest(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }>;
+  /** Read the finalized answer of an existing retained conversation; never creates one. */
+  recoverRetainedAnswer(
+    conversationKey: string,
+    options: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<WebSurfaceRetainedAnswer>;
   close(): Promise<void>;
 }
 
@@ -141,6 +160,14 @@ class ChatGptBrowserWorkerBackend implements WebSurfaceTransportBackend {
     return this.worker.smokeTest(abortSignal);
   }
 
+  async recoverRetainedAnswer(
+    conversationKey: string,
+    options: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<WebSurfaceRetainedAnswer> {
+    const answer = await this.worker.recoverRetainedAnswer(conversationKey, options);
+    return { text: answer.text, capturedAt: answer.capturedAt, waitedMs: answer.waitedMs };
+  }
+
   close(): Promise<void> {
     return this.worker.close();
   }
@@ -151,6 +178,10 @@ export interface WebSurfaceTransport {
   verifyConnector(traceId?: string): Promise<string>;
   inspectSession(detectCapabilities: boolean): Promise<WebSurfaceInspection>;
   smokeTest(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }>;
+  recoverRetainedAnswer(
+    conversationKey: string,
+    options: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<WebSurfaceRetainedAnswer>;
   close(): Promise<void>;
 }
 
@@ -171,6 +202,13 @@ export class ChatGptWebSurfaceTransport implements WebSurfaceTransport {
 
   smokeTest(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
     return this.backend.smokeTest(abortSignal);
+  }
+
+  recoverRetainedAnswer(
+    conversationKey: string,
+    options: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<WebSurfaceRetainedAnswer> {
+    return this.backend.recoverRetainedAnswer(conversationKey, options);
   }
 
   close(): Promise<void> {

@@ -90,6 +90,7 @@ import {
   ChatGptWebAdapterError,
   chatGptBrowserTabClosedError,
   chatGptContextExhaustedError,
+  chatGptAnswerRecoveryUnavailableError,
   chatGptRetainedConversationUnavailableError,
   chatGptRetainedSurfaceBusyError,
   chatGptRetainedSurfaceLostError,
@@ -188,6 +189,21 @@ export function chatGptGenerationRunningStallExceeded(
 ): boolean {
   if (runningSince === undefined) return false;
   return now - runningSince > tuning.generationRunningStallMs;
+}
+/**
+ * Default bounded wait for a finalized answer during a read-only recovery of a retained
+ * conversation. Callers that own a user-facing budget (the Advisor) pass their own value.
+ */
+export const CHATGPT_RECOVERY_DEFAULT_TIMEOUT_MS = 900_000;
+
+/** One finalized answer read back from a retained ChatGPT conversation (issue #214). */
+export interface ChatGptRetainedAnswerRecovery {
+  /** Finalized assistant answer text, trimmed. */
+  text: string;
+  /** When the answer was read (epoch ms). */
+  capturedAt: number;
+  /** How long the read waited for the finalized turn. */
+  waitedMs: number;
 }
 /**
  * True while the temporary-chat surface shows a visible "Loading chats" / "Loading profile"
@@ -1624,10 +1640,14 @@ export class ChatGptTurnDomHealthTracker {
     externalProgressLive?: boolean;
   }, now = Date.now()): string | undefined {
     if (state.responsePresent) this.sawResponse = true;
-    if (state.externalProgressLive) {
-      // Every conclusion below asserts that ChatGPT stopped producing this turn. A tool call that
-      // is still completing disproves all of them, whatever the renderer is currently exposing, so
-      // no window may accrue while the model is provably working.
+    if (state.externalProgressLive || state.running) {
+      // Every conclusion below asserts that ChatGPT stopped producing this turn. Both a tool call
+      // that is still completing and a visible Stop button disprove all of them, whatever the
+      // renderer is currently exposing, so no window may accrue while the model is provably
+      // working. ChatGPT's work/commentary phase replaces the assistant turn element with its
+      // activity view, which is a re-render, not a lost answer (issue #214); a generator that
+      // keeps running without ever exposing material stays bounded by the explicit
+      // generation-running stall budget instead of this window.
       this.missingResponseSince = undefined;
       this.emptyCompletionSince = undefined;
       this.missingCompletionAction = undefined;
@@ -2257,6 +2277,87 @@ export class ChatGptBrowserWorker {
       return Promise.reject(new Error("ChatGPT connector verification trace id is invalid"));
     }
     return this.enqueueMaintenance("connector verification", () => this.verifyConnectorExclusive(traceId));
+  }
+
+  /**
+   * Read the finalized answer of the retained ChatGPT conversation for one conversationKey.
+   *
+   * Read-only by construction (issue #214): the surface must already exist, so a missing or
+   * tombstoned key fails with its own continuity error instead of creating a conversation;
+   * nothing is navigated, nothing is submitted, and the composer is never touched. The wait is
+   * bounded and returns as soon as ChatGPT exposes a finalized assistant turn, which is what
+   * makes an answer recoverable after the plugin's own turn already gave up on it.
+   *
+   * @param conversationKey - the retained conversation to read.
+   * @param options - bounded wait and cancellation.
+   * @returns the finalized answer text and when it was read.
+   */
+  async recoverRetainedAnswer(
+    conversationKey: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<ChatGptRetainedAnswerRecovery> {
+    const timeoutMs = options.timeoutMs ?? CHATGPT_RECOVERY_DEFAULT_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error("ChatGPT answer recovery timeout must be a positive finite number");
+    }
+    let retained;
+    try {
+      retained = await this.retainedSurfaces.acquire(conversationKey, {
+        required: true,
+        create: () => {
+          // `required: true` already fails before this runs; the throw keeps "a recovery never
+          // creates a conversation" explicit even if the registry contract changes.
+          throw new Error("ChatGPT answer recovery must not create a retained conversation");
+        },
+      });
+    } catch (error) {
+      if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError();
+      if (error instanceof RetainedSurfaceBusyError) throw chatGptRetainedSurfaceBusyError();
+      if (error instanceof RetainedSurfaceMissingError) throw chatGptRetainedConversationUnavailableError();
+      throw error;
+    }
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    try {
+      for (;;) {
+        if (options.signal?.aborted) throw new DOMException("ChatGPT answer recovery aborted", "AbortError");
+        const page = retained.page;
+        if (page.isClosed()) throw chatGptRetainedSurfaceLostError();
+        const turns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
+        const count = await turns.count().catch(() => 0);
+        if (count > 0) {
+          try {
+            const snapshot = await this.responseDomSnapshot(turns.last(), {});
+            const text = snapshot.visibleText.trim();
+            if (text) return { text, capturedAt: Date.now(), waitedMs: Date.now() - startedAt };
+          } catch (error) {
+            // A re-render between the count and the read is not a failed recovery: keep polling
+            // until the bounded wait expires. A closed page is the one unrecoverable case.
+            if (page.isClosed()) throw chatGptRetainedSurfaceLostError();
+          }
+        }
+        if (Date.now() >= deadline) throw chatGptAnswerRecoveryUnavailableError(timeoutMs);
+        await this.delayWithAbort(250, options.signal);
+      }
+    } finally {
+      this.retainedSurfaces.release(conversationKey);
+    }
+  }
+
+  /** Sleep that settles early with an AbortError when the caller cancels the wait. */
+  private delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new DOMException("ChatGPT answer recovery aborted", "AbortError"));
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new DOMException("ChatGPT answer recovery aborted", "AbortError"));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   inspectSession(detectCapabilities: boolean): Promise<{

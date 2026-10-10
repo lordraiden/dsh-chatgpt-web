@@ -168,7 +168,7 @@ describe("issue #180 — case 2: result does not auto-enter model history", () =
         ]),
       ),
     ).toEqual([
-      { turn: 3, reviewId: "", mode: "normal", model: "", preset: "", text: "ok", at: 0 },
+      { turn: 3, reviewId: "", mode: "normal", model: "", preset: "", recovered: false, text: "ok", at: 0 },
     ]);
   });
 });
