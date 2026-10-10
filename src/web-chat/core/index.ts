@@ -114,3 +114,23 @@ export {
 } from "./provider";
 
 export { createWebChatDriverResolver, type WebChatDriverResolver } from "./resolver";
+
+export {
+  WebChatExchangeLifecycle,
+  type WebChatExchangeLifecycleOptions,
+  type WebChatExchangeSnapshot,
+  type WebChatExchangeState,
+  type WebChatLogicalSettlement,
+  type WebChatPhysicalSettlement,
+  type WebChatSubmissionPhase,
+} from "./exchange-state";
+
+export {
+  decideWebChatRetry,
+  webChatRetrySafetyOf,
+  type WebChatRetryDecision,
+  type WebChatRetryObservation,
+  type WebChatRetryPolicy,
+  type WebChatRetryRefusal,
+  type WebChatRetrySafety,
+} from "./retry-authority";
