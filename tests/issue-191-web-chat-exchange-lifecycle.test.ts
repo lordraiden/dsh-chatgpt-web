@@ -410,14 +410,84 @@ describe("issue #191 — the exchange runner over a provider transport", () => {
     expect(exchange.snapshot().logical).toBe("pending");
   });
 
-  test("a pre-submission transport failure is retry-safe and settles the resource", async () => {
+  test("a pre-submission transport failure is retry-safe and frees the resource", async () => {
     const { transport, calls } = scriptedTransport({ ready: async () => { throw new Error("the surface is gone"); } });
-    const { exchange } = await runnerWith(transport);
+    const { exchange, leases } = await runnerWith(transport);
     await expect(exchange.prepare()).rejects.toThrow(/surface is gone/);
     expect(exchange.snapshot().state).toBe("FAILED");
     expect(exchange.retrySafety()).toBe("retry_safe");
-    expect(calls.settle).toBe(1);
+    // Readiness precedes submission, so this failure provably never sent anything: the resource is
+    // published as `not_started` and stays reusable, without asking the provider to settle an
+    // operation it never started.
+    expect(exchange.settlement()).toBe("not_started");
+    expect(calls.settle).toBe(0);
     expect(calls.abort).toBe(0);
+    expect(leases.describe("conversation-key-1")).toEqual({ leased: false, settling: false, retired: false, creating: false });
+  });
+
+  test("a submission that fails after activation is ambiguous, never retry-safe, and never frees the resource", async () => {
+    // The browser activated the send and then failed while confirming it: a throw proves nothing.
+    const failing = scriptedTransport({
+      phases: [],
+      settlement: async () => "pending",
+    });
+    const failingTransport: WebChatTextTransport = {
+      ...failing.transport,
+      async submit() { throw new Error("the confirmation never arrived"); },
+    };
+    const { exchange, leases } = await runnerWith(failingTransport);
+    await exchange.prepare();
+    await expect(exchange.submit()).rejects.toThrow(/confirmation never arrived/);
+
+    expect(exchange.snapshot().state).toBe("SUBMISSION_AMBIGUOUS");
+    expect(exchange.snapshot().phase).toBe("send_activated");
+    expect(exchange.snapshot().logical).toBe("pending");
+    expect(exchange.retrySafety()).toBe("ambiguous");
+    expect(decideWebChatRetry({ snapshot: exchange.snapshot() })).toMatchObject({ allowed: false, reason: "ambiguous" });
+    // The resource is not declared free while the provider may still be producing output.
+    expect(exchange.settlement()).toBe("pending");
+    expect(leases.describe("conversation-key-1")).toEqual({ leased: false, settling: true, retired: false, creating: false });
+  });
+
+  test("a submission failure whose settlement cannot be established retires the resource", async () => {
+    const transport: WebChatTextTransport = {
+      id: "unsound",
+      ready: async () => {},
+      submit: async () => { throw new Error("send exploded"); },
+      // eslint-disable-next-line require-yield
+      async *stream() { /* never reached */ },
+      async settle() { throw new Error("settlement unknown"); },
+      async abort() {},
+    };
+    const { exchange, leases } = await runnerWith(transport);
+    await exchange.prepare();
+    await expect(exchange.submit()).rejects.toThrow(/send exploded/);
+    expect(exchange.snapshot().state).toBe("SUBMISSION_AMBIGUOUS");
+    expect(exchange.settlement()).toBe("rejected");
+    expect(exchange.retrySafety()).toBe("not_retry_safe");
+    // Only an explicit recovery brings the conversation back.
+    expect(leases.isRetired("conversation-key-1")).toBe(true);
+    await expect(runnerWith(scriptedTransport().transport, { leases })).resolves.toBeDefined();
+    const next = createWebChatExchange({
+      identity: IDENTITY,
+      turn: TURN,
+      transport: scriptedTransport().transport,
+      leases,
+    });
+    await expect(next.prepare()).rejects.toThrow(/was retired/);
+  });
+
+  test("a provider that proves nothing was submitted stays retry-safe", async () => {
+    const { transport } = scriptedTransport({ phases: ["prepared", "accepted"] });
+    const { exchange } = await runnerWith(transport, { maxSubmits: 2 });
+    await exchange.prepare();
+    await exchange.submit();
+    expect(exchange.snapshot().state).toBe("SUBMITTING");
+    expect(exchange.retrySafety()).toBe("retry_safe");
+    expect(decideWebChatRetry({ snapshot: exchange.snapshot() })).toMatchObject({ allowed: true });
+    await exchange.submit();
+    expect(exchange.snapshot().state).toBe("SUBMITTED");
+    expect(exchange.snapshot().submits).toBe(2);
   });
 
   test("a provider error after submission is not retry-safe", async () => {
@@ -484,6 +554,36 @@ describe("issue #191 — the exchange runner over a provider transport", () => {
     await expect(second.prepare()).rejects.toThrow(/still owns this conversation's transport resource/);
   });
 
+  test("cancellation waits for the provider abort before publishing settlement", async () => {
+    let releaseAbort: () => void = () => {};
+    const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
+    const order: string[] = [];
+    const transport: WebChatTextTransport = {
+      id: "ordered",
+      ready: async () => {},
+      submit: async () => "accepted",
+      // eslint-disable-next-line require-yield
+      async *stream() { /* the exchange is cancelled before it streams */ },
+      async settle() { order.push("settle"); return "fulfilled"; },
+      async abort() { order.push("abort:start"); await abortGate; order.push("abort:end"); },
+    };
+    const { exchange } = await runnerWith(transport);
+    await exchange.prepare();
+    await exchange.submit();
+
+    const aborting = exchange.abort("the caller stopped it");
+    await Promise.resolve();
+    await Promise.resolve();
+    // The provider abort is still running: nothing may be settled or released yet.
+    expect(order).toEqual(["abort:start"]);
+    expect(exchange.settlement()).toBeUndefined();
+
+    releaseAbort();
+    await aborting;
+    expect(order).toEqual(["abort:start", "abort:end", "settle"]);
+    expect(exchange.settlement()).toBe("fulfilled");
+  });
+
   test("an external abort signal cancels the exchange", async () => {
     const controller = new AbortController();
     const { transport, calls } = scriptedTransport({ events: [] });
@@ -510,7 +610,7 @@ describe("issue #191 — transport resource ownership", () => {
     const leases = createWebChatTransportLeaseRegistry();
     const lease = await leases.acquire({ exchangeId: "e1", conversationKey: "c1", epoch: 1, create: async () => resource() });
     expect(leases.isLeased("c1")).toBe(true);
-    expect(leases.describe("c1")).toEqual({ leased: true, settling: false, retired: false });
+    expect(leases.describe("c1")).toEqual({ leased: true, settling: false, retired: false, creating: false });
 
     // A second exchange cannot take a resource that may still produce output.
     await expect(leases.acquire({ exchangeId: "e2", conversationKey: "c1", epoch: 1 }))
@@ -518,13 +618,13 @@ describe("issue #191 — transport resource ownership", () => {
 
     // Releasing without settlement keeps it unavailable: an error is not proof that it stopped.
     lease.release();
-    expect(leases.describe("c1")).toEqual({ leased: false, settling: true, retired: false });
+    expect(leases.describe("c1")).toEqual({ leased: false, settling: true, retired: false, creating: false });
     await expect(leases.acquire({ exchangeId: "e3", conversationKey: "c1", epoch: 1 }))
       .rejects.toThrow(/still owns this conversation's transport resource/);
 
     // Only a published settlement makes it reusable.
     lease.settle("fulfilled");
-    expect(leases.describe("c1")).toEqual({ leased: false, settling: false, retired: false });
+    expect(leases.describe("c1")).toEqual({ leased: false, settling: false, retired: false, creating: false });
     const reused = await leases.acquire({ exchangeId: "e4", conversationKey: "c1", epoch: 1 });
     expect(reused.resource.id).toBe("resource-1");
 
@@ -544,6 +644,55 @@ describe("issue #191 — transport resource ownership", () => {
       create: async () => ({ id: "resource-2", conversationKey: "c1", epoch: 1 }),
     });
     expect(afterReset.resource.id).toBe("resource-2");
+  });
+
+  test("two simultaneous initial acquisitions cannot both own the conversation", async () => {
+    const leases = createWebChatTransportLeaseRegistry();
+    let releaseCreate: () => void = () => {};
+    const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    let creations = 0;
+    const slowCreate = async (): Promise<WebChatTransportResource> => {
+      creations += 1;
+      await createGate;
+      return { id: `resource-${creations}`, conversationKey: "c1", epoch: 1 };
+    };
+
+    // The first acquisition reserves the conversation before its asynchronous creation settles.
+    const first = leases.acquire({ exchangeId: "e1", conversationKey: "c1", epoch: 1, create: slowCreate });
+    await Promise.resolve();
+    expect(leases.describe("c1")).toEqual({ leased: false, settling: false, retired: false, creating: true });
+    expect(leases.isLeased("c1")).toBe(true);
+
+    // A second acquisition during that window must not create a second resource.
+    await expect(leases.acquire({ exchangeId: "e2", conversationKey: "c1", epoch: 1, create: slowCreate }))
+      .rejects.toThrow(/is being created/);
+
+    releaseCreate();
+    const lease = await first;
+    expect(lease.resource.id).toBe("resource-1");
+    expect(creations).toBe(1);
+    expect(leases.describe("c1")).toEqual({ leased: true, settling: false, retired: false, creating: false });
+  });
+
+  test("a failed creation releases its reservation, so the conversation is not blocked", async () => {
+    const leases = createWebChatTransportLeaseRegistry();
+    let attempts = 0;
+    const failingCreate = async (): Promise<WebChatTransportResource> => {
+      attempts += 1;
+      throw new Error("the browser refused to open a page");
+    };
+    await expect(leases.acquire({ exchangeId: "e1", conversationKey: "c1", epoch: 1, create: failingCreate }))
+      .rejects.toThrow(/refused to open/);
+    expect(leases.describe("c1")).toEqual({ leased: false, settling: false, retired: false, creating: false });
+
+    const lease = await leases.acquire({
+      exchangeId: "e2",
+      conversationKey: "c1",
+      epoch: 1,
+      create: async () => ({ id: "resource-1", conversationKey: "c1", epoch: 1 }),
+    });
+    expect(lease.resource.id).toBe("resource-1");
+    expect(attempts).toBe(1);
   });
 
   test("an unrecorded resource is refused unless the caller may create one", async () => {

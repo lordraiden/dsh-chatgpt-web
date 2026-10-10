@@ -21,6 +21,7 @@ import {
   type WebChatExchangeEvent,
   type WebChatExchangeSnapshot,
   type WebChatPhysicalSettlement,
+  type WebChatSubmissionPhase,
   type WebChatRetrySafety,
   type WebChatTurnIdentity,
   type WebChatTurnInput,
@@ -105,6 +106,22 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     return reported;
   };
 
+  /**
+   * Establish the physical settlement of an exchange whose provider outcome is unknown.
+   *
+   * The transport is the only authority on settlement (architecture §9.3). If it cannot even report
+   * one, the resource is not declared free: it is retired, and only an explicit reset brings it back.
+   */
+  const settleUnknownOutcome = async (): Promise<void> => {
+    try {
+      await publishSettlement();
+    } catch {
+      settlement = "rejected";
+      lifecycle.markPhysicallySettled("rejected");
+      lease?.settle("rejected");
+    }
+  };
+
   const disarm = (): void => {
     if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
   };
@@ -112,12 +129,16 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     void exchange.abort("the caller aborted the exchange").catch(() => undefined);
   };
 
-  // §9.2: the provider exchange is aborted exactly once, whatever asked for the cancellation.
-  let abortIssued = false;
-  const issueAbort = async (reason?: unknown): Promise<void> => {
-    if (abortIssued) return;
-    abortIssued = true;
-    await transport.abort?.(context(), reason).catch(() => undefined);
+  // §9.2: the provider exchange is aborted exactly once, whatever asked for the cancellation, and
+  // every caller waits for that same operation. A flag would deduplicate the call but not order it:
+  // the cancellation hook fires without awaiting, so `abort()` would proceed to settle the resource
+  // while the provider abort was still running.
+  let abortPromise: Promise<void> | undefined;
+  const issueAbort = (reason?: unknown): Promise<void> => {
+    abortPromise ??= Promise.resolve()
+      .then(async () => { await transport.abort?.(context(), reason); })
+      .catch(() => undefined);
+    return abortPromise;
   };
   lifecycle.attachCancellation((error) => {
     void issueAbort(error);
@@ -143,8 +164,12 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
         lifecycle.markTransportReady();
       } catch (error) {
         lifecycle.markFailed();
-        // Nothing was submitted, so the resource was never used for output.
-        await publishSettlement().catch(() => undefined);
+        // Readiness precedes submission, so this failure never sent anything: the resource is
+        // provably unused and stays reusable without asking the provider to settle an operation it
+        // never started.
+        settlement = "not_started";
+        lifecycle.markPhysicallySettled("not_started");
+        lease?.settle("not_started");
         disarm();
         throw error;
       }
@@ -152,13 +177,17 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
 
     async submit() {
       lifecycle.markSubmitting();
-      let phase;
+      let phase: WebChatSubmissionPhase;
       try {
         phase = await transport.submit(context());
       } catch (error) {
-        // A rejected submission attempt is not proof that the provider accepted nothing, unless the
-        // provider said so explicitly; the caller decides with the retry authority.
-        lifecycle.markFailed();
+        // A thrown submission failure proves nothing about whether the text was sent: a browser can
+        // activate the send and then fail while confirming it. Fail closed — the exchange becomes
+        // ambiguous (never automatically retried), and the resource is settled through the transport
+        // instead of being declared free on an unknown state. A provider that *can* prove nothing was
+        // submitted returns `prepared` rather than throwing.
+        lifecycle.markSendActivated();
+        await settleUnknownOutcome();
         throw error;
       }
       if (phase === "accepted") lifecycle.markSubmitted();
@@ -204,7 +233,7 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
       } finally {
         // A logical outcome never proves the resource is reusable: settlement is published here, and
         // the lease keeps it unavailable until the provider proves it.
-        await publishSettlement().catch(() => undefined);
+        await settleUnknownOutcome();
         disarm();
       }
     },
@@ -219,7 +248,7 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
       // §9.2 order: logical cancellation -> abort the provider exchange -> wait for or force physical
       // settlement -> release the resource.
       await issueAbort(reason);
-      await publishSettlement().catch(() => undefined);
+      await settleUnknownOutcome();
       disarm();
     },
 

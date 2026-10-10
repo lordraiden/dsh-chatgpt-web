@@ -78,10 +78,16 @@ export interface WebChatTransportLeaseAcquireOptions {
 /** The registry that owns exclusivity per conversation. */
 export interface WebChatTransportLeaseRegistry {
   acquire(options: WebChatTransportLeaseAcquireOptions): Promise<WebChatTransportLease>;
+  /** True when the conversation is owned, settling, or being acquired right now. */
   isLeased(conversationKey: string): boolean;
   isRetired(conversationKey: string): boolean;
   /** What the registry knows about one conversation. */
-  describe(conversationKey: string): { readonly leased: boolean; readonly retired: boolean; readonly settling: boolean };
+  describe(conversationKey: string): {
+    readonly leased: boolean;
+    readonly retired: boolean;
+    readonly settling: boolean;
+    readonly creating: boolean;
+  };
   /**
    * Explicit recovery for a retired conversation: the only way to clear a tombstone.
    *
@@ -103,6 +109,15 @@ interface RegistryEntry {
  */
 export function createWebChatTransportLeaseRegistry(): WebChatTransportLeaseRegistry {
   const entries = new Map<string, RegistryEntry>();
+  /**
+   * In-flight creations, per conversation.
+   *
+   * Creating a resource is asynchronous, so two acquisitions that both see an empty registry would
+   * both create one and both receive an active lease — breaking the exclusivity this registry exists
+   * to guarantee. The reservation is taken before the first `await` and released when the creation
+   * settles, either way.
+   */
+  const pendingAcquires = new Set<string>();
   return {
     async acquire(options) {
       const { conversationKey, exchangeId, epoch } = options;
@@ -128,9 +143,24 @@ export function createWebChatTransportLeaseRegistry(): WebChatTransportLeaseRegi
           `The transport resource belongs to epoch ${entry.resource.epoch}, not ${epoch}`,
         );
       }
-      const resource = entry?.resource ?? (options.create ? await options.create() : undefined);
+      let resource = entry?.resource;
       if (!resource) {
-        throw webChatError("CONVERSATION_LOST", "No transport resource exists for this conversation");
+        if (!options.create) {
+          throw webChatError("CONVERSATION_LOST", "No transport resource exists for this conversation");
+        }
+        if (pendingAcquires.has(conversationKey)) {
+          throw webChatError(
+            "TRANSPORT_UNAVAILABLE",
+            "A transport resource for this conversation is being created",
+          );
+        }
+        pendingAcquires.add(conversationKey);
+        try {
+          resource = await options.create();
+        } finally {
+          // Reserved until the creation settles, so a failure never leaves the reservation behind.
+          pendingAcquires.delete(conversationKey);
+        }
       }
 
       let state: WebChatTransportLeaseState = "active";
@@ -177,6 +207,7 @@ export function createWebChatTransportLeaseRegistry(): WebChatTransportLeaseRegi
       return lease;
     },
     isLeased(conversationKey) {
+      if (pendingAcquires.has(conversationKey)) return true;
       const state = entries.get(conversationKey)?.lease?.snapshot().state;
       return state === "active" || state === "settling";
     },
@@ -189,11 +220,15 @@ export function createWebChatTransportLeaseRegistry(): WebChatTransportLeaseRegi
         leased: state === "active",
         settling: state === "settling",
         retired: state === "retired",
+        creating: pendingAcquires.has(conversationKey),
       };
     },
     reset(conversationKey) {
       const entry = entries.get(conversationKey);
       if (!entry) return;
+      if (pendingAcquires.has(conversationKey)) {
+        throw webChatError("CONVERSATION_STATE_MISMATCH", "A transport resource is being created and cannot be reset");
+      }
       if (entry.lease && entry.lease.snapshot().state === "active") {
         throw webChatError("CONVERSATION_STATE_MISMATCH", "An active transport lease cannot be reset");
       }
