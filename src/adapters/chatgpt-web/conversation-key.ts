@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CodexParsedRequest } from "../../types";
-import { webChatConversationKey } from "../../web-chat/core";
+import { legacyWebChatThreadKey } from "../../web-chat/core";
 import { extractChatGptTurnIdentity } from "./environment";
 
 /**
@@ -11,9 +11,14 @@ import { extractChatGptTurnIdentity } from "./environment";
  * turn, not of the chat: they must never split one DSH chat into a second
  * ChatGPT conversation.
  *
- * The digest belongs to the provider-neutral core (`webChatConversationKey`,
- * issue #189); this function owns only the ChatGPT-specific half — which thread
- * identity a request carries and which namespace it runs under.
+ * The digest itself is owned by the core (`legacyWebChatThreadKey`, deprecated:
+ * the ChatGPT driver migration of issue #192 moves this path onto the canonical
+ * `webChatAffinityKey`); this function owns only the ChatGPT-specific half —
+ * which thread identity a request carries and which namespace it runs under.
+ *
+ * The digest must not change: it addresses ChatGPT conversations that already
+ * exist, and the affinity of an installed conversation must survive the
+ * migration steps that only add contracts.
  */
 export function chatGptConversationKey(
   parsed: CodexParsedRequest,
@@ -21,7 +26,7 @@ export function chatGptConversationKey(
 ): string | undefined {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.threadId) return undefined;
-  return webChatConversationKey(namespace, identity.threadId);
+  return legacyWebChatThreadKey(namespace, identity.threadId);
 }
 
 /** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */

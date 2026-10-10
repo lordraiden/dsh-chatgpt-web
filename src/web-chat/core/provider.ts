@@ -55,6 +55,15 @@ export interface WebChatConversationAssessment {
   readonly status: WebChatConversation["status"];
   /** Short provider-visible reason, for diagnostics. */
   readonly reason?: string;
+  /**
+   * The conversation the driver reconciled itself, when it can establish one the core has not
+   * recorded (for example the remote conversation still exists after a store loss).
+   *
+   * Continuity is provider-driven: only the driver can establish remote state, so the core adopts
+   * what it hands back instead of guessing. Without it, a `resumable` verdict for an unrecorded
+   * affinity is refused rather than turned into a new conversation.
+   */
+  readonly conversation?: WebChatConversation;
 }
 
 /** Identity and selection shared by every conversation operation. */
@@ -75,9 +84,14 @@ export interface WebChatConversationResumeInput extends WebChatConversationSelec
   readonly conversation: WebChatConversation;
 }
 
-/** Re-establish a conversation from canonical host history after an explicit replay decision. */
+/**
+ * Re-establish a conversation from canonical host history after an explicit replay decision.
+ *
+ * The predecessor is optional: a replay rebuilds from canonical host history, so it can also be the
+ * first conversation of an affinity whose continuity is gone (architecture §10).
+ */
 export interface WebChatConversationReplayInput extends WebChatConversationSelection {
-  readonly conversation: WebChatConversation;
+  readonly conversation?: WebChatConversation;
   /** Canonical text history for the replay; never a second persistent transcript. */
   readonly history: readonly WebChatReplayMessage[];
 }

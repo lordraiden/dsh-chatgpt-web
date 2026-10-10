@@ -11,7 +11,12 @@
  * become a second source of truth for identity or account state.
  */
 import type { CodexParsedRequest } from "../../types";
-import type { WebChatAccountBinding, WebChatErrorCategory, WebChatTurnIdentity } from "../../web-chat/core";
+import type {
+  WebChatAccountBinding,
+  WebChatAffinityKeyInput,
+  WebChatErrorCategory,
+  WebChatTurnIdentity,
+} from "../../web-chat/core";
 import { chatGptConversationKey } from "./conversation-key";
 import { extractChatGptTurnIdentity } from "./environment";
 
@@ -71,6 +76,40 @@ export function chatGptWebChatTurnIdentity(
     threadId: identity.threadId,
     ...(identity.dshSessionId !== undefined ? { dshSessionId: identity.dshSessionId } : {}),
     ...(conversationKey !== undefined ? { conversationKey } : {}),
+  };
+}
+
+/**
+ * Project one ChatGPT turn into the canonical provider-neutral affinity (architecture §7).
+ *
+ * The affinity carries the provider, the account binding, the host session and the provider thread,
+ * so a later migration can address the same conversation through the core key while the ChatGPT
+ * path keeps its own legacy thread key until the driver migration (issue #192).
+ *
+ * @param parsed - the parsed ChatGPT request.
+ * @param input - provider id, binding identity and execution namespace of the ChatGPT path.
+ * @returns the core affinity key input.
+ * @throws {Error} when the turn carries no host session or provider thread identity.
+ */
+export function chatGptWebChatAffinity(
+  parsed: CodexParsedRequest,
+  input: ChatGptWebChatBindingInput & { readonly providerId: string },
+): WebChatAffinityKeyInput {
+  const identity = extractChatGptTurnIdentity(parsed);
+  if (!identity.threadId) {
+    throw new Error("The ChatGPT turn has no provider thread identity to project");
+  }
+  if (!identity.dshSessionId) {
+    throw new Error("The ChatGPT turn has no host session identity to project");
+  }
+  if (!input.providerId) throw new Error("The ChatGPT affinity requires the provider identity");
+  if (!input.bindingId) throw new Error("The ChatGPT affinity requires a provider/account binding identity");
+  return {
+    providerId: input.providerId,
+    bindingId: input.bindingId,
+    dshSessionId: identity.dshSessionId,
+    threadId: identity.threadId,
+    ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
   };
 }
 

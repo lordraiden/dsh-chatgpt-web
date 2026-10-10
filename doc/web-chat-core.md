@@ -19,6 +19,14 @@ index between that specification and the code that implements it today.
 | `core/model.ts` | Provider-neutral model metadata; the common layer is text-only. | §14 |
 | `core/provider.ts` | The driver contract, the conversation assessment inputs/outcomes, and the provider-tagged replay-state ownership rule. | §8.1, §8.2, §8.4 |
 | `core/resolver.ts` | Resolution of an **already-selected** host route to its driver. | §17 |
+| `core/account-binding.ts` | The stable identity of one provider/account binding (a fingerprint, never a credential). | §6.2, §7 |
+| `core/conversation-store.ts` | The durable continuity record, the store port, the in-memory reference implementation and the record invariants (generations, confirmed checkpoints, no secrets, opaque handles). | §6.3, §7.3, §18 |
+| `core/continuation.ts` | The continuation decisions: explicit new conversation, exact resume, explicit replay, or an explicit failure — never a silent fork. | §7.1, §10, §11 |
+
+The durable **backend** for the store is infrastructure and lives outside the core
+(`src/web-chat/persistence/conversation-store-file.ts`): it owns the JSON document, reuses the
+plugin's atomic write helper, re-reads on every operation (no cache) and refuses a corrupt file or
+an unknown schema version instead of presenting an empty store.
 
 ## Invariants (enforced by tests)
 
@@ -42,6 +50,25 @@ files/images/audio/video/attachments/tools/toolChoice/MCP), the opaque handle, t
 resolution-only semantics, a driver implemented with no browser page, the fail-closed replay-state
 ownership rule, and the exact conversation-key digests captured before the extraction.
 
+## Continuity: the two keys, the record and the decisions
+
+- **Two derivations, one owner each.** `webChatAffinityKey` is the canonical affinity key of §7
+  (provider + account binding + host session/thread + namespace). `legacyWebChatThreadKey` is the
+  pre-migration thread key of the existing provider path, `@deprecated` with the driver migration
+  (issue #192) as its retirement trigger; it exists so an installed conversation keeps its affinity,
+  and a boundary test keeps it to exactly one production caller.
+- **The record holds continuity only**: affinity identity, generation, the opaque handle, the
+  driver's last established status, whether that state is authoritative (`checkpoint`), the
+  initialization fingerprint installed in the current generation, and the last confirmed turn. It
+  holds no messages (the host owns canonical history), no lease (the exchange lifecycle owns
+  transport readiness) and no transport resource.
+- **Generations are monotonic** and a stale one is refused rather than silently replaced; an
+  initialization fingerprint is never current for a later generation.
+- **Nothing is implicit.** `resolveWebChatContinuation` returns `exact_resume`, `new_conversation`,
+  `replay` or `failed`; a lost, unreachable, unsupported, unconfirmed or stale conversation fails
+  explicitly, and only an explicit caller intent starts a new conversation or a replay. A handle is
+  committed only after the driver established it, so a failed driver leaves the record untouched.
+
 ## Consuming the core today (reference: ChatGPT)
 
 The ChatGPT path consumes the core without being migrated yet (issue #192 owns that):
@@ -56,11 +83,13 @@ The ChatGPT path consumes the core without being migrated yet (issue #192 owns t
 
 ## What is deliberately not here
 
+The continuity layer exists (issue #190) and is consumed by the provider migration when it moves
+that path onto the core key and records its conversations through this store.
+
 | Owner | Work |
 | --- | --- |
-| #190 (PR 2) | Conversation affinity decisions, the durable conversation store, generations, continuation/replay outcomes. |
 | #191 (PR 3) | The exchange state machine, retry authority, transport lease, physical settlement. |
-| #192 (PR 4) | The ChatGPT driver implementation and its transport behind the core. |
+| #192 (PR 4) | The ChatGPT driver implementation and its transport behind the core, including retiring `legacyWebChatThreadKey`. |
 | #193 (PR 5) | Host route integration: adapter, drivers, models, auth, health. |
 | #194 (PR 6) | The provider conformance and architecture-contract suite. |
 
