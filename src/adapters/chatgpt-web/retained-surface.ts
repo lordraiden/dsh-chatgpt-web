@@ -130,9 +130,15 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
     if (existing) {
       if (existing.busy) throw new RetainedSurfaceBusyError(conversationKey);
       if (existing.page.isClosed()) {
+        // A dead page is a continuity loss whatever its settlement state, so this is decided first.
         this.surfaces.delete(conversationKey);
         this.lostSurfaces.add(conversationKey);
         throw new RetainedSurfaceLostError(conversationKey);
+      }
+      if (!existing.settled) {
+        // A surface that was released without a published settlement may still produce output: it is
+        // retained, but it is not handed to another turn (architecture §9.3, §15.3).
+        throw new RetainedSurfaceBusyError(conversationKey);
       }
       existing.busy = true;
       return { page: existing.page, created: false };

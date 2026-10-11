@@ -55,6 +55,7 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     const page = fakePage("page-1");
     await registry.acquire("key-a", { required: false, create: async () => page });
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     const reused = await registry.acquire("key-a", {
       required: false,
       create: async () => fakePage("page-should-not-be-used"),
@@ -80,6 +81,7 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     await registry.acquire("key-a", { required: false, create: async () => page });
     // End of the normal turn: release clears the busy flag but keeps the page.
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     expect(registry.has("key-a")).toBe(true);
     expect(page.isClosed()).toBe(false);
     expect(page.closeCount).toBe(0);
@@ -90,6 +92,7 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     const page = fakePage("page-1");
     await registry.acquire("key-a", { required: false, create: async () => page });
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     // The page dies outside the registry's control.
     page.markClosed();
     await expect(registry.acquire("key-a", {
@@ -120,6 +123,7 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     const page = fakePage("page-1");
     await registry.acquire("key-a", { required: false, create: async () => page });
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     page.markClosed();
     await expect(registry.acquire("key-a", { required: false, create: async () => fakePage("x") }))
       .rejects.toBeInstanceOf(RetainedSurfaceLostError);
@@ -141,6 +145,7 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     const page = fakePage("page-1");
     await registry.acquire("key-a", { required: false, create: async () => page });
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     page.markClosed();
     await expect(registry.acquire("key-a", { required: false, create: async () => fakePage("x") }))
       .rejects.toBeInstanceOf(RetainedSurfaceLostError);
@@ -212,12 +217,14 @@ describe("issue #171 managed-chrome retained surface registry", () => {
     const page = fakePage("page-1");
     await registry.acquire("key-a", { required: false, create: async () => page });
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     // Turn 2 acquires the existing surface (a continuation) ...
     const acquired = await registry.acquire("key-a", { required: false, create: async () => fakePage("x") });
     expect(acquired.created).toBe(false);
     expect(acquired.page).toBe(page);
     // ... and is aborted. The worker's abort path for a reused surface only releases.
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     // The page must be untouched: not closed, not removed.
     expect(page.closeCount).toBe(0);
     expect(page.isClosed()).toBe(false);
@@ -299,10 +306,12 @@ describe("issue #171 physical reuse vs configuration reuse", () => {
     const first = await registry.acquire("key-a", { required: false, create: async () => page });
     expect(first.created).toBe(true);
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     const second = await registry.acquire("key-a", { required: false, create: async () => fakePage("x") });
     expect(second.created).toBe(false);
     expect(second.page).toBe(page);
     registry.release("key-a");
+        registry.settle("key-a", "fulfilled");
     const third = await registry.acquire("key-a", { required: false, create: async () => fakePage("y") });
     expect(third.created).toBe(false);
     expect(third.page).toBe(page);
