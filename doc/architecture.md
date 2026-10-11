@@ -1008,11 +1008,11 @@ A provider may require:
 - access verification or anti-bot challenges;
 - browser-derived session material;
 - provider-specific challenge computation;
-- revalidation before each transport mode is allowed.
+- revalidation before browser-driven website interaction is allowed.
 
 These mechanisms remain provider-local.
 
-The common core must not assume that a headless or automated browser can always establish a valid consumer-web session. A provider driver may require an existing real browser profile, an interactive bootstrap step, or a browser-assisted network transport. The semantic result exposed to the core remains only the provider authentication/session state.
+The common core must not assume that a headless or automated browser can always establish a valid consumer-web session. A provider driver may require an existing authenticated Chrome profile or an interactive user-facing bootstrap step. The semantic result exposed to the core remains only the provider authentication/session state. All subsequent model interaction remains through Chrome/Playwright UI.
 
 ### 13.2 Browser profiles
 
@@ -1605,18 +1605,21 @@ Every provider driver should pass the same semantic suite:
 
 The exact transport assertions are provider-specific.
 
-### 24.3 Transport tests
+### 24.3 Playwright UI transport tests
 
-DOM/network/hybrid transports should have separate tests for:
+Each provider's Playwright UI driver should have separate tests for:
 
-- readiness;
-- submit activation;
+- authenticated browser/profile readiness;
+- visible model discovery and selection;
+- composer submission activation;
 - submission confirmation;
-- text extraction;
-- completion;
+- text extraction from the rendered page;
+- completion detection;
 - abort;
 - resource close;
 - physical-settlement guarantees.
+
+No transport test may rely on direct provider API calls or parse internal network responses to obtain model output.
 
 ### 24.4 Architecture tests
 
