@@ -139,7 +139,7 @@ export async function beginWebChatConversationAttempt(
   identity: WebChatConversationIdentity,
   attempt: { readonly generation: number },
 ): Promise<WebChatConversationRecord> {
-  return store.update(identity, (current) => {
+  return withDecisionLock(identity, () => store.update(identity, (current) => {
     if (!current) {
       throw webChatError("CONVERSATION_STATE_MISMATCH", "Cannot attempt a turn on an unrecorded conversation");
     }
@@ -150,7 +150,7 @@ export async function beginWebChatConversationAttempt(
       );
     }
     return { ...current, checkpoint: "unconfirmed" };
-  });
+  }));
 }
 
 /**
@@ -164,7 +164,7 @@ export async function confirmWebChatConversation(
   identity: WebChatConversationIdentity,
   settled: { readonly generation: number; readonly turnId: string; readonly at: number },
 ): Promise<WebChatConversationRecord> {
-  return store.update(identity, (current) => {
+  return withDecisionLock(identity, () => store.update(identity, (current) => {
     if (!current) {
       throw webChatError("CONVERSATION_STATE_MISMATCH", "Cannot confirm a turn on an unrecorded conversation");
     }
@@ -180,7 +180,7 @@ export async function confirmWebChatConversation(
       checkpoint: "confirmed",
       lastConfirmedTurn: { turnId: settled.turnId, at: settled.at },
     };
-  });
+  }));
 }
 
 /**
@@ -292,11 +292,13 @@ async function resolveWebChatContinuationLocked(
 ): Promise<WebChatContinuationPlan> {
   const stored = await deps.store.read(identity);
 
-  if (stored && request.expectedGeneration !== undefined && stored.generation !== request.expectedGeneration) {
+  if (request.expectedGeneration !== undefined && (stored?.generation ?? 0) !== request.expectedGeneration) {
+    // A caller that believes generation N exists must not silently become a first conversation when
+    // the record is gone: the current generation of a missing record is 0.
     return failure(
       identity,
       "CONVERSATION_STATE_MISMATCH",
-      `Conversation generation ${request.expectedGeneration} is stale; the current generation is ${stored.generation}`,
+      `Conversation generation ${request.expectedGeneration} is stale; the current generation is ${stored?.generation ?? 0}`,
       stored,
     );
   }

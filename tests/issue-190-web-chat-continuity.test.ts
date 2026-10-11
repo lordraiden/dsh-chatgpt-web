@@ -1078,3 +1078,64 @@ describe("issue #190 — concurrent decisions on one affinity (review of #217)",
     expect((await store.read(identity))?.handle).toBe(webChatConversationHandle("handle-external"));
   });
 });
+
+describe("issue #190 — a stale expectation and cross-mutation coordination (review of #217)", () => {
+  const request = (overrides: Partial<Parameters<typeof resolveWebChatContinuation>[1]> = {}) => ({
+    binding: BINDING,
+    dshSession: { sessionId: "dsh-session-1" },
+    threadId: "dsh-thread-1",
+    namespace: "dsh-chatgpt-web",
+    model: "model-1",
+    intent: { kind: "continue" } as const,
+    ...overrides,
+  });
+
+  test("an expectation with no record is refused, not turned into a first conversation", async () => {
+    const store = createMemoryConversationStore();
+    const { driver, calls } = scriptedDriver({ assessment: { status: "new" }, createGeneration: 1 });
+    const plan = await resolveWebChatContinuation({ store, driver }, request({ expectedGeneration: 1 }));
+    expect(plan.outcome).toBe("failed");
+    expect(plan.error?.category).toBe("CONVERSATION_STATE_MISMATCH");
+    expect(plan.reason).toContain("the current generation is 0");
+    // The provider was not asked and nothing was created for a generation the caller believed in.
+    expect(calls.create).toBe(0);
+    expect(await store.list()).toHaveLength(0);
+  });
+
+  test("a confirmation of the same affinity waits for the decision in flight", async () => {
+    const store = createMemoryConversationStore();
+    const seeded = await seedConversation(store);
+    const order: string[] = [];
+    let confirming: Promise<unknown> = Promise.resolve();
+    const driver: WebChatProviderDriver = {
+      id: "chatgpt-web",
+      inspectAccount: async () => ({ authenticated: true, accountFingerprint: "fp-1" }),
+      listModels: async () => [{ id: "model-1", label: "Model 1", text: true }],
+      resolveModel: async () => ({ id: "model-1", label: "Model 1", text: true }),
+      assessConversation: async () => {
+        // Another turn of the same affinity confirms while this decision is inside its provider window.
+        confirming = confirmWebChatConversation(store, seeded.identity, { generation: 1, turnId: "other", at: 9 })
+          .then(() => { order.push("confirmed"); });
+        await Promise.resolve();
+        return { status: "resumable" };
+      },
+      createConversation: async () => {
+        throw new Error("a new conversation was not requested");
+      },
+      resumeConversation: async input => input.conversation,
+      replayConversation: async () => {
+        throw new Error("a replay was not requested");
+      },
+      health: async () => ({ ok: true }),
+      shutdown: async () => {},
+    };
+
+    const plan = await resolveWebChatContinuation({ store, driver }, request({ expectedGeneration: 1 }));
+    await confirming;
+    // The decision was not invalidated by a mutation landing inside its window: the confirmation was
+    // applied after it, which is what the shared affinity lock guarantees.
+    expect(plan.outcome).toBe("exact_resume");
+    expect(order).toEqual(["confirmed"]);
+    expect((await store.read(seeded.identity))?.lastConfirmedTurn?.turnId).toBe("other");
+  });
+});
