@@ -222,3 +222,30 @@ test("confirmed exhaustion invalidates the retained conversation immediately but
 
   expect(released).toBe(true);
 });
+
+test("a pending retirement stays coordinated across a registry clear", async () => {
+  const sessions = new ChatGptTurnSessions();
+  let resolvePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { resolvePhysical = resolve; });
+  const runtime = runtimeForRetainedConversation(physicalSettlement, () => {});
+  sessions.getOrCreate(
+    "execution-clear",
+    () => runtime,
+    "trace-clear",
+    "owner-clear",
+    "native-turn-clear",
+    "thread-clear",
+  );
+
+  const retirement = sessions.retireConversationAndWait("conversation-1");
+  // A clear stands for a fresh process, and the physical close this registry is coordinating is
+  // still running: clearing must not make it invisible to the next caller.
+  sessions.clear();
+  const joined = sessions.retireConversationAndWait("conversation-1");
+
+  resolvePhysical();
+  // The second call joined the pending retirement instead of starting another close, and the
+  // registry is left without a stale entry once the promise settles.
+  expect(await Promise.all([retirement, joined])).toEqual([1, 0]);
+  await expect(sessions.waitForConversationRetirement("conversation-1")).resolves.toBeUndefined();
+});
