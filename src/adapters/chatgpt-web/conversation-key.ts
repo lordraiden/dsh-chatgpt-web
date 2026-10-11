@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CodexParsedRequest } from "../../types";
+import { webChatConversationKey } from "../../web-chat/core";
 import { extractChatGptTurnIdentity } from "./environment";
 
 /**
@@ -9,6 +10,10 @@ import { extractChatGptTurnIdentity } from "./environment";
  * namespace. Model, reasoning effort, and compaction are properties of the
  * turn, not of the chat: they must never split one DSH chat into a second
  * ChatGPT conversation.
+ *
+ * The digest belongs to the provider-neutral core (`webChatConversationKey`,
+ * issue #189); this function owns only the ChatGPT-specific half — which thread
+ * identity a request carries and which namespace it runs under.
  */
 export function chatGptConversationKey(
   parsed: CodexParsedRequest,
@@ -16,10 +21,7 @@ export function chatGptConversationKey(
 ): string | undefined {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.threadId) return undefined;
-  return createHash("sha256").update(JSON.stringify({
-    namespace,
-    threadId: identity.threadId,
-  })).digest("hex");
+  return webChatConversationKey(namespace, identity.threadId);
 }
 
 /** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
