@@ -128,6 +128,25 @@ async function collect(exchange: WebChatExchangeRunner): Promise<WebChatExchange
 }
 
 describe("issue #191 — the exchange state machine is monotonic and testable", () => {
+  test("a late confirmation resolves ambiguity into the confirmed case", () => {
+    const exchange = lifecycle();
+    exchange.markPreparing();
+    exchange.markTransportReady();
+    exchange.markSubmitting();
+    exchange.markSendActivated();
+    expect(exchange.snapshot().state).toBe("SUBMISSION_AMBIGUOUS");
+    exchange.markSubmitted();
+    const snapshot = exchange.snapshot();
+    expect(snapshot.state).toBe("SUBMITTED");
+    expect(snapshot.phase).toBe("accepted");
+    // From there an automatic duplicate submission is forbidden, as after any confirmed submission.
+    expect(webChatRetrySafetyOf({ snapshot })).toBe("not_retry_safe");
+    // The exchange keeps following the normal path.
+    exchange.markStreaming();
+    exchange.markCompleted();
+    expect(exchange.snapshot().logical).toBe("completed");
+  });
+
   test("the architecture §9 path is accepted in order", () => {
     const exchange = lifecycle();
     expect(exchange.snapshot().state).toBe("CREATED");
@@ -177,7 +196,7 @@ describe("issue #191 — the exchange state machine is monotonic and testable", 
     ambiguous.markSendActivated();
     expect(ambiguous.isTerminal()).toBe(true);
     expect(() => ambiguous.markStreaming()).toThrow(/cannot change state|Streaming cannot start/);
-    expect(() => ambiguous.markSubmitted()).toThrow(/cannot change state/);
+    expect(() => ambiguous.markPreparing()).toThrow(/cannot change state/);
     ambiguous.markFailed();
     expect(ambiguous.snapshot().state).toBe("FAILED");
   });
