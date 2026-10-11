@@ -36,6 +36,7 @@ import {
   createChatGptWebRouteAuthorityFromProvider,
   requireChatGptWebRoute,
 } from "../../chatgpt-web-authority";
+import type { WebChatProviderDriver } from "../../web-chat/core";
 import { loadConfig, providerConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../lib/compaction";
 import { projectConversationalMessages } from "../../conversation-projection";
@@ -51,6 +52,7 @@ import {
 } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { createChatGptWebAdapter } from "./index";
+import { createChatGptWebDriver } from "./chatgpt-driver";
 
 export const CHATGPT_WEB_PROVIDER_ID = "chatgpt-web";
 
@@ -209,6 +211,22 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The WebChat provider driver for this adapter's own route.
+   *
+   * The adapter already owns the provider configuration (resolved once and memoized), so it — not a
+   * caller that would have to duplicate the resolution — is the authority that can compose the
+   * driver for the route it registers. The driver is a projection of the facts this provider already
+   * owns and defaults to the same `chatGptTurnSessions` registry the native path uses, so the driver
+   * and the native path can never disagree about a conversation's generation.
+   *
+   * This is not a second registry: the plugin still decides which routes may reach
+   * `ctx.llm.registerAdapter`, and no route without a driver is registered.
+   */
+  webChatDriver(): WebChatProviderDriver {
+    return createChatGptWebDriver({ provider: this.resolveProvider() });
   }
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
