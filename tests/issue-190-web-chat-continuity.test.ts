@@ -633,7 +633,7 @@ describe("issue #190 — continuation decisions", () => {
     const seeded = await seedConversation(store);
     const { driver } = scriptedDriver({ assessment: { status: "lost" }, createGeneration: 2 });
     const plan = await resolveWebChatContinuation({ store, driver }, request({
-      intent: { kind: "new_conversation", reason: "the user asked for a fresh conversation" },
+      intent: { kind: "new_conversation", expectedGeneration: 1, reason: "the user asked for a fresh conversation" },
     }));
     expect(plan.outcome).toBe("new_conversation");
     expect(plan.conversation?.generation).toBe(2);
@@ -643,7 +643,7 @@ describe("issue #190 — continuation decisions", () => {
     // A driver that does not advance the generation is refused, and the record is untouched.
     const failing = scriptedDriver({ assessment: { status: "lost" }, createGeneration: 2 });
     const refused = await resolveWebChatContinuation({ store, driver: failing.driver }, request({
-      intent: { kind: "new_conversation", reason: "again" },
+      intent: { kind: "new_conversation", expectedGeneration: 2, reason: "again" },
     }));
     expect(refused.outcome).toBe("failed");
     expect(refused.reason).toContain("must advance the generation");
@@ -659,7 +659,7 @@ describe("issue #190 — continuation decisions", () => {
     ];
     const { driver, calls } = scriptedDriver({ assessment: { status: "lost" }, replayGeneration: 2 });
     const plan = await resolveWebChatContinuation({ store, driver }, request({
-      intent: { kind: "replay", reason: "continuity was lost", history },
+      intent: { kind: "replay", expectedGeneration: 1, reason: "continuity was lost", history },
     }));
     expect(plan.outcome).toBe("replay");
     expect(plan.conversation?.generation).toBe(2);
@@ -669,7 +669,7 @@ describe("issue #190 — continuation decisions", () => {
     const beforeEmpty = await store.read(seeded.identity);
     const empty = scriptedDriver({ assessment: { status: "lost" } });
     const refused = await resolveWebChatContinuation({ store, driver: empty.driver }, request({
-      intent: { kind: "replay", reason: "nothing to rebuild from", history: [] },
+      intent: { kind: "replay", expectedGeneration: 1, reason: "nothing to rebuild from", history: [] },
     }));
     expect(refused.outcome).toBe("failed");
     expect(refused.error?.category).toBe("CONVERSATION_STATE_MISMATCH");
@@ -682,7 +682,7 @@ describe("issue #190 — continuation decisions", () => {
     const seeded = await seedConversation(store, { status: "lost" });
     const { driver } = scriptedDriver({ assessment: { status: "lost" }, failReplay: new Error("provider refused") });
     await expect(resolveWebChatContinuation({ store, driver }, request({
-      intent: { kind: "replay", reason: "retry", history: [{ role: "user", text: "hi" }] },
+      intent: { kind: "replay", expectedGeneration: 1, reason: "retry", history: [{ role: "user", text: "hi" }] },
     }))).rejects.toThrow(/provider refused/);
     const after = await store.read(seeded.identity);
     expect(after?.generation).toBe(1);
@@ -719,7 +719,7 @@ describe("issue #190 — migration evidence from the current provider path", () 
       threadId: "dsh-thread-1",
       namespace: "dsh-chatgpt-web",
       model: "model-1",
-      intent: { kind: "replay", reason: "the installed initialization state no longer applies", history: [{ role: "user", text: "hi" }] },
+      intent: { kind: "replay", expectedGeneration: 1, reason: "retry", history: [{ role: "user", text: "hi" }] },
     });
     expect(replay.outcome).toBe("replay");
     expect(replay.conversation?.generation).toBe(2);
@@ -902,7 +902,7 @@ describe("issue #190 — concurrent decisions on one affinity (review of #217)",
     expect(loser.error?.category).toBe("CONVERSATION_STATE_MISMATCH");
   });
 
-  test("two concurrent replays advance the conversation twice, without orphaning a handle", async () => {
+  test("a concurrent replay decided for a superseded generation is refused", async () => {
     const store = createMemoryConversationStore();
     const seeded = await seedConversation(store);
     const generations: number[] = [];
@@ -917,7 +917,6 @@ describe("issue #190 — concurrent decisions on one affinity (review of #217)",
       },
       resumeConversation: async input => input.conversation,
       replayConversation: async input => {
-        // Each replay is a new physical epoch: the provider advances from what it was given.
         const generation = (input.conversation?.generation ?? 0) + 1;
         generations.push(generation);
         return {
@@ -935,21 +934,117 @@ describe("issue #190 — concurrent decisions on one affinity (review of #217)",
 
     const [first, second] = await Promise.all([
       resolveWebChatContinuation({ store, driver }, request({
-        intent: { kind: "replay", reason: "lost", history: [{ role: "user", text: "hola" }] },
+        intent: { kind: "replay", expectedGeneration: 1, reason: "lost", history: [{ role: "user", text: "hola" }] },
       })),
       resolveWebChatContinuation({ store, driver }, request({
-        intent: { kind: "replay", reason: "lost", history: [{ role: "user", text: "hola" }] },
+        intent: { kind: "replay", expectedGeneration: 1, reason: "lost", history: [{ role: "user", text: "hola" }] },
       })),
     ]);
 
-    // Serialized: the second replay starts from the generation the first one committed.
-    expect(generations).toEqual([2, 3]);
-    expect(first.outcome).toBe("replay");
-    expect(second.outcome).toBe("replay");
-    expect([first.conversation?.generation, second.conversation?.generation].sort()).toEqual([2, 3]);
+    // Only one replay ran: the other was decided for a generation that no longer exists, so it is
+    // refused *before* the provider is asked — no physical conversation is created without a record.
+    expect(generations).toEqual([2]);
+    const outcomes = [first.outcome, second.outcome].sort();
+    expect(outcomes).toEqual(["failed", "replay"]);
+    const winner = first.outcome === "replay" ? first : second;
+    expect(winner.conversation?.generation).toBe(2);
+    const loser = first.outcome === "failed" ? first : second;
+    expect(loser.error?.category).toBe("CONVERSATION_STATE_MISMATCH");
+    expect(loser.reason).toContain("was decided for generation 1");
     const record = await store.read(seeded.identity);
-    expect(record?.generation).toBe(3);
-    // The stored handle belongs to the last committed conversation: nothing is orphaned.
-    expect(record?.handle).toBe(webChatConversationHandle("handle-3"));
+    expect(record?.generation).toBe(2);
+    expect(record?.handle).toBe(webChatConversationHandle("handle-2"));
+  });
+
+  test("a concurrent new conversation decided for no record is refused before the provider", async () => {
+    const store = createMemoryConversationStore();
+    let created = 0;
+    const driver: WebChatProviderDriver = {
+      id: "chatgpt-web",
+      inspectAccount: async () => ({ authenticated: true, accountFingerprint: "fp-1" }),
+      listModels: async () => [{ id: "model-1", label: "Model 1", text: true }],
+      resolveModel: async () => ({ id: "model-1", label: "Model 1", text: true }),
+      assessConversation: async () => ({ status: "new" }),
+      createConversation: async () => {
+        created += 1;
+        return {
+          key: identityOf().key,
+          providerId: "chatgpt-web",
+          bindingId: webChatAccountBindingId(BINDING),
+          generation: 1,
+          handle: webChatConversationHandle("handle-created")!,
+          status: "new",
+        };
+      },
+      resumeConversation: async input => input.conversation,
+      replayConversation: async () => {
+        throw new Error("a replay was not requested");
+      },
+      health: async () => ({ ok: true }),
+      shutdown: async () => {},
+    };
+
+    const [first, second] = await Promise.all([
+      resolveWebChatContinuation({ store, driver }, request({
+        intent: { kind: "new_conversation", expectedGeneration: 0, reason: "first turn" },
+      })),
+      resolveWebChatContinuation({ store, driver }, request({
+        intent: { kind: "new_conversation", expectedGeneration: 0, reason: "first turn" },
+      })),
+    ]);
+
+    // The provider is asked once, and the loser is refused because it still believes there is no
+    // conversation: no second physical conversation is created without a record.
+    expect(created).toBe(1);
+    const outcomes = [first.outcome, second.outcome].sort();
+    expect(outcomes).toEqual(["failed", "new_conversation"]);
+    const loser = first.outcome === "failed" ? first : second;
+    expect(loser.reason).toContain("was decided for generation 0");
+    const records = await store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]?.generation).toBe(1);
+  });
+
+  test("a creation commit is conditional on the state the provider was given", async () => {
+    const store = createMemoryConversationStore();
+    const identity = identityOf();
+    const driver: WebChatProviderDriver = {
+      id: "chatgpt-web",
+      inspectAccount: async () => ({ authenticated: true, accountFingerprint: "fp-1" }),
+      listModels: async () => [{ id: "model-1", label: "Model 1", text: true }],
+      resolveModel: async () => ({ id: "model-1", label: "Model 1", text: true }),
+      assessConversation: async () => ({ status: "new" }),
+      createConversation: async () => {
+        // Another writer records this affinity while the provider is creating its conversation: the
+        // decision was taken from "no conversation", so a record appearing makes it stale.
+        await store.update(identity, () => ({
+          identity,
+          generation: 1,
+          handle: webChatConversationHandle("handle-external")!,
+          status: "resumable",
+          checkpoint: "confirmed",
+        }));
+        return {
+          key: identity.key,
+          providerId: identity.providerId,
+          bindingId: identity.bindingId,
+          generation: 1,
+          handle: webChatConversationHandle("handle-created")!,
+          status: "new",
+        };
+      },
+      resumeConversation: async input => input.conversation,
+      replayConversation: async () => {
+        throw new Error("a replay was not requested");
+      },
+      health: async () => ({ ok: true }),
+      shutdown: async () => {},
+    };
+
+    await expect(resolveWebChatContinuation({ store, driver }, request({
+      intent: { kind: "new_conversation", expectedGeneration: 0, reason: "first turn" },
+    }))).rejects.toThrow(/changed while the provider was assessing it/);
+    // The other writer's record is intact: the stale decision never overwrote it.
+    expect((await store.read(identity))?.handle).toBe(webChatConversationHandle("handle-external"));
   });
 });

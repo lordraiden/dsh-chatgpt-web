@@ -42,8 +42,25 @@ export type WebChatContinuationOutcome = "exact_resume" | "new_conversation" | "
  */
 export type WebChatContinuationIntent =
   | { readonly kind: "continue" }
-  | { readonly kind: "new_conversation"; readonly reason: string }
-  | { readonly kind: "replay"; readonly reason: string; readonly history: readonly WebChatReplayMessage[] };
+  | {
+    readonly kind: "new_conversation";
+    readonly reason: string;
+    /** The generation the caller believes is current, or 0 when it believes there is none. */
+    readonly expectedGeneration: number;
+  }
+  | {
+    readonly kind: "replay";
+    readonly reason: string;
+    readonly history: readonly WebChatReplayMessage[];
+    /**
+     * The generation the caller believes it is replacing, or 0 when it believes the affinity has no
+     * recorded conversation.
+     *
+     * A replay is an explicit replacement: naming what is being replaced is what makes a decision
+     * taken from a superseded state refusable instead of silently replacing a newer conversation.
+     */
+    readonly expectedGeneration: number;
+  };
 
 /** Everything the core needs to decide continuity for one turn. */
 export interface WebChatContinuationRequest {
@@ -166,6 +183,38 @@ export async function confirmWebChatConversation(
   });
 }
 
+/**
+ * Refuse an explicit intent that was decided from a state that is no longer current.
+ *
+ * The check happens before the provider is asked for anything, so a request based on superseded state
+ * cannot create a physical conversation that would then be refused a record.
+ */
+function explicitIntentStale(
+  identity: WebChatConversationIdentity,
+  stored: WebChatConversationRecord | undefined,
+  expectedGeneration: number,
+  what: string,
+): WebChatContinuationPlan | undefined {
+  if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) {
+    return failure(
+      identity,
+      "CONVERSATION_STATE_MISMATCH",
+      `A ${what} must name the conversation generation it acts on (0 when there is none)`,
+      stored,
+    );
+  }
+  const current = stored?.generation ?? 0;
+  if (current !== expectedGeneration) {
+    return failure(
+      identity,
+      "CONVERSATION_STATE_MISMATCH",
+      `The ${what} was decided for generation ${expectedGeneration}, but the current generation is ${current}`,
+      stored,
+    );
+  }
+  return undefined;
+}
+
 /** A failed decision, never a replacement conversation. */
 function failure(
   identity: WebChatConversationIdentity,
@@ -273,6 +322,8 @@ async function resolveWebChatContinuationLocked(
   // exactly how a lost or unreachable conversation is left behind, so a refusing verdict does not
   // block it.
   if (request.intent.kind === "new_conversation") {
+    const stale = explicitIntentStale(identity, stored, request.intent.expectedGeneration, "new conversation");
+    if (stale) return stale;
     return startNewConversation(deps, identity, request, stored, request.intent.reason);
   }
   if (request.intent.kind === "replay") {
@@ -284,6 +335,8 @@ async function resolveWebChatContinuationLocked(
         stored,
       );
     }
+    const stale = explicitIntentStale(identity, stored, request.intent.expectedGeneration, "replay");
+    if (stale) return stale;
     return replayConversation(deps, identity, request, stored, request.intent.reason);
   }
 
@@ -380,8 +433,10 @@ function assertUnchangedSinceAssessment(
   current: WebChatConversationRecord | undefined,
   assessed: WebChatConversationRecord | undefined,
 ): void {
-  if (!assessed) return;
-  if (!current || current.revision !== assessed.revision) {
+  // A record that appeared (or disappeared) while the provider was asked is a change too: the
+  // decision was taken from the state that was read, and it is only committed while that state is
+  // still the current one.
+  if ((current?.revision ?? 0) !== (assessed?.revision ?? 0)) {
     throw webChatError(
       "CONVERSATION_STATE_MISMATCH",
       "The conversation changed while the provider was assessing it; the decision is not applied",
@@ -457,7 +512,10 @@ async function startNewConversation(
       stored,
     );
   }
-  const record = await deps.store.update(identity, () => draftFromConversation(created));
+  const record = await deps.store.update(identity, (current) => {
+    assertUnchangedSinceAssessment(current, stored);
+    return draftFromConversation(created);
+  });
   return {
     outcome: "new_conversation",
     identity,
@@ -496,7 +554,10 @@ async function replayConversation(
       stored,
     );
   }
-  const record = await deps.store.update(identity, () => draftFromConversation(replayed));
+  const record = await deps.store.update(identity, (current) => {
+    assertUnchangedSinceAssessment(current, stored);
+    return draftFromConversation(replayed);
+  });
   return {
     outcome: "replay",
     identity,
