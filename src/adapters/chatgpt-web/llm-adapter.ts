@@ -37,7 +37,8 @@ import {
   requireChatGptWebRoute,
 } from "../../chatgpt-web-authority";
 import type { WebChatProviderDriver } from "../../web-chat/core";
-import { loadConfig, providerConfig } from "../../config";
+import { resolveWebChatProviderConfig } from "../../web-chat/host/dsh-integration";
+import { loadConfig, providerConfig, type AppConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../lib/compaction";
 import { projectConversationalMessages } from "../../conversation-projection";
 import {
@@ -86,7 +87,7 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 
   constructor(deps: LlmAdapterDeps = {}) {
     super();
-    this.loadProvider = deps.loadProvider ?? (() => providerConfig(loadConfig()));
+    this.loadProvider = deps.loadProvider ?? (() => effectiveChatGptWebProviderConfig(loadConfig()));
     this.createBackend = deps.createBackend ?? (provider => createChatGptWebAdapter(provider));
     this.resolveNativeDshTransport = deps.resolveNativeDshTransport;
     this.resolveNativeDshContext = deps.resolveNativeDshContext ?? ((options, turnId, threadId) => ({
@@ -272,6 +273,30 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 /** Resolve the resolvable model routes for a provider configuration. */
 function requireRouteList(provider: ReturnType<typeof providerConfig>) {
   return availableChatGptWebRoutes(createChatGptWebRouteAuthorityFromProvider(provider));
+}
+
+/**
+ * The provider configuration this deployment actually uses (issue #193).
+ *
+ * A provider-scoped WebChat block (`webChat.providers["chatgpt-web"]`) replaces the historical flat
+ * ChatGPT block as a whole — the precedence the host boundary already states, and the reason no
+ * field-by-field merge happens here. An installation without `webChat`, or a payload that is not a
+ * configuration object, therefore keeps exactly today's flat configuration: the compatibility
+ * guarantee is that the effective configuration equals `providerConfig(config)` unchanged.
+ */
+export function effectiveChatGptWebProviderConfig(config: AppConfig): ReturnType<typeof providerConfig> {
+  const provider = providerConfig(config);
+  const scoped = resolveWebChatProviderConfig(
+    { webChat: config.webChat, chatgptWeb: provider.chatgptWeb },
+    CHATGPT_WEB_PROVIDER_ID,
+  );
+  if (scoped === provider.chatgptWeb || !scoped || typeof scoped !== "object" || Array.isArray(scoped)) {
+    return provider;
+  }
+  return {
+    ...provider,
+    chatgptWeb: scoped as NonNullable<ReturnType<typeof providerConfig>["chatgptWeb"]>,
+  };
 }
 
 function errorMessage(value: unknown): string {

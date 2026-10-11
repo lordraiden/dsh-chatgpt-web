@@ -213,6 +213,21 @@ export interface AppConfig {
   controlToken: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;
+  /**
+   * WebChat host surface (issue #193): provider-scoped provider configuration and the durable
+   * continuity location.
+   *
+   * The shape is inline on purpose: the configuration module must not import the host boundary (that
+   * would be a cycle) and the host boundary accepts this structural shape, so the two can never
+   * disagree about what a serialized configuration means. Absent means exactly today's behavior: the
+   * historical flat ChatGPT configuration is the effective one.
+   */
+  webChat?: {
+    /** Provider-scoped configuration, keyed by provider route id. */
+    providers?: Record<string, unknown>;
+    /** Durable continuity location; omit to keep continuity in memory. */
+    conversationStorePath?: string;
+  };
   tunnel?: TunnelConfig;
   automaticTunnel?: TunnelConfig;
   manualTunnel?: TunnelConfig;
@@ -679,6 +694,27 @@ function parseConfig(value: unknown, path: string): AppConfig {
   }
   if (parsed.tuning !== undefined) {
     parsed.tuning = validateChatGptWebTuning(parsed.tuning, path);
+  }
+  if (parsed.webChat !== undefined) {
+    const webChat = parsed.webChat as unknown;
+    if (!webChat || typeof webChat !== "object" || Array.isArray(webChat)) {
+      throw new Error(`Invalid webChat in ${path}`);
+    }
+    const record = webChat as Record<string, unknown>;
+    if (record.providers !== undefined) {
+      if (!record.providers || typeof record.providers !== "object" || Array.isArray(record.providers)) {
+        throw new Error(`Invalid webChat.providers in ${path}`);
+      }
+      for (const [providerId, provider] of Object.entries(record.providers)) {
+        if (!providerId.trim() || !provider || typeof provider !== "object" || Array.isArray(provider)) {
+          throw new Error(`Invalid webChat.providers.${providerId || "(empty)"} in ${path}`);
+        }
+      }
+    }
+    if (record.conversationStorePath !== undefined
+      && (typeof record.conversationStorePath !== "string" || !record.conversationStorePath.trim())) {
+      throw new Error(`Invalid webChat.conversationStorePath in ${path}`);
+    }
   }
   const solAvailable = parsed.solAvailable === true;
   const proAvailable = parsed.proAvailable === true;
