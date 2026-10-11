@@ -472,6 +472,21 @@ export function resolveChatGptCapabilitySnapshotForTurn(
   });
 }
 
+/**
+ * The effective configuration could not be read, so no continuity backend can be resolved.
+ *
+ * This is deliberately *not* swallowed into an in-memory store: durability that silently degrades to
+ * process memory would let a restart look like continuity loss the deployment never accepted, and a
+ * conversation record would then be rebuilt (or refused) against a configuration the process could
+ * not even read. The failure is typed so the shutdown/call boundary can report it.
+ */
+export class ChatGptWebNativeContinuityConfigError extends Error {
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "ChatGptWebNativeContinuityConfigError";
+  }
+}
+
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 /**
  * The WebChat conversation store the native ChatGPT path uses, created at first use (issue #193).
@@ -479,13 +494,17 @@ export function resolveChatGptCapabilitySnapshotForTurn(
  * The store is owned by the process — exactly like the turn-session registry — and resolved from the
  * **effective configuration at the point of use**, never at import time: importing this module must
  * not touch the filesystem, and an installation that configures
- * `webChat.conversationStorePath` gets continuity that survives a restart. Memory is the explicit,
- * documented fallback, never an invented location:
+ * `webChat.conversationStorePath` gets continuity that survives a restart.
  *
- * - a readable configuration without a configured path keeps continuity in memory (the host
- *   boundary's documented default for that backend);
- * - without a readable configuration there is no configured durable location at all, so continuity
- *   stays in memory and nothing is fabricated on disk.
+ * The two outcomes are explicit and never inferred from each other:
+ *
+ * - a **readable** configuration without a configured path keeps continuity in memory: that is the
+ *   host boundary's documented default for that backend, not a degradation, and nothing is
+ *   fabricated on disk;
+ * - a configuration that is **unreadable or invalid** is a typed failure
+ *   ({@link ChatGptWebNativeContinuityConfigError}). Continuity is *not* silently moved to memory:
+ *   the process cannot know which conversations an operator meant to make durable, and a durability
+ *   promise must fail closed rather than pretend the deployment accepted memory-only continuity.
  *
  * The file backend owns **one writer per file and process**, so the process keeps exactly one store per
  * effective location: every adapter instance of this process resolves the same store, and a second
@@ -497,38 +516,53 @@ const nativeContinuityStores = new Map<string, WebChatConversationStore>();
  * Resolve the native continuity store for the effective configuration.
  *
  * @param config - the effective application configuration; omitted resolves `loadConfig()`.
- * @returns the process-owned store for that configuration's durable location.
+ * @returns the process-owned store for that configuration's durable location, or the memory backend
+ *   when the configuration is readable and configures no durable location.
+ * @throws {ChatGptWebNativeContinuityConfigError} when the configuration cannot be loaded.
+ * @throws {WebChatConversationStoreUnavailableError} when the configured durable location cannot be
+ *   opened (for example because this process already owns that file).
  */
 export function resolveNativeChatGptContinuityStore(config?: AppConfig): WebChatConversationStore {
-  let effective = config;
-  if (!effective) {
-    try {
-      effective = loadConfig();
-    } catch (error) {
-      console.warn(
-        `[chatgpt-web] native continuity stays in memory: the application configuration is unreadable ${safeErrorDescriptor(error)}`,
-      );
-      effective = undefined;
-    }
-  }
-  const path = effective?.webChat?.conversationStorePath?.trim();
+  const effective = config ?? loadNativeContinuityConfig();
+  const path = effective.webChat?.conversationStorePath?.trim();
   const key = path && path.length > 0 ? resolve(path) : "";
   const existing = nativeContinuityStores.get(key);
   if (existing) return existing;
-  const provider = effective ? providerConfig(effective) : undefined;
+  const provider = providerConfig(effective);
   const store = createWebChatConversationStore({
-    ...(effective?.webChat !== undefined ? { webChat: effective.webChat } : {}),
-    ...(provider?.chatgptWeb !== undefined ? { chatgptWeb: provider.chatgptWeb } : {}),
+    ...(effective.webChat !== undefined ? { webChat: effective.webChat } : {}),
+    ...(provider.chatgptWeb !== undefined ? { chatgptWeb: provider.chatgptWeb } : {}),
   });
   nativeContinuityStores.set(key, store);
   return store;
+}
+
+/** Load the effective configuration, turning an unreadable one into the typed continuity failure. */
+function loadNativeContinuityConfig(): AppConfig {
+  try {
+    return loadConfig();
+  } catch (error) {
+    throw new ChatGptWebNativeContinuityConfigError(
+      "The ChatGPT Web native continuity store cannot be resolved: the application configuration is "
+      + `unreadable or invalid (${safeErrorDescriptor(error)}). Fix the configuration instead of `
+      + "falling back to an in-memory conversation store.",
+      { cause: error },
+    );
+  }
 }
 
 /**
  * Release the process-owned continuity stores.
  *
  * The durable backend owns an open file and a writer slot, so the sidecar/plugin shutdown path
- * releases them here; releasing is idempotent and best effort, because the process is going away.
+ * releases them here. Taking the map first makes the release **idempotent**: a concurrent or repeated
+ * shutdown sees an empty map and releases nothing twice.
+ *
+ * A store is never closed while an operation is still in flight: each backend's own `close()` drains
+ * the queue it serialized those operations on (see `conversation-store-file.ts`), so a committed
+ * update is already on disk when its file is released and the next runtime can open it. The release
+ * itself stays best effort — the process is going away — so a failing `close()` is reported by the
+ * backend and never turns into an unhandled rejection.
  */
 export async function closeNativeChatGptContinuityStores(): Promise<void> {
   const stores = [...nativeContinuityStores.values()];
