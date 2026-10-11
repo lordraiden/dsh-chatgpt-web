@@ -2341,6 +2341,7 @@ export class ChatGptBrowserWorker {
       }
     } finally {
       this.retainedSurfaces.release(conversationKey);
+      this.retainedSurfaces.settle(conversationKey, "fulfilled");
     }
   }
 
@@ -4643,7 +4644,7 @@ export class ChatGptBrowserWorker {
       && this.config.browserHost === "managed-chrome"
       && turn.conversationKey !== undefined
       && (turn.retainConversation === true || turn.requireRetainedConversation === true);
-    const managedReuse = managedRetained && this.retainedSurfaces.has(turn.conversationKey!);
+    const managedReuse = managedRetained && this.retainedSurfaces.isReusable(turn.conversationKey!);
     // Physical reuse: continue on the existing page (resume prompt, no root navigation). The
     // Launcher lease reuses the conversation its handshake owns; a managed-chrome retained
     // surface reuses only the physical page.
@@ -4790,6 +4791,8 @@ export class ChatGptBrowserWorker {
                 // A previously retained surface already carries a conversation: keep it and only
                 // clear the busy flag, so the next turn reuses it instead of starting a new one.
                 this.retainedSurfaces.release(turn.conversationKey!);
+        this.retainedSurfaces.settle(turn.conversationKey!, "fulfilled");
+                this.retainedSurfaces.settle(turn.conversationKey!, "fulfilled");
               }
               throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
             }
