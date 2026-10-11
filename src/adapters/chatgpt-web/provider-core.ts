@@ -650,6 +650,9 @@ export class ProviderTurnLifecycle {
     error?: unknown,
   ): void {
     if (this.physicalSettled) return;
+    // The core records what the provider established, in the same step as the local fields, so the
+    // two can never describe different outcomes.
+    this.recordCoreSettlement(outcome);
     this.physicalSettled = true;
     this.physicalSettlementOutcome = outcome;
     if (outcome === "rejected") {
@@ -774,27 +777,29 @@ export class ChatGptWebProviderCore {
     const attempts = budget?.attempts ?? 0;
     // Provider policy that is not the core's: a budget older than its TTL is forgotten, so a much
     // later reconnect starts from a fresh allowance.
+    // An expired budget starts a fresh allowance (provider policy), but the decision itself still
+    // goes through the core below: an expired counter is not evidence that nothing was submitted.
     if (budget && budget.lastRetryAt > 0 && now - budget.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
       this.retryBudgets.delete(executionKey);
-      return { allowed: true, attempt: 1, maxAttempts };
     }
+    const attemptsAfterTtl = this.retryBudgetIfPresent(executionKey)?.attempts ?? 0;
     // The decision itself is the core's (issue #192): one retry authority, not two.
     const decision = decideWebChatRetry({
       snapshot: {
         ...turn.coreSnapshot(),
-        submits: attempts,
+        submits: attemptsAfterTtl,
         maxSubmits: maxAttempts,
       },
     });
     if (!decision.allowed) {
       return {
         allowed: false,
-        attempt: attempts,
+        attempt: attemptsAfterTtl,
         maxAttempts,
         reason: CORE_RETRY_REASONS[decision.reason ?? "policy"],
       };
     }
-    return { allowed: true, attempt: attempts + 1, maxAttempts };
+    return { allowed: true, attempt: attemptsAfterTtl + 1, maxAttempts };
   }
 
   recordRetryAttempt(

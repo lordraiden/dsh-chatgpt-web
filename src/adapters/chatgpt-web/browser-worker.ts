@@ -4791,7 +4791,6 @@ export class ChatGptBrowserWorker {
                 // A previously retained surface already carries a conversation: keep it and only
                 // clear the busy flag, so the next turn reuses it instead of starting a new one.
                 this.retainedSurfaces.release(turn.conversationKey!);
-        this.retainedSurfaces.settle(turn.conversationKey!, "fulfilled");
                 this.retainedSurfaces.settle(turn.conversationKey!, "fulfilled");
               }
               throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
@@ -5502,6 +5501,7 @@ export class ChatGptBrowserWorker {
       // the next turn of the same conversationKey can continue, keeping the page itself open.
       if (managedRetained) {
         this.retainedSurfaces.release(turn.conversationKey!);
+        this.retainedSurfaces.settle(turn.conversationKey!, "fulfilled");
         // A surface that this turn created is discarded only if the send never activated: before
         // that boundary ChatGPT has seen nothing, so no conversation exists to preserve. Once the
         // send is activated (or submission is proven), irreversible activity exists and a later
