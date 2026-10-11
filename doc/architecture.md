@@ -16,7 +16,7 @@ The key design decision is:
 
 > **Abstract the logical conversation and text exchange, not the browser page.**
 
-A provider may use a retained web page, a browser network session, a private web endpoint reached through an authenticated browser, or a hybrid of these. Those are provider transport decisions. The shared core must not depend on any one of them.
+All providers in this project are consumed through their user-facing websites in an authenticated Chrome/Chromium browser controlled by Playwright. Provider-specific UI mechanics remain inside each driver; the shared core abstracts logical conversations and text exchanges rather than browser details. This is a product constraint: do not call public, private, or undocumented provider APIs, website-internal HTTP endpoints, or WebSockets to submit prompts, discover models, continue conversations, or obtain generated answers. Do not fall back to such paths when UI automation is difficult.
 
 This document replaces the previous ChatGPT-centric architecture. Older design sections and issue mappings that were built around a single ChatGPTWebProviderCore, ChatGPT-native MCP/capability execution, or the Responses server as an architectural concern are historical and must not be used as the basis for new provider work.
 
@@ -41,7 +41,7 @@ The target architecture covers:
 - submission/stream/completion state;
 - authentication/session health;
 - provider-neutral error normalization;
-- provider-specific browser or network transport;
+- provider-specific Chrome/Playwright website UI interaction;
 - provider conformance tests.
 
 The first target services are:
@@ -83,7 +83,7 @@ The architecture must provide:
 4. Provider-native continuation state as an opaque provider-owned handle.
 5. No silent conversation fork after a continuity failure.
 6. No automatic duplicate submission after an ambiguous send.
-7. Provider transport freedom: DOM, browser-network, hybrid, or another web-native mechanism.
+7. Provider-specific Playwright-driven website UI interaction, behind a provider-neutral semantic exchange contract.
 8. Provider-specific authentication and model behavior without contaminating the core.
 9. Explicit separation between:
    - DSH session identity,
@@ -217,11 +217,11 @@ The shared core never parses:
 
 A logical provider conversation may be implemented through:
 
-- a retained page;
-- a new page in the same authenticated browser context;
-- browser-network requests;
-- a browser context plus provider session identifiers;
-- a provider API exposed only through the authenticated product session.
+- a retained Playwright page;
+- a new page in the same authenticated Chrome context;
+- a provider website conversation reached and continued through its rendered UI.
+
+The driver may keep provider-specific continuity data as opaque state, but it must acquire and use it through the supported website UI interaction path rather than by calling or parsing the site's internal network protocol.
 
 The common core therefore stores an **opaque conversation handle**, not a Page.
 
@@ -385,10 +385,9 @@ The core stores and passes this state. It does not interpret provider fields.
 A provider may hold a physical resource such as:
 
 - Playwright page;
-- browser context;
+- authenticated Chrome browser context/profile;
 - CDP session;
-- authenticated web session;
-- provider-network connection.
+- provider website session state.
 
 The core sees this only through a provider-owned resource/lease boundary.
 
@@ -921,78 +920,55 @@ The common core should model this as continuation compatibility rather than as a
 
 ---
 
-## 12. Transport architecture
+## 12. Provider website interaction architecture
 
-The transport layer is intentionally more flexible than the old browser-only design.
+All supported providers are consumed through their customer-facing website UI in authenticated Chrome/Chromium controlled by Playwright. This is a project constraint, not a transport option chosen independently by each provider.
 
-### 12.1 DOM transport
+The browser naturally performs network traffic to load and operate the website, but the plugin must interact through the rendered UI. It must not call or replay public, private, or undocumented provider model APIs, website-internal HTTP endpoints, WebSockets, or direct network protocols. It must not parse internal network responses as an alternate source of model output, model catalogue data, or continuation authority. There is no API/network fallback when UI automation becomes difficult.
 
-The provider uses the product UI directly.
+### 12.1 Playwright UI transport
 
-~~~text
-browser page
-   |
-composer
-   |
-send
-   |
-visible response stream
-~~~
-
-Suitable when:
-
-- the DOM is the only stable product surface;
-- authentication is easiest through the UI;
-- web requests are inaccessible or too volatile to reproduce.
-
-ChatGPT currently uses this class of transport.
-
-### 12.2 Browser-network transport
-
-The provider uses the authenticated browser session as the trust/session anchor but exchanges text through the web application's network surface.
+The provider driver maps the shared semantic exchange to the provider's visible product UI:
 
 ~~~text
-authenticated browser context
+authenticated Chrome/Chromium context
           |
-          +--> cookies / session state
+          v
+provider website UI
           |
-          +--> provider web request
+          +--> inspect visible model choices
           |
-          +--> streamed response
+          +--> enter text through the composer
+          |
+          +--> activate the visible Send action
+          |
+          +--> observe rendered response text and completion state
 ~~~
 
-This is useful when:
+A driver should use stable accessible roles/names and visible UI state where available, with provider-local selectors as necessary. It owns provider-specific details such as navigation, the model picker, composer controls, submit activation, response streaming/completion detection, and conversation continuation.
 
-- the web UI's internal request protocol is more stable than DOM scraping;
-- conversation IDs/cursors are explicit in web requests;
-- the browser session provides authentication and anti-bot state.
+Model discovery for the Advisor and normal provider integration must reflect the models available through the provider's website UI in the authenticated account. Do not substitute the provider's separate API model catalogue or assume that API model IDs, pricing, limits, or capabilities match the website product.
 
-Qwen and DeepSeek have current independent implementations following variants of this model.
+When the website requires interactive login, access verification, or a challenge, follow the provider's supported user-facing browser flow. Do not bypass access controls or replace the UI path with undocumented endpoints.
 
-### 12.3 Hybrid transport
+### 12.2 Provider-local browser ownership
 
-A provider may:
+Each driver owns its page interaction and knows the UI for its own website. Shared browser infrastructure may help manage Chrome startup, configured profiles, contexts, CDP, and lifecycle, but it must not become a giant universal provider driver.
 
-1. authenticate through the browser;
-2. maintain the browser profile/context;
-3. execute text exchange through a network path;
-4. fall back to DOM interaction only where the network path cannot safely express an operation.
+Drivers may differ in UI structure and conversation continuation while using the same semantic core contract. Provider-private selectors, visible model labels, DOM observations, and opaque continuation details remain provider-local.
 
-This must remain provider-local.
-
-### 12.4 What the core must never assume
+### 12.3 What the core must never assume
 
 The core must never require:
 
 - a Playwright Page;
-- CSS selectors;
+- CSS selectors or accessible names;
 - an editable composer;
 - browser DOM traversal;
-- a specific web endpoint;
-- a provider's private JSON schema.
+- a specific website layout;
+- a provider's private JSON schema or network protocol.
 
-The core sees only semantic exchange operations.
-
+The core sees only semantic exchange operations. The Playwright requirement applies to provider drivers and their transport boundary, not to the provider-neutral core.
 ---
 
 ## 13. Authentication and provider sessions
@@ -1298,7 +1274,7 @@ src/
         models.ts
         conversation.ts
         transport/
-          browser-network.ts
+          playwright-ui.ts
           ...
       deepseek/
         driver.ts
@@ -1306,7 +1282,7 @@ src/
         models.ts
         conversation.ts
         transport/
-          browser-network.ts
+          playwright-ui.ts
           ...
 ~~~
 
@@ -1413,16 +1389,14 @@ WebChat core
     v
 TextExchangeTransport
     |
-    +--> provider transport
+    +--> provider-specific Playwright UI driver
             |
-            +--> DOM
-            +--> browser-network
-            +--> hybrid
+            +--> ChatGPT website UI
+            +--> Qwen website UI
+            +--> DeepSeek website UI
 ~~~
 
-The current ChatGPT surface transport then becomes one implementation of the provider transport seam.
-
-It must not define the universal Web Chat interface.
+The shared interface remains semantic and provider-neutral. Every consumer-web driver uses Chrome/Playwright to operate its own website UI; that requirement does not make the core depend on DOM structure or Playwright types. The current ChatGPT surface transport becomes one implementation of the provider UI seam, not the universal provider implementation.
 
 ---
 
@@ -1476,29 +1450,25 @@ The migration must preserve current ChatGPT continuity before adding other provi
 
 The driver should be designed to accommodate:
 
-- authenticated browser session/profile state;
-- provider conversation ID;
-- provider parent/response cursor;
-- web-network exchange where useful;
-- DOM fallback only if required;
-- provider anti-bot/session requirements;
-- provider-specific model/mode selection.
+- authenticated Chrome profile/context state;
+- conversation creation and continuation through the visible Qwen Chat UI;
+- provider-specific model choices discovered from the website's model picker;
+- rendered response streaming/completion and UI-specific failure detection;
+- provider access-verification and session requirements.
 
-Current independent work against chat.qwen.ai demonstrates server-side chat_id and parent/response chaining, while separate recon work reports that automated browser sessions can encounter the site's access-verification layer. This reinforces the architectural rule that session bootstrap, browser profile choice, anti-bot handling and network transport remain Qwen-local implementation decisions.
+The driver must not call Qwen's public API or replay website-internal endpoints. Any server-side conversation identifiers are an implementation detail; the supported interaction path for this project remains the website UI controlled by Playwright.
 
 ### 21.3 DeepSeek driver
 
 The driver should be designed to accommodate:
 
-- authenticated web session;
-- provider conversation/session ID;
-- provider message-parent lineage;
-- streamed web responses;
-- browser-network or DOM transport;
-- current product modes such as reasoning/non-reasoning;
-- web-session protections that may change over time.
+- authenticated Chrome profile/context state;
+- conversation creation and continuation through the visible DeepSeek Chat UI;
+- product model choices discovered through its website model picker;
+- rendered response streaming/completion and UI-specific failure detection;
+- web-session protections and interactive verification that may change over time.
 
-DeepSeek's current web service is explicitly separate from the API product surface, even though the Web and API model families evolve rapidly in parallel. API model IDs, API request formats, API pricing and API context limits therefore must not be used as the Web provider architecture. The DeepSeek driver must establish current Web model availability and Web session behavior independently.
+DeepSeek Chat is a separate product from its API. The driver must not call either the public DeepSeek API or undocumented website endpoints. API model IDs, request formats, pricing, and limits must not be treated as the website product catalogue or contract.
 
 ---
 
@@ -1704,17 +1674,19 @@ Reason:
 - private contracts change;
 - the common architecture would become reverse-engineering debt.
 
-Private web endpoints may be used inside an individual provider driver.
+Even inside an individual provider driver, this project must not call or replay public/private provider APIs or website-internal endpoints. Operate the consumer-facing website with Chrome/Playwright instead.
 
-### 26.4 Make DOM interaction the common protocol
+### 26.4 Put DOM selectors and Playwright objects in the common core
 
 Rejected.
 
 Reason:
 
-- some providers are better represented by their web network exchange;
-- DOM structure is unstable and service-specific;
-- conversation continuity may live outside the page.
+- each provider has different UI structure and interaction mechanics;
+- DOM and Playwright types would contaminate provider-neutral contracts;
+- conversation continuity is a logical provider concern, not a page identity.
+
+The project nevertheless requires each provider-specific driver to consume the consumer website through Chrome/Playwright UI. The distinction is that this is a **driver/transport constraint**, not a common-core protocol.
 
 ### 26.5 Make the provider conversation ID the DSH conversation ID
 
@@ -1994,14 +1966,11 @@ Provider Driver
   = provider transport selection
 
 Provider Transport
-  = DOM
-  = browser-network
-  = hybrid
-  = provider-specific response parsing
-  = provider-specific readiness/submission/completion detection
+  = provider-specific Chrome/Playwright website UI
+  = visible model selection, composer, send action, rendered response and completion detection
 
 Browser Runtime
-  = optional infrastructure for profiles, contexts, pages, CDP and lifecycle
+  = shared infrastructure for configured Chrome profiles, contexts, pages, CDP and lifecycle
 ~~~
 
 The three fundamental invariants are:
@@ -2035,7 +2004,7 @@ A correct implementation therefore looks like:
       ChatGPT           Qwen           DeepSeek
        driver           driver           driver
           |               |                |
-       DOM/Browser     Network/Browser   Network/Browser
+       Playwright UI  Playwright UI     Playwright UI
           |               |                |
           v               v                v
        Web Chat         Web Chat         Web Chat
