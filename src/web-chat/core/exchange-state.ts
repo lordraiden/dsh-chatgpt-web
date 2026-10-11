@@ -80,8 +80,9 @@ const TRANSITIONS: Record<WebChatExchangeState, readonly WebChatExchangeState[]>
   CANCELLED: [],
   FAILED: [],
   // Ambiguity is terminal for the *outcome* of this exchange, but the provider may still establish
-  // how the turn ended: that resolution is the only movement out of it.
-  SUBMISSION_AMBIGUOUS: ["COMPLETED", "FAILED", "CANCELLED"],
+  // what happened: a late confirmation (`SUBMITTED`) or a definite end (`COMPLETED`/`FAILED`/
+  // `CANCELLED`) are the only movements out of it.
+  SUBMISSION_AMBIGUOUS: ["SUBMITTED", "COMPLETED", "FAILED", "CANCELLED"],
 };
 
 const RECOVERY_RANK: Record<WebChatContinuationOutcome, number> = {
@@ -268,6 +269,13 @@ export class WebChatExchangeLifecycle {
 
   /** Submission is confirmed: from here an automatic duplicate submission is forbidden. */
   markSubmitted(): void {
+    // A confirmation can arrive after the provider admitted the send was already activated: that is
+    // the ambiguity resolving into the confirmed case, not a new submission.
+    if (this.state === "SUBMISSION_AMBIGUOUS") {
+      this.phase = "accepted";
+      this.transition("SUBMITTED");
+      return;
+    }
     this.assertMutable();
     if (this.phase === "prepared") this.phase = "send_activated";
     if (this.state === "CREATED" || this.state === "PREPARING" || this.state === "TRANSPORT_READY") {
@@ -332,6 +340,14 @@ export class WebChatExchangeLifecycle {
       : outcome === "cancelled"
         ? "CANCELLED"
         : "FAILED";
+    if (this.retired) {
+      // Retirement supersedes the state machine: the exchange is already written off (its physical
+      // settlement could not be proven), and publishing the logical outcome it finally reached is
+      // the one thing left to record. The state stays as it was; `retired` and `logical` are what a
+      // consumer reads.
+      this.touch();
+      return;
+    }
     if (this.state !== target) {
       if (TERMINAL_STATES.includes(this.state) && this.state !== "SUBMISSION_AMBIGUOUS") {
         throw webChatError("CONVERSATION_STATE_MISMATCH", `Cannot settle ${this.state} as ${outcome}`);
@@ -438,7 +454,7 @@ export class WebChatExchangeLifecycle {
     }
     // The one way out of the ambiguous outcome: the provider finally established how it ended.
     const leavingAmbiguity = this.state === "SUBMISSION_AMBIGUOUS"
-      && (next === "COMPLETED" || next === "FAILED" || next === "CANCELLED");
+      && (next === "SUBMITTED" || next === "COMPLETED" || next === "FAILED" || next === "CANCELLED");
     if (TERMINAL_STATES.includes(this.state) && !leavingAmbiguity) {
       throw webChatError("CONVERSATION_STATE_MISMATCH", `The exchange is ${this.state.toLowerCase()} and cannot change state`);
     }

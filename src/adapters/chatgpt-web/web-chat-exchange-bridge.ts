@@ -25,20 +25,54 @@ import type {
   SubmissionPhase,
 } from "./provider-core";
 
-/** The ChatGPT turn state that corresponds to one core exchange state. */
-const CORE_STATE_BY_PROVIDER_STATE: Readonly<Record<ProviderTurnState, WebChatExchangeState>> = {
-  PREPARING: "PREPARING",
-  LEASED: "PREPARING",
-  SURFACE_READY: "TRANSPORT_READY",
-  SUBMITTED: "SUBMITTED",
-  RUNNING: "STREAMING",
-  SETTLING: "COMPLETED",
-  RETIRED: "COMPLETED",
-};
+/**
+ * The facts the ChatGPT lifecycle actually holds.
+ *
+ * Its state alone cannot express the shared exchange: `SUBMITTED` means "confirmed" or "only
+ * activated" depending on the submission phase, and `SETTLING`/`RETIRED` say nothing about how the
+ * turn ended. The projection therefore reads state, submission phase and both outcomes together.
+ */
+export interface ChatGptWebChatExchangeFacts {
+  readonly state: ProviderTurnState;
+  readonly submission: SubmissionPhase;
+  readonly logicalOutcome: LogicalSettlementOutcome;
+  readonly physicalOutcome: PhysicalSettlementOutcome;
+}
 
-/** The core exchange state for one ChatGPT turn state. */
-export function chatGptWebChatExchangeStateOf(state: ProviderTurnState): WebChatExchangeState {
-  return CORE_STATE_BY_PROVIDER_STATE[state];
+/** The core exchange state for the ChatGPT lifecycle facts. */
+export function chatGptWebChatExchangeStateOf(facts: ChatGptWebChatExchangeFacts): WebChatExchangeState {
+  /** How the end of the turn reads in the core: the logical outcome decides, and an outcome that was
+   * never published stays explicit instead of being invented. */
+  const atEnd = (): WebChatExchangeState => {
+    switch (facts.logicalOutcome) {
+      case "completed":
+        return "COMPLETED";
+      case "cancelled":
+        return "CANCELLED";
+      case "failed":
+        return "FAILED";
+      default:
+        return "SUBMISSION_AMBIGUOUS";
+    }
+  };
+  switch (facts.state) {
+    case "PREPARING":
+    case "LEASED":
+      return "PREPARING";
+    case "SURFACE_READY":
+      return "TRANSPORT_READY";
+    case "SUBMITTED":
+      if (facts.submission === "accepted") return "SUBMITTED";
+      if (facts.submission === "send_activated") return "SUBMISSION_AMBIGUOUS";
+      return "SUBMITTING";
+    case "RUNNING":
+      return "STREAMING";
+    case "SETTLING":
+    case "RETIRED":
+      return atEnd();
+    default:
+      return "CREATED";
+  }
 }
 
 /** The submission phases are the same vocabulary; this validates rather than translates. */
@@ -84,9 +118,14 @@ export function chatGptWebChatLeaseShapeOf(observation: {
   readonly present: boolean;
   readonly busy: boolean;
   readonly lost: boolean;
-}): { readonly leased: boolean; readonly settling: boolean; readonly retired: boolean } {
-  if (observation.lost) return { leased: false, settling: false, retired: true };
-  if (observation.busy) return { leased: true, settling: false, retired: false };
-  if (observation.present) return { leased: false, settling: false, retired: false };
-  return { leased: false, settling: false, retired: false };
+  /** Whether the physical settlement of the operation that held it has been published. */
+  readonly settled: boolean;
+}): { readonly leased: boolean; readonly settling: boolean; readonly settled: boolean; readonly retired: boolean } {
+  if (observation.lost) return { leased: false, settling: false, settled: false, retired: true };
+  if (observation.busy) return { leased: true, settling: false, settled: observation.settled, retired: false };
+  if (observation.present) {
+    // Present and free of an operation, but not reusable until its settlement is known.
+    return { leased: false, settling: !observation.settled, settled: observation.settled, retired: false };
+  }
+  return { leased: false, settling: false, settled: false, retired: false };
 }

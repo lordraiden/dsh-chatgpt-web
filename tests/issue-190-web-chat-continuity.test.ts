@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import { RetainedSurfaceRegistry } from "../src/adapters/chatgpt-web/retained-surface";
-import { chatGptWebChatAffinity } from "../src/adapters/chatgpt-web/web-chat-bridge";
+import { chatGptWebChatAffinity, chatGptWebChatTurnIdentity } from "../src/adapters/chatgpt-web/web-chat-bridge";
 import {
   assertCurrentWebChatGeneration,
   assertNoWebChatSecrets,
@@ -181,6 +181,7 @@ describe("issue #190 — affinity identity", () => {
       bindingId: webChatAccountBindingId(BINDING),
       namespace: "dsh-chatgpt-web",
     });
+    const canonicalTurnAffinity = { providerId: "chatgpt-web", bindingId: webChatAccountBindingId(BINDING), namespace: "dsh-chatgpt-web" };
     expect(affinity).toEqual({
       providerId: "chatgpt-web",
       bindingId: webChatAccountBindingId(BINDING),
@@ -190,6 +191,10 @@ describe("issue #190 — affinity identity", () => {
     });
     // The same turn resolves to the same core key, and the legacy key is untouched.
     expect(webChatAffinityKey(affinity)).toBe(identityOf("dsh-thread-1").key);
+    // The projected turn identity now carries the canonical key (issue #192), and the legacy digest
+    // is what a caller without an affinity still gets.
+    const projected = chatGptWebChatTurnIdentity(parsed, canonicalTurnAffinity);
+    expect(projected.conversationKey).toBe(webChatAffinityKey(affinity));
     expect(chatGptConversationKey(parsed, "dsh-chatgpt-web")).toBe(legacyWebChatThreadKey("dsh-chatgpt-web", "dsh-thread-1"));
     // A turn without a host session cannot be projected onto an affinity.
     const withoutSession = {
@@ -199,11 +204,13 @@ describe("issue #190 — affinity identity", () => {
       options: {},
       _dshContext: { threadId: "dsh-thread-1", turnId: "turn-1" },
     } as unknown as CodexParsedRequest;
-    expect(() => chatGptWebChatAffinity(withoutSession, {
+    // Since issue #192 the affinity follows one identity rule everywhere: a turn without a host
+    // session projects its stable thread identity as the session, exactly as the native path does.
+    expect(chatGptWebChatAffinity(withoutSession, {
       providerId: "chatgpt-web",
       bindingId: "b",
       namespace: "dsh-chatgpt-web",
-    })).toThrow(/host session identity/);
+    })).toMatchObject({ dshSessionId: "dsh-thread-1", threadId: "dsh-thread-1" });
   });
 });
 

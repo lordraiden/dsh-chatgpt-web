@@ -58,6 +58,9 @@ test("ProviderCore retains the immutable capability snapshot across physical-fir
     pageIdentity: "page-66",
     capabilitySnapshot: snapshot,
   });
+  // The real flow reports the submission before a physical settlement can race; the core records
+  // that fact now, so the race runs on a turn that reached the submit boundary.
+  first.markSubmitted();
   let resolvePhysical!: () => void;
   const physical = new Promise<void>(resolve => { resolvePhysical = resolve; });
   core.bindPhysicalSettlement("execution-66", physical);

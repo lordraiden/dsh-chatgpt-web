@@ -2297,6 +2297,9 @@ export class ChatGptBrowserWorker {
     options: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<ChatGptRetainedAnswerRecovery> {
     const timeoutMs = options.timeoutMs ?? CHATGPT_RECOVERY_DEFAULT_TIMEOUT_MS;
+    // Whether the read actually finished: a recovery that times out or is aborted must not report a
+    // settled surface, because nothing proves the page stopped producing output.
+    let recovered = false;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new Error("ChatGPT answer recovery timeout must be a positive finite number");
     }
@@ -2329,7 +2332,10 @@ export class ChatGptBrowserWorker {
           try {
             const snapshot = await this.responseDomSnapshot(turns.last(), {});
             const text = snapshot.visibleText.trim();
-            if (text) return { text, capturedAt: Date.now(), waitedMs: Date.now() - startedAt };
+            if (text) {
+              recovered = true;
+              return { text, capturedAt: Date.now(), waitedMs: Date.now() - startedAt };
+            }
           } catch (error) {
             // A re-render between the count and the read is not a failed recovery: keep polling
             // until the bounded wait expires. A closed page is the one unrecoverable case.
@@ -2341,6 +2347,9 @@ export class ChatGptBrowserWorker {
       }
     } finally {
       this.retainedSurfaces.release(conversationKey);
+      // A completed read proves the surface is free; a timeout or a cancellation does not, so the
+      // surface is retired and only an explicit reset brings it back.
+      this.retainedSurfaces.settle(conversationKey, recovered ? "fulfilled" : "rejected");
     }
   }
 
@@ -4643,7 +4652,7 @@ export class ChatGptBrowserWorker {
       && this.config.browserHost === "managed-chrome"
       && turn.conversationKey !== undefined
       && (turn.retainConversation === true || turn.requireRetainedConversation === true);
-    const managedReuse = managedRetained && this.retainedSurfaces.has(turn.conversationKey!);
+    const managedReuse = managedRetained && this.retainedSurfaces.isReusable(turn.conversationKey!);
     // Physical reuse: continue on the existing page (resume prompt, no root navigation). The
     // Launcher lease reuses the conversation its handshake owns; a managed-chrome retained
     // surface reuses only the physical page.
@@ -4663,6 +4672,8 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    /** Whether this browser turn reached its completion or failed: the surface's settlement follows. */
+    let turnFailed = false;
     let retainedCreated = false;
     let retainedPage: Page | undefined;
     // Send activation is the ambiguity boundary (issue #171): before it, ChatGPT has seen
@@ -4790,6 +4801,7 @@ export class ChatGptBrowserWorker {
                 // A previously retained surface already carries a conversation: keep it and only
                 // clear the busy flag, so the next turn reuses it instead of starting a new one.
                 this.retainedSurfaces.release(turn.conversationKey!);
+                this.retainedSurfaces.settle(turn.conversationKey!, "fulfilled");
               }
               throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
             }
@@ -5485,6 +5497,7 @@ export class ChatGptBrowserWorker {
       );
       return finalText;
     } catch (error) {
+      turnFailed = true;
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${safeErrorDescriptor(error)}`,
@@ -5499,6 +5512,10 @@ export class ChatGptBrowserWorker {
       // the next turn of the same conversationKey can continue, keeping the page itself open.
       if (managedRetained) {
         this.retainedSurfaces.release(turn.conversationKey!);
+        // The settlement is what this turn actually reached: a failed turn proves nothing about the
+        // remote generation, so the surface is retired (an explicit reset is the way back) instead of
+        // being handed to the next turn as if the operation had finished.
+        this.retainedSurfaces.settle(turn.conversationKey!, turnFailed ? "rejected" : "fulfilled");
         // A surface that this turn created is discarded only if the send never activated: before
         // that boundary ChatGPT has seen nothing, so no conversation exists to preserve. Once the
         // send is activated (or submission is proven), irreversible activity exists and a later

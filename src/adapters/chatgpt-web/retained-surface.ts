@@ -62,6 +62,14 @@ export class RetainedSurfaceBusyError extends Error {
 interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
   page: P;
   busy: boolean;
+  /**
+   * Whether the physical settlement of the last holder has been published.
+   *
+   * A resource that may still produce output must not be reused (architecture §9.3, §15.3): a turn
+   * that released the surface without settling it leaves the key unavailable for reuse until `settle`
+   * says what happened, and only an explicit settlement — or an explicit loss — makes it reusable.
+   */
+  settled: boolean;
 }
 
 export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSurfacePage> {
@@ -122,9 +130,15 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
     if (existing) {
       if (existing.busy) throw new RetainedSurfaceBusyError(conversationKey);
       if (existing.page.isClosed()) {
+        // A dead page is a continuity loss whatever its settlement state, so this is decided first.
         this.surfaces.delete(conversationKey);
         this.lostSurfaces.add(conversationKey);
         throw new RetainedSurfaceLostError(conversationKey);
+      }
+      if (!existing.settled) {
+        // A surface that was released without a published settlement may still produce output: it is
+        // retained, but it is not handed to another turn (architecture §9.3, §15.3).
+        throw new RetainedSurfaceBusyError(conversationKey);
       }
       existing.busy = true;
       return { page: existing.page, created: false };
@@ -144,17 +158,56 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
         this.surfaces.delete(conversationKey);
         throw new RetainedSurfaceLostError(conversationKey);
       }
-      this.surfaces.set(conversationKey, { page, busy: true });
+      this.surfaces.set(conversationKey, { page, busy: true, settled: true });
       return { page, created: true };
     } finally {
       this.pendingCreates.delete(conversationKey);
     }
   }
 
-  /** Drop the busy flag at the end of a turn; the surface stays retained. */
+  /**
+   * Drop the busy flag at the end of a turn; the surface stays retained.
+   *
+   * The key becomes *settling*: still retained, but not reusable for a later turn until `settle`
+   * publishes what happened to the operation that was using it.
+   */
   release(conversationKey: string): void {
     const entry = this.surfaces.get(conversationKey);
-    if (entry) entry.busy = false;
+    if (entry) {
+      entry.busy = false;
+      entry.settled = false;
+    }
+  }
+
+  /**
+   * Publish the physical settlement of the operation that held this surface.
+   *
+   * `fulfilled`/`not_started` make the retained surface reusable again and `pending` keeps it
+   * settling; `rejected` means settlement could not be proven, so the surface is dropped and the key
+   * tombstoned instead of being trusted again (an explicit `reset` is the only way back).
+   */
+  settle(conversationKey: string, outcome: "fulfilled" | "not_started" | "pending" | "rejected" = "fulfilled"): void {
+    const entry = this.surfaces.get(conversationKey);
+    if (!entry) return;
+    if (outcome === "rejected") {
+      this.surfaces.delete(conversationKey);
+      this.lostSurfaces.add(conversationKey);
+      void entry.page.close().catch(() => {});
+      return;
+    }
+    entry.settled = outcome !== "pending";
+  }
+
+  /**
+   * Whether this surface may be handed to a later turn.
+   *
+   * Retained, not held by an operation in flight, and physically settled. `has()` keeps its
+   * pre-existing meaning ("retained") and `acquire` keeps its pre-existing behaviour, because the
+   * reuse decision belongs to the caller that owns the turn: it asks this instead of `has()`.
+   */
+  isReusable(conversationKey: string): boolean {
+    const entry = this.surfaces.get(conversationKey);
+    return entry !== undefined && entry.settled && !entry.busy;
   }
 
   /** Remove and close one retained surface. */

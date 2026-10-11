@@ -128,6 +128,25 @@ async function collect(exchange: WebChatExchangeRunner): Promise<WebChatExchange
 }
 
 describe("issue #191 — the exchange state machine is monotonic and testable", () => {
+  test("a late confirmation resolves ambiguity into the confirmed case", () => {
+    const exchange = lifecycle();
+    exchange.markPreparing();
+    exchange.markTransportReady();
+    exchange.markSubmitting();
+    exchange.markSendActivated();
+    expect(exchange.snapshot().state).toBe("SUBMISSION_AMBIGUOUS");
+    exchange.markSubmitted();
+    const snapshot = exchange.snapshot();
+    expect(snapshot.state).toBe("SUBMITTED");
+    expect(snapshot.phase).toBe("accepted");
+    // From there an automatic duplicate submission is forbidden, as after any confirmed submission.
+    expect(webChatRetrySafetyOf({ snapshot })).toBe("not_retry_safe");
+    // The exchange keeps following the normal path.
+    exchange.markStreaming();
+    exchange.markCompleted();
+    expect(exchange.snapshot().logical).toBe("completed");
+  });
+
   test("the architecture §9 path is accepted in order", () => {
     const exchange = lifecycle();
     expect(exchange.snapshot().state).toBe("CREATED");
@@ -177,7 +196,7 @@ describe("issue #191 — the exchange state machine is monotonic and testable", 
     ambiguous.markSendActivated();
     expect(ambiguous.isTerminal()).toBe(true);
     expect(() => ambiguous.markStreaming()).toThrow(/cannot change state|Streaming cannot start/);
-    expect(() => ambiguous.markSubmitted()).toThrow(/cannot change state/);
+    expect(() => ambiguous.markPreparing()).toThrow(/cannot change state/);
     ambiguous.markFailed();
     expect(ambiguous.snapshot().state).toBe("FAILED");
   });
@@ -727,11 +746,132 @@ describe("issue #191 — transport resource ownership", () => {
 });
 
 describe("issue #191 — migration evidence from the existing provider lifecycle", () => {
+  test("a rejected physical settlement is the core's logical failure as well (review of #219)", async () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey: "issue-219-physical-rejection",
+      traceId: "trace-219",
+      nativeTurnId: "turn-219",
+      nativeThreadId: "thread-219",
+      accountIdentity: "account-219",
+      browserProfile: "profile-219",
+      browserContext: "context-219",
+      pageIdentity: "page-219",
+      capabilitySnapshot: {
+        snapshotId: "snapshot-219",
+        sessionId: "session-219",
+        agentId: "session-219",
+        turnId: "turn-219",
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+
+    // The physical side fails before the logical outcome was ever settled.
+    turn.attachPhysicalSettlement(Promise.reject(new Error("the browser operation could not be proven settled")));
+    await turn.waitForPhysicalSettlement().catch(() => undefined);
+
+    const provider = turn.snapshot();
+    const coreState = turn.coreSnapshot();
+    expect(provider.physicalSettlementOutcome).toBe("rejected");
+    expect(provider.logicalOutcome).toBe("failed");
+    expect(provider.recovery).toBe("FAILED");
+    // The core describes the same outcome: the provider's view is the core's.
+    expect(coreState.physical).toBe("rejected");
+    expect(coreState.logical).toBe("failed");
+    expect(coreState.recovery).toBe("failed");
+    expect(coreState.retired).toBe(true);
+  });
+
+  test("a logical failure is the core's outcome too (review of #219)", () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey: "issue-219-logical-failure",
+      traceId: "trace-219-lf",
+      nativeTurnId: "turn-219-lf",
+      nativeThreadId: "thread-219-lf",
+      accountIdentity: "account-219",
+      browserProfile: "profile-219",
+      browserContext: "context-219",
+      pageIdentity: "page-219",
+      capabilitySnapshot: {
+        snapshotId: "snapshot-219-lf",
+        sessionId: "session-219",
+        agentId: "session-219",
+        turnId: "turn-219-lf",
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+
+    // The physical side finished, but the turn itself failed.
+    turn.markLogicalSettled("failed");
+    const provider = turn.snapshot();
+    const coreState = turn.coreSnapshot();
+    expect(provider.logicalOutcome).toBe("failed");
+    expect(provider.recovery).toBe("FAILED");
+    expect(coreState.logical).toBe("failed");
+    expect(coreState.recovery).toBe("failed");
+  });
+
+  test("a failure before any physical execution is the core's recovery too (review of #219)", () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey: "issue-219-pre-physical",
+      traceId: "trace-219-pp",
+      nativeTurnId: "turn-219-pp",
+      nativeThreadId: "thread-219-pp",
+      accountIdentity: "account-219",
+      browserProfile: "profile-219",
+      browserContext: "context-219",
+      pageIdentity: "page-219",
+      capabilitySnapshot: {
+        snapshotId: "snapshot-219-pp",
+        sessionId: "session-219",
+        agentId: "session-219",
+        turnId: "turn-219-pp",
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+
+    turn.failBeforePhysicalSettlement();
+    const provider = turn.snapshot();
+    const coreState = turn.coreSnapshot();
+    expect(provider.physicalSettlementOutcome).toBe("not_started");
+    expect(provider.logicalOutcome).toBe("failed");
+    expect(provider.recovery).toBe("FAILED");
+    expect(coreState.physical).toBe("not_started");
+    expect(coreState.logical).toBe("failed");
+    expect(coreState.recovery).toBe("failed");
+  });
+
   test("the ChatGPT lifecycle vocabulary maps onto the core exchange", () => {
-    expect(chatGptWebChatExchangeStateOf("PREPARING")).toBe("PREPARING");
-    expect(chatGptWebChatExchangeStateOf("SURFACE_READY")).toBe("TRANSPORT_READY");
-    expect(chatGptWebChatExchangeStateOf("SUBMITTED")).toBe("SUBMITTED");
-    expect(chatGptWebChatExchangeStateOf("RUNNING")).toBe("STREAMING");
+    const facts = (overrides: Partial<Parameters<typeof chatGptWebChatExchangeStateOf>[0]> = {}) => ({
+      state: "PREPARING" as const,
+      submission: "prepared" as const,
+      logicalOutcome: "pending" as const,
+      physicalOutcome: "not_started" as const,
+      ...overrides,
+    });
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "PREPARING" }))).toBe("PREPARING");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SURFACE_READY" }))).toBe("TRANSPORT_READY");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RUNNING", submission: "accepted" }))).toBe("STREAMING");
+    // The distinction the static table could not make: submitted-and-confirmed versus only activated.
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SUBMITTED", submission: "accepted" }))).toBe("SUBMITTED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SUBMITTED", submission: "send_activated" }))).toBe("SUBMISSION_AMBIGUOUS");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SUBMITTED", submission: "prepared" }))).toBe("SUBMITTING");
+    // The end of the turn reads from the logical outcome, not from the state name.
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SETTLING", logicalOutcome: "completed" }))).toBe("COMPLETED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RETIRED", logicalOutcome: "cancelled" }))).toBe("CANCELLED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RETIRED", logicalOutcome: "failed" }))).toBe("FAILED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RETIRED", logicalOutcome: "pending" }))).toBe("SUBMISSION_AMBIGUOUS");
     expect(chatGptWebChatSubmissionPhaseOf("prepared")).toBe("prepared");
     expect(chatGptWebChatSubmissionPhaseOf("send_activated")).toBe("send_activated");
     expect(chatGptWebChatSubmissionPhaseOf("accepted")).toBe("accepted");
@@ -740,8 +880,13 @@ describe("issue #191 — migration evidence from the existing provider lifecycle
     expect(chatGptWebChatRetryRefusalOf("submitted")).toBe("submitted");
     expect(chatGptWebChatRetryRefusalOf("budget_exhausted")).toBe("budget_exhausted");
     expect(chatGptWebChatRetryRefusalOf(undefined)).toBeUndefined();
-    expect(chatGptWebChatLeaseShapeOf({ present: true, busy: true, lost: false })).toEqual({ leased: true, settling: false, retired: false });
-    expect(chatGptWebChatLeaseShapeOf({ present: false, busy: false, lost: true })).toEqual({ leased: false, settling: false, retired: true });
+    expect(chatGptWebChatLeaseShapeOf({ present: true, busy: true, lost: false, settled: true }))
+      .toEqual({ leased: true, settling: false, settled: true, retired: false });
+    expect(chatGptWebChatLeaseShapeOf({ present: false, busy: false, lost: true, settled: false }))
+      .toEqual({ leased: false, settling: false, settled: false, retired: true });
+    // Present and free, but not settled: not reusable yet, which the previous shape could not say.
+    expect(chatGptWebChatLeaseShapeOf({ present: true, busy: false, lost: false, settled: false }))
+      .toEqual({ leased: false, settling: true, settled: false, retired: false });
   });
 
   test("both lifecycles refuse an automatic retry once submission may have happened", () => {
@@ -883,4 +1028,56 @@ describe("issue #191 — stream ends, concurrency and preparation (review of #21
     expect(exchange.snapshot().cancelRequested).toBe(true);
     expect(calls.abort).toBe(1);
   });
+});
+
+describe("issue #191 — a failure escalates a recovery already recorded (review of #219)", () => {
+  function begunTurn(executionKey: string) {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey,
+      traceId: `${executionKey}-trace`,
+      nativeTurnId: `${executionKey}-turn`,
+      nativeThreadId: `${executionKey}-thread`,
+      accountIdentity: "account-esc",
+      browserProfile: "profile-esc",
+      browserContext: "context-esc",
+      pageIdentity: "page-esc",
+      capabilitySnapshot: {
+        snapshotId: `${executionKey}-snapshot`,
+        sessionId: "session-esc",
+        agentId: "session-esc",
+        turnId: `${executionKey}-turn`,
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+    return turn;
+  }
+
+  for (const recovery of ["EXACT_RESUME", "REPLAY"] as const) {
+    test(`a logical failure escalates a turn that started with ${recovery}`, () => {
+      const turn = begunTurn(`esc-logical-${recovery}`);
+      turn.markRecovery(recovery);
+      expect(turn.snapshot().recovery).toBe(recovery);
+      expect(turn.coreSnapshot().recovery).toBe(recovery === "EXACT_RESUME" ? "exact_resume" : "replay");
+
+      turn.markLogicalSettled("failed");
+      expect(turn.snapshot().recovery).toBe("FAILED");
+      // The core escalates with the same rank rule; it never keeps the recovery the turn started from.
+      expect(turn.coreSnapshot().recovery).toBe("failed");
+      expect(turn.coreSnapshot().logical).toBe("failed");
+    });
+
+    test(`a failure before physical execution escalates a turn that started with ${recovery}`, () => {
+      const turn = begunTurn(`esc-physical-${recovery}`);
+      turn.markRecovery(recovery);
+      turn.failBeforePhysicalSettlement();
+      expect(turn.snapshot().recovery).toBe("FAILED");
+      expect(turn.snapshot().physicalSettlementOutcome).toBe("not_started");
+      expect(turn.coreSnapshot().recovery).toBe("failed");
+      expect(turn.coreSnapshot().logical).toBe("failed");
+    });
+  }
 });

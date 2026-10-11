@@ -1,7 +1,29 @@
 import { createHash } from "node:crypto";
 import type { CodexParsedRequest } from "../../types";
-import { legacyWebChatThreadKey } from "../../web-chat/core";
+import { legacyWebChatThreadKey, webChatAffinityKey } from "../../web-chat/core";
 import { extractChatGptTurnIdentity } from "./environment";
+
+/**
+ * The WebChat provider/account binding this turn runs under (issue #192).
+ *
+ * Supplying it switches the key derivation to the canonical one: the affinity then includes the
+ * provider and the authenticated account, so one DSH chat can hold one conversation per provider
+ * *and* per account, as architecture §7 requires.
+ */
+/**
+ * The session identity an affinity is derived from (issue #192, one rule for every caller).
+ *
+ * The host session when the turn carries one; otherwise the provider's stable thread identity is its
+ * projection, so a chat never splits across two conversation keys.
+ */
+export function chatGptAffinitySessionId(identity: { readonly dshSessionId?: string; readonly threadId: string }): string {
+  return identity.dshSessionId && identity.dshSessionId.length > 0 ? identity.dshSessionId : identity.threadId;
+}
+
+export interface ChatGptConversationAffinity {
+  readonly providerId: string;
+  readonly bindingId: string;
+}
 
 /**
  * Logical ChatGPT Web conversation affinity.
@@ -11,22 +33,32 @@ import { extractChatGptTurnIdentity } from "./environment";
  * turn, not of the chat: they must never split one DSH chat into a second
  * ChatGPT conversation.
  *
- * The digest itself is owned by the core (`legacyWebChatThreadKey`, deprecated:
- * the ChatGPT driver migration of issue #192 moves this path onto the canonical
- * `webChatAffinityKey`); this function owns only the ChatGPT-specific half —
- * which thread identity a request carries and which namespace it runs under.
+ * Two derivations, one owner each (issue #192):
  *
- * The digest must not change: it addresses ChatGPT conversations that already
- * exist, and the affinity of an installed conversation must survive the
- * migration steps that only add contracts.
+ * - with an affinity, the canonical `webChatAffinityKey` of the core, which includes the provider
+ *   and the account binding;
+ * - without one, the legacy thread digest (`legacyWebChatThreadKey`), which the remaining callers
+ *   keep until the driver migration retires it. The digest must not change for them: it addresses
+ *   ChatGPT conversations that already exist.
+ *
+ * A turn with no host session identity projects its stable thread identity as the session, so a
+ * chat never splits across two keys.
  */
 export function chatGptConversationKey(
   parsed: CodexParsedRequest,
   namespace: string,
+  affinity?: ChatGptConversationAffinity,
 ): string | undefined {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.threadId) return undefined;
-  return legacyWebChatThreadKey(namespace, identity.threadId);
+  if (!affinity) return legacyWebChatThreadKey(namespace, identity.threadId);
+  return webChatAffinityKey({
+    providerId: affinity.providerId,
+    bindingId: affinity.bindingId,
+    dshSessionId: chatGptAffinitySessionId({ dshSessionId: identity.dshSessionId, threadId: identity.threadId }),
+    threadId: identity.threadId,
+    namespace,
+  });
 }
 
 /** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */

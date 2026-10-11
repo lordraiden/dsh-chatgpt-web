@@ -22,10 +22,12 @@ import {
 import { type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import { safeErrorDescriptor, toolCallDiagnosticSummary } from "../../lib/safe-diagnostics";
 import type { ProviderAdapter } from "../base";
+import type { ProviderRecovery } from "./provider-core";
 import { parseDataUrl } from "../image";
 import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
 import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface, type WebSurfaceRetainedAnswer } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
+import { createChatGptContinuity } from "./chatgpt-continuity";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { compileChatGptWebPrompt, compileRetainedChatGptWebContinuation, compileRetainedChatGptWebInstall, type CompiledChatGptWebPrompt } from "./prompt";
@@ -62,6 +64,11 @@ import {
   settleActiveCompactionSource,
   settleActiveZeroRiskCompactionSource,
 } from "./compaction-handoff";
+import { createMemoryConversationStore, webChatAccountBindingId, type WebChatAccountBinding } from "../../web-chat/core";
+import { CHATGPT_WEB_PROVIDER_ID } from "./llm-adapter";
+import {
+  chatGptWebChatAccountBinding,
+} from "./web-chat-bridge";
 import {
   chatGptConversationKey,
   chatGptSystemFingerprint,
@@ -80,6 +87,15 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
 }
 
+/**
+ * The authenticated account fingerprint of this deployment (single owner for the provider, the lease
+ * and the WebChat binding identity).
+ */
+export function chatGptWebAccountFingerprint(provider: CodexProviderConfig): string {
+  return provider.chatgptWeb?.accountIdentityFingerprint
+    ?? accountIdentityFromUnknownSession().fingerprint;
+}
+
 function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string): {
   accountIdentity: string;
   browserProfile: string;
@@ -87,8 +103,7 @@ function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string
   pageIdentity: string;
 } {
   const browser = provider.chatgptWeb;
-  const accountIdentity = browser?.accountIdentityFingerprint
-    ?? accountIdentityFromUnknownSession().fingerprint;
+  const accountIdentity = chatGptWebAccountFingerprint(provider);
   const browserProfile = browser?.chromeExecutablePath
     ?? browser?.browserHost
     ?? "managed-chrome";
@@ -240,6 +255,28 @@ function safeManualTerminalError(status: "cancelled" | "failed"): ChatGptWebAdap
     retryable: false,
   });
 }
+
+/**
+ * The WebChat provider/account binding identity of one ChatGPT turn (issue #192).
+ *
+ * Derived from the same account and browser facts the turn lease uses, so the canonical affinity and
+ * the lease can never disagree about which account a conversation belongs to.
+ */
+export function chatGptWebChatAccountBindingFor(provider: CodexProviderConfig): WebChatAccountBinding {
+  const { accountIdentity, browserProfile, browserContext } = browserAccountLeaseInput(provider, "web-chat-affinity");
+  return chatGptWebChatAccountBinding({
+    providerId: CHATGPT_WEB_PROVIDER_ID,
+    accountFingerprint: accountIdentity,
+    browserProfile,
+    browserContext,
+  });
+}
+
+export function chatGptWebChatBindingIdFor(provider: CodexProviderConfig): string {
+  return webChatAccountBindingId(chatGptWebChatAccountBindingFor(provider));
+}
+
+
 
 export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): string {
   return createHash("sha256").update(JSON.stringify({
@@ -435,6 +472,14 @@ export function resolveChatGptCapabilitySnapshotForTurn(
 }
 
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
+/**
+ * Process-lifetime continuity of the native ChatGPT path (issue #192).
+ *
+ * The core's store, kept for the lifetime of the process exactly like the turn-session registry, so a
+ * chat's conversation survives across its turns. The host wires the durable backend in #193.
+ */
+const chatGptNativeContinuityStore = createMemoryConversationStore();
+
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
 
 /** Bounded wait and cancellation for one retained-answer read (issue #214). */
@@ -568,7 +613,10 @@ export function createChatGptWebAdapter(
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
     const conversationKey = retainConversationForTurn
-      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
+      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace, {
+        providerId: CHATGPT_WEB_PROVIDER_ID,
+        bindingId: chatGptWebChatBindingIdFor(provider),
+      })
       : undefined;
     const resumeInput = conversationKey
       ? retainedConversationResumeRequest(checkpointInput.parsed)
@@ -1114,7 +1162,10 @@ export function createChatGptWebAdapter(
       // The identity owner is the same one the turn uses: one retained conversation per DSH
       // session/thread, resolved from the request the caller built (the Advisor builds the same
       // synthetic identity as its review turn).
-      const conversationKey = chatGptConversationKey(parsed, executionNamespace);
+      const conversationKey = chatGptConversationKey(parsed, executionNamespace, {
+        providerId: CHATGPT_WEB_PROVIDER_ID,
+        bindingId: chatGptWebChatBindingIdFor(provider),
+      });
       if (!conversationKey) {
         throw new Error("The retained ChatGPT Web conversation identity is unavailable for this request");
       }
@@ -1249,7 +1300,10 @@ export function createChatGptWebAdapter(
                   );
                   handoffTimer.unref?.();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
-                  const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
+                  const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace, {
+                    providerId: CHATGPT_WEB_PROVIDER_ID,
+                    bindingId: chatGptWebChatBindingIdFor(provider),
+                  });
                   const runFreshCompactionFallback = async (reason: string): Promise<string> => {
                     console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
                     const fallbackRuntime = startRuntime(
@@ -1445,13 +1499,35 @@ export function createChatGptWebAdapter(
           await providerCore.waitForRetirement(executionKey);
         }
         const previousProviderTurn = providerCore.get(executionKey);
-        const recovery = contextExhaustion
-          ? "REPLAY" as const
+        const retired = providerCore.wasRetired(executionKey);
+        const legacyRecovery: ProviderRecovery = contextExhaustion
+          ? "REPLAY"
           : previousProviderTurn
-            ? "EXACT_RESUME" as const
-            : providerCore.wasRetired(executionKey)
-              ? "REPLAY" as const
-              : "NEW" as const;
+            ? "EXACT_RESUME"
+            : retired
+              ? "REPLAY"
+              : "NEW";
+        // Cancellation takes precedence over continuity: an already-aborted turn fails with the
+        // cancellation error, before any continuity decision is made (issue #192 review).
+        if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
+        // The core owns the continuity decision (issue #192): the provider states its intent and the
+        // core applies the shared rules, mapping the outcome back to the provider's vocabulary. The
+        // store lives for the process, so a chat's conversation survives across the turns of a
+        // session; the host wires the durable backend in #193.
+        const webChatContinuity = createChatGptContinuity({
+          provider,
+          affinity: { providerId: CHATGPT_WEB_PROVIDER_ID, bindingId: chatGptWebChatBindingIdFor(provider) },
+          namespace: executionNamespace,
+          binding: chatGptWebChatAccountBindingFor(provider),
+          sessions: chatGptTurnSessions,
+          store: chatGptNativeContinuityStore,
+        });
+        const recovery = await webChatContinuity.resolveRecovery({
+          parsed,
+          legacyRecovery,
+          contextExhausted: Boolean(contextExhaustion),
+          retired,
+        });
         const providerTurn = providerCore.begin({
           executionKey,
           traceId,
@@ -1633,6 +1709,10 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  // The provider established this round's result (it asked for tools), so the record is
+                  // confirmed before the turn returns: the next invocation, which carries the tool results,
+                  // continues the same conversation (issue #192).
+                  await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                   return;
                 }
 
@@ -1656,6 +1736,9 @@ export function createChatGptWebAdapter(
                 buffer,
               ));
               providerTurn.markLogicalSettled();
+              // The turn settled and the provider established its result: the record is confirmed,
+              // which is what makes continuity resumable for the next turn (issue #192).
+              await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
               session.completeRound(roundKey);
               return;
             }
@@ -1678,6 +1761,10 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  // The provider established this round's result (it asked for tools), so the record is
+                  // confirmed before the turn returns: the next invocation, which carries the tool results,
+                  // continues the same conversation (issue #192).
+                  await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                   return;
                 }
                 if (results.length !== outstanding.length) {
@@ -1699,6 +1786,10 @@ export function createChatGptWebAdapter(
                 buffer,
               ));
               session.completeRound(roundKey);
+              // The provider established this round's result (it asked for tools), so the record is
+              // confirmed before the turn returns: the next invocation, which carries the tool results,
+              // continues the same conversation (issue #192).
+              await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
               return;
             }
 
@@ -1812,6 +1903,10 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  // The provider established this round's result (it asked for tools), so the record is
+                  // confirmed before the turn returns: the next invocation, which carries the tool results,
+                  // continues the same conversation (issue #192).
+                  await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                   return;
                 }
 
@@ -1827,6 +1922,9 @@ export function createChatGptWebAdapter(
                   buffer,
                 ));
                 providerTurn.markLogicalSettled();
+                // The turn settled and the provider established its result: the record is confirmed,
+                // which is what makes continuity resumable for the next turn (issue #192).
+                await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                 session.completeRound(roundKey);
                   };
               const waitForTrace = () => session.runtime.trace.wait(toolWaitAbort.signal)
@@ -1885,6 +1983,10 @@ export function createChatGptWebAdapter(
                   buffer,
                 ));
                 session.completeRound(roundKey);
+                // The provider established this round's result (it asked for tools), so the record is
+                // confirmed before the turn returns: the next invocation, which carries the tool results,
+                // continues the same conversation (issue #192).
+                await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                 return;
               }
             } finally {

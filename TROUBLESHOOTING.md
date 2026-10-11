@@ -252,6 +252,10 @@ submission ambiguous
 
 First determine whether the provider conversation can be safely resumed or whether an explicit recovery/replay path is required.
 
+### 11.0 After updating to 1.0.21, a ChatGPT chat starts a new conversation
+
+Expected once. Until 1.0.21 the conversation key was derived from the deployment namespace and the DSH chat identity only; it now includes the provider and the authenticated account binding, so the same DSH chat cannot reuse another account's conversation. The first turn of each chat after the update therefore physically installs a fresh ChatGPT conversation from the canonical DSH context. The DSH history is untouched, and the affinity stays stable from then on.
+
 ### 11.1 `ChatGPT stopped responding after the task started` while ChatGPT is still working
 
 Observed as a failed **Review with ChatGPT** (or any long ChatGPT Web turn) whose tab keeps working and produces the answer anyway.
