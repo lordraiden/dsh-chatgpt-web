@@ -131,11 +131,11 @@ The current implementation can maintain a physical conversation surface in a ret
 
 ### Qwen Chat
 
-Current independent implementations of the Qwen Web surface show that conversation continuity can be represented by a server-side chat_id plus a provider response/parent cursor. Other implementations also rely on persistent browser state and anti-bot/session data. These details are not stable public contracts and therefore must remain inside a Qwen-specific driver.
+Qwen Chat may maintain server-side conversation continuity, but the plugin must operate it through the authenticated website UI. The driver owns the visible model picker, composer, Send action, response detection, and whatever opaque continuity state is required by the existing WebChat contract. Do not reproduce or call the website's internal protocol.
 
 ### DeepSeek Chat
 
-Current independent implementations of the DeepSeek Web surface use a server-side chat session and message lineage such as chat_session_id / parent_message_id, with additional web-session protections such as proof-of-work in some flows. DeepSeek officially documents chat.deepseek.com as the consumer chat surface and continues to evolve its web models independently of its API.
+DeepSeek Chat may maintain server-side conversation continuity and web-session protections, but the plugin must operate it through the authenticated website UI. The driver discovers models and continues conversations through Chrome/Playwright UI interactions. API model families and internal website protocols are not substitutes for observing the actual consumer product.
 
 Therefore:
 
@@ -1400,35 +1400,45 @@ The shared interface remains semantic and provider-neutral. Every consumer-web d
 
 ---
 
-## 20. ChatGPT-specific features outside the common architecture
+## 20. ChatGPT-specific compatibility and provider-neutral features above the core
 
-The current repository includes functionality beyond text-only exchange.
+The current repository includes ChatGPT-specific functionality beyond the text-only WebChat exchange.
 
-Examples include:
+ChatGPT-specific compatibility features include:
 
 - MCP/capability bridging;
 - native Codex-related routes;
 - Responses compatibility;
-- Advisor review;
 - compaction/control protocols;
 - image/tool payloads.
 
-These may remain operational for ChatGPT.
+These may remain operational for ChatGPT and must remain outside WebChat Core.
 
-They are intentionally classified as:
+The Advisor is different: it is a **provider-neutral feature above the WebChat host boundary**, not part of the common core and not a ChatGPT driver responsibility.
 
 ~~~text
-ChatGPT-specific compatibility/features
-        |
-        v
-outside WebChat Core
+DSH Advisor UI / task lifecycle
+              |
+              v
+Provider-neutral Advisor orchestration
+              |
+              v
+Existing DSH route authority + WebChat host/core
+              |
+       +------+------+
+       |      |      |
+    ChatGPT  Qwen  DeepSeek
+    driver  driver  driver
+       |
+       v
+Authenticated consumer website via Chrome/Playwright
 ~~~
 
-The shared Web Chat contract must remain text-only.
+The Advisor selects an already-registered public model route, submits a semantic text review through the selected driver, and keeps its review conversation separate from the primary DSH conversation and from normal WebChat conversations. It must not import ChatGPT-specific adapters, browser workers, model assumptions, or transport code.
 
-A future provider does not inherit ChatGPT MCP, capability, Codex, or Advisor semantics merely by implementing WebChatProviderDriver.
+A future provider becomes eligible for Advisor use when its WebChat driver is integrated, exposes a usable route through the existing DSH route authority, and can discover/operate its website models through the UI-only contract. It does not implement its own copy of Advisor.
 
-This separation is essential to prevent the new architecture from becoming a generic agent runtime.
+The shared WebChat contract remains text-only. This separation prevents both ChatGPT-specific compatibility features and the Advisor orchestration from becoming a generic agent runtime inside WebChat Core.
 
 ---
 
@@ -1912,23 +1922,13 @@ These establish the DSH-side rule: provider implementations are LlmAdapter insta
   https://chat.qwen.ai/
 - Qwen cookie/session notice:
   https://qwen.ai/cookies-notice
-- Current independent Qwen web reverse-engineering reference:
-  https://github.com/AnonymoDGH/Qwen-Reverse
-- Current Playwright-based Qwen proxy/reference:
-  https://github.com/pedrofariasx/qwenproxy
-
-The independent projects are used only to validate the architectural observation that Qwen conversation state and web transport are provider-specific and may require persistent browser/session state. Current Qwen web recon also reports an access-verification layer that can reject automated browser sessions, reinforcing that authentication/session bootstrap must remain provider-local. Their private endpoints, anti-bot headers, fingerprinting and internal schemas are not architectural contracts for this repository.
+The provider's visible website UI is the source of truth for model availability, authentication, and supported user-facing behavior. Do not use third-party reverse-engineered clients as implementation templates, and do not copy or replay their private endpoints, request schemas, anti-bot techniques, or browser fingerprinting strategies. Provider access verification must be handled through the supported browser flow.
 
 ### DeepSeek
 
 - Official DeepSeek V4 announcement and web service:
   https://deepseek.com/en/news/v4-preview/
-- Current independent DeepSeek Web protocol reference:
-  https://github.com/kittors/deepseek-web-api
-- Current independent DeepSeek Web API reference:
-  https://github.com/ForgetMeAI/FreeDeepseekAPI
-
-The independent projects are used only to validate that DeepSeek Web can expose server-side conversation/message lineage and streamed text exchange through its consumer-web session. Private endpoint names, PoW details, and headers remain strictly provider-local implementation details.
+The DeepSeek consumer website, not its API documentation or third-party protocol implementations, is the source of truth for the supported model picker, authentication, and visible conversation behavior. Do not implement against reverse-engineered endpoint details, PoW recipes, private request headers, or response schemas.
 
 ---
 
