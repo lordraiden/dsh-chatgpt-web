@@ -207,7 +207,6 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
           reason: "first turn of this chat",
         };
       }
-
       const plan = await resolveWebChatContinuation(
         { store, driver },
         { ...scope, model: facts.parsed.modelId, intent },

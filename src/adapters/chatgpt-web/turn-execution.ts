@@ -811,6 +811,11 @@ export class ChatGptTurnSessions {
       this.conversationHeads.clear();
       this.contextExhaustions.clear();
       this.sentSystemFingerprints.clear();
+      // A cleared registry stands for a fresh process, and the conversation generations are part of
+      // that process state: keeping them would make the first turn of the "new process" create the
+      // next generation instead of the one a new conversation starts at.
+      this.conversationGenerations.clear();
+      this.conversationRetirements.clear();
     } else {
       const clearedConversationKeys: string[] = [];
       for (const [key, session] of this.conversationHeads) {

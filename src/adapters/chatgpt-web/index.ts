@@ -612,9 +612,18 @@ export function createChatGptWebAdapter(
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
     /** Shared lifecycle authority owned by the server process. */
     providerCore?: ChatGptWebProviderCore;
+    /**
+     * The physical web transport for this turn.
+     *
+     * The default is the browser-backed transport built for the provider; this seam exists so a
+     * harness can drive the rest of the native cycle (runtime startup, prompt preparation, submission
+     * hooks, settlement) against a controlled stand-in for the browser's I/O. It replaces only the
+     * transport resource, never the continuity decision, the driver, the core or the durable store.
+     */
+    surfaceTransport?: ReturnType<typeof chatGptWebSurfaceTransportForProvider>;
   } = {},
 ): ChatGptWebProviderAdapter {
-  const transport = chatGptWebSurfaceTransportForProvider(provider);
+  const transport = dependencies.surfaceTransport ?? chatGptWebSurfaceTransportForProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;

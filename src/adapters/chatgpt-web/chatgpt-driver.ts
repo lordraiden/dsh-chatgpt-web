@@ -11,6 +11,7 @@
  * browser page, a selector or an endpoint.
  */
 import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
+import type { ChatGptWebModelRoute } from "../../chatgpt-web-models";
 import {
   availableChatGptWebRoutes,
   createChatGptWebRouteAuthorityFromProvider,
@@ -79,6 +80,18 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
       text: true,
     };
   };
+
+  /**
+   * The route this provider serves for a model identity.
+   *
+   * The continuity decision is handed the request the native transport carries, whose `modelId` is the
+   * **backend** model the provider routes to (`toCodexParsedRequest` projects it), while the public,
+   * provider-scoped route identity is the slug the host selects. Both name the same served route, and
+   * the driver is the owner of that mapping: without resolving both, a real native turn would be
+   * assessed against a route this deployment does serve and still be refused as unsupported.
+   */
+  const servedRouteOf = (model: string): ChatGptWebModelRoute | undefined =>
+    availableChatGptWebRoutes(authority).find(candidate => candidate.slug === model || candidate.backendModel === model);
 
   /** The affinity key of one selection, derived by the core and never locally. */
   const conversationKeyOf = (selection: {
@@ -150,7 +163,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
      * conversation has to be established from canonical history (the provider's `install` path).
      */
     async assessConversation(input: WebChatConversationAssessmentInput): Promise<WebChatConversationAssessment> {
-      if (!descriptorOf(input.model)) {
+      if (!servedRouteOf(input.model)) {
         return { status: "unsupported", reason: `the ChatGPT Web route ${input.model} is not served by this deployment` };
       }
       if (input.conversation
