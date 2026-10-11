@@ -229,8 +229,18 @@ export function createWebChatTransportLeaseRegistry(): WebChatTransportLeaseRegi
       if (pendingAcquires.has(conversationKey)) {
         throw webChatError("CONVERSATION_STATE_MISMATCH", "A transport resource is being created and cannot be reset");
       }
-      if (entry.lease && entry.lease.snapshot().state === "active") {
+      // Explicit recovery forgets a resource that is provably done with: an operation in flight
+      // (`active`) or one whose settlement has not been published (`settling`) may still produce
+      // output, so neither may be forgotten — only a settled or retired entry can.
+      const state = entry.lease?.snapshot().state;
+      if (state === "active") {
         throw webChatError("CONVERSATION_STATE_MISMATCH", "An active transport lease cannot be reset");
+      }
+      if (state === "settling") {
+        throw webChatError(
+          "CONVERSATION_STATE_MISMATCH",
+          "A transport lease whose settlement has not been published cannot be reset",
+        );
       }
       entries.delete(conversationKey);
     },

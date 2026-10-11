@@ -695,6 +695,21 @@ describe("issue #191 — transport resource ownership", () => {
     expect(attempts).toBe(1);
   });
 
+  test("a lease whose settlement is not published cannot be reset away", async () => {
+    const leases = createWebChatTransportLeaseRegistry();
+    const lease = await leases.acquire({ exchangeId: "e1", conversationKey: "c1", epoch: 1, create: async () => resource() });
+    // Held by an operation in flight: explicit recovery cannot forget it.
+    expect(() => leases.reset("c1")).toThrow(/active transport lease cannot be reset/);
+    lease.release();
+    // Released without a settlement: the resource may still produce output, so it stays protected.
+    expect(leases.describe("c1")).toEqual({ leased: false, settling: true, retired: false, creating: false });
+    expect(() => leases.reset("c1")).toThrow(/settlement has not been published/);
+    // Only a published settlement (or a retirement) makes it forgettable.
+    lease.settle("fulfilled");
+    expect(() => leases.reset("c1")).not.toThrow();
+    expect(leases.isLeased("c1")).toBe(false);
+  });
+
   test("an unrecorded resource is refused unless the caller may create one", async () => {
     const leases = createWebChatTransportLeaseRegistry();
     await expect(leases.acquire({ exchangeId: "e1", conversationKey: "missing", epoch: 1 }))
