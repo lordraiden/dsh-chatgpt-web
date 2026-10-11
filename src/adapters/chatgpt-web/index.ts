@@ -1709,6 +1709,10 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  // The provider established this round's result (it asked for tools), so the record is
+                  // confirmed before the turn returns: the next invocation, which carries the tool results,
+                  // continues the same conversation (issue #192).
+                  await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                   return;
                 }
 
@@ -1757,6 +1761,10 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  // The provider established this round's result (it asked for tools), so the record is
+                  // confirmed before the turn returns: the next invocation, which carries the tool results,
+                  // continues the same conversation (issue #192).
+                  await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                   return;
                 }
                 if (results.length !== outstanding.length) {
@@ -1778,6 +1786,10 @@ export function createChatGptWebAdapter(
                 buffer,
               ));
               session.completeRound(roundKey);
+              // The provider established this round's result (it asked for tools), so the record is
+              // confirmed before the turn returns: the next invocation, which carries the tool results,
+              // continues the same conversation (issue #192).
+              await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
               return;
             }
 
@@ -1891,6 +1903,10 @@ export function createChatGptWebAdapter(
                     buffer,
                   ));
                   session.completeRound(roundKey);
+                  // The provider established this round's result (it asked for tools), so the record is
+                  // confirmed before the turn returns: the next invocation, which carries the tool results,
+                  // continues the same conversation (issue #192).
+                  await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                   return;
                 }
 
@@ -1967,6 +1983,10 @@ export function createChatGptWebAdapter(
                   buffer,
                 ));
                 session.completeRound(roundKey);
+                // The provider established this round's result (it asked for tools), so the record is
+                // confirmed before the turn returns: the next invocation, which carries the tool results,
+                // continues the same conversation (issue #192).
+                await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                 return;
               }
             } finally {

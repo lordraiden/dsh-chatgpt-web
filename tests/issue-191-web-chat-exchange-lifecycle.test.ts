@@ -1029,3 +1029,55 @@ describe("issue #191 — stream ends, concurrency and preparation (review of #21
     expect(calls.abort).toBe(1);
   });
 });
+
+describe("issue #191 — a failure escalates a recovery already recorded (review of #219)", () => {
+  function begunTurn(executionKey: string) {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey,
+      traceId: `${executionKey}-trace`,
+      nativeTurnId: `${executionKey}-turn`,
+      nativeThreadId: `${executionKey}-thread`,
+      accountIdentity: "account-esc",
+      browserProfile: "profile-esc",
+      browserContext: "context-esc",
+      pageIdentity: "page-esc",
+      capabilitySnapshot: {
+        snapshotId: `${executionKey}-snapshot`,
+        sessionId: "session-esc",
+        agentId: "session-esc",
+        turnId: `${executionKey}-turn`,
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+    return turn;
+  }
+
+  for (const recovery of ["EXACT_RESUME", "REPLAY"] as const) {
+    test(`a logical failure escalates a turn that started with ${recovery}`, () => {
+      const turn = begunTurn(`esc-logical-${recovery}`);
+      turn.markRecovery(recovery);
+      expect(turn.snapshot().recovery).toBe(recovery);
+      expect(turn.coreSnapshot().recovery).toBe(recovery === "EXACT_RESUME" ? "exact_resume" : "replay");
+
+      turn.markLogicalSettled("failed");
+      expect(turn.snapshot().recovery).toBe("FAILED");
+      // The core escalates with the same rank rule; it never keeps the recovery the turn started from.
+      expect(turn.coreSnapshot().recovery).toBe("failed");
+      expect(turn.coreSnapshot().logical).toBe("failed");
+    });
+
+    test(`a failure before physical execution escalates a turn that started with ${recovery}`, () => {
+      const turn = begunTurn(`esc-physical-${recovery}`);
+      turn.markRecovery(recovery);
+      turn.failBeforePhysicalSettlement();
+      expect(turn.snapshot().recovery).toBe("FAILED");
+      expect(turn.snapshot().physicalSettlementOutcome).toBe("not_started");
+      expect(turn.coreSnapshot().recovery).toBe("failed");
+      expect(turn.coreSnapshot().logical).toBe("failed");
+    });
+  }
+});
