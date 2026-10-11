@@ -94,8 +94,11 @@ describe("issue #193 — the effective provider configuration", () => {
       webChat: { providers: { [CHATGPT_WEB_DRIVER_ID]: scoped } },
     };
     const effective = effectiveChatGptWebProviderConfig(scopedConfig);
-    expect(effective.chatgptWeb).toBe(scoped);
-    // Only the provider block is replaced: the rest of the provider facts are untouched.
+    // The block is an overlay: the field it states wins, and every value it does not state is the one
+    // the flat configuration already produced (see the overlay suite for the derived values).
+    expect(effective.chatgptWeb).toMatchObject(scoped);
+    expect(effective.chatgptWeb?.browserHost).toBe(providerConfig(scopedConfig).chatgptWeb?.browserHost);
+    // The rest of the provider facts are untouched.
     expect(effective.baseUrl).toBe(providerConfig(scopedConfig).baseUrl);
     expect(effective.models).toEqual(providerConfig(scopedConfig).models);
 

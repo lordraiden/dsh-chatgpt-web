@@ -21,6 +21,7 @@ import {
   availableChatGptWebRoutes,
 } from "../src/chatgpt-web-authority";
 import { effectiveChatGptWebProviderConfig } from "../src/chatgpt-web-provider-config";
+import { webChatModelCatalogueEntries } from "../src/web-chat/host/dsh-integration";
 import {
   defaultConfig,
   getConfigPath,
@@ -118,7 +119,9 @@ describe("issue #193 — one effective provider configuration", () => {
 
     // 1. The resolver: the provider facts every other seam derives from.
     const effective = effectiveChatGptWebProviderConfig(config);
-    expect(effective.chatgptWeb).toBe(LUNA_ONLY_SCOPED);
+    // The scoped fields are the ones in force; the block is an overlay, so the fields it does not
+    // state keep the flat value (see the partial-block test below).
+    expect(effective.chatgptWeb).toMatchObject(LUNA_ONLY_SCOPED);
 
     // 2. Route authority.
     const authority = createChatGptWebRouteAuthorityFromProvider(effective);
@@ -180,7 +183,7 @@ describe("issue #193 — one effective provider configuration", () => {
       expect(response.status).toBe(200);
       await response.text();
       expect(seen).toHaveLength(1);
-      expect(seen[0]?.chatgptWeb).toBe(LUNA_ONLY_SCOPED);
+      expect(seen[0]?.chatgptWeb).toMatchObject(LUNA_ONLY_SCOPED);
     } finally {
       await running.stop(true);
     }
@@ -247,5 +250,57 @@ describe("issue #193 — the scoped block is validated by the same owner as the 
       capabilityState: { solAvailable: "unknown", proAvailable: "unknown" },
     });
     expect(() => loadConfig()).toThrow(/Invalid Sol capability state/);
+  });
+});
+
+describe("issue #193 — a scoped block is an overlay, not a replacement (review)", () => {
+  test("a partial scoped block keeps every value it does not state, derived ones included", () => {
+    const flat = flatSolConfig();
+    const base = providerConfig(flat).chatgptWeb;
+    const effective = effectiveChatGptWebProviderConfig(scopedLunaConfig({ browserInteractionMode: "automatic" })).chatgptWeb;
+
+    expect(effective).toBeDefined();
+    expect(effective?.browserInteractionMode).toBe("automatic");
+    // The account identity is *derived* from the stored session by the flat configuration. A whole-block
+    // replacement dropped it, which is how the driver could report an authenticated account as unknown.
+    expect(effective?.accountIdentityFingerprint).toBe(base?.accountIdentityFingerprint);
+    expect(effective?.solAvailable).toBe(base?.solAvailable);
+    expect(effective?.storageStatePath).toBe(base?.storageStatePath);
+  });
+
+  test("a scoped capability state decides the compatibility boolean it implies", () => {
+    const effective = effectiveChatGptWebProviderConfig(scopedLunaConfig({
+      capabilityState: { solAvailable: "unsupported", proAvailable: "unsupported" },
+    })).chatgptWeb;
+
+    // The block states no boolean for either capability: the state it does state decides, so the
+    // facts the adapter reads can no longer contradict the capability the host reports.
+    expect(effective?.solAvailable).toBe(false);
+    expect(effective?.proAvailable).toBe(false);
+  });
+
+  test("a scoped capability state that contradicts an explicit boolean is refused", () => {
+    const config = scopedLunaConfig({
+      capabilityState: { solAvailable: "unsupported", proAvailable: "unsupported" },
+      solAvailable: true,
+    });
+    // The merged block is what the shared validator checks, so this is refused with the block's
+    // location instead of reaching the driver as an incoherent provider.
+    expect(() => effectiveChatGptWebProviderConfig(config)).toThrow(/webChat\.providers\["chatgpt-web"\]/);
+  });
+});
+
+describe("issue #193 — catalogue metadata never doubles a provider-qualified id (review)", () => {
+  test("a driver's already-scoped public id is used as it is, and a bare one is scoped once", () => {
+    const entries = webChatModelCatalogueEntries("chatgpt-web", [
+      { id: "chatgpt-web/luna", label: "Luna", text: true },
+      { id: "think", label: "Think", text: true },
+    ]);
+
+    // The driver declares its model's public identity. A provider that already scopes it (`chatgpt-web/
+    // luna`) must not be scoped again — `chatgpt-web/chatgpt-web/luna` is not a model — while an
+    // unqualified id is still given the provider it came from.
+    expect(entries.map(entry => entry.id)).toEqual(["chatgpt-web/luna", "chatgpt-web/think"]);
+    expect(entries.map(entry => entry.providerId)).toEqual(["chatgpt-web", "chatgpt-web"]);
   });
 });

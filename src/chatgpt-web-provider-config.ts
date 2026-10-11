@@ -9,9 +9,11 @@
  * What this module owns, and what it deliberately does not:
  *
  * - it produces **provider facts only**: the same `CodexProviderConfig` shape `providerConfig(config)`
- *   produces, with a provider-scoped `webChat.providers["chatgpt-web"]` block replacing the flat
- *   `chatgptWeb` block as a whole (the precedence the host boundary already states). Without `webChat`
- *   the result is structurally `providerConfig(config)` unchanged;
+ *   produces. A provider-scoped `webChat.providers["chatgpt-web"]` block **overrides** the flat
+ *   `chatgptWeb` block field by field — the fields it does not state keep the flat value, including the
+ *   derived ones (the account identity fingerprint) — and the merged block, not the scoped payload
+ *   alone, is what the shared validator checks. Without `webChat` the result is structurally
+ *   `providerConfig(config)` unchanged;
  * - it is **not** a second routing authority. `ctx.llm` remains the public provider registry and route
  *   dispatch authority, and the sidecar remains the execution authority; callers derive their own
  *   provider-scoped views (routes, catalogue) from these facts exactly as they derived them from
@@ -50,9 +52,50 @@ export function effectiveChatGptWebProviderConfig(config: AppConfig): ReturnType
   if (scoped === provider.chatgptWeb || !scoped || typeof scoped !== "object" || Array.isArray(scoped)) {
     return provider;
   }
-  validateChatGptWebProviderFacts(scoped, CHATGPT_WEB_SCOPED_CONFIG_PATH);
+  // The scoped block **overrides** the flat block; it does not replace it. A block that states only
+  // what it wants to change therefore keeps every value the flat configuration already produced —
+  // including the ones that are *derived* rather than configured (the account identity fingerprint
+  // read from the stored session), which a whole-block replacement would silently drop.
+  const declared = Object.fromEntries(
+    Object.entries(scoped as Record<string, unknown>).filter(([, value]) => value !== undefined),
+  );
+  const merged = { ...provider.chatgptWeb, ...declared } as Record<string, unknown>;
+
+  // A scoped capability state decides the compatibility boolean it implies, unless the scoped block
+  // states that boolean itself: then the pair is a genuine contradiction and the shared validator
+  // refuses it, which is the project's rule for an explicit tri-state next to an explicit claim.
+  const state = declared.capabilityState as
+    | { solAvailable?: "supported" | "unsupported" | "unknown"; proAvailable?: "supported" | "unsupported" | "unknown" }
+    | undefined;
+  if (state) {
+    for (const [claim, capability] of [
+      ["solAvailable", "solAvailable"],
+      ["proAvailable", "proAvailable"],
+    ] as const) {
+      const claimed = declared[claim];
+      const reported = state[capability];
+      if (reported === undefined || reported === "unknown") continue;
+      const implied = reported === "supported";
+      if (claimed === undefined) {
+        merged[claim] = implied;
+        continue;
+      }
+      // Both are stated, and they disagree: the block is refused instead of the adapter and the host
+      // disagreeing about what this deployment can serve.
+      if (claimed !== implied) {
+        throw new Error(
+          `Invalid capability combination in ${CHATGPT_WEB_SCOPED_CONFIG_PATH}: `
+          + `${claim} is ${String(claimed)} while capabilityState.${capability} is ${reported}`,
+        );
+      }
+    }
+  }
+
+  // The **merge** is what gets validated, so an incoherence the overlay introduced is refused with
+  // the block's location instead of reaching the driver.
+  validateChatGptWebProviderFacts(merged, CHATGPT_WEB_SCOPED_CONFIG_PATH);
   return {
     ...provider,
-    chatgptWeb: scoped as NonNullable<ReturnType<typeof providerConfig>["chatgptWeb"]>,
+    chatgptWeb: merged as NonNullable<ReturnType<typeof providerConfig>["chatgptWeb"]>,
   };
 }
