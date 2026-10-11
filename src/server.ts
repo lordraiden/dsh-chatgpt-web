@@ -10,6 +10,7 @@ import {
 } from "./adapters/chatgpt-web/advisor";
 import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { closeNativeChatGptContinuityStores } from "./adapters/chatgpt-web/index";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -1532,6 +1533,9 @@ export function startServer(
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
         sharedProviderCore.shutdown(),
+        // The durable continuity store owns an open file and one writer slot per process; the
+        // sidecar releases it on its own shutdown path (#193).
+        closeNativeChatGptContinuityStores(),
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
