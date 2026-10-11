@@ -340,6 +340,14 @@ export class WebChatExchangeLifecycle {
       : outcome === "cancelled"
         ? "CANCELLED"
         : "FAILED";
+    if (this.retired) {
+      // Retirement supersedes the state machine: the exchange is already written off (its physical
+      // settlement could not be proven), and publishing the logical outcome it finally reached is
+      // the one thing left to record. The state stays as it was; `retired` and `logical` are what a
+      // consumer reads.
+      this.touch();
+      return;
+    }
     if (this.state !== target) {
       if (TERMINAL_STATES.includes(this.state) && this.state !== "SUBMISSION_AMBIGUOUS") {
         throw webChatError("CONVERSATION_STATE_MISMATCH", `Cannot settle ${this.state} as ${outcome}`);

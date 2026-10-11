@@ -536,6 +536,11 @@ export class ProviderTurnLifecycle {
       throw new Error("Provider recovery cannot reclassify a replay as exact resume");
     }
     this.recovery = value;
+    // The recovery decision is shared state: the core records it with its own vocabulary and its own
+    // monotonicity guards.
+    if (value !== "FAILED" && this.core.snapshot().recovery === undefined) {
+      this.core.markRecovery(value === "EXACT_RESUME" ? "exact_resume" : "replay");
+    }
   }
 
   markLogicalSettled(outcome: Exclude<LogicalSettlementOutcome, "pending"> = "completed"): void {
@@ -661,7 +666,12 @@ export class ProviderTurnLifecycle {
       if (!this.logicalSettled) {
         this.logicalSettled = true;
         this.logicalOutcome = "failed";
+        // The logical outcome is the core's too: a physical failure that ends the turn as failed is
+        // recorded in the same step, so the provider view and the core cannot describe different
+        // outcomes.
+        if (this.core.snapshot().logical === "pending") this.core.markLogicallySettled("failed");
       }
+      this.core.markRecovery("failed");
     }
     this.activity = "idle";
     if (this.state !== "RETIRED" && this.state !== "SETTLING") {

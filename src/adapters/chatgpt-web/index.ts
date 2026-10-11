@@ -1507,6 +1507,9 @@ export function createChatGptWebAdapter(
             : retired
               ? "REPLAY"
               : "NEW";
+        // Cancellation takes precedence over continuity: an already-aborted turn fails with the
+        // cancellation error, before any continuity decision is made (issue #192 review).
+        if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
         // The core owns the continuity decision (issue #192): the provider states its intent and the
         // core applies the shared rules, mapping the outcome back to the provider's vocabulary. The
         // store lives for the process, so a chat's conversation survives across the turns of a

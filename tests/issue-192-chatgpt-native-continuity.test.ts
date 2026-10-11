@@ -124,21 +124,21 @@ describe("issue #192 — the native recovery decision comes from the core", () =
     expect(plan).toBe("NEW");
   });
 
-  test("a verdict that refuses continuity fails explicitly, never silently", async () => {
+  test("a verdict that refuses continuity stops the turn instead of continuing", async () => {
     const { instance, sessions } = continuity();
     // The chat has a recorded conversation and an installed initialization state...
     const key = chatGptConversationKey(parsed(), NAMESPACE, AFFINITY)!;
     await instance.resolveRecovery({ parsed: parsed(), legacyRecovery: "NEW", contextExhausted: false, retired: false });
     sessions.recordSentSystemFingerprint(key, 1, "fingerprint-1");
 
-    // ...but this turn asks for a route the deployment does not serve: the core refuses.
-    const refused = await instance.resolveRecovery({
+    // ...but this turn asks for a route the deployment does not serve: the core refuses, and the
+    // refusal reaches the caller as a typed failure *before* any provider turn is created.
+    await expect(instance.resolveRecovery({
       parsed: parsed({ modelId: "chatgpt-web/pro" }),
       legacyRecovery: "EXACT_RESUME",
       contextExhausted: false,
       retired: false,
-    });
-    expect(refused).toBe("FAILED");
+    })).rejects.toMatchObject({ category: "UNSUPPORTED_OPTION" });
   });
 
   test("a lane with no logical conversation keeps the provider's own decision", async () => {

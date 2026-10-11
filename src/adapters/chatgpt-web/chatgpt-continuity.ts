@@ -17,6 +17,7 @@ import type { ChatGptTurnSessions } from "./turn-execution";
 import type { CodexParsedRequest, CodexProviderConfig } from "../../types";
 import {
   createMemoryConversationStore,
+  webChatError,
   resolveWebChatContinuation,
   webChatContinuationIdentity,
   type WebChatAccountBinding,
@@ -132,9 +133,13 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
         case "new_conversation":
           return "NEW";
         default:
-          // The core refused continuity: the turn fails explicitly instead of installing a new
-          // conversation by inference.
-          return "FAILED";
+          // The core refused continuity: the turn fails here, before any provider turn, transport or
+          // browser session is created, and the typed failure reaches the caller. Continuing with a
+          // recovery flag would be the silent fork the contract forbids.
+          throw plan.error ?? webChatError(
+            "CONVERSATION_STATE_MISMATCH",
+            "The WebChat Core refused continuity for this turn",
+          );
       }
     },
   };

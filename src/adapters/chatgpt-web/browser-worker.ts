@@ -4672,6 +4672,8 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    /** Whether this browser turn reached its completion or failed: the surface's settlement follows. */
+    let turnFailed = false;
     let retainedCreated = false;
     let retainedPage: Page | undefined;
     // Send activation is the ambiguity boundary (issue #171): before it, ChatGPT has seen
@@ -5495,6 +5497,7 @@ export class ChatGptBrowserWorker {
       );
       return finalText;
     } catch (error) {
+      turnFailed = true;
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${safeErrorDescriptor(error)}`,
@@ -5509,7 +5512,10 @@ export class ChatGptBrowserWorker {
       // the next turn of the same conversationKey can continue, keeping the page itself open.
       if (managedRetained) {
         this.retainedSurfaces.release(turn.conversationKey!);
-        this.retainedSurfaces.settle(turn.conversationKey!, "fulfilled");
+        // The settlement is what this turn actually reached: a failed turn proves nothing about the
+        // remote generation, so the surface is retired (an explicit reset is the way back) instead of
+        // being handed to the next turn as if the operation had finished.
+        this.retainedSurfaces.settle(turn.conversationKey!, turnFailed ? "rejected" : "fulfilled");
         // A surface that this turn created is discarded only if the send never activated: before
         // that boundary ChatGPT has seen nothing, so no conversation exists to preserve. Once the
         // send is activated (or submission is proven), irreversible activity exists and a later

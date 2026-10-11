@@ -746,6 +746,45 @@ describe("issue #191 — transport resource ownership", () => {
 });
 
 describe("issue #191 — migration evidence from the existing provider lifecycle", () => {
+  test("a rejected physical settlement is the core's logical failure as well (review of #219)", async () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey: "issue-219-physical-rejection",
+      traceId: "trace-219",
+      nativeTurnId: "turn-219",
+      nativeThreadId: "thread-219",
+      accountIdentity: "account-219",
+      browserProfile: "profile-219",
+      browserContext: "context-219",
+      pageIdentity: "page-219",
+      capabilitySnapshot: {
+        snapshotId: "snapshot-219",
+        sessionId: "session-219",
+        agentId: "session-219",
+        turnId: "turn-219",
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+
+    // The physical side fails before the logical outcome was ever settled.
+    turn.attachPhysicalSettlement(Promise.reject(new Error("the browser operation could not be proven settled")));
+    await turn.waitForPhysicalSettlement().catch(() => undefined);
+
+    const provider = turn.snapshot();
+    const coreState = turn.coreSnapshot();
+    expect(provider.physicalSettlementOutcome).toBe("rejected");
+    expect(provider.logicalOutcome).toBe("failed");
+    expect(provider.recovery).toBe("FAILED");
+    // The core describes the same outcome: the provider's view is the core's.
+    expect(coreState.physical).toBe("rejected");
+    expect(coreState.logical).toBe("failed");
+    expect(coreState.recovery).toBe("failed");
+    expect(coreState.retired).toBe(true);
+  });
+
   test("the ChatGPT lifecycle vocabulary maps onto the core exchange", () => {
     const facts = (overrides: Partial<Parameters<typeof chatGptWebChatExchangeStateOf>[0]> = {}) => ({
       state: "PREPARING" as const,
