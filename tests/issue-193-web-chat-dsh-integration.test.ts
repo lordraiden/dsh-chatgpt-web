@@ -3,6 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
   CHATGPT_WEB_DRIVER_ID,
   admitDshTurn,
+  closeWebChatConversationStore,
+  createWebChatShutdown,
+  registerableRouteIds,
+  webChatProviderCheck,
   assertHostReplayStateOwnership,
   createWebChatConversationStore,
   createWebChatHostResolver,
@@ -186,5 +190,83 @@ describe("issue #193 — failure semantics and boundaries", () => {
     for (const feature of ["files", "images", "tools", "mcp"] as const) {
       expect(() => admitDshTurn({ userText: "hola", model: "m", [feature]: [{ any: true }] })).toThrow(/UNSUPPORTED_OPTION|text-only/);
     }
+  });
+});
+
+describe("issue #193 — the wiring the host boundary enables", () => {
+  test("a route without a driver is never registerable", () => {
+    const implemented = driver();
+    expect(registerableRouteIds([CHATGPT_WEB_DRIVER_ID, "qwen-web"], [implemented])).toEqual([CHATGPT_WEB_DRIVER_ID]);
+    expect(registerableRouteIds(["qwen-web", "deepseek-web"], [implemented])).toEqual([]);
+    // The registration authority stays DSH's: this only decides which ids may be passed to it.
+    expect(registerableRouteIds([], [implemented])).toEqual([]);
+  });
+
+  test("the provider check reports auth, capabilities and an unhealthy driver, without secrets", async () => {
+    const healthy = webChatProviderCheck(await inspectWebChatProvider(driver()));
+    expect(healthy).toEqual({
+      providerId: CHATGPT_WEB_DRIVER_ID,
+      status: "ok",
+      detail: "authenticated (fp-193); unsupported: pro; 2 models; 2 routes",
+    });
+    expect(healthy.detail).not.toContain("token");
+
+    const unauthenticated = webChatProviderCheck(await inspectWebChatProvider(driver({
+      inspectAccount: async () => ({ authenticated: false }),
+    })));
+    expect(unauthenticated.status).toBe("warning");
+    expect(unauthenticated.detail).toContain("not authenticated");
+
+    const unhealthy = webChatProviderCheck(await inspectWebChatProvider(driver({
+      health: async () => ({ ok: false, detail: "sidecar closed" }),
+    })));
+    expect(unhealthy.status).toBe("error");
+    expect(unhealthy.detail).toContain("sidecar closed");
+  });
+
+  test("shutdown asks every driver once and survives one that fails", async () => {
+    let first = 0;
+    let second = 0;
+    const failures: string[] = [];
+    const shutdown = createWebChatShutdown([
+      driver({ shutdown: async () => { first += 1; } }),
+      driver({ id: "other-web", shutdown: async () => { second += 1; throw new Error("already gone"); } }),
+    ], (error, providerId) => failures.push(`${providerId}: ${(error as Error).message}`));
+
+    await shutdown();
+    await shutdown();
+    expect([first, second]).toEqual([1, 1]);
+    expect(failures).toEqual(["other-web: already gone"]);
+  });
+
+  test("a durable store survives a restart, and releasing it is idempotent", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const directory = mkdtempSync(join(tmpdir(), "issue-193-store-"));
+    const file = join(directory, "conversations.json");
+
+    const first = createWebChatConversationStore({ webChat: { conversationStorePath: file } });
+    const identity = { providerId: CHATGPT_WEB_DRIVER_ID, bindingId: "binding-1", key: "key-1" };
+    await first.update(identity, () => ({
+      identity,
+      generation: 1,
+      handle: "handle-1" as never,
+      status: "resumable" as const,
+      checkpoint: "confirmed" as const,
+      lastConfirmedTurn: { turnId: "turn-1", at: 1 },
+    }));
+    // One writer per file and process: the same path cannot be opened twice.
+    expect(() => createWebChatConversationStore({ webChat: { conversationStorePath: file } })).toThrow(/already owns it/);
+    await closeWebChatConversationStore(first);
+
+    // A restarted runtime opens the same file and reads the same conversation back.
+    const second = createWebChatConversationStore({ webChat: { conversationStorePath: file } });
+    const record = await second.read(identity);
+    expect(record?.generation).toBe(1);
+    expect(record?.lastConfirmedTurn?.turnId).toBe("turn-1");
+    await closeWebChatConversationStore(second);
+    // Releasing an already released store is harmless.
+    await closeWebChatConversationStore(second);
   });
 });

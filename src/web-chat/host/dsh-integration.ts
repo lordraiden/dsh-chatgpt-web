@@ -225,3 +225,87 @@ export function assertHostReplayStateOwnership(
 export function admitDshTurn(candidate: unknown): ReturnType<typeof assertTextOnlyWebChatTurn> {
   return assertTextOnlyWebChatTurn(candidate);
 }
+
+/**
+ * The route ids that may be registered publicly.
+ *
+ * `ctx.llm.registerAdapter` remains the only public registration authority, and a route is only
+ * registerable when this deployment actually implements it: an id with no driver is refused, so the
+ * registry can never look complete with implementations that do not exist.
+ */
+export function registerableRouteIds(
+  routeIds: readonly string[],
+  drivers: readonly WebChatProviderDriver[],
+): readonly string[] {
+  return routeIds.filter(routeId => drivers.some(driver => driver.id === routeId));
+}
+
+/** A public-facing provider check, without any credential. */
+export interface WebChatProviderCheck {
+  readonly providerId: string;
+  readonly status: "ok" | "warning" | "error";
+  readonly detail: string;
+}
+
+/**
+ * Turn one provider's information into a doctor check.
+ *
+ * The detail carries only non-secret facts: the account is described by its fingerprint (an
+ * identifier, never a credential), and an unhealthy driver is reported as an error rather than being
+ * omitted from the report.
+ */
+export function webChatProviderCheck(info: WebChatProviderInfo): WebChatProviderCheck {
+  const parts: string[] = [];
+  parts.push(info.authenticated ? `authenticated (${info.accountFingerprint ?? "no fingerprint"})` : "not authenticated");
+  if (info.capabilities) {
+    const unsupported = Object.entries(info.capabilities)
+      .filter(([, state]) => state === "unsupported")
+      .map(([capability]) => capability);
+    if (unsupported.length > 0) parts.push(`unsupported: ${unsupported.join(", ")}`);
+  }
+  parts.push(`${info.models.length} model${info.models.length === 1 ? "" : "s"}`);
+  if (info.health.detail) parts.push(info.health.detail);
+
+  if (!info.health.ok) return { providerId: info.providerId, status: "error", detail: parts.join("; ") };
+  if (!info.authenticated) return { providerId: info.providerId, status: "warning", detail: parts.join("; ") };
+  return { providerId: info.providerId, status: "ok", detail: parts.join("; ") };
+}
+
+/**
+ * An idempotent shutdown for the drivers this deployment composed.
+ *
+ * Each driver is asked to shut down exactly once, and a driver that throws does not stop the others
+ * or the sidecar from shutting down: shutdown must always complete.
+ */
+export function createWebChatShutdown(
+  drivers: readonly WebChatProviderDriver[],
+  onError: (error: unknown, providerId: string) => void = () => {},
+): () => Promise<void> {
+  let shutdown: Promise<void> | undefined;
+  return () => {
+    shutdown ??= (async () => {
+      for (const driver of drivers) {
+        try {
+          await driver.shutdown();
+        } catch (error) {
+          onError(error, driver.id);
+        }
+      }
+    })();
+    return shutdown;
+  };
+}
+
+/**
+ * Release a conversation store, whatever backend it is.
+ *
+ * Every backend may need to release what it owns (a durable file, for instance), and a release that
+ * fails must not turn into an unhandled rejection during shutdown.
+ */
+export async function closeWebChatConversationStore(store: WebChatConversationStore): Promise<void> {
+  try {
+    await store.close?.();
+  } catch {
+    // Releasing is best effort: the process is going away and the store holds no other authority.
+  }
+}
