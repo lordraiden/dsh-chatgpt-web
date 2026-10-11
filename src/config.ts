@@ -205,9 +205,9 @@ function capabilityStateFromBooleans(record: Record<string, unknown>): {
  *
  * The same facts are described twice: by the historical flat ChatGPT block (the AppConfig fields
  * `providerConfig` projects) and by a provider-scoped `webChat.providers["chatgpt-web"]` block, which
- * **replaces** the flat block as a whole and is therefore consumed verbatim by the driver instead of
- * being projected again. This function is the single copy of their rules, so the two descriptions
- * cannot drift:
+ * overlays the projected facts at resolution time. The loader first checks scoped field shapes, then
+ * validates the effective merge; the runtime resolver uses the same merge owner. This function is the
+ * single copy of their rules, so the two descriptions cannot drift:
  *
  * - the scalar shape of every fact, including the two enumerations and the transport pair
  *   (a launcher browser host requires an absolute descriptor);
@@ -220,7 +220,11 @@ function capabilityStateFromBooleans(record: Record<string, unknown>): {
  * scoped block another, and neither is required to restate every fact. `path` names where the block
  * lives, so a refusal names the exact location whichever block produced it.
  */
-export function validateChatGptWebProviderFacts(value: unknown, path = "config"): void {
+export function validateChatGptWebProviderFacts(
+  value: unknown,
+  path = "config",
+  options: { crossField?: boolean } = {},
+): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Invalid ChatGPT Web provider configuration in ${path}`);
   }
@@ -246,11 +250,11 @@ export function validateChatGptWebProviderFacts(value: unknown, path = "config")
     && record.browserHost !== "launcher") {
     throw new Error(`Invalid browserHost in ${path}`);
   }
-  if (record.browserHost === "launcher"
+  if (options.crossField !== false && record.browserHost === "launcher"
     && (typeof record.browserHostDescriptorPath !== "string" || !record.browserHostDescriptorPath.trim())) {
     throw new Error(`Launcher browser host requires browserHostDescriptorPath in ${path}`);
   }
-  if (record.browserHost === "launcher"
+  if (options.crossField !== false && record.browserHost === "launcher"
     && typeof record.browserHostDescriptorPath === "string"
     && !isAbsolute(expandUserPath(record.browserHostDescriptorPath))) {
     throw new Error(`Launcher browserHostDescriptorPath must be absolute in ${path}`);
@@ -279,11 +283,21 @@ export function validateChatGptWebProviderFacts(value: unknown, path = "config")
       proAvailable: explicit.proAvailable as "supported" | "unsupported" | "unknown",
     };
   }
+  if (options.crossField === false) return;
   if (explicitState?.solAvailable === "unknown" && record.solAvailable !== undefined) {
     throw new Error(`Invalid Sol capability state in ${path}`);
   }
   if (explicitState?.proAvailable === "unknown" && record.proAvailable !== undefined) {
     throw new Error(`Invalid Pro capability state in ${path}`);
+  }
+  for (const capability of ["solAvailable", "proAvailable"] as const) {
+    const reported = explicitState?.[capability];
+    const claimed = record[capability];
+    if (reported === undefined || reported === "unknown" || claimed === undefined) continue;
+    const implied = reported === "supported";
+    if (claimed !== implied) {
+      throw new Error(`Invalid ${capability} capability state in ${path}: ${reported} conflicts with ${String(claimed)}`);
+    }
   }
   const capabilityState = explicitState ?? capabilityStateFromBooleans(record);
   if (capabilityState.proAvailable === "supported" && capabilityState.solAvailable !== "supported") {
@@ -296,6 +310,56 @@ export function validateChatGptWebProviderFacts(value: unknown, path = "config")
   if (record.proAvailable === true && record.solAvailable !== true) {
     throw new Error(`Invalid ChatGPT account capabilities in ${path}: Pro requires Sol`);
   }
+}
+
+/** Merge one scoped provider overlay and validate only its effective facts. */
+export function mergeChatGptWebProviderFacts(
+  base: Record<string, unknown>,
+  overlay: unknown,
+  path: string,
+): Record<string, unknown> {
+  if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return base;
+  validateChatGptWebProviderFacts(overlay, path, { crossField: false });
+  const declared = Object.fromEntries(
+    Object.entries(overlay as Record<string, unknown>).filter(([, value]) => value !== undefined),
+  );
+  const declaredMode = declared.browserInteractionMode;
+  if (declaredMode !== undefined && declaredMode !== base.browserInteractionMode) {
+    throw new Error(`browserInteractionMode conflicts with deployment mode in ${path}`);
+  }
+  const merged = { ...base, ...declared };
+  const state = declared.capabilityState as
+    | { solAvailable?: "supported" | "unsupported" | "unknown"; proAvailable?: "supported" | "unsupported" | "unknown" }
+    | undefined;
+  if (state) {
+    for (const capability of ["solAvailable", "proAvailable"] as const) {
+      const claimed = declared[capability];
+      const reported = state[capability];
+      if (reported === undefined) continue;
+      if (reported === "unknown") {
+        if (claimed === undefined) delete merged[capability];
+      } else {
+        const implied = reported === "supported";
+        if (claimed === undefined) merged[capability] = implied;
+        else if (claimed !== implied) {
+          throw new Error(`Invalid capability combination in ${path}: ${capability} contradicts capabilityState.${capability}`);
+        }
+      }
+    }
+  }
+  // parseConfig normalizes absent flat legacy booleans to false after validating the persisted
+  // unknown state. When any overlay is present, remove only that inherited synthetic assertion;
+  // an explicitly scoped boolean with unknown remains invalid in the shared validator.
+  const effectiveState = merged.capabilityState as
+    | { solAvailable?: string; proAvailable?: string }
+    | undefined;
+  for (const capability of ["solAvailable", "proAvailable"] as const) {
+    if (effectiveState?.[capability] === "unknown" && declared[capability] === undefined) {
+      delete merged[capability];
+    }
+  }
+  validateChatGptWebProviderFacts(merged, path);
+  return merged;
 }
 
 export interface AppConfig {
@@ -826,14 +890,16 @@ function parseConfig(value: unknown, path: string): AppConfig {
         if (!providerId.trim() || !provider || typeof provider !== "object" || Array.isArray(provider)) {
           throw new Error(`Invalid webChat.providers.${providerId || "(empty)"} in ${path}`);
         }
-        // The provider-scoped block the ChatGPT Web route consumes is validated by the same owner as
-        // the flat block: it replaces those facts as a whole, so a malformed internal value or an
-        // incoherent capability combination is refused here instead of being cast into the driver.
+        // The provider-scoped block overlays provider facts. An explicit browser mode is accepted
+        // only when it agrees with the normalized deployment mode.
         if (providerId === CHATGPT_WEB_ROUTE_ID) {
-          validateChatGptWebProviderFacts(
-            provider,
-            `${path} (webChat.providers["${CHATGPT_WEB_ROUTE_ID}"])`,
-          );
+          const scopedPath = `${path} (webChat.providers["${CHATGPT_WEB_ROUTE_ID}"])`;
+          const scoped = provider as Record<string, unknown>;
+          validateChatGptWebProviderFacts(provider, scopedPath, { crossField: false });
+          if (scoped.browserInteractionMode !== undefined
+            && scoped.browserInteractionMode !== browserInteractionMode) {
+            throw new Error(`browserInteractionMode conflicts with deployment mode in ${scopedPath}`);
+          }
         }
       }
     }
@@ -850,7 +916,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
   };
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
-  return {
+  const result = {
     ...parsed,
     appName: expectedAppName,
     automaticAppName,
@@ -863,6 +929,15 @@ function parseConfig(value: unknown, path: string): AppConfig {
     experimentalBiggerContext,
     zeroRiskProEnabled,
   } as AppConfig;
+  const scopedProvider = result.webChat?.providers?.[CHATGPT_WEB_ROUTE_ID];
+  if (scopedProvider && typeof scopedProvider === "object" && !Array.isArray(scopedProvider)) {
+    mergeChatGptWebProviderFacts(
+      providerConfig(result).chatgptWeb as unknown as Record<string, unknown>,
+      scopedProvider,
+      `${path} (webChat.providers["${CHATGPT_WEB_ROUTE_ID}"])`,
+    );
+  }
+  return result;
 }
 
 export function saveConfig(config: AppConfig): void {

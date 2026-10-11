@@ -60,11 +60,27 @@ describe("issue #192 — the ChatGPT driver", () => {
     const models = await driver.listModels();
     expect(models.length).toBeGreaterThan(0);
     for (const model of models) expect(isWebChatModelDescriptor(model)).toBe(true);
-    expect(models.some(model => model.id === "chatgpt-web/light")).toBe(true);
-    expect((await driver.resolveModel("chatgpt-web/light"))?.label).toBeTruthy();
+    expect(models.some(model => model.id === "light")).toBe(true);
+    expect(models.some(model => model.id.startsWith("chatgpt-web/"))).toBe(false);
+    // The provider driver accepts the unchanged public DSH route and projects it to a local descriptor.
+    expect((await driver.resolveModel("chatgpt-web/light"))?.id).toBe("light");
     // A Pro route is not served when the account does not have it.
     expect(await driver.resolveModel("chatgpt-web/pro")).toBeUndefined();
     expect(await driver.resolveModel("api/gpt-5")).toBeUndefined();
+  });
+
+  test("the public Luna route remains unchanged while its descriptor is provider-local", async () => {
+    const lunaProvider = {
+      ...PROVIDER,
+      chatgptWeb: {
+        ...PROVIDER.chatgptWeb,
+        solAvailable: false,
+        capabilityState: { solAvailable: "unsupported", proAvailable: "unsupported" },
+      },
+    } as unknown as CodexProviderConfig;
+    const driver = createChatGptWebDriver({ provider: lunaProvider });
+
+    expect((await driver.resolveModel("chatgpt-web/luna"))?.id).toBe("luna");
   });
 
   test("health reflects whether any route is available", async () => {
