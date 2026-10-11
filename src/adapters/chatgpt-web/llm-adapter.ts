@@ -748,10 +748,21 @@ function toTokenUsage(usage: CodexUsage | undefined): TokenUsage | undefined {
  * An attempt that reports nothing keeps exactly the failure shape it has today: no retryability is
  * invented for an event that does not carry the evidence.
  */
+/** The submission phases the core defines. Anything else is malformed evidence. */
+const WEB_CHAT_SUBMISSION_PHASES: readonly string[] = ["prepared", "send_activated", "accepted"];
+
 export function dshFailureRetryableOf(
   event: { readonly retryable?: boolean; readonly phase?: WebChatSubmissionPhase },
 ): boolean | undefined {
-  const phase = event.phase ?? (event.retryable === undefined ? undefined : event.retryable ? "prepared" : "accepted");
+  // The phase arrives from a provider event, so it is validated here before it can decide anything:
+  // malformed or contradictory evidence is not a licence to retry a turn that may already have
+  // reached the provider, so it fails closed instead of falling through to the ACCEPTED/FAILED rules.
+  const reported: unknown = event.phase;
+  if (reported !== undefined && (typeof reported !== "string" || !WEB_CHAT_SUBMISSION_PHASES.includes(reported))) {
+    return false;
+  }
+  const phase = (reported as WebChatSubmissionPhase | undefined)
+    ?? (event.retryable === undefined ? undefined : event.retryable ? "prepared" : "accepted");
   if (phase === undefined) return undefined;
   return dshFailureSemanticsForSubmission({ phase }).retryable;
 }

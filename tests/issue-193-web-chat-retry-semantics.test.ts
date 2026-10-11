@@ -194,3 +194,26 @@ describe("issue #193 — the failure DSH sees carries that retryability", () => 
     }
   });
 });
+
+describe("issue #193 — malformed submission evidence fails closed (correction C5)", () => {
+  test("a phase the core does not define is never retryable, however it is spelled", () => {
+    for (const phase of ["sent", "submitting", "PREPARED", "", "accepted ", 1, {}, null]) {
+      expect(dshFailureRetryableOf({ phase: phase as never })).toBe(false);
+    }
+  });
+
+  test("contradictory evidence follows the phase, and the phase is the safer side", () => {
+    // `retryable: true` alongside a phase that means the submission was activated or accepted is a
+    // contradiction: the provider's own boundary wins, so the turn is never retried.
+    expect(dshFailureRetryableOf({ retryable: true, phase: "send_activated" })).toBe(false);
+    expect(dshFailureRetryableOf({ retryable: true, phase: "accepted" })).toBe(false);
+    // The converse stays as before: only a proven pre-submit failure is retryable.
+    expect(dshFailureRetryableOf({ retryable: true, phase: "prepared" })).toBe(true);
+    expect(dshFailureRetryableOf({ retryable: true })).toBe(true);
+    expect(dshFailureRetryableOf({ retryable: false })).toBe(false);
+  });
+
+  test("no evidence keeps the failure shape unchanged", () => {
+    expect(dshFailureRetryableOf({})).toBeUndefined();
+  });
+});
