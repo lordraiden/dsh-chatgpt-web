@@ -522,7 +522,9 @@ describe("issue #190 — continuation decisions", () => {
     const plan = await resolveWebChatContinuation({ store, driver }, request());
     expect(plan.outcome).toBe("new_conversation");
     expect(plan.conversation?.generation).toBe(1);
-    expect(plan.record?.checkpoint).toBe("confirmed");
+    // A creation registers a generation, not a finished turn: the record is an attempt until the
+    // provider confirms the result.
+    expect(plan.record?.checkpoint).toBe("unconfirmed");
     expect(calls).toEqual({ assess: 1, create: 1, replay: 0 });
   });
 
@@ -536,6 +538,34 @@ describe("issue #190 — continuation decisions", () => {
     expect(plan.conversation?.handle as string | undefined).toBe("handle-1");
     expect(calls).toEqual({ assess: 1, create: 0, replay: 0 });
     expect((await store.read(seeded.identity))?.generation).toBe(1);
+  });
+
+  test("a conversation is resumable only after the provider confirmed its turn", async () => {
+    const store = createMemoryConversationStore();
+    const created = await resolveWebChatContinuation(
+      { store, driver: scriptedDriver({ assessment: { status: "new" }, createGeneration: 1 }).driver },
+      request({ intent: { kind: "new_conversation", expectedGeneration: 0, reason: "first turn" } }),
+    );
+    expect(created.record?.checkpoint).toBe("unconfirmed");
+
+    // While that turn's result is unknown, continuity is not resumable.
+    const refused = await resolveWebChatContinuation(
+      { store, driver: scriptedDriver({ assessment: { status: "resumable" } }).driver },
+      request({ expectedGeneration: 1 }),
+    );
+    expect(refused.outcome).toBe("failed");
+    expect(refused.error?.category).toBe("CONVERSATION_STATE_MISMATCH");
+    expect(refused.reason).toContain("never confirmed");
+
+    // Once the provider confirms the settled turn, the conversation continues.
+    await confirmWebChatConversation(store, created.identity, { generation: 1, turnId: "turn-1", at: 1 });
+    const resumed = await resolveWebChatContinuation(
+      { store, driver: scriptedDriver({ assessment: { status: "resumable" } }).driver },
+      request({ expectedGeneration: 1 }),
+    );
+    expect(resumed.outcome).toBe("exact_resume");
+    // Using it is another attempt: it is unconfirmed again until that turn settles.
+    expect(resumed.record?.checkpoint).toBe("unconfirmed");
   });
 
   test("a lost conversation fails explicitly and is never replaced silently", async () => {

@@ -403,14 +403,15 @@ async function resolveWebChatContinuationLocked(
     return failure(identity, "CONVERSATION_STATE_MISMATCH", "A resumable conversation has no provider handle", stored);
   }
 
-  // Exact resume: the same generation and the same opaque handle, re-confirmed. The commit is
-  // conditional on the revision the driver assessed, so a concurrent change is never overwritten.
+  // Exact resume: the same generation and the same opaque handle; using the conversation is an
+  // *attempt* — its result is unknown until the provider confirms it — so the record is left
+  // unconfirmed; the commit stays conditional on the revision the driver assessed.
   const resumed = await deps.store.update(identity, (current) => {
     assertUnchangedSinceAssessment(current, stored);
     return {
       ...(current as WebChatConversationRecord),
       status: "resumable",
-      checkpoint: "confirmed",
+      checkpoint: "unconfirmed",
     };
   });
   return {
@@ -453,7 +454,7 @@ async function commitAdoption(
 ): Promise<WebChatConversationRecord> {
   return deps.store.update(identity, (current) => {
     assertUnchangedSinceAssessment(current, assessed);
-    return draftFromConversation(conversation);
+    return confirmedDraftFromConversation(conversation);
   });
 }
 
@@ -472,7 +473,14 @@ function conversationOf(record: WebChatConversationRecord): WebChatConversation 
   };
 }
 
-/** A record draft for a conversation a driver established. */
+/**
+ * A record draft for a conversation a driver established.
+ *
+ * It is deliberately **unconfirmed**: the driver established a generation and a handle, not that the
+ * turn it belongs to finished. Continuity becomes resumable only when the provider confirms the
+ * result (`confirmWebChatConversation`), which is what keeps a crashed or ambiguous turn from being
+ * treated as a confirmed continuation.
+ */
 function draftFromConversation(conversation: WebChatConversation): WebChatConversationDraft {
   assertNoWebChatSecrets({ identity: conversation.key });
   return {
@@ -484,8 +492,19 @@ function draftFromConversation(conversation: WebChatConversation): WebChatConver
     generation: conversation.generation,
     handle: conversation.handle,
     status: conversation.status,
-    checkpoint: "confirmed",
+    checkpoint: "unconfirmed",
   };
+}
+
+/**
+ * The draft for a conversation a driver *reconciled* on its own.
+ *
+ * The driver's verdict is what proves this one: it established that the conversation exists and can
+ * continue, so the record may be confirmed — unlike a creation or a replay, which only register a
+ * generation.
+ */
+function confirmedDraftFromConversation(conversation: WebChatConversation): WebChatConversationDraft {
+  return { ...draftFromConversation(conversation), checkpoint: "confirmed" };
 }
 
 /** Ask the driver for a brand-new conversation and record it only once it exists. */
