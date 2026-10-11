@@ -22,6 +22,14 @@ index between that specification and the code that implements it today.
 | `core/account-binding.ts` | The stable identity of one provider/account binding (a fingerprint, never a credential). | §6.2, §7 |
 | `core/conversation-store.ts` | The durable continuity record, the store port, the in-memory reference implementation and the record invariants (generations, confirmed checkpoints, no secrets, opaque handles). | §6.3, §7.3, §18 |
 | `core/continuation.ts` | The continuation decisions: explicit new conversation, exact resume, explicit replay, or an explicit failure — never a silent fork. | §7.1, §10, §11 |
+| `core/exchange-state.ts` | The exchange lifecycle: monotonic states, the submission phase, logical versus physical settlement, cancellation and stale-result protection. | §9 |
+| `core/retry-authority.ts` | Retry safety and the exchange's own retry decision, so the host's route-level retry and the exchange cannot both retry one submitted turn. | §9.1, §9.4 |
+
+The transport layer (`src/web-chat/transport/`) holds the provider-neutral seam and its ownership:
+`text-transport.ts` (the semantic operations a provider transport implements), `transport-lease.ts`
+(exclusive ownership, settlement and retirement of a physical resource) and `exchange-runner.ts`,
+which composes the core lifecycle with a transport **without** taking any of their authority. The
+core never imports it; a provider implements the seam and the host drives it (architecture §12).
 
 The durable **backend** for the store is infrastructure and lives outside the core
 (`src/web-chat/persistence/conversation-store-file.ts`): it owns the JSON document, reuses the
@@ -69,6 +77,23 @@ ownership rule, and the exact conversation-key digests captured before the extra
   explicitly, and only an explicit caller intent starts a new conversation or a replay. A handle is
   committed only after the driver established it, so a failed driver leaves the record untouched.
 
+## The exchange: submit boundary, settlement and leases
+
+- **The submit boundary is the retry boundary.** `WebChatSubmissionPhase` records what the provider
+  proved: `prepared` (nothing was sent — retry-safe), `send_activated` (it may have been sent —
+  ambiguous, never retried automatically) or `accepted` (confirmed). `webChatRetrySafetyOf` turns
+  that into what the host may do, and `decideWebChatRetry` is the exchange's own decision, so the two
+  retry layers cannot both act on one submitted turn. Partial output is never evidence of non-submission.
+- **Logical and physical settlement are separate.** A turn can be finished logically while the
+  transport resource may still produce late output; only a published physical settlement makes it
+  reusable, and a settlement that cannot be proven retires the resource.
+- **Nothing is reused while it may still produce output.** The lease registry keeps a conversation
+  exclusive, leaves a released-but-unsettled resource `settling`, and refuses a retired one until an
+  explicit `reset` — a lost resource never becomes a new one on its own.
+- **Cancellation is idempotent** and ordered logical cancellation → provider abort → settlement →
+  release; a result arriving after cancellation, after retirement, or from another conversation epoch
+  is never accepted.
+
 ## Consuming the core today (reference: ChatGPT)
 
 The ChatGPT path consumes the core without being migrated yet (issue #192 owns that):
@@ -83,13 +108,14 @@ The ChatGPT path consumes the core without being migrated yet (issue #192 owns t
 
 ## What is deliberately not here
 
-The continuity layer exists (issue #190) and is consumed by the provider migration when it moves
-that path onto the core key and records its conversations through this store.
+The continuity layer (issue #190) and the exchange lifecycle (issue #191) exist and are consumed by
+the provider migration, which moves that path onto the core key, records its conversations through
+this store, and replaces its lifecycle with this state machine.
 
 | Owner | Work |
 | --- | --- |
-| #191 (PR 3) | The exchange state machine, retry authority, transport lease, physical settlement. |
-| #192 (PR 4) | The ChatGPT driver implementation and its transport behind the core, including retiring `legacyWebChatThreadKey`. |
+| #192 (PR 4) | The ChatGPT driver implementation and its transport behind the core. |
+| #192 (PR 4) | The ChatGPT driver implementation and its transport behind the core, including retiring `legacyWebChatThreadKey` and moving the current `ProviderTurnLifecycle`/`RetainedSurfaceRegistry` onto this lifecycle. |
 | #193 (PR 5) | Host route integration: adapter, drivers, models, auth, health. |
 | #194 (PR 6) | The provider conformance and architecture-contract suite. |
 

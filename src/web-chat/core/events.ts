@@ -2,7 +2,9 @@
  * Normalized WebChat exchange events (architecture §8.3).
  *
  * The vocabulary is deliberately small: `ready`, `submitted`, `text_delta`, `completed`,
- * `cancelled`, `error`. A driver may have much richer internal events, but only the semantics the
+ * `cancelled`, `error`. Every event carries the **epoch of the exchange that produced it**, so a
+ * result that belongs to a conversation generation the exchange no longer is can be recognized as
+ * stale instead of being attributed to the current turn. A driver may have much richer internal events, but only the semantics the
  * shared layer needs are normalized here — reasoning/commentary phases, provider DTOs, usage
  * shapes and transport frames stay provider-private.
  *
@@ -13,6 +15,7 @@ import type { WebChatError } from "./errors";
 /** The exchange is ready to accept its submit boundary. */
 export interface WebChatExchangeReadyEvent {
   readonly type: "ready";
+  readonly epoch: number;
 }
 
 /**
@@ -23,29 +26,36 @@ export interface WebChatExchangeReadyEvent {
  */
 export interface WebChatExchangeSubmittedEvent {
   readonly type: "submitted";
+  readonly epoch: number;
 }
 
 /** Incremental assistant text. Provider-specific phases are not part of the common vocabulary. */
 export interface WebChatExchangeTextDeltaEvent {
   readonly type: "text_delta";
+  /** Conversation epoch this text belongs to. */
+  readonly epoch: number;
   readonly text: string;
 }
 
 /** The exchange produced its final text. */
 export interface WebChatExchangeCompletedEvent {
   readonly type: "completed";
+  /** Conversation epoch this answer belongs to. */
+  readonly epoch: number;
   readonly text: string;
 }
 
 /** The exchange was cancelled (idempotent, architecture §9.2). */
 export interface WebChatExchangeCancelledEvent {
   readonly type: "cancelled";
+  readonly epoch: number;
   readonly reason?: string;
 }
 
 /** The exchange failed semantically. */
 export interface WebChatExchangeErrorEvent {
   readonly type: "error";
+  readonly epoch: number;
   readonly error: WebChatError;
 }
 
