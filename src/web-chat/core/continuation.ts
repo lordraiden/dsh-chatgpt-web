@@ -183,6 +183,41 @@ function failure(
 }
 
 /**
+ * Decisions in flight, per affinity.
+ *
+ * A decision spans a read, an asynchronous provider verdict and a commit. Two callers on the same
+ * affinity would otherwise both act on the same state — both creating or both replaying the provider
+ * conversation — and only one of the handles they received would end up recorded, leaving the
+ * physical conversation of the other one unrecorded. Decisions are therefore serialized per affinity:
+ * a later caller reads the state the previous one committed.
+ *
+ * This is in-process coordination, not cross-process mutual exclusion; the store's own revision
+ * preconditions and conflict detection cover a writer outside this process.
+ */
+const decisionsInFlight = new Map<string, Promise<unknown>>();
+
+/** One key per affinity. */
+function decisionKey(identity: WebChatConversationIdentity): string {
+  return `${identity.providerId}\u0000${identity.bindingId}\u0000${identity.key}`;
+}
+
+/** Run one decision with the affinity held, so a concurrent one sees its result. */
+async function withDecisionLock<T>(identity: WebChatConversationIdentity, run: () => Promise<T>): Promise<T> {
+  const key = decisionKey(identity);
+  const previous = decisionsInFlight.get(key);
+  const current = (async () => {
+    if (previous) await previous.catch(() => undefined);
+    return run();
+  })();
+  decisionsInFlight.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (decisionsInFlight.get(key) === current) decisionsInFlight.delete(key);
+  }
+}
+
+/**
  * Resolve continuity for one turn.
  *
  * The driver is always consulted, because only it can establish whether remote continuity exists —
@@ -197,6 +232,15 @@ export async function resolveWebChatContinuation(
   request: WebChatContinuationRequest,
 ): Promise<WebChatContinuationPlan> {
   const identity = webChatContinuationIdentity(request);
+  return withDecisionLock(identity, () => resolveWebChatContinuationLocked(deps, identity, request));
+}
+
+/** The decision itself, run with its affinity held. */
+async function resolveWebChatContinuationLocked(
+  deps: { readonly store: WebChatConversationStore; readonly driver: WebChatProviderDriver },
+  identity: WebChatConversationIdentity,
+  request: WebChatContinuationRequest,
+): Promise<WebChatContinuationPlan> {
   const stored = await deps.store.read(identity);
 
   if (stored && request.expectedGeneration !== undefined && stored.generation !== request.expectedGeneration) {

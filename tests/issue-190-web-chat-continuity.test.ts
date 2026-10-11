@@ -840,3 +840,116 @@ describe("issue #190 — continuity decisions under review (review of #217)", ()
     })).toThrow(/confirmed-turn state is malformed/);
   });
 });
+
+describe("issue #190 — concurrent decisions on one affinity (review of #217)", () => {
+  const request = (overrides: Partial<Parameters<typeof resolveWebChatContinuation>[1]> = {}) => ({
+    binding: BINDING,
+    dshSession: { sessionId: "dsh-session-1" },
+    threadId: "dsh-thread-1",
+    namespace: "dsh-chatgpt-web",
+    model: "model-1",
+    intent: { kind: "continue" } as const,
+    ...overrides,
+  });
+
+  test("two concurrent continuations on a fresh affinity create exactly one conversation", async () => {
+    const store = createMemoryConversationStore();
+    let created = 0;
+    // The verdict depends on what the provider can see: nothing recorded yet, or a conversation whose
+    // initialization state is not installed.
+    const driver: WebChatProviderDriver = {
+      id: "chatgpt-web",
+      inspectAccount: async () => ({ authenticated: true, accountFingerprint: "fp-1" }),
+      listModels: async () => [{ id: "model-1", label: "Model 1", text: true }],
+      resolveModel: async () => ({ id: "model-1", label: "Model 1", text: true }),
+      assessConversation: async input => (input.conversation
+        ? { status: "replay_required", reason: "no initialization state is installed yet" }
+        : { status: "new" }),
+      createConversation: async () => {
+        created += 1;
+        return {
+          key: identityOf().key,
+          providerId: "chatgpt-web",
+          bindingId: webChatAccountBindingId(BINDING),
+          generation: 1,
+          handle: webChatConversationHandle("handle-created")!,
+          status: "new",
+        };
+      },
+      resumeConversation: async input => input.conversation,
+      replayConversation: async () => {
+        throw new Error("a replay was not requested");
+      },
+      health: async () => ({ ok: true }),
+      shutdown: async () => {},
+    };
+
+    const [first, second] = await Promise.all([
+      resolveWebChatContinuation({ store, driver }, request()),
+      resolveWebChatContinuation({ store, driver }, request()),
+    ]);
+
+    // One conversation exists, created once, and the plan that created it is the one whose handle the
+    // store holds; the other one fails explicitly instead of creating a second physical conversation.
+    expect(created).toBe(1);
+    const records = await store.list();
+    expect(records).toHaveLength(1);
+    const outcomes = [first.outcome, second.outcome].sort();
+    expect(outcomes).toEqual(["failed", "new_conversation"]);
+    const winner = first.outcome === "new_conversation" ? first : second;
+    expect(winner.conversation?.handle).toBe(records[0]?.handle);
+    const loser = first.outcome === "failed" ? first : second;
+    expect(loser.error?.category).toBe("CONVERSATION_STATE_MISMATCH");
+  });
+
+  test("two concurrent replays advance the conversation twice, without orphaning a handle", async () => {
+    const store = createMemoryConversationStore();
+    const seeded = await seedConversation(store);
+    const generations: number[] = [];
+    const driver: WebChatProviderDriver = {
+      id: "chatgpt-web",
+      inspectAccount: async () => ({ authenticated: true, accountFingerprint: "fp-1" }),
+      listModels: async () => [{ id: "model-1", label: "Model 1", text: true }],
+      resolveModel: async () => ({ id: "model-1", label: "Model 1", text: true }),
+      assessConversation: async () => ({ status: "replay_required" }),
+      createConversation: async () => {
+        throw new Error("a new conversation was not requested");
+      },
+      resumeConversation: async input => input.conversation,
+      replayConversation: async input => {
+        // Each replay is a new physical epoch: the provider advances from what it was given.
+        const generation = (input.conversation?.generation ?? 0) + 1;
+        generations.push(generation);
+        return {
+          key: seeded.identity.key,
+          providerId: seeded.identity.providerId,
+          bindingId: seeded.identity.bindingId,
+          generation,
+          handle: webChatConversationHandle(`handle-${generation}`)!,
+          status: "resumable",
+        };
+      },
+      health: async () => ({ ok: true }),
+      shutdown: async () => {},
+    };
+
+    const [first, second] = await Promise.all([
+      resolveWebChatContinuation({ store, driver }, request({
+        intent: { kind: "replay", reason: "lost", history: [{ role: "user", text: "hola" }] },
+      })),
+      resolveWebChatContinuation({ store, driver }, request({
+        intent: { kind: "replay", reason: "lost", history: [{ role: "user", text: "hola" }] },
+      })),
+    ]);
+
+    // Serialized: the second replay starts from the generation the first one committed.
+    expect(generations).toEqual([2, 3]);
+    expect(first.outcome).toBe("replay");
+    expect(second.outcome).toBe("replay");
+    expect([first.conversation?.generation, second.conversation?.generation].sort()).toEqual([2, 3]);
+    const record = await store.read(seeded.identity);
+    expect(record?.generation).toBe(3);
+    // The stored handle belongs to the last committed conversation: nothing is orphaned.
+    expect(record?.handle).toBe(webChatConversationHandle("handle-3"));
+  });
+});
