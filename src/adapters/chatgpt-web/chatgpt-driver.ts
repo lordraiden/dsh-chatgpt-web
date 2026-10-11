@@ -10,6 +10,7 @@
  * ChatGPT-specific mechanisms stay here or in the modules it delegates to: this file never touches a
  * browser page, a selector or an endpoint.
  */
+import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import {
   availableChatGptWebRoutes,
   createChatGptWebRouteAuthorityFromProvider,
@@ -107,12 +108,16 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
 
     async inspectAccount(): Promise<WebChatAccountInspection> {
       const accountFingerprint = chatGptWebAccountFingerprint(provider);
+      // An unknown session is a reported identity with no authenticated account behind it: the
+      // capabilities are unknown rather than trusted, so the core never starts on a guess.
+      const known = accountFingerprint.length > 0
+        && accountFingerprint !== accountIdentityFromUnknownSession().fingerprint;
       return {
-        authenticated: accountFingerprint.length > 0,
+        authenticated: known,
         accountFingerprint,
         capabilities: {
-          sol: authority.capabilities.solAvailable,
-          pro: authority.capabilities.proAvailable,
+          sol: known ? authority.capabilities.solAvailable : "unknown",
+          pro: known ? authority.capabilities.proAvailable : "unknown",
         },
       };
     },

@@ -10,6 +10,16 @@ import { extractChatGptTurnIdentity } from "./environment";
  * provider and the authenticated account, so one DSH chat can hold one conversation per provider
  * *and* per account, as architecture §7 requires.
  */
+/**
+ * The session identity an affinity is derived from (issue #192, one rule for every caller).
+ *
+ * The host session when the turn carries one; otherwise the provider's stable thread identity is its
+ * projection, so a chat never splits across two conversation keys.
+ */
+export function chatGptAffinitySessionId(identity: { readonly dshSessionId?: string; readonly threadId: string }): string {
+  return identity.dshSessionId && identity.dshSessionId.length > 0 ? identity.dshSessionId : identity.threadId;
+}
+
 export interface ChatGptConversationAffinity {
   readonly providerId: string;
   readonly bindingId: string;
@@ -45,7 +55,7 @@ export function chatGptConversationKey(
   return webChatAffinityKey({
     providerId: affinity.providerId,
     bindingId: affinity.bindingId,
-    dshSessionId: identity.dshSessionId ?? identity.threadId,
+    dshSessionId: chatGptAffinitySessionId({ dshSessionId: identity.dshSessionId, threadId: identity.threadId }),
     threadId: identity.threadId,
     namespace,
   });

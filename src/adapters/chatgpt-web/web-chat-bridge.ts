@@ -17,7 +17,7 @@ import type {
   WebChatErrorCategory,
   WebChatTurnIdentity,
 } from "../../web-chat/core";
-import { chatGptConversationKey } from "./conversation-key";
+import { chatGptAffinitySessionId, chatGptConversationKey } from "./conversation-key";
 import { extractChatGptTurnIdentity } from "./environment";
 
 /** Values the ChatGPT path already owns and supplies to the projections. */
@@ -104,15 +104,12 @@ export function chatGptWebChatAffinity(
   if (!identity.threadId) {
     throw new Error("The ChatGPT turn has no provider thread identity to project");
   }
-  if (!identity.dshSessionId) {
-    throw new Error("The ChatGPT turn has no host session identity to project");
-  }
   if (!input.providerId) throw new Error("The ChatGPT affinity requires the provider identity");
   if (!input.bindingId) throw new Error("The ChatGPT affinity requires a provider/account binding identity");
   return {
     providerId: input.providerId,
     bindingId: input.bindingId,
-    dshSessionId: identity.dshSessionId,
+    dshSessionId: chatGptAffinitySessionId({ dshSessionId: identity.dshSessionId, threadId: identity.threadId }),
     threadId: identity.threadId,
     ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
   };

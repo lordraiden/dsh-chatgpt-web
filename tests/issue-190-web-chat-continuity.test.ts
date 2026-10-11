@@ -204,11 +204,13 @@ describe("issue #190 — affinity identity", () => {
       options: {},
       _dshContext: { threadId: "dsh-thread-1", turnId: "turn-1" },
     } as unknown as CodexParsedRequest;
-    expect(() => chatGptWebChatAffinity(withoutSession, {
+    // Since issue #192 the affinity follows one identity rule everywhere: a turn without a host
+    // session projects its stable thread identity as the session, exactly as the native path does.
+    expect(chatGptWebChatAffinity(withoutSession, {
       providerId: "chatgpt-web",
       bindingId: "b",
       namespace: "dsh-chatgpt-web",
-    })).toThrow(/host session identity/);
+    })).toMatchObject({ dshSessionId: "dsh-thread-1", threadId: "dsh-thread-1" });
   });
 });
 

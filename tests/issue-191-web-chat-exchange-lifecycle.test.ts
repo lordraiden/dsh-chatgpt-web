@@ -747,10 +747,25 @@ describe("issue #191 — transport resource ownership", () => {
 
 describe("issue #191 — migration evidence from the existing provider lifecycle", () => {
   test("the ChatGPT lifecycle vocabulary maps onto the core exchange", () => {
-    expect(chatGptWebChatExchangeStateOf("PREPARING")).toBe("PREPARING");
-    expect(chatGptWebChatExchangeStateOf("SURFACE_READY")).toBe("TRANSPORT_READY");
-    expect(chatGptWebChatExchangeStateOf("SUBMITTED")).toBe("SUBMITTED");
-    expect(chatGptWebChatExchangeStateOf("RUNNING")).toBe("STREAMING");
+    const facts = (overrides: Partial<Parameters<typeof chatGptWebChatExchangeStateOf>[0]> = {}) => ({
+      state: "PREPARING" as const,
+      submission: "prepared" as const,
+      logicalOutcome: "pending" as const,
+      physicalOutcome: "not_started" as const,
+      ...overrides,
+    });
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "PREPARING" }))).toBe("PREPARING");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SURFACE_READY" }))).toBe("TRANSPORT_READY");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RUNNING", submission: "accepted" }))).toBe("STREAMING");
+    // The distinction the static table could not make: submitted-and-confirmed versus only activated.
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SUBMITTED", submission: "accepted" }))).toBe("SUBMITTED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SUBMITTED", submission: "send_activated" }))).toBe("SUBMISSION_AMBIGUOUS");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SUBMITTED", submission: "prepared" }))).toBe("SUBMITTING");
+    // The end of the turn reads from the logical outcome, not from the state name.
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "SETTLING", logicalOutcome: "completed" }))).toBe("COMPLETED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RETIRED", logicalOutcome: "cancelled" }))).toBe("CANCELLED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RETIRED", logicalOutcome: "failed" }))).toBe("FAILED");
+    expect(chatGptWebChatExchangeStateOf(facts({ state: "RETIRED", logicalOutcome: "pending" }))).toBe("SUBMISSION_AMBIGUOUS");
     expect(chatGptWebChatSubmissionPhaseOf("prepared")).toBe("prepared");
     expect(chatGptWebChatSubmissionPhaseOf("send_activated")).toBe("send_activated");
     expect(chatGptWebChatSubmissionPhaseOf("accepted")).toBe("accepted");
@@ -759,8 +774,13 @@ describe("issue #191 — migration evidence from the existing provider lifecycle
     expect(chatGptWebChatRetryRefusalOf("submitted")).toBe("submitted");
     expect(chatGptWebChatRetryRefusalOf("budget_exhausted")).toBe("budget_exhausted");
     expect(chatGptWebChatRetryRefusalOf(undefined)).toBeUndefined();
-    expect(chatGptWebChatLeaseShapeOf({ present: true, busy: true, lost: false })).toEqual({ leased: true, settling: false, retired: false });
-    expect(chatGptWebChatLeaseShapeOf({ present: false, busy: false, lost: true })).toEqual({ leased: false, settling: false, retired: true });
+    expect(chatGptWebChatLeaseShapeOf({ present: true, busy: true, lost: false, settled: true }))
+      .toEqual({ leased: true, settling: false, settled: true, retired: false });
+    expect(chatGptWebChatLeaseShapeOf({ present: false, busy: false, lost: true, settled: false }))
+      .toEqual({ leased: false, settling: false, settled: false, retired: true });
+    // Present and free, but not settled: not reusable yet, which the previous shape could not say.
+    expect(chatGptWebChatLeaseShapeOf({ present: true, busy: false, lost: false, settled: false }))
+      .toEqual({ leased: false, settling: true, settled: false, retired: false });
   });
 
   test("both lifecycles refuse an automatic retry once submission may have happened", () => {

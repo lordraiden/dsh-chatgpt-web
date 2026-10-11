@@ -2297,6 +2297,9 @@ export class ChatGptBrowserWorker {
     options: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<ChatGptRetainedAnswerRecovery> {
     const timeoutMs = options.timeoutMs ?? CHATGPT_RECOVERY_DEFAULT_TIMEOUT_MS;
+    // Whether the read actually finished: a recovery that times out or is aborted must not report a
+    // settled surface, because nothing proves the page stopped producing output.
+    let recovered = false;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new Error("ChatGPT answer recovery timeout must be a positive finite number");
     }
@@ -2329,7 +2332,10 @@ export class ChatGptBrowserWorker {
           try {
             const snapshot = await this.responseDomSnapshot(turns.last(), {});
             const text = snapshot.visibleText.trim();
-            if (text) return { text, capturedAt: Date.now(), waitedMs: Date.now() - startedAt };
+            if (text) {
+              recovered = true;
+              return { text, capturedAt: Date.now(), waitedMs: Date.now() - startedAt };
+            }
           } catch (error) {
             // A re-render between the count and the read is not a failed recovery: keep polling
             // until the bounded wait expires. A closed page is the one unrecoverable case.
@@ -2341,7 +2347,9 @@ export class ChatGptBrowserWorker {
       }
     } finally {
       this.retainedSurfaces.release(conversationKey);
-      this.retainedSurfaces.settle(conversationKey, "fulfilled");
+      // A completed read proves the surface is free; a timeout or a cancellation does not, so the
+      // surface is retired and only an explicit reset brings it back.
+      this.retainedSurfaces.settle(conversationKey, recovered ? "fulfilled" : "rejected");
     }
   }
 
