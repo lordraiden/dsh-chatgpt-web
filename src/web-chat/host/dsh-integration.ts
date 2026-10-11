@@ -124,6 +124,8 @@ export function webChatModelCatalogueEntries(
   return models
     .filter(isWebChatModelDescriptor)
     .map(model => ({
+      // Core model ids are provider-local. The host qualifies them exactly once
+      // for the public informational catalogue; DSH remains route authority.
       id: `${providerId}/${model.id}`,
       providerId,
       modelId: model.id,

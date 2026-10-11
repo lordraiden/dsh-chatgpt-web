@@ -9,9 +9,11 @@
  * What this module owns, and what it deliberately does not:
  *
  * - it produces **provider facts only**: the same `CodexProviderConfig` shape `providerConfig(config)`
- *   produces, with a provider-scoped `webChat.providers["chatgpt-web"]` block replacing the flat
- *   `chatgptWeb` block as a whole (the precedence the host boundary already states). Without `webChat`
- *   the result is structurally `providerConfig(config)` unchanged;
+ *   produces. A provider-scoped `webChat.providers["chatgpt-web"]` block **overrides** the flat
+ *   `chatgptWeb` block field by field — the fields it does not state keep the flat value, including the
+ *   derived ones (the account identity fingerprint) — and the merged block, not the scoped payload
+ *   alone, is what the shared validator checks. Without `webChat` the result is structurally
+ *   `providerConfig(config)` unchanged;
  * - it is **not** a second routing authority. `ctx.llm` remains the public provider registry and route
  *   dispatch authority, and the sidecar remains the execution authority; callers derive their own
  *   provider-scoped views (routes, catalogue) from these facts exactly as they derived them from
@@ -26,7 +28,7 @@
  * is not an object keeps the host boundary's previously documented fail-closed behavior: the flat
  * block stays effective rather than an unusable provider being produced.
  */
-import { providerConfig, validateChatGptWebProviderFacts, type AppConfig } from "./config";
+import { mergeChatGptWebProviderFacts, providerConfig, type AppConfig } from "./config";
 import { CHATGPT_WEB_DRIVER_ID, resolveWebChatProviderConfig } from "./web-chat/host/dsh-integration";
 
 /** The configuration location named when a provider-scoped block is refused. */
@@ -50,9 +52,14 @@ export function effectiveChatGptWebProviderConfig(config: AppConfig): ReturnType
   if (scoped === provider.chatgptWeb || !scoped || typeof scoped !== "object" || Array.isArray(scoped)) {
     return provider;
   }
-  validateChatGptWebProviderFacts(scoped, CHATGPT_WEB_SCOPED_CONFIG_PATH);
+  // Shared merge/validation preserves derived base facts and checks invariants only after overlay.
+  const merged = mergeChatGptWebProviderFacts(
+    provider.chatgptWeb as unknown as Record<string, unknown>,
+    scoped,
+    CHATGPT_WEB_SCOPED_CONFIG_PATH,
+  );
   return {
     ...provider,
-    chatgptWeb: scoped as NonNullable<ReturnType<typeof providerConfig>["chatgptWeb"]>,
+    chatgptWeb: merged as NonNullable<ReturnType<typeof providerConfig>["chatgptWeb"]>,
   };
 }

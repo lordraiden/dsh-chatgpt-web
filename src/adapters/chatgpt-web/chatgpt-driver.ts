@@ -11,7 +11,7 @@
  * browser page, a selector or an endpoint.
  */
 import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
-import type { ChatGptWebModelRoute } from "../../chatgpt-web-models";
+import { CHATGPT_WEB_MODEL_PREFIX, type ChatGptWebModelRoute } from "../../chatgpt-web-models";
 import {
   availableChatGptWebRoutes,
   createChatGptWebRouteAuthorityFromProvider,
@@ -74,8 +74,11 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
   const descriptorOf = (model: string): WebChatModelDescriptor | undefined => {
     const route = availableChatGptWebRoutes(authority).find(candidate => candidate.slug === model);
     if (!route) return undefined;
+    // Core descriptor ids are provider-local; translate the public DSH route slug
+    // at this provider boundary without changing route authority or adapter ids.
+    if (!route.slug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) return undefined;
     return {
-      id: route.slug,
+      id: route.slug.slice(CHATGPT_WEB_MODEL_PREFIX.length),
       label: route.displayName,
       text: true,
     };
