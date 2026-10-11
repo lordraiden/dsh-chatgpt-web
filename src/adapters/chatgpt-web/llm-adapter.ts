@@ -39,7 +39,6 @@ import {
 import type { WebChatProviderDriver, WebChatSubmissionPhase } from "../../web-chat/core";
 import {
   dshFailureSemanticsForSubmission,
-  resolveWebChatProviderConfig,
 } from "../../web-chat/host/dsh-integration";
 import { loadConfig, providerConfig, type AppConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../lib/compaction";
@@ -281,26 +280,11 @@ function requireRouteList(provider: ReturnType<typeof providerConfig>) {
 /**
  * The provider configuration this deployment actually uses (issue #193).
  *
- * A provider-scoped WebChat block (`webChat.providers["chatgpt-web"]`) replaces the historical flat
- * ChatGPT block as a whole — the precedence the host boundary already states, and the reason no
- * field-by-field merge happens here. An installation without `webChat`, or a payload that is not a
- * configuration object, therefore keeps exactly today's flat configuration: the compatibility
- * guarantee is that the effective configuration equals `providerConfig(config)` unchanged.
+ * Re-exported from the single resolver so every seam — this adapter, the driver, the catalogue, the
+ * Responses ingress and the native DSH loopback — resolves the same facts from one implementation.
  */
-export function effectiveChatGptWebProviderConfig(config: AppConfig): ReturnType<typeof providerConfig> {
-  const provider = providerConfig(config);
-  const scoped = resolveWebChatProviderConfig(
-    { webChat: config.webChat, chatgptWeb: provider.chatgptWeb },
-    CHATGPT_WEB_PROVIDER_ID,
-  );
-  if (scoped === provider.chatgptWeb || !scoped || typeof scoped !== "object" || Array.isArray(scoped)) {
-    return provider;
-  }
-  return {
-    ...provider,
-    chatgptWeb: scoped as NonNullable<ReturnType<typeof providerConfig>["chatgptWeb"]>,
-  };
-}
+import { effectiveChatGptWebProviderConfig } from "../../chatgpt-web-provider-config";
+export { effectiveChatGptWebProviderConfig };
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);

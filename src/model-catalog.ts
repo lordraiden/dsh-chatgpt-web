@@ -1,9 +1,10 @@
-import type { AppConfig } from "./config";
+import { providerConfig, type AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebRoutes,
-  createChatGptWebRouteAuthority,
+  createChatGptWebRouteAuthorityFromProvider,
 } from "./chatgpt-web-authority";
+import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import {
   CHATGPT_WEB_MODEL_PREFIX,
   resolveChatGptWebContextLimits,
@@ -25,24 +26,24 @@ function slug(value: unknown): string | undefined {
   return typeof candidate === "string" ? candidate : undefined;
 }
 
-function webCapabilities(config: AppConfig): {
+/**
+ * The catalogue's view of the effective provider facts (issue #193).
+ *
+ * It reads the same resolved provider configuration every other seam uses, so `/v1/models` cannot
+ * advertise a route the Responses ingress or the native loopback would refuse.
+ */
+function webCapabilities(provider: ReturnType<typeof providerConfig>): {
   solAvailable: boolean;
   proAvailable: boolean;
   experimentalBiggerContext: boolean;
   browserInteractionMode: "automatic" | "manual";
   zeroRiskProEnabled: boolean;
 } {
-  const authority = createChatGptWebRouteAuthority({
-    solAvailable: config.solAvailable,
-    proAvailable: config.proAvailable,
-    capabilityState: config.capabilityState,
-    browserInteractionMode: config.browserInteractionMode,
-    zeroRiskProEnabled: config.zeroRiskProEnabled,
-  });
+  const authority = createChatGptWebRouteAuthorityFromProvider(provider);
   return {
     solAvailable: authority.capabilities.solAvailable === "supported",
     proAvailable: authority.capabilities.proAvailable === "supported",
-    experimentalBiggerContext: config.experimentalBiggerContext,
+    experimentalBiggerContext: provider.chatgptWeb?.experimentalBiggerContext === true,
     browserInteractionMode: authority.browserInteractionMode,
     zeroRiskProEnabled: authority.zeroRiskProEnabled,
   };
@@ -65,7 +66,14 @@ export function buildChatGptWebModel(
   route: ChatGptWebModelRoute,
   config: AppConfig,
 ): JsonObject {
-  const capabilities = webCapabilities(config);
+  return buildChatGptWebModelFromProvider(route, effectiveChatGptWebProviderConfig(config));
+}
+
+function buildChatGptWebModelFromProvider(
+  route: ChatGptWebModelRoute,
+  provider: ReturnType<typeof providerConfig>,
+): JsonObject {
+  const capabilities = webCapabilities(provider);
   const limits = resolveChatGptWebContextLimits(
     route.backendModel,
     route.adapterEffort,
@@ -104,16 +112,11 @@ export function buildChatGptWebModelCatalog(
   config: AppConfig,
   contextOverride?: CodexModelContextOverride,
 ): JsonObject {
-  const routes = availableChatGptWebRoutes(createChatGptWebRouteAuthority({
-    solAvailable: config.solAvailable,
-    proAvailable: config.proAvailable,
-    capabilityState: config.capabilityState,
-    browserInteractionMode: config.browserInteractionMode,
-    zeroRiskProEnabled: config.zeroRiskProEnabled,
-  }));
+  const provider = effectiveChatGptWebProviderConfig(config);
+  const routes = availableChatGptWebRoutes(createChatGptWebRouteAuthorityFromProvider(provider));
   const catalog: JsonObject = {
     object: "list",
-    models: routes.map(route => buildChatGptWebModel(route, config)),
+    models: routes.map(route => buildChatGptWebModelFromProvider(route, provider)),
   };
   if (contextOverride) {
     for (const candidate of catalog.models as JsonObject[]) {
