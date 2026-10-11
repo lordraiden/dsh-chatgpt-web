@@ -25,6 +25,7 @@ import {
   rejectUnsupportedWebChatFeatures,
   webChatConversationHandle,
   legacyWebChatThreadKey,
+  webChatAffinityKey,
   webChatError,
   webChatReplayStateOwnedBy,
   type WebChatExchangeEvent,
@@ -345,22 +346,30 @@ describe("issue #189 — provider-tagged replay state fails closed", () => {
 describe("issue #189 — the ChatGPT path consumes the core", () => {
   test("a real ChatGPT turn is expressible as a core turn identity", () => {
     const parsed = chatGptRequest("dsh-111111111111111111111111");
-    const projected = chatGptWebChatTurnIdentity(parsed, { bindingId: "binding-1", namespace: "dsh-chatgpt-web" });
+    const projected = chatGptWebChatTurnIdentity(parsed, { providerId: "chatgpt-web", bindingId: "binding-1", namespace: "dsh-chatgpt-web" });
     expect(projected).toEqual({
       bindingId: "binding-1",
       dshSessionId: "dsh-session-1",
       turnId: "turn-1",
       threadId: "dsh-111111111111111111111111",
-      conversationKey: PINNED_CONVERSATION_KEYS[0]!.key,
+      // Since issue #192 the projected key is the canonical affinity (provider + binding + session +
+      // namespace), not the legacy thread digest.
+      conversationKey: webChatAffinityKey({
+        providerId: "chatgpt-web",
+        bindingId: "binding-1",
+        dshSessionId: "dsh-session-1",
+        threadId: "dsh-111111111111111111111111",
+        namespace: "dsh-chatgpt-web",
+      }),
     });
     // The provider-specific Luna fallback stays provider-specific: it still projects, and the
     // projection simply reports the thread the ChatGPT path would use.
     const lunaWithoutNativeContext = { modelId: "gpt-5.6-luna", context: { systemPrompt: [], messages: [] }, stream: false, options: {} } as unknown as CodexParsedRequest;
-    expect(chatGptWebChatTurnIdentity(lunaWithoutNativeContext, { bindingId: "b", namespace: "ns" }).threadId).toBe("dsh-session");
+    expect(chatGptWebChatTurnIdentity(lunaWithoutNativeContext, { providerId: "chatgpt-web", bindingId: "b", namespace: "ns" }).threadId).toBe("dsh-session");
     // A request with no provider identity at all fails closed rather than inventing one.
     const identityless = { modelId: "gpt-5.6-sol", context: { systemPrompt: [], messages: [] }, stream: false, options: {} } as unknown as CodexParsedRequest;
-    expect(() => chatGptWebChatTurnIdentity(identityless, { bindingId: "b", namespace: "ns" })).toThrow(/no provider thread identity/);
-    expect(() => chatGptWebChatTurnIdentity(parsed, { bindingId: "", namespace: "ns" })).toThrow(/binding identity/);
+    expect(() => chatGptWebChatTurnIdentity(identityless, { providerId: "chatgpt-web", bindingId: "b", namespace: "ns" })).toThrow(/no provider thread identity/);
+    expect(() => chatGptWebChatTurnIdentity(parsed, { providerId: "chatgpt-web", bindingId: "", namespace: "ns" })).toThrow(/binding identity/);
   });
 
   test("the ChatGPT account identity is expressible as a core account binding", () => {

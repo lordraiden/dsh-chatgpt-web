@@ -62,6 +62,11 @@ import {
   settleActiveCompactionSource,
   settleActiveZeroRiskCompactionSource,
 } from "./compaction-handoff";
+import { webChatAccountBindingId } from "../../web-chat/core";
+import { CHATGPT_WEB_PROVIDER_ID } from "./llm-adapter";
+import {
+  chatGptWebChatAccountBinding,
+} from "./web-chat-bridge";
 import {
   chatGptConversationKey,
   chatGptSystemFingerprint,
@@ -239,6 +244,28 @@ function safeManualTerminalError(status: "cancelled" | "failed"): ChatGptWebAdap
     code: "manual_launcher_failed",
     retryable: false,
   });
+}
+
+/**
+ * The WebChat provider/account binding identity of one ChatGPT turn (issue #192).
+ *
+ * Derived from the same account and browser facts the turn lease uses, so the canonical affinity and
+ * the lease can never disagree about which account a conversation belongs to.
+ */
+export function chatGptWebChatBindingIdFor(provider: CodexProviderConfig): string {
+  // The binding is a property of the deployment and the authenticated account, not of a turn; the
+  // lease builder is reused only for those facts (its page identity is a per-turn value the binding
+  // deliberately ignores).
+  const { accountIdentity, browserProfile, browserContext } = browserAccountLeaseInput(
+    provider,
+    "web-chat-affinity",
+  );
+  return webChatAccountBindingId(chatGptWebChatAccountBinding({
+    providerId: CHATGPT_WEB_PROVIDER_ID,
+    accountFingerprint: accountIdentity,
+    browserProfile,
+    browserContext,
+  }));
 }
 
 export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): string {
@@ -568,7 +595,10 @@ export function createChatGptWebAdapter(
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
     const conversationKey = retainConversationForTurn
-      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
+      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace, {
+        providerId: CHATGPT_WEB_PROVIDER_ID,
+        bindingId: chatGptWebChatBindingIdFor(provider),
+      })
       : undefined;
     const resumeInput = conversationKey
       ? retainedConversationResumeRequest(checkpointInput.parsed)
@@ -1114,7 +1144,10 @@ export function createChatGptWebAdapter(
       // The identity owner is the same one the turn uses: one retained conversation per DSH
       // session/thread, resolved from the request the caller built (the Advisor builds the same
       // synthetic identity as its review turn).
-      const conversationKey = chatGptConversationKey(parsed, executionNamespace);
+      const conversationKey = chatGptConversationKey(parsed, executionNamespace, {
+        providerId: CHATGPT_WEB_PROVIDER_ID,
+        bindingId: chatGptWebChatBindingIdFor(provider),
+      });
       if (!conversationKey) {
         throw new Error("The retained ChatGPT Web conversation identity is unavailable for this request");
       }
@@ -1249,7 +1282,10 @@ export function createChatGptWebAdapter(
                   );
                   handoffTimer.unref?.();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
-                  const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
+                  const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace, {
+                    providerId: CHATGPT_WEB_PROVIDER_ID,
+                    bindingId: chatGptWebChatBindingIdFor(provider),
+                  });
                   const runFreshCompactionFallback = async (reason: string): Promise<string> => {
                     console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
                     const fallbackRuntime = startRuntime(
