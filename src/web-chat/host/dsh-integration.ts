@@ -26,10 +26,12 @@ import {
   type WebChatConversationStore,
   type WebChatDriverResolver,
   type WebChatExchangeSnapshot,
+  type WebChatExchangeState,
   type WebChatModelDescriptor,
   type WebChatProviderDriver,
   type WebChatProviderHealth,
   type WebChatRetrySafety,
+  type WebChatSubmissionPhase,
 } from "../core";
 import {
   createFileConversationStore,
@@ -187,8 +189,16 @@ export interface WebChatDshFailureSemantics {
  * else — a confirmed submission, an ambiguous one, partial output — must not be retried by DSH: the
  * provider may already have executed the turn.
  */
-export function dshFailureSemanticsFor(snapshot: WebChatExchangeSnapshot): WebChatDshFailureSemantics {
-  const safety = webChatRetrySafetyOf({ snapshot });
+export function dshFailureSemanticsFor(
+  snapshot: WebChatExchangeSnapshot,
+  observation: { readonly partialOutputObserved?: boolean } = {},
+): WebChatDshFailureSemantics {
+  const safety = webChatRetrySafetyOf({
+    snapshot,
+    ...(observation.partialOutputObserved !== undefined
+      ? { partialOutputObserved: observation.partialOutputObserved }
+      : {}),
+  });
   if (safety === "retry_safe") {
     return {
       retryable: true,
@@ -205,6 +215,47 @@ export function dshFailureSemanticsFor(snapshot: WebChatExchangeSnapshot): WebCh
       ? "the provider may have accepted the submission: never retried automatically"
       : "the submission is confirmed or produced output: never retried automatically",
   };
+}
+
+/** What one failure's submission evidence is, when the caller does not hold a whole exchange. */
+export interface WebChatSubmissionEvidence {
+  /** How far submission is proven to have gone for the failed attempt. */
+  readonly phase: WebChatSubmissionPhase;
+  /** Whether output was already observed, which makes a retry unsafe however the phase reads. */
+  readonly partialOutputObserved?: boolean;
+  /** When the attempt's exchange is known, its state decides alongside the phase. */
+  readonly state?: WebChatExchangeState;
+  /** Whether the attempt's conversation was retired. */
+  readonly retired?: boolean;
+}
+
+/**
+ * The DSH failure semantics of one submission evidence, without a whole exchange snapshot.
+ *
+ * A provider that reports its submit boundary rather than an exchange still gets the same rule: this
+ * builds the exchange view the single retry authority reasons over and delegates to
+ * {@link dshFailureSemanticsFor}, so `prepared` is the only phase DSH may retry and `send_activated`
+ * (ambiguous) or `accepted` (confirmed) never is. No caller reimplements the rule.
+ */
+export function dshFailureSemanticsForSubmission(
+  evidence: WebChatSubmissionEvidence,
+): WebChatDshFailureSemantics {
+  return dshFailureSemanticsFor({
+    exchangeId: "submission-evidence",
+    conversationKey: "submission-evidence",
+    epoch: 1,
+    state: evidence.state ?? (evidence.phase === "send_activated" ? "SUBMISSION_AMBIGUOUS" : "FAILED"),
+    phase: evidence.phase,
+    logical: "failed",
+    physical: "pending",
+    retired: evidence.retired ?? false,
+    cancelRequested: false,
+    submits: 1,
+    maxSubmits: 1,
+    updatedAt: 0,
+  }, evidence.partialOutputObserved !== undefined
+    ? { partialOutputObserved: evidence.partialOutputObserved }
+    : {});
 }
 
 /** Assert that host replay state belongs to the requested provider conversation. */

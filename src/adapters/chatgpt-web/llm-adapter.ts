@@ -36,8 +36,11 @@ import {
   createChatGptWebRouteAuthorityFromProvider,
   requireChatGptWebRoute,
 } from "../../chatgpt-web-authority";
-import type { WebChatProviderDriver } from "../../web-chat/core";
-import { resolveWebChatProviderConfig } from "../../web-chat/host/dsh-integration";
+import type { WebChatProviderDriver, WebChatSubmissionPhase } from "../../web-chat/core";
+import {
+  dshFailureSemanticsForSubmission,
+  resolveWebChatProviderConfig,
+} from "../../web-chat/host/dsh-integration";
 import { loadConfig, providerConfig, type AppConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../lib/compaction";
 import { projectConversationalMessages } from "../../conversation-projection";
@@ -749,11 +752,34 @@ function toTokenUsage(usage: CodexUsage | undefined): TokenUsage | undefined {
   };
 }
 
-function failureFromEvent(message: string, code?: string, status?: number) {
+/**
+ * The DSH-visible retryability of one failed attempt, or `undefined` when the provider reported none.
+ *
+ * The provider owns the submit boundary; what reaches this adapter is its verdict on it — whether the
+ * failure is proven to have happened *before* submission was activated. DSH's failure semantics are
+ * not the provider's to decide, so the verdict is expressed in the core's own vocabulary
+ * (`prepared` / `accepted`) and the single retry authority decides: a failure proven pre-submit may be
+ * retried by DSH, and a `send_activated` (ambiguous) or `accepted` (confirmed) submission never is.
+ *
+ * An attempt that reports nothing keeps exactly the failure shape it has today: no retryability is
+ * invented for an event that does not carry the evidence.
+ */
+export function dshFailureRetryableOf(
+  event: { readonly retryable?: boolean; readonly phase?: WebChatSubmissionPhase },
+): boolean | undefined {
+  const phase = event.phase ?? (event.retryable === undefined ? undefined : event.retryable ? "prepared" : "accepted");
+  if (phase === undefined) return undefined;
+  return dshFailureSemanticsForSubmission({ phase }).retryable;
+}
+
+function failureFromEvent(message: string, code?: string, status?: number, retryable?: boolean) {
   return {
     message,
     code: code ?? "PROVIDER_ERROR",
     ...(status !== undefined ? { status } : {}),
+    // Additive on purpose: the field is only present when the provider reported submission evidence,
+    // so every failure shape that exists today is untouched.
+    ...(retryable !== undefined ? { retryable } : {}),
   };
 }
 function assertLosslessJsonValue(value: unknown, label: string, seen = new WeakSet<object>()): void {
@@ -1036,7 +1062,18 @@ export function mapStream(
             const end = closeBlock(); if (end) yield end;
             const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
-            yield { type: "finish", reason: { kind: "error", failure: failureFromEvent(event.message ?? event.reason, "PROVIDER_ERROR") } };
+            yield {
+              type: "finish",
+              reason: {
+                kind: "error",
+                failure: failureFromEvent(
+                  event.message ?? event.reason,
+                  "PROVIDER_ERROR",
+                  undefined,
+                  dshFailureRetryableOf(event),
+                ),
+              },
+            };
             finishYielded = true;
             return;
           }
@@ -1045,7 +1082,18 @@ export function mapStream(
             const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             const kind = isAbortError(event) && (options.signal?.aborted || backendAbort.signal.aborted) ? "aborted" : "error";
-            yield { type: "finish", reason: { kind, failure: failureFromEvent(event.message, event.code ?? (kind === "aborted" ? "aborted" : "PROVIDER_ERROR"), event.status) } };
+            yield {
+              type: "finish",
+              reason: {
+                kind,
+                failure: failureFromEvent(
+                  event.message,
+                  event.code ?? (kind === "aborted" ? "aborted" : "PROVIDER_ERROR"),
+                  event.status,
+                  dshFailureRetryableOf(event),
+                ),
+              },
+            };
             finishYielded = true;
             return;
           }
