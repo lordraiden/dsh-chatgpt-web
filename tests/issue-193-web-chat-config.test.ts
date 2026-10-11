@@ -87,16 +87,19 @@ describe("issue #193 — the typed webChat surface round-trips", () => {
 });
 
 describe("issue #193 — the effective provider configuration", () => {
-  test("the provider-scoped block wins; a non-object payload keeps the flat block", () => {
-    const scoped = { browserInteractionMode: "manual" as const };
+  test("a non-mode provider field wins; a non-object payload keeps the flat block", () => {
+    const scoped = { tuning: { composerCharLimit: 1_000 } };
     const scopedConfig: AppConfig = {
       ...defaultConfig(),
+      tuning: { composerCharLimit: 2_000 },
       webChat: { providers: { [CHATGPT_WEB_DRIVER_ID]: scoped } },
     };
     const effective = effectiveChatGptWebProviderConfig(scopedConfig);
-    // The block is an overlay: the field it states wins, and every value it does not state is the one
-    // the flat configuration already produced (see the overlay suite for the derived values).
-    expect(effective.chatgptWeb).toMatchObject(scoped);
+    // The block is an overlay: its tuning field wins, while omitted deployment-owned and provider
+    // facts remain the ones the flat configuration already produced.
+    expect(effective.chatgptWeb?.tuning?.composerCharLimit).toBe(1_000);
+    expect(effective.chatgptWeb?.browserInteractionMode)
+      .toBe(providerConfig(scopedConfig).chatgptWeb?.browserInteractionMode);
     expect(effective.chatgptWeb?.browserHost).toBe(providerConfig(scopedConfig).chatgptWeb?.browserHost);
     // The rest of the provider facts are untouched.
     expect(effective.baseUrl).toBe(providerConfig(scopedConfig).baseUrl);

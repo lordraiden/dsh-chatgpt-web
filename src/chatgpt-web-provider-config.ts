@@ -28,7 +28,7 @@
  * is not an object keeps the host boundary's previously documented fail-closed behavior: the flat
  * block stays effective rather than an unusable provider being produced.
  */
-import { providerConfig, validateChatGptWebProviderFacts, type AppConfig } from "./config";
+import { mergeChatGptWebProviderFacts, providerConfig, type AppConfig } from "./config";
 import { CHATGPT_WEB_DRIVER_ID, resolveWebChatProviderConfig } from "./web-chat/host/dsh-integration";
 
 /** The configuration location named when a provider-scoped block is refused. */
@@ -52,48 +52,12 @@ export function effectiveChatGptWebProviderConfig(config: AppConfig): ReturnType
   if (scoped === provider.chatgptWeb || !scoped || typeof scoped !== "object" || Array.isArray(scoped)) {
     return provider;
   }
-  // The scoped block **overrides** the flat block; it does not replace it. A block that states only
-  // what it wants to change therefore keeps every value the flat configuration already produced —
-  // including the ones that are *derived* rather than configured (the account identity fingerprint
-  // read from the stored session), which a whole-block replacement would silently drop.
-  const declared = Object.fromEntries(
-    Object.entries(scoped as Record<string, unknown>).filter(([, value]) => value !== undefined),
+  // Shared merge/validation preserves derived base facts and checks invariants only after overlay.
+  const merged = mergeChatGptWebProviderFacts(
+    provider.chatgptWeb as unknown as Record<string, unknown>,
+    scoped,
+    CHATGPT_WEB_SCOPED_CONFIG_PATH,
   );
-  const merged = { ...provider.chatgptWeb, ...declared } as Record<string, unknown>;
-
-  // A scoped capability state decides the compatibility boolean it implies, unless the scoped block
-  // states that boolean itself: then the pair is a genuine contradiction and the shared validator
-  // refuses it, which is the project's rule for an explicit tri-state next to an explicit claim.
-  const state = declared.capabilityState as
-    | { solAvailable?: "supported" | "unsupported" | "unknown"; proAvailable?: "supported" | "unsupported" | "unknown" }
-    | undefined;
-  if (state) {
-    for (const [claim, capability] of [
-      ["solAvailable", "solAvailable"],
-      ["proAvailable", "proAvailable"],
-    ] as const) {
-      const claimed = declared[claim];
-      const reported = state[capability];
-      if (reported === undefined || reported === "unknown") continue;
-      const implied = reported === "supported";
-      if (claimed === undefined) {
-        merged[claim] = implied;
-        continue;
-      }
-      // Both are stated, and they disagree: the block is refused instead of the adapter and the host
-      // disagreeing about what this deployment can serve.
-      if (claimed !== implied) {
-        throw new Error(
-          `Invalid capability combination in ${CHATGPT_WEB_SCOPED_CONFIG_PATH}: `
-          + `${claim} is ${String(claimed)} while capabilityState.${capability} is ${reported}`,
-        );
-      }
-    }
-  }
-
-  // The **merge** is what gets validated, so an incoherence the overlay introduced is refused with
-  // the block's location instead of reaching the driver.
-  validateChatGptWebProviderFacts(merged, CHATGPT_WEB_SCOPED_CONFIG_PATH);
   return {
     ...provider,
     chatgptWeb: merged as NonNullable<ReturnType<typeof providerConfig>["chatgptWeb"]>,

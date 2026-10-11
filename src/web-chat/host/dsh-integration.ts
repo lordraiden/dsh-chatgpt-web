@@ -124,10 +124,9 @@ export function webChatModelCatalogueEntries(
   return models
     .filter(isWebChatModelDescriptor)
     .map(model => ({
-      // A driver declares its model's **public** id, which a provider may already scope with its own
-      // id (`chatgpt-web/luna`). Prefixing that again would produce `chatgpt-web/chatgpt-web/luna`, so
-      // the provider is only added when the id is not already qualified.
-      id: model.id.startsWith(`${providerId}/`) ? model.id : `${providerId}/${model.id}`,
+      // Core model ids are provider-local. The host qualifies them exactly once
+      // for the public informational catalogue; DSH remains route authority.
+      id: `${providerId}/${model.id}`,
       providerId,
       modelId: model.id,
       label: model.label,
