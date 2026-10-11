@@ -1732,6 +1732,9 @@ export function createChatGptWebAdapter(
                 buffer,
               ));
               providerTurn.markLogicalSettled();
+              // The turn settled and the provider established its result: the record is confirmed,
+              // which is what makes continuity resumable for the next turn (issue #192).
+              await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
               session.completeRound(roundKey);
               return;
             }
@@ -1903,6 +1906,9 @@ export function createChatGptWebAdapter(
                   buffer,
                 ));
                 providerTurn.markLogicalSettled();
+                // The turn settled and the provider established its result: the record is confirmed,
+                // which is what makes continuity resumable for the next turn (issue #192).
+                await webChatContinuity.confirmTurn({ turnId: nativeTurnId });
                 session.completeRound(roundKey);
                   };
               const waitForTrace = () => session.runtime.trace.wait(toolWaitAbort.signal)

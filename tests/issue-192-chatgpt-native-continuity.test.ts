@@ -81,9 +81,11 @@ describe("issue #192 — the native recovery decision comes from the core", () =
     expect(first).toBe("NEW");
 
     // The install turn settles: the initialization state of generation 1 is physically installed,
-    // which is what the provider records today when that turn completes.
+    // which is what the provider records today when that turn completes, and the settled turn
+    // confirms the record.
     const key = chatGptConversationKey(parsed(), NAMESPACE, AFFINITY)!;
     sessions.recordSentSystemFingerprint(key, 1, "fingerprint-1");
+    await instance.confirmTurn({ turnId: "turn-1", at: 1 });
 
     const second = await instance.resolveRecovery({
       parsed: parsed(),

@@ -567,6 +567,8 @@ export class ProviderTurnLifecycle {
     if (this.core.snapshot().logical === "pending") this.core.markLogicallySettled(outcome);
     if (outcome === "failed") {
       this.recovery = "FAILED";
+      // A logical failure is a shared outcome too: the core records it with its own vocabulary.
+      if (this.core.snapshot().recovery === undefined) this.core.markRecovery("failed");
     }
     this.retireIfSettled();
   }
@@ -640,6 +642,8 @@ export class ProviderTurnLifecycle {
     this.physicalSettlementOutcome = "not_started";
     this.core.markPhysicallySettled("not_started");
     this.recovery = "FAILED";
+    // The failure before any physical execution is the core's recovery decision as well.
+    if (this.core.snapshot().recovery === undefined) this.core.markRecovery("failed");
     this.activity = "idle";
     this.releaseLease();
     this.transition("RETIRED");

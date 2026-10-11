@@ -785,6 +785,73 @@ describe("issue #191 — migration evidence from the existing provider lifecycle
     expect(coreState.retired).toBe(true);
   });
 
+  test("a logical failure is the core's outcome too (review of #219)", () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey: "issue-219-logical-failure",
+      traceId: "trace-219-lf",
+      nativeTurnId: "turn-219-lf",
+      nativeThreadId: "thread-219-lf",
+      accountIdentity: "account-219",
+      browserProfile: "profile-219",
+      browserContext: "context-219",
+      pageIdentity: "page-219",
+      capabilitySnapshot: {
+        snapshotId: "snapshot-219-lf",
+        sessionId: "session-219",
+        agentId: "session-219",
+        turnId: "turn-219-lf",
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+
+    // The physical side finished, but the turn itself failed.
+    turn.markLogicalSettled("failed");
+    const provider = turn.snapshot();
+    const coreState = turn.coreSnapshot();
+    expect(provider.logicalOutcome).toBe("failed");
+    expect(provider.recovery).toBe("FAILED");
+    expect(coreState.logical).toBe("failed");
+    expect(coreState.recovery).toBe("failed");
+  });
+
+  test("a failure before any physical execution is the core's recovery too (review of #219)", () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin({
+      executionKey: "issue-219-pre-physical",
+      traceId: "trace-219-pp",
+      nativeTurnId: "turn-219-pp",
+      nativeThreadId: "thread-219-pp",
+      accountIdentity: "account-219",
+      browserProfile: "profile-219",
+      browserContext: "context-219",
+      pageIdentity: "page-219",
+      capabilitySnapshot: {
+        snapshotId: "snapshot-219-pp",
+        sessionId: "session-219",
+        agentId: "session-219",
+        turnId: "turn-219-pp",
+        createdAt: Date.now(),
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    });
+
+    turn.failBeforePhysicalSettlement();
+    const provider = turn.snapshot();
+    const coreState = turn.coreSnapshot();
+    expect(provider.physicalSettlementOutcome).toBe("not_started");
+    expect(provider.logicalOutcome).toBe("failed");
+    expect(provider.recovery).toBe("FAILED");
+    expect(coreState.physical).toBe("not_started");
+    expect(coreState.logical).toBe("failed");
+    expect(coreState.recovery).toBe("failed");
+  });
+
   test("the ChatGPT lifecycle vocabulary maps onto the core exchange", () => {
     const facts = (overrides: Partial<Parameters<typeof chatGptWebChatExchangeStateOf>[0]> = {}) => ({
       state: "PREPARING" as const,

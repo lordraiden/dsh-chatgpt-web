@@ -10,6 +10,7 @@ import { RetainedSurfaceRegistry } from "../src/adapters/chatgpt-web/retained-su
 import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { chatGptWebChatAccountBinding, chatGptWebChatAffinity } from "../src/adapters/chatgpt-web/web-chat-bridge";
 import {
+  confirmWebChatConversation,
   createMemoryConversationStore,
   resolveWebChatContinuation,
   webChatAccountBindingId,
@@ -110,11 +111,13 @@ describe("issue #192 — two turns, a cancellation and a replay over one physica
     // ---- Turn 1: no conversation yet, so the provider installs one (an explicit decision).
     const first = await resolveWebChatContinuation({ store, driver }, {
       ...selection,
-      intent: { kind: "new_conversation", reason: "first turn of this chat" },
+      intent: { kind: "new_conversation", expectedGeneration: 0, reason: "first turn of this chat" },
     });
     expect(first.outcome).toBe("new_conversation");
     expect(first.conversation?.generation).toBe(1);
-    expect(first.record?.checkpoint).toBe("confirmed");
+    // A creation is an attempt: the record is confirmed only when the turn that owns it settles.
+    expect(first.record?.checkpoint).toBe("unconfirmed");
+    await confirmWebChatConversation(store, first.identity, { generation: 1, turnId: "turn-1", at: 1 });
 
     // The physical side: the surface is acquired, used, released and settled.
     const page = fakePage();
@@ -171,7 +174,7 @@ describe("issue #192 — two turns, a cancellation and a replay over one physica
 
     const replayed = await resolveWebChatContinuation({ store, driver }, {
       ...selection,
-      intent: { kind: "replay", reason: "the retained surface was lost", history: [{ role: "user", text: "arregla el bug" }] },
+      intent: { kind: "replay", expectedGeneration: 1, reason: "the retained surface was lost", history: [{ role: "user", text: "arregla el bug" }] },
       expectedGeneration: 1,
     });
     expect(replayed.outcome).toBe("replay");
@@ -186,6 +189,9 @@ describe("issue #192 — two turns, a cancellation and a replay over one physica
     sessions.recordSentSystemFingerprint(key, 2, "fingerprint-2");
     surfaces.release(key);
     surfaces.settle(key, "fulfilled");
+
+    // The replayed turn settles: the provider established the result, so continuity is confirmed.
+    await confirmWebChatConversation(store, replayed.identity, { generation: 2, turnId: "turn-2", at: 2 });
 
     // ---- The durable record and the physical side agree.
     const record = await store.read(replayed.identity);
@@ -231,7 +237,7 @@ describe("issue #192 — two turns, a cancellation and a replay over one physica
       threadId: "dsh-thread-integration",
       namespace: chatGptWebExecutionNamespace(PROVIDER),
       model: MODEL,
-      intent: { kind: "new_conversation", reason: "first turn" } as const,
+      intent: { kind: "new_conversation", expectedGeneration: 0, reason: "first turn" } as const,
     };
     const firstAccount = await resolveWebChatContinuation({ store, driver }, { ...base, binding: BINDING });
     const secondBinding = chatGptWebChatAccountBinding({

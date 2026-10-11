@@ -16,11 +16,13 @@ import type { ProviderRecovery } from "./provider-core";
 import type { ChatGptTurnSessions } from "./turn-execution";
 import type { CodexParsedRequest, CodexProviderConfig } from "../../types";
 import {
+  confirmWebChatConversation,
   createMemoryConversationStore,
   webChatError,
   resolveWebChatContinuation,
   webChatContinuationIdentity,
   type WebChatAccountBinding,
+  type WebChatConversationIdentity,
   type WebChatConversationStore,
   type WebChatContinuationIntent,
   type WebChatReplayMessage,
@@ -71,6 +73,15 @@ export function chatGptReplayHistory(parsed: CodexParsedRequest): readonly WebCh
 /** The continuity decision of one native turn. */
 export interface ChatGptContinuity {
   resolveRecovery(facts: ChatGptRecoveryFacts): Promise<ProviderRecovery>;
+  /**
+   * Confirm the settled turn in the durable record.
+   *
+   * A turn that never reaches this leaves its conversation unconfirmed, so nothing resumes continuity
+   * the provider never established. A confirmation that cannot be applied (the conversation moved on)
+   * is logged and the record stays unconfirmed: the turn's own result is already delivered, and
+   * failing it here would not make the state any more true.
+   */
+  confirmTurn(input: { readonly turnId: string; readonly at?: number }): Promise<void>;
 }
 
 /**
@@ -80,6 +91,8 @@ export interface ChatGptContinuity {
  * @returns the decision, expressed in the provider's recovery vocabulary.
  */
 export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptContinuity {
+  /** The conversation the last decision resolved, so a settled turn can confirm it. */
+  let decision: { identity: WebChatConversationIdentity; generation: number } | undefined;
   const driver = createChatGptWebDriver({
     provider: deps.provider,
     namespace: deps.namespace,
@@ -107,24 +120,41 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
       };
       const stored = await store.read(webChatContinuationIdentity(scope));
 
+      // Every explicit intent names the generation it acts on, so a decision taken from a superseded
+      // state is refused instead of creating a conversation that would then be refused a record.
+      const currentGeneration = stored?.generation ?? 0;
       let intent: WebChatContinuationIntent;
       if (facts.contextExhausted || facts.retired) {
         // Continuity has to be rebuilt: an explicit replay when canonical history is available, and a
         // first conversation when there is nothing to rebuild from.
         const history = chatGptReplayHistory(facts.parsed);
         intent = history.length > 0
-          ? { kind: "replay", reason: "ChatGPT continuity must be rebuilt from canonical history", history }
-          : { kind: "new_conversation", reason: "ChatGPT continuity was lost and no canonical history remains" };
+          ? {
+            kind: "replay",
+            expectedGeneration: currentGeneration,
+            reason: "ChatGPT continuity must be rebuilt from canonical history",
+            history,
+          }
+          : {
+            kind: "new_conversation",
+            expectedGeneration: currentGeneration,
+            reason: "ChatGPT continuity was lost and no canonical history remains",
+          };
       } else if (stored) {
         intent = { kind: "continue" };
       } else {
-        intent = { kind: "new_conversation", reason: "first turn of this chat" };
+        intent = {
+          kind: "new_conversation",
+          expectedGeneration: currentGeneration,
+          reason: "first turn of this chat",
+        };
       }
 
       const plan = await resolveWebChatContinuation(
         { store, driver },
         { ...scope, model: facts.parsed.modelId, intent },
       );
+      if (plan.record) decision = { identity: plan.identity, generation: plan.record.generation };
       switch (plan.outcome) {
         case "exact_resume":
           return "EXACT_RESUME";
@@ -140,6 +170,21 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
             "CONVERSATION_STATE_MISMATCH",
             "The WebChat Core refused continuity for this turn",
           );
+      }
+    },
+
+    async confirmTurn(input) {
+      if (!decision) return;
+      try {
+        await confirmWebChatConversation(store, decision.identity, {
+          generation: decision.generation,
+          turnId: input.turnId,
+          at: input.at ?? Date.now(),
+        });
+      } catch (error) {
+        console.warn(
+          `[chatgpt-web] the settled turn could not be confirmed in the conversation record: ${(error as Error).message}`,
+        );
       }
     },
   };
