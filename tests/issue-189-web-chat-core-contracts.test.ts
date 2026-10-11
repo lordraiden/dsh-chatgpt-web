@@ -139,12 +139,12 @@ describe("issue #189 — normalized exchange events", () => {
 
   test("the union is exhaustively consumable with provider-specific phases absent", () => {
     const events: WebChatExchangeEvent[] = [
-      { type: "ready" },
-      { type: "submitted" },
-      { type: "text_delta", text: "hola" },
-      { type: "completed", text: "hola" },
-      { type: "cancelled", reason: "user" },
-      { type: "error", error: webChatError("UPSTREAM_ERROR", "boom") },
+      { type: "ready", epoch: 1 },
+      { type: "submitted", epoch: 1 },
+      { type: "text_delta", epoch: 1, text: "hola" },
+      { type: "completed", epoch: 1, text: "hola" },
+      { type: "cancelled", epoch: 1, reason: "user" },
+      { type: "error", epoch: 1, error: webChatError("UPSTREAM_ERROR", "boom") },
     ];
     const seen = events.map((event) => event.type);
     expect(seen).toEqual([...WEB_CHAT_EXCHANGE_EVENT_TYPES]);

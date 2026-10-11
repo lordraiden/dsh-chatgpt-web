@@ -68,8 +68,8 @@ function scriptedTransport(script: {
   const calls = { ready: 0, submit: 0, stream: 0, settle: 0, abort: 0 };
   const phases = [...(script.phases ?? ["accepted"])];
   const events = script.events ?? [
-    { type: "text_delta", text: "hola" },
-    { type: "completed", text: "hola" },
+    { type: "text_delta", epoch: 1, text: "hola" },
+    { type: "completed", epoch: 1, text: "hola" },
   ];
   const transport: WebChatTextTransport = {
     id: "scripted",
@@ -493,8 +493,8 @@ describe("issue #191 — the exchange runner over a provider transport", () => {
   test("a provider error after submission is not retry-safe", async () => {
     const { transport } = scriptedTransport({
       events: [
-        { type: "text_delta", text: "parcial" },
-        { type: "error", error: webChatError("UPSTREAM_ERROR", "upstream exploded") },
+        { type: "text_delta", epoch: 1, text: "parcial" },
+        { type: "error", epoch: 1, error: webChatError("UPSTREAM_ERROR", "upstream exploded") },
       ],
     });
     const { exchange } = await runnerWith(transport);
@@ -515,11 +515,11 @@ describe("issue #191 — the exchange runner over a provider transport", () => {
       id: "gated",
       ready: async () => {},
       submit: async () => "accepted",
-      async *stream(): AsyncIterable<WebChatExchangeEvent> {
+      async *stream(context: WebChatTextTransportContext): AsyncIterable<WebChatExchangeEvent> {
         await gate;
-        events.push({ type: "text_delta", text: "tarde" });
-        yield { type: "text_delta", text: "tarde" };
-        yield { type: "completed", text: "tarde" };
+        events.push({ type: "text_delta", epoch: context.epoch, text: "tarde" });
+        yield { type: "text_delta", epoch: context.epoch, text: "tarde" };
+        yield { type: "completed", epoch: context.epoch, text: "tarde" };
       },
       async settle() { calls.settle += 1; return "fulfilled"; },
       async abort() { calls.abort += 1; },
@@ -798,7 +798,7 @@ describe("issue #191 — migration evidence from the existing provider lifecycle
 
 describe("issue #191 — stream ends, concurrency and preparation (review of #218)", () => {
   test("a stream that ends without a terminal event is never a completed answer", async () => {
-    const { transport } = scriptedTransport({ events: [{ type: "text_delta", text: "parcial" }] });
+    const { transport } = scriptedTransport({ events: [{ type: "text_delta", epoch: 1, text: "parcial" }] });
     const { exchange } = await runnerWith(transport);
     await exchange.prepare();
     await exchange.submit();
@@ -840,6 +840,23 @@ describe("issue #191 — stream ends, concurrency and preparation (review of #21
     expect(order).toEqual(["abort:start", "abort:end", "settle"]);
     expect(settleCalls).toBe(1);
     expect(exchange.snapshot().cancelRequested).toBe(true);
+  });
+
+  test("an event from another conversation epoch is discarded, not presented as this turn", async () => {
+    const { transport } = scriptedTransport({
+      events: [
+        { type: "text_delta", epoch: 2, text: "de otra época" },
+        { type: "text_delta", epoch: 1, text: "de esta" },
+        { type: "completed", epoch: 1, text: "de esta" },
+      ],
+    });
+    const { exchange } = await runnerWith(transport, { epoch: 1 });
+    await exchange.prepare();
+    await exchange.submit();
+    const events = await collect(exchange);
+    // The event carries the epoch it was produced for: another generation never reaches the caller.
+    expect(events.map(event => (event.type === "text_delta" ? event.text : event.type))).toEqual(["de esta", "completed"]);
+    expect(exchange.snapshot().state).toBe("COMPLETED");
   });
 
   test("a submission before the exchange is transport-ready is refused", async () => {

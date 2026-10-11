@@ -215,8 +215,9 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     async *stream() {
       try {
         for await (const event of transport.stream(context())) {
-          if (!lifecycle.acceptsResult(lifecycle.snapshot().epoch)) {
-            // A result from a retired exchange, or one arriving after cancellation, is stale.
+          if (!lifecycle.acceptsResult(event.epoch)) {
+            // The event itself says which conversation generation produced it: a result from another
+            // epoch, from a retired exchange, or arriving after cancellation is stale.
             continue;
           }
           if (event.type === "text_delta") {
