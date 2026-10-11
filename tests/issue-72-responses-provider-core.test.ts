@@ -33,6 +33,9 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
         tools: [],
       }),
     });
+    // The real flow reports the submission before a physical settlement can race; the core records
+    // that fact now, so the race is exercised on a turn that reached the submit boundary.
+    turn.markSubmitted();
     core.bindPhysicalSettlement("race-execution", physical);
     await physical;
 
@@ -60,6 +63,8 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
         tools: [],
       }),
     });
+    // Same as above: the submission is reported before the physical settlement can win the race.
+    turn.markSubmitted();
     core.bindPhysicalSettlement("race-failure-execution", Promise.resolve());
     await turn.waitForPhysicalSettlement();
 

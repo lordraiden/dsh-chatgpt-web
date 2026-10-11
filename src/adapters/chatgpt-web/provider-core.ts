@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import {
+  WebChatExchangeLifecycle,
+  decideWebChatRetry,
+  type WebChatContinuationOutcome,
+  type WebChatRetryRefusal,
+} from "../../web-chat/core";
 import type { CapabilitySnapshot } from "./capability-projector";
 import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concurrency";
 
@@ -37,6 +43,23 @@ interface ProviderRetryBudget {
   attempts: number;
   lastRetryAt: number;
 }
+
+/**
+ * The core's refusal vocabulary mapped onto the provider's (issue #192).
+ *
+ * The provider keeps its historical four reasons; the core's sharper ones (`ambiguous`,
+ * `partial_output`, `cancelled`) all mean the same thing here: this turn may already have been
+ * submitted, so it is not retryable.
+ */
+const CORE_RETRY_REASONS: Record<WebChatRetryRefusal, NonNullable<ProviderRetryDecision["reason"]>> = {
+  submitted: "submitted",
+  ambiguous: "submitted",
+  partial_output: "submitted",
+  cancelled: "submitted",
+  budget_exhausted: "budget_exhausted",
+  retired: "retired",
+  policy: "policy",
+};
 
 export interface ProviderRetryDecision {
   readonly allowed: boolean;
@@ -298,6 +321,14 @@ export class ProviderTurnLifecycle {
   private retirementScheduled = false;
   private shutdownRequested = false;
   private cancelExecution?: (reason: Error) => void;
+  /**
+   * The WebChat Core lifecycle this turn is a view of (issue #192).
+   *
+   * It owns the legality of every state, submission-phase, settlement and recovery change: the
+   * provider keeps its own vocabulary and fields for its consumers, but it can no longer record a
+   * change the core rejects, so there is one execution authority instead of two.
+   */
+  private readonly core: WebChatExchangeLifecycle;
 
   constructor(
     readonly lease: BrowserAccountLease,
@@ -307,7 +338,20 @@ export class ProviderTurnLifecycle {
     private readonly bindResource: (binding: ProviderTurnPhysicalResourceBinding) => void = binding => lease.bindPhysicalResource(binding),
     private readonly releaseLease: () => void = () => lease.release(),
     private readonly onRetired: () => void = () => {},
-  ) {}
+    /**
+     * Conversation epoch this turn belongs to, and submission budget of the logical turn.
+     *
+     * Optional so existing callers and tests keep working; the core records them either way.
+     */
+    options: { readonly epoch?: number; readonly maxSubmits?: number } = {},
+  ) {
+    this.core = new WebChatExchangeLifecycle({
+      exchangeId: provenance.executionKey ?? "chatgpt-web",
+      conversationKey: lease.descriptor.serviceId,
+      epoch: options.epoch ?? 1,
+      ...(options.maxSubmits !== undefined ? { maxSubmits: options.maxSubmits } : {}),
+    });
+  }
 
   snapshot(): ProviderTurnSnapshot {
     return {
@@ -339,8 +383,72 @@ export class ProviderTurnLifecycle {
     if (!TRANSITIONS[this.state].includes(next)) {
       throw new Error(`Invalid provider turn transition: ${this.state} -> ${next}`);
     }
+    // The core records the change first: if it is not a legal WebChat exchange transition, the
+    // provider turn does not move either.
+    this.recordInCore(next);
     this.state = next;
     if (next === "RETIRED") this.activity = "idle";
+  }
+
+  /**
+   * Record one provider state change in the WebChat Core lifecycle.
+   *
+   * The provider vocabulary is a view: several of its states mean the same core state, and its
+   * submission phase decides whether a `SUBMITTED` turn was confirmed or only activated.
+   */
+  private recordInCore(next: ProviderTurnState): void {
+    switch (next) {
+      case "PREPARING":
+        this.core.markPreparing();
+        return;
+      case "LEASED":
+        // The core has no lease-as-state: readiness and ownership are recorded by the transport lease.
+        return;
+      case "SURFACE_READY":
+        if (this.core.snapshot().state === "CREATED") this.core.markPreparing();
+        this.core.markTransportReady();
+        return;
+      case "SUBMITTED":
+        // The phase was recorded by `markSendActivated`/`markSubmitted`; this only mirrors that the
+        // provider considers the turn submitted.
+        this.ensureCoreSubmitting();
+        return;
+      case "RUNNING":
+        this.core.markStreaming();
+        return;
+      case "SETTLING":
+        // The provider enters SETTLING while it waits for the client-visible logical outcome; the
+        // core is not settled here. The physical settlement is recorded by the settlement methods
+        // and the logical one by `markLogicalSettled`.
+        return;
+      case "RETIRED":
+        this.core.markRetired("the provider turn was retired");
+        return;
+      default:
+        return;
+    }
+  }
+
+  /** The core's view of this turn, for the retry authority and for cross-checks. */
+  coreSnapshot() {
+    return this.core.snapshot();
+  }
+
+  /** Bring the core to the submission attempt that is about to be reported. */
+  private ensureCoreSubmitting(): void {
+    if (this.core.snapshot().state === "CREATED") this.core.markPreparing();
+    if (this.core.snapshot().state === "PREPARING") this.core.markTransportReady();
+    if (this.core.snapshot().state === "TRANSPORT_READY") this.core.markSubmitting();
+  }
+
+  private recordCoreActivation(): void {
+    this.ensureCoreSubmitting();
+    if (this.core.snapshot().phase === "prepared") this.core.markSendActivated();
+  }
+
+  private recordCoreSubmission(): void {
+    this.ensureCoreSubmitting();
+    this.core.markSubmitted();
   }
 
   private assertMutable(): void {
@@ -375,6 +483,7 @@ export class ProviderTurnLifecycle {
   markSendActivated(): void {
     if (this.submission !== "prepared") return;
     this.assertMutable();
+    this.recordCoreActivation();
     this.submission = "send_activated";
     if (this.state === "SURFACE_READY") {
       this.transition("SUBMITTED");
@@ -384,6 +493,7 @@ export class ProviderTurnLifecycle {
   markSubmitted(): void {
     if (this.submission === "accepted") return;
     this.assertMutable();
+    this.recordCoreSubmission();
     this.submission = "accepted";
     if (this.state === "SURFACE_READY") this.transition("SUBMITTED");
   }
@@ -449,6 +559,7 @@ export class ProviderTurnLifecycle {
     }
     this.logicalSettled = true;
     this.logicalOutcome = outcome;
+    if (this.core.snapshot().logical === "pending") this.core.markLogicallySettled(outcome);
     if (outcome === "failed") {
       this.recovery = "FAILED";
     }
@@ -522,11 +633,16 @@ export class ProviderTurnLifecycle {
     if (this.state !== "SETTLING") this.transition("SETTLING");
     this.physicalSettled = true;
     this.physicalSettlementOutcome = "not_started";
+    this.core.markPhysicallySettled("not_started");
     this.recovery = "FAILED";
     this.activity = "idle";
     this.releaseLease();
     this.transition("RETIRED");
     this.onRetired();
+  }
+
+  private recordCoreSettlement(outcome: PhysicalSettlementOutcome): void {
+    this.core.markPhysicallySettled(outcome);
   }
 
   private finishPhysicalSettlement(
@@ -656,18 +772,27 @@ export class ChatGptWebProviderCore {
     const snapshot = turn.snapshot();
     const budget = this.retryBudgetIfPresent(executionKey);
     const attempts = budget?.attempts ?? 0;
-    if (snapshot.submission !== "prepared") {
-      return { allowed: false, attempt: attempts, maxAttempts, reason: "submitted" };
-    }
-    if (snapshot.state === "SETTLING" || snapshot.state === "RETIRED") {
-      return { allowed: false, attempt: attempts, maxAttempts, reason: "retired" };
-    }
+    // Provider policy that is not the core's: a budget older than its TTL is forgotten, so a much
+    // later reconnect starts from a fresh allowance.
     if (budget && budget.lastRetryAt > 0 && now - budget.lastRetryAt >= RETRY_BUDGET_TTL_MS) {
       this.retryBudgets.delete(executionKey);
       return { allowed: true, attempt: 1, maxAttempts };
     }
-    if (attempts >= maxAttempts) {
-      return { allowed: false, attempt: attempts, maxAttempts, reason: "budget_exhausted" };
+    // The decision itself is the core's (issue #192): one retry authority, not two.
+    const decision = decideWebChatRetry({
+      snapshot: {
+        ...turn.coreSnapshot(),
+        submits: attempts,
+        maxSubmits: maxAttempts,
+      },
+    });
+    if (!decision.allowed) {
+      return {
+        allowed: false,
+        attempt: attempts,
+        maxAttempts,
+        reason: CORE_RETRY_REASONS[decision.reason ?? "policy"],
+      };
     }
     return { allowed: true, attempt: attempts + 1, maxAttempts };
   }
