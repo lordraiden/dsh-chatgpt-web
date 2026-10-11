@@ -64,6 +64,11 @@ describe("issue #192 — the ChatGPT driver", () => {
     expect(models.some(model => model.id.startsWith("chatgpt-web/"))).toBe(false);
     // The provider driver accepts the unchanged public DSH route and projects it to a local descriptor.
     expect((await driver.resolveModel("chatgpt-web/light"))?.id).toBe("light");
+    expect(models.find(model => model.id === "light")?.reasoningModes).toEqual(["low"]);
+    expect((await driver.resolveModel("chatgpt-web/light", "low"))?.id).toBe("light");
+    expect(await driver.resolveModel("chatgpt-web/light", "medium")).toBeUndefined();
+    // An omitted reasoning selection preserves route-pinned behavior.
+    expect((await driver.resolveModel("chatgpt-web/light"))?.id).toBe("light");
     // A Pro route is not served when the account does not have it.
     expect(await driver.resolveModel("chatgpt-web/pro")).toBeUndefined();
     expect(await driver.resolveModel("api/gpt-5")).toBeUndefined();
