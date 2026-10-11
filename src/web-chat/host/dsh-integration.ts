@@ -272,6 +272,32 @@ export function webChatProviderCheck(info: WebChatProviderInfo): WebChatProvider
 }
 
 /**
+ * The prefix of an account fingerprint that a human-facing report may print.
+ *
+ * A fingerprint is an account identifier, never a credential, but a diagnostic report should still
+ * not carry a complete identifier: only a short prefix is printed, which is enough to tell two
+ * accounts apart and useless as a lookup key.
+ */
+export function redactWebChatFingerprint(fingerprint: string): string {
+  const trimmed = fingerprint.trim();
+  return trimmed.length <= 8 ? trimmed : `${trimmed.slice(0, 8)}…`;
+}
+
+/**
+ * Turn one provider's information into a doctor check, with an identifier-safe detail.
+ *
+ * This is the doctor-facing variant of {@link webChatProviderCheck}: the same status and the same
+ * non-secret facts, with the account fingerprint shortened. The check never carries a credential, and
+ * an unhealthy driver is reported as an error rather than omitted from the report.
+ */
+export function webChatDoctorCheck(info: WebChatProviderInfo): WebChatProviderCheck {
+  const check = webChatProviderCheck(info);
+  const fingerprint = info.accountFingerprint;
+  if (!fingerprint) return check;
+  return { ...check, detail: check.detail.split(fingerprint).join(redactWebChatFingerprint(fingerprint)) };
+}
+
+/**
  * An idempotent shutdown for the drivers this deployment composed.
  *
  * Each driver is asked to shut down exactly once, and a driver that throws does not stop the others
