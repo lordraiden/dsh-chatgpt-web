@@ -107,7 +107,9 @@ export interface WebChatConversationStore {
    * Release whatever this store owns.
    *
    * A backend that owns a durable file refuses a second instance for it, so it must be able to give
-   * it back; nothing else needs to call this.
+   * it back; nothing else needs to call this. Releasing never discards accepted work: a backend that
+   * serializes mutations drains them before it gives the resource back, so an operation already
+   * accepted is either committed or failed by the time `close()` resolves.
    */
   close?(): Promise<void>;
 }

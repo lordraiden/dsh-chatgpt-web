@@ -10,6 +10,7 @@ import {
 } from "./adapters/chatgpt-web/advisor";
 import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { closeNativeChatGptContinuityStores } from "./adapters/chatgpt-web/index";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -33,7 +34,6 @@ import type { AppConfig } from "./config";
 import {
   CHATGPT_WEB_TUNING_DEFAULTS,
   getConfigDir,
-  providerConfig,
   resolveChatGptWebTuning,
   saveConfig,
   validateChatGptWebTuning,
@@ -43,6 +43,7 @@ import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import { augmentNativeModelCatalog, buildChatGptWebModelCatalog } from "./model-catalog";
+import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import {
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
@@ -55,7 +56,7 @@ import {
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 import {
-  createChatGptWebRouteAuthority,
+  createChatGptWebRouteAuthorityFromProvider,
   requireChatGptWebRoute,
 } from "./chatgpt-web-authority";
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
@@ -384,14 +385,13 @@ export interface ResponseRequestOptions {
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
 }
 
+/**
+ * The route authority for one configuration, derived from the **same** effective provider facts every
+ * other seam uses (issue #193). This is a view over provider facts, not a second routing authority:
+ * DSH still selects the provider, and the sidecar still executes the selected turn.
+ */
 function chatGptWebRouteAuthority(config: AppConfig) {
-  return createChatGptWebRouteAuthority({
-    solAvailable: config.solAvailable,
-    proAvailable: config.proAvailable,
-    capabilityState: config.capabilityState,
-    browserInteractionMode: config.browserInteractionMode,
-    zeroRiskProEnabled: config.zeroRiskProEnabled,
-  });
+  return createChatGptWebRouteAuthorityFromProvider(effectiveChatGptWebProviderConfig(config));
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -562,7 +562,7 @@ export async function responseRequest(
     parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
   }
 
-  const provider = providerConfig(config);
+  const provider = effectiveChatGptWebProviderConfig(config);
   let traceId: string | undefined;
   try {
     traceId = chatGptWebTraceId(provider, parsed);
@@ -961,7 +961,7 @@ async function nativeDshTurnRequest(
   if (parsed.modelId !== route.backendModel) {
     return formatErrorResponse(400, "invalid_request_error", "Native DSH public model and routed backend model do not match");
   }
-  const provider = providerConfig(config);
+  const provider = effectiveChatGptWebProviderConfig(config);
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const queueIterator = queue[Symbol.asyncIterator]();
@@ -1049,7 +1049,7 @@ async function advisorReviewRequest(
     );
   }
   const reviewId = randomUUID();
-  const provider = providerConfig(config);
+  const provider = effectiveChatGptWebProviderConfig(config);
   let route: ChatGptWebModelRoute;
   try {
     route = resolveAdvisorRequestRoute(config, input.mode);
@@ -1103,7 +1103,7 @@ async function advisorRecoverRequest(
   }
   const reviewId = randomUUID();
   const mode = input.mode ?? "normal";
-  const provider = providerConfig(config);
+  const provider = effectiveChatGptWebProviderConfig(config);
   let route: ChatGptWebModelRoute;
   try {
     route = resolveAdvisorRequestRoute(config, mode);
@@ -1240,8 +1240,10 @@ export function startServer(
         const body = await req.json() as { tuning?: unknown };
         const tuning = validateChatGptWebTuning(body.tuning, "control API");
         saveConfig({ ...config, tuning });
-        // Mutate the in-memory config so the next turn's providerConfig(config) sees the new
-        // tuning without a sidecar restart (workers are keyed by the serialized provider config).
+        // Mutate the in-memory config so the next turn's effective provider configuration sees the
+        // new tuning without a sidecar restart (workers are keyed by the serialized provider config).
+        // The resolver reads the configuration per call, and a provider-scoped block still wins over
+        // this flat field, exactly as it wins over the loaded one (issue #193).
         config.tuning = tuning;
         return Response.json({ status: "ok", tuning }, { headers: controlCorsHeaders() });
       } catch (error) {
@@ -1532,6 +1534,9 @@ export function startServer(
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
         sharedProviderCore.shutdown(),
+        // The durable continuity store owns an open file and one writer slot per process; the
+        // sidecar releases it on its own shutdown path (#193).
+        closeNativeChatGptContinuityStores(),
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")

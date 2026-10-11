@@ -96,27 +96,30 @@ ownership rule, and the exact conversation-key digests captured before the extra
 
 ## Consuming the core today (reference: ChatGPT)
 
-The ChatGPT path consumes the core without being migrated yet (issue #192 owns that):
+The ChatGPT implementation was migrated onto WebChat Core by issue #192 and connected to the DSH host by issue #193. The responsibilities are deliberately split:
 
-- `src/adapters/chatgpt-web/conversation-key.ts` owns the ChatGPT-specific half of affinity (which
-  thread identity a request carries, which namespace it runs under) and delegates the digest to
-  `core/conversation-key.ts`. The digest is a compatibility surface and must not change.
-- `src/adapters/chatgpt-web/web-chat-bridge.ts` projects the existing ChatGPT values into core
-  types: the turn identity, the account binding, and the classification of every ChatGPT failure
-  code into a core category. The test that scans the provider's declared codes fails when a new
-  code is neither classified nor explicitly excluded with a reason.
+- `src/adapters/chatgpt-web/conversation-key.ts` owns the ChatGPT-specific interpretation of native DSH thread/session identity and delegates the stable affinity digest to `core/conversation-key.ts`. The digest remains a compatibility surface.
+- `src/adapters/chatgpt-web/chatgpt-driver.ts` implements the provider contract. It reports model availability, account binding, conversation assessment and provider-native continuation; Core applies the shared continuation rules.
+- `src/adapters/chatgpt-web/chatgpt-continuity.ts` expresses explicit new/resume/replay decisions through Core and confirms a durable record only after the turn settles successfully. Canonical transcript history remains owned by DSH.
+- `src/adapters/chatgpt-web/index.ts` composes the native turn with the shared continuity/exchange semantics and ChatGPT's own browser transport. Physical browser settlement and logical turn completion remain distinct.
+- `src/web-chat/host/dsh-integration.ts`, `src/plugin.ts`, `src/server.ts` and `src/doctor.ts` form the host boundary. DSH remains the public routing authority; the host resolves only drivers that are actually implemented, projects provider-scoped model identity, reports health, and translates retry safety.
+
+The provider-code boundary test still requires every ChatGPT-specific failure code to be classified or explicitly excluded with a reason. ChatGPT-specific DOM, browser resources, MCP/capability behavior and legacy compatibility remain outside `src/web-chat/core`.
 
 ## What is deliberately not here
 
-The continuity layer (issue #190) and the exchange lifecycle (issue #191) exist and are consumed by
-the provider migration, which moves that path onto the core key, records its conversations through
-this store, and replaces its lifecycle with this state machine.
+The common Core remains text-only and provider-neutral. It does not own provider implementations, browser transports, credentials, provider-private IDs, the DSH transcript or host route registration. Those remain with the provider, transport, host and DSH runtime respectively.
 
 | Owner | Work |
 | --- | --- |
-| #192 (PR 4) | The ChatGPT driver implementation and its transport behind the core. |
-| #192 (PR 4) | The ChatGPT driver implementation and its transport behind the core, including retiring `legacyWebChatThreadKey` and moving the current `ProviderTurnLifecycle`/`RetainedSurfaceRegistry` onto this lifecycle. |
-| #193 (PR 5) | Host route integration: adapter, drivers, models, auth, health. |
-| #194 (PR 6) | The provider conformance and architecture-contract suite. |
+| #189 (PR 1) | Provider-neutral Core contracts and architectural boundary tests — merged. |
+| #190 (PR 2) | Stable affinity, opaque continuation state, and durable conversation-store semantics — merged. |
+| #191 (PR 3) | Exchange lifecycle, retry authority, physical settlement and transport leases — merged. |
+| #192 (PR 4) | ChatGPT driver/transport migration onto Core — merged. |
+| #193 (PR 5) | DSH host integration, provider-scoped configuration, health, registration and durable native continuity — in PR #220. |
+| #194 (PR 6) | Reusable provider conformance and architecture-contract suite — pending. |
+| #195 / #196 (PRs 7–8) | Qwen Web provider implementation and provider-specific continuity validation — pending. |
+| #197 / #198 (PRs 9–10) | DeepSeek Web provider implementation and provider-specific continuity validation — pending. |
+| #199 (PR 11) | Cross-provider isolation and end-to-end conformance — pending. |
 
-Qwen and DeepSeek are not implemented and are not referenced by the core.
+Qwen and DeepSeek are roadmap providers, not current routes. Their provider-specific session IDs, lineage, auth challenges and transport protocols must remain opaque to Core.

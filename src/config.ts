@@ -18,6 +18,15 @@ export type BrowserInteractionMode = "automatic" | "manual";
 export type SubagentProtocol = "compatibility-v1" | "native";
 
 /**
+ * The provider route this deployment implements.
+ *
+ * It is also the key of the provider-scoped WebChat block (`webChat.providers[...]`) that replaces the
+ * flat ChatGPT block as a whole (issue #193), which is why the configuration module validates that
+ * block here: the flat and the scoped description of the same facts have one owner.
+ */
+export const CHATGPT_WEB_ROUTE_ID = "chatgpt-web";
+
+/**
  * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token
  * contract therefore has a new identity instead of mutating the retired connector in place.
  */
@@ -171,6 +180,124 @@ export function validateChatGptWebTuning(value: unknown, path = "config"): ChatG
   return tuning;
 }
 
+/** Boolean provider facts, and the string provider facts that name a location or identity. */
+const CHATGPT_WEB_PROVIDER_BOOLEAN_FACTS = [
+  "solAvailable", "proAvailable", "zeroRiskProEnabled", "experimentalBiggerContext",
+  "headed", "localToolsEnabled", "autoApproveToolCalls",
+] as const;
+const CHATGPT_WEB_PROVIDER_STRING_FACTS = [
+  "appName", "storageStatePath", "chromeExecutablePath", "brokerSocketPath",
+  "browserHostDescriptorPath", "accountIdentityFingerprint",
+  "threadEnvironmentStatePath", "lunaCheckpointStatePath",
+] as const;
+
+function capabilityStateFromBooleans(record: Record<string, unknown>): {
+  solAvailable: "supported" | "unsupported" | "unknown";
+  proAvailable: "supported" | "unsupported" | "unknown";
+} {
+  const stateFor = (value: unknown): "supported" | "unsupported" | "unknown" =>
+    value === undefined ? "unknown" : value === true ? "supported" : "unsupported";
+  return { solAvailable: stateFor(record.solAvailable), proAvailable: stateFor(record.proAvailable) };
+}
+
+/**
+ * Validate the ChatGPT Web provider facts a configuration block carries (issue #193).
+ *
+ * The same facts are described twice: by the historical flat ChatGPT block (the AppConfig fields
+ * `providerConfig` projects) and by a provider-scoped `webChat.providers["chatgpt-web"]` block, which
+ * **replaces** the flat block as a whole and is therefore consumed verbatim by the driver instead of
+ * being projected again. This function is the single copy of their rules, so the two descriptions
+ * cannot drift:
+ *
+ * - the scalar shape of every fact, including the two enumerations and the transport pair
+ *   (a launcher browser host requires an absolute descriptor);
+ * - the capability invariants: the tri-state shape, an `unknown` state contradicting a boolean claim,
+ *   Pro requiring Sol;
+ * - the capability ↔ browser-mode invariants (Zero Risk does not support Bigger Context);
+ * - the tuning block, through `validateChatGptWebTuning`.
+ *
+ * Fields the caller omits are not validated: a flat configuration is one source of the facts and a
+ * scoped block another, and neither is required to restate every fact. `path` names where the block
+ * lives, so a refusal names the exact location whichever block produced it.
+ */
+export function validateChatGptWebProviderFacts(value: unknown, path = "config"): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Invalid ChatGPT Web provider configuration in ${path}`);
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of CHATGPT_WEB_PROVIDER_BOOLEAN_FACTS) {
+    if (record[key] !== undefined && typeof record[key] !== "boolean") {
+      throw new Error(`Invalid ${key} in ${path}`);
+    }
+  }
+  for (const key of CHATGPT_WEB_PROVIDER_STRING_FACTS) {
+    const candidate = record[key];
+    if (candidate !== undefined && (typeof candidate !== "string" || !candidate.trim())) {
+      throw new Error(`Invalid ${key} in ${path}`);
+    }
+  }
+  if (record.browserInteractionMode !== undefined
+    && record.browserInteractionMode !== "automatic"
+    && record.browserInteractionMode !== "manual") {
+    throw new Error(`Invalid browserInteractionMode in ${path}`);
+  }
+  if (record.browserHost !== undefined
+    && record.browserHost !== "managed-chrome"
+    && record.browserHost !== "launcher") {
+    throw new Error(`Invalid browserHost in ${path}`);
+  }
+  if (record.browserHost === "launcher"
+    && (typeof record.browserHostDescriptorPath !== "string" || !record.browserHostDescriptorPath.trim())) {
+    throw new Error(`Launcher browser host requires browserHostDescriptorPath in ${path}`);
+  }
+  if (record.browserHost === "launcher"
+    && typeof record.browserHostDescriptorPath === "string"
+    && !isAbsolute(expandUserPath(record.browserHostDescriptorPath))) {
+    throw new Error(`Launcher browserHostDescriptorPath must be absolute in ${path}`);
+  }
+  if (record.stallTimeoutSec !== undefined
+    && (typeof record.stallTimeoutSec !== "number"
+      || !Number.isFinite(record.stallTimeoutSec)
+      || record.stallTimeoutSec <= 0)) {
+    throw new Error(`Invalid stallTimeoutSec in ${path}`);
+  }
+  if (record.tuning !== undefined) validateChatGptWebTuning(record.tuning, path);
+
+  // An explicit tri-state, when present, must be a complete and valid pair; otherwise it is derived
+  // from the boolean claims (the compatibility fields) exactly as the projection does.
+  const explicit = record.capabilityState as
+    | { solAvailable?: unknown; proAvailable?: unknown }
+    | undefined;
+  let explicitState: { solAvailable: "supported" | "unsupported" | "unknown"; proAvailable: "supported" | "unsupported" | "unknown" } | undefined;
+  if (explicit !== undefined) {
+    const valid = explicit !== null && typeof explicit === "object" && !Array.isArray(explicit)
+      && (explicit.solAvailable === "supported" || explicit.solAvailable === "unsupported" || explicit.solAvailable === "unknown")
+      && (explicit.proAvailable === "supported" || explicit.proAvailable === "unsupported" || explicit.proAvailable === "unknown");
+    if (!valid) throw new Error(`Invalid capabilityState in ${path}`);
+    explicitState = {
+      solAvailable: explicit.solAvailable as "supported" | "unsupported" | "unknown",
+      proAvailable: explicit.proAvailable as "supported" | "unsupported" | "unknown",
+    };
+  }
+  if (explicitState?.solAvailable === "unknown" && record.solAvailable !== undefined) {
+    throw new Error(`Invalid Sol capability state in ${path}`);
+  }
+  if (explicitState?.proAvailable === "unknown" && record.proAvailable !== undefined) {
+    throw new Error(`Invalid Pro capability state in ${path}`);
+  }
+  const capabilityState = explicitState ?? capabilityStateFromBooleans(record);
+  if (capabilityState.proAvailable === "supported" && capabilityState.solAvailable !== "supported") {
+    throw new Error(`Invalid ChatGPT account capabilityState in ${path}: Pro requires supported Sol`);
+  }
+  const browserInteractionMode = record.browserInteractionMode ?? "automatic";
+  if (browserInteractionMode === "manual" && record.experimentalBiggerContext === true) {
+    throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
+  }
+  if (record.proAvailable === true && record.solAvailable !== true) {
+    throw new Error(`Invalid ChatGPT account capabilities in ${path}: Pro requires Sol`);
+  }
+}
+
 export interface AppConfig {
   version: 3;
   purpose?: "dev-harness";
@@ -213,6 +340,21 @@ export interface AppConfig {
   controlToken: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;
+  /**
+   * WebChat host surface (issue #193): provider-scoped provider configuration and the durable
+   * continuity location.
+   *
+   * The shape is inline on purpose: the configuration module must not import the host boundary (that
+   * would be a cycle) and the host boundary accepts this structural shape, so the two can never
+   * disagree about what a serialized configuration means. Absent means exactly today's behavior: the
+   * historical flat ChatGPT configuration is the effective one.
+   */
+  webChat?: {
+    /** Provider-scoped configuration, keyed by provider route id. */
+    providers?: Record<string, unknown>;
+    /** Durable continuity location; omit to keep continuity in memory. */
+    conversationStorePath?: string;
+  };
   tunnel?: TunnelConfig;
   automaticTunnel?: TunnelConfig;
   manualTunnel?: TunnelConfig;
@@ -653,26 +795,16 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid runtimeCommand in ${path}`);
   }
   assertDurableRuntimeCommand(parsed.runtimeCommand as string[]);
-  if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
-    throw new Error(`Invalid proAvailable in ${path}`);
-  }
-  if (parsed.capabilityState !== undefined) {
-    const state = parsed.capabilityState;
-    const valid = state
-      && (state.solAvailable === "supported" || state.solAvailable === "unsupported" || state.solAvailable === "unknown")
-      && (state.proAvailable === "supported" || state.proAvailable === "unsupported" || state.proAvailable === "unknown");
-    if (!valid) throw new Error(`Invalid capabilityState in ${path}`);
-  }
-  if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
-    throw new Error(`Invalid solAvailable in ${path}`);
-  }
-  if (parsed.experimentalBiggerContext !== undefined
-    && typeof parsed.experimentalBiggerContext !== "boolean") {
-    throw new Error(`Invalid experimentalBiggerContext in ${path}`);
-  }
-  if (parsed.zeroRiskProEnabled !== undefined && typeof parsed.zeroRiskProEnabled !== "boolean") {
-    throw new Error(`Invalid zeroRiskProEnabled in ${path}`);
-  }
+  // The capability and browser-mode facts of the flat ChatGPT block are validated by the single owner
+  // of those rules (issue #193), which the provider-scoped block uses too, so the two cannot drift.
+  validateChatGptWebProviderFacts({
+    browserInteractionMode,
+    solAvailable: parsed.solAvailable,
+    proAvailable: parsed.proAvailable,
+    capabilityState: parsed.capabilityState,
+    zeroRiskProEnabled: parsed.zeroRiskProEnabled,
+    experimentalBiggerContext: parsed.experimentalBiggerContext,
+  }, path);
   if (parsed.stallTimeoutSec !== undefined
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
     throw new Error(`Invalid stallTimeoutSec in ${path}`);
@@ -680,30 +812,44 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.tuning !== undefined) {
     parsed.tuning = validateChatGptWebTuning(parsed.tuning, path);
   }
+  if (parsed.webChat !== undefined) {
+    const webChat = parsed.webChat as unknown;
+    if (!webChat || typeof webChat !== "object" || Array.isArray(webChat)) {
+      throw new Error(`Invalid webChat in ${path}`);
+    }
+    const record = webChat as Record<string, unknown>;
+    if (record.providers !== undefined) {
+      if (!record.providers || typeof record.providers !== "object" || Array.isArray(record.providers)) {
+        throw new Error(`Invalid webChat.providers in ${path}`);
+      }
+      for (const [providerId, provider] of Object.entries(record.providers)) {
+        if (!providerId.trim() || !provider || typeof provider !== "object" || Array.isArray(provider)) {
+          throw new Error(`Invalid webChat.providers.${providerId || "(empty)"} in ${path}`);
+        }
+        // The provider-scoped block the ChatGPT Web route consumes is validated by the same owner as
+        // the flat block: it replaces those facts as a whole, so a malformed internal value or an
+        // incoherent capability combination is refused here instead of being cast into the driver.
+        if (providerId === CHATGPT_WEB_ROUTE_ID) {
+          validateChatGptWebProviderFacts(
+            provider,
+            `${path} (webChat.providers["${CHATGPT_WEB_ROUTE_ID}"])`,
+          );
+        }
+      }
+    }
+    if (record.conversationStorePath !== undefined
+      && (typeof record.conversationStorePath !== "string" || !record.conversationStorePath.trim())) {
+      throw new Error(`Invalid webChat.conversationStorePath in ${path}`);
+    }
+  }
   const solAvailable = parsed.solAvailable === true;
   const proAvailable = parsed.proAvailable === true;
   const capabilityState = parsed.capabilityState ?? {
     solAvailable: parsed.solAvailable === undefined ? "unknown" : solAvailable ? "supported" : "unsupported",
     proAvailable: parsed.proAvailable === undefined ? "unknown" : proAvailable ? "supported" : "unsupported",
   };
-  if (capabilityState.solAvailable === "unknown") {
-    // Keep the boolean compatibility field conservative; route authority uses the tri-state value.
-    if (parsed.solAvailable !== undefined) throw new Error(`Invalid Sol capability state in ${path}`);
-  }
-  if (capabilityState.proAvailable === "unknown") {
-    if (parsed.proAvailable !== undefined) throw new Error(`Invalid Pro capability state in ${path}`);
-  }
-  if (capabilityState.proAvailable === "supported" && capabilityState.solAvailable !== "supported") {
-    throw new Error(`Invalid ChatGPT account capabilityState in ${path}: Pro requires supported Sol`);
-  }
   const experimentalBiggerContext = parsed.experimentalBiggerContext === true;
   const zeroRiskProEnabled = parsed.zeroRiskProEnabled === true;
-  if (browserInteractionMode === "manual" && experimentalBiggerContext) {
-    throw new Error(`Zero Risk does not support Bigger Context in ${path}`);
-  }
-  if (proAvailable && !solAvailable) {
-    throw new Error(`Invalid ChatGPT account capabilities in ${path}: Pro requires Sol`);
-  }
   return {
     ...parsed,
     appName: expectedAppName,
@@ -765,7 +911,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     },
   ).contextWindow;
   return {
-    adapter: "chatgpt-web",
+    adapter: CHATGPT_WEB_ROUTE_ID,
     baseUrl: "https://chatgpt.com",
     models,
     liveModels: false,

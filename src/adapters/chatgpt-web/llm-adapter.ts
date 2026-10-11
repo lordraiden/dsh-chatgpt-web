@@ -36,7 +36,11 @@ import {
   createChatGptWebRouteAuthorityFromProvider,
   requireChatGptWebRoute,
 } from "../../chatgpt-web-authority";
-import { loadConfig, providerConfig } from "../../config";
+import type { WebChatProviderDriver, WebChatSubmissionPhase } from "../../web-chat/core";
+import {
+  dshFailureSemanticsForSubmission,
+} from "../../web-chat/host/dsh-integration";
+import { loadConfig, providerConfig, type AppConfig } from "../../config";
 import { COMPACT_PROMPT } from "../../lib/compaction";
 import { projectConversationalMessages } from "../../conversation-projection";
 import {
@@ -51,6 +55,7 @@ import {
 } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { createChatGptWebAdapter } from "./index";
+import { createChatGptWebDriver } from "./chatgpt-driver";
 
 export const CHATGPT_WEB_PROVIDER_ID = "chatgpt-web";
 
@@ -84,7 +89,7 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 
   constructor(deps: LlmAdapterDeps = {}) {
     super();
-    this.loadProvider = deps.loadProvider ?? (() => providerConfig(loadConfig()));
+    this.loadProvider = deps.loadProvider ?? (() => effectiveChatGptWebProviderConfig(loadConfig()));
     this.createBackend = deps.createBackend ?? (provider => createChatGptWebAdapter(provider));
     this.resolveNativeDshTransport = deps.resolveNativeDshTransport;
     this.resolveNativeDshContext = deps.resolveNativeDshContext ?? ((options, turnId, threadId) => ({
@@ -211,6 +216,22 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * The WebChat provider driver for this adapter's own route.
+   *
+   * The adapter already owns the provider configuration (resolved once and memoized), so it — not a
+   * caller that would have to duplicate the resolution — is the authority that can compose the
+   * driver for the route it registers. The driver is a projection of the facts this provider already
+   * owns and defaults to the same `chatGptTurnSessions` registry the native path uses, so the driver
+   * and the native path can never disagree about a conversation's generation.
+   *
+   * This is not a second registry: the plugin still decides which routes may reach
+   * `ctx.llm.registerAdapter`, and no route without a driver is registered.
+   */
+  webChatDriver(): WebChatProviderDriver {
+    return createChatGptWebDriver({ provider: this.resolveProvider() });
+  }
+
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     // Resolution is deferred into the stream so missing config/auth become a
     // terminal `finish` chunk with a stable code, never a synchronous throw.
@@ -255,6 +276,15 @@ export class ChatGptWebLlmAdapter extends LlmAdapter {
 function requireRouteList(provider: ReturnType<typeof providerConfig>) {
   return availableChatGptWebRoutes(createChatGptWebRouteAuthorityFromProvider(provider));
 }
+
+/**
+ * The provider configuration this deployment actually uses (issue #193).
+ *
+ * Re-exported from the single resolver so every seam — this adapter, the driver, the catalogue, the
+ * Responses ingress and the native DSH loopback — resolves the same facts from one implementation.
+ */
+import { effectiveChatGptWebProviderConfig } from "../../chatgpt-web-provider-config";
+export { effectiveChatGptWebProviderConfig };
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
@@ -706,11 +736,45 @@ function toTokenUsage(usage: CodexUsage | undefined): TokenUsage | undefined {
   };
 }
 
-function failureFromEvent(message: string, code?: string, status?: number) {
+/**
+ * The DSH-visible retryability of one failed attempt, or `undefined` when the provider reported none.
+ *
+ * The provider owns the submit boundary; what reaches this adapter is its verdict on it — whether the
+ * failure is proven to have happened *before* submission was activated. DSH's failure semantics are
+ * not the provider's to decide, so the verdict is expressed in the core's own vocabulary
+ * (`prepared` / `accepted`) and the single retry authority decides: a failure proven pre-submit may be
+ * retried by DSH, and a `send_activated` (ambiguous) or `accepted` (confirmed) submission never is.
+ *
+ * An attempt that reports nothing keeps exactly the failure shape it has today: no retryability is
+ * invented for an event that does not carry the evidence.
+ */
+/** The submission phases the core defines. Anything else is malformed evidence. */
+const WEB_CHAT_SUBMISSION_PHASES: readonly string[] = ["prepared", "send_activated", "accepted"];
+
+export function dshFailureRetryableOf(
+  event: { readonly retryable?: boolean; readonly phase?: WebChatSubmissionPhase },
+): boolean | undefined {
+  // The phase arrives from a provider event, so it is validated here before it can decide anything:
+  // malformed or contradictory evidence is not a licence to retry a turn that may already have
+  // reached the provider, so it fails closed instead of falling through to the ACCEPTED/FAILED rules.
+  const reported: unknown = event.phase;
+  if (reported !== undefined && (typeof reported !== "string" || !WEB_CHAT_SUBMISSION_PHASES.includes(reported))) {
+    return false;
+  }
+  const phase = (reported as WebChatSubmissionPhase | undefined)
+    ?? (event.retryable === undefined ? undefined : event.retryable ? "prepared" : "accepted");
+  if (phase === undefined) return undefined;
+  return dshFailureSemanticsForSubmission({ phase }).retryable;
+}
+
+function failureFromEvent(message: string, code?: string, status?: number, retryable?: boolean) {
   return {
     message,
     code: code ?? "PROVIDER_ERROR",
     ...(status !== undefined ? { status } : {}),
+    // Additive on purpose: the field is only present when the provider reported submission evidence,
+    // so every failure shape that exists today is untouched.
+    ...(retryable !== undefined ? { retryable } : {}),
   };
 }
 function assertLosslessJsonValue(value: unknown, label: string, seen = new WeakSet<object>()): void {
@@ -993,7 +1057,18 @@ export function mapStream(
             const end = closeBlock(); if (end) yield end;
             const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
-            yield { type: "finish", reason: { kind: "error", failure: failureFromEvent(event.message ?? event.reason, "PROVIDER_ERROR") } };
+            yield {
+              type: "finish",
+              reason: {
+                kind: "error",
+                failure: failureFromEvent(
+                  event.message ?? event.reason,
+                  "PROVIDER_ERROR",
+                  undefined,
+                  dshFailureRetryableOf(event),
+                ),
+              },
+            };
             finishYielded = true;
             return;
           }
@@ -1002,7 +1077,18 @@ export function mapStream(
             const tokenUsage = emitUsage ? toTokenUsage(event.usage) : undefined;
             if (tokenUsage && !usageEmitted) { yield { type: "usage", usage: tokenUsage }; usageEmitted = true; }
             const kind = isAbortError(event) && (options.signal?.aborted || backendAbort.signal.aborted) ? "aborted" : "error";
-            yield { type: "finish", reason: { kind, failure: failureFromEvent(event.message, event.code ?? (kind === "aborted" ? "aborted" : "PROVIDER_ERROR"), event.status) } };
+            yield {
+              type: "finish",
+              reason: {
+                kind,
+                failure: failureFromEvent(
+                  event.message,
+                  event.code ?? (kind === "aborted" ? "aborted" : "PROVIDER_ERROR"),
+                  event.status,
+                  dshFailureRetryableOf(event),
+                ),
+              },
+            };
             finishYielded = true;
             return;
           }

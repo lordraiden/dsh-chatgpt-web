@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
-import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint, resolveChatGptWebTuning } from "../../config";
+import { defaultBrokerEndpoint, expandUserPath, loadConfig, providerConfig, resolveBrokerEndpoint, resolveChatGptWebTuning, type AppConfig } from "../../config";
 import {
   cancelLauncherManualTurn,
   endLauncherManualTurn,
@@ -64,7 +64,8 @@ import {
   settleActiveCompactionSource,
   settleActiveZeroRiskCompactionSource,
 } from "./compaction-handoff";
-import { createMemoryConversationStore, webChatAccountBindingId, type WebChatAccountBinding } from "../../web-chat/core";
+import { webChatAccountBindingId, type WebChatAccountBinding, type WebChatConversationStore } from "../../web-chat/core";
+import { closeWebChatConversationStore, createWebChatConversationStore } from "../../web-chat/host/dsh-integration";
 import { CHATGPT_WEB_PROVIDER_ID } from "./llm-adapter";
 import {
   chatGptWebChatAccountBinding,
@@ -471,14 +472,103 @@ export function resolveChatGptCapabilitySnapshotForTurn(
   });
 }
 
+/**
+ * The effective configuration could not be read, so no continuity backend can be resolved.
+ *
+ * This is deliberately *not* swallowed into an in-memory store: durability that silently degrades to
+ * process memory would let a restart look like continuity loss the deployment never accepted, and a
+ * conversation record would then be rebuilt (or refused) against a configuration the process could
+ * not even read. The failure is typed so the shutdown/call boundary can report it.
+ */
+export class ChatGptWebNativeContinuityConfigError extends Error {
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "ChatGptWebNativeContinuityConfigError";
+  }
+}
+
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 /**
- * Process-lifetime continuity of the native ChatGPT path (issue #192).
+ * The WebChat conversation store the native ChatGPT path uses, created at first use (issue #193).
  *
- * The core's store, kept for the lifetime of the process exactly like the turn-session registry, so a
- * chat's conversation survives across its turns. The host wires the durable backend in #193.
+ * The store is owned by the process — exactly like the turn-session registry — and resolved from the
+ * **effective configuration at the point of use**, never at import time: importing this module must
+ * not touch the filesystem, and an installation that configures
+ * `webChat.conversationStorePath` gets continuity that survives a restart.
+ *
+ * The two outcomes are explicit and never inferred from each other:
+ *
+ * - a **readable** configuration without a configured path keeps continuity in memory: that is the
+ *   host boundary's documented default for that backend, not a degradation, and nothing is
+ *   fabricated on disk;
+ * - a configuration that is **unreadable or invalid** is a typed failure
+ *   ({@link ChatGptWebNativeContinuityConfigError}). Continuity is *not* silently moved to memory:
+ *   the process cannot know which conversations an operator meant to make durable, and a durability
+ *   promise must fail closed rather than pretend the deployment accepted memory-only continuity.
+ *
+ * The file backend owns **one writer per file and process**, so the process keeps exactly one store per
+ * effective location: every adapter instance of this process resolves the same store, and a second
+ * store for the same file is refused by the backend rather than silently racing a second writer.
  */
-const chatGptNativeContinuityStore = createMemoryConversationStore();
+const nativeContinuityStores = new Map<string, WebChatConversationStore>();
+
+/**
+ * Resolve the native continuity store for the effective configuration.
+ *
+ * @param config - the effective application configuration; omitted resolves `loadConfig()`.
+ * @returns the process-owned store for that configuration's durable location, or the memory backend
+ *   when the configuration is readable and configures no durable location.
+ * @throws {ChatGptWebNativeContinuityConfigError} when the configuration cannot be loaded.
+ * @throws {WebChatConversationStoreUnavailableError} when the configured durable location cannot be
+ *   opened (for example because this process already owns that file).
+ */
+export function resolveNativeChatGptContinuityStore(config?: AppConfig): WebChatConversationStore {
+  const effective = config ?? loadNativeContinuityConfig();
+  const path = effective.webChat?.conversationStorePath?.trim();
+  const key = path && path.length > 0 ? resolve(path) : "";
+  const existing = nativeContinuityStores.get(key);
+  if (existing) return existing;
+  const provider = providerConfig(effective);
+  const store = createWebChatConversationStore({
+    ...(effective.webChat !== undefined ? { webChat: effective.webChat } : {}),
+    ...(provider.chatgptWeb !== undefined ? { chatgptWeb: provider.chatgptWeb } : {}),
+  });
+  nativeContinuityStores.set(key, store);
+  return store;
+}
+
+/** Load the effective configuration, turning an unreadable one into the typed continuity failure. */
+function loadNativeContinuityConfig(): AppConfig {
+  try {
+    return loadConfig();
+  } catch (error) {
+    throw new ChatGptWebNativeContinuityConfigError(
+      "The ChatGPT Web native continuity store cannot be resolved: the application configuration is "
+      + `unreadable or invalid (${safeErrorDescriptor(error)}). Fix the configuration instead of `
+      + "falling back to an in-memory conversation store.",
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * Release the process-owned continuity stores.
+ *
+ * The durable backend owns an open file and a writer slot, so the sidecar/plugin shutdown path
+ * releases them here. Taking the map first makes the release **idempotent**: a concurrent or repeated
+ * shutdown sees an empty map and releases nothing twice.
+ *
+ * A store is never closed while an operation is still in flight: each backend's own `close()` drains
+ * the queue it serialized those operations on (see `conversation-store-file.ts`), so a committed
+ * update is already on disk when its file is released and the next runtime can open it. The release
+ * itself stays best effort — the process is going away — so a failing `close()` is reported by the
+ * backend and never turns into an unhandled rejection.
+ */
+export async function closeNativeChatGptContinuityStores(): Promise<void> {
+  const stores = [...nativeContinuityStores.values()];
+  nativeContinuityStores.clear();
+  for (const store of stores) await closeWebChatConversationStore(store);
+}
 
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
 
@@ -522,9 +612,18 @@ export function createChatGptWebAdapter(
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
     /** Shared lifecycle authority owned by the server process. */
     providerCore?: ChatGptWebProviderCore;
+    /**
+     * The physical web transport for this turn.
+     *
+     * The default is the browser-backed transport built for the provider; this seam exists so a
+     * harness can drive the rest of the native cycle (runtime startup, prompt preparation, submission
+     * hooks, settlement) against a controlled stand-in for the browser's I/O. It replaces only the
+     * transport resource, never the continuity decision, the driver, the core or the durable store.
+     */
+    surfaceTransport?: ReturnType<typeof chatGptWebSurfaceTransportForProvider>;
   } = {},
 ): ChatGptWebProviderAdapter {
-  const transport = chatGptWebSurfaceTransportForProvider(provider);
+  const transport = dependencies.surfaceTransport ?? chatGptWebSurfaceTransportForProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const zeroRiskManualControl = dependencies.zeroRiskManualControl ?? launcherZeroRiskManualControl;
   const structuredBroker = broker instanceof TurnBroker ? broker : undefined;
@@ -1155,6 +1254,10 @@ export function createChatGptWebAdapter(
       shutdownPromise = (async () => {
         await Promise.allSettled([...activeRuns]);
         if (ownsProviderCore) await providerCore.shutdown();
+        // The adapter's own lifecycle releases the process-owned continuity store: the durable backend
+        // owns an open file and one writer slot, so the shutdown path closes it instead of leaving the
+        // resource to process exit (#193).
+        await closeNativeChatGptContinuityStores();
       })();
       return shutdownPromise;
     },
@@ -1512,15 +1615,16 @@ export function createChatGptWebAdapter(
         if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
         // The core owns the continuity decision (issue #192): the provider states its intent and the
         // core applies the shared rules, mapping the outcome back to the provider's vocabulary. The
-        // store lives for the process, so a chat's conversation survives across the turns of a
-        // session; the host wires the durable backend in #193.
+        // store is resolved here, at the point of use, from the effective configuration (#193), so a
+        // chat's conversation survives across the turns of a session — and across a restart when the
+        // deployment configured a durable location.
         const webChatContinuity = createChatGptContinuity({
           provider,
           affinity: { providerId: CHATGPT_WEB_PROVIDER_ID, bindingId: chatGptWebChatBindingIdFor(provider) },
           namespace: executionNamespace,
           binding: chatGptWebChatAccountBindingFor(provider),
           sessions: chatGptTurnSessions,
-          store: chatGptNativeContinuityStore,
+          store: resolveNativeChatGptContinuityStore(),
         });
         const recovery = await webChatContinuity.resolveRecovery({
           parsed,

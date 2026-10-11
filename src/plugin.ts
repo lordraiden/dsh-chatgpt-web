@@ -8,6 +8,8 @@ import { z } from "zod";
 import schemastery from "@deepseek-ai/schemastery";
 import { ChatGptWebLlmAdapter, CHATGPT_WEB_PROVIDER_ID } from "./adapters/chatgpt-web/llm-adapter";
 import { loadConfig } from "./config";
+import { createWebChatShutdown, registerableRouteIds } from "./web-chat/host/dsh-integration";
+import type { WebChatProviderDriver } from "./web-chat/core";
 import type { DshNativeTurnContext } from "./types";
 import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
 
@@ -223,7 +225,22 @@ async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
   }
 }
 
-export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): void {
+/**
+ * WebChat drivers this deployment composes.
+ *
+ * Optional on purpose: a profile without the WebChat host seam keeps exactly today's behavior. When it
+ * is supplied, only the routes that really have a driver may be registered, and every driver is shut
+ * down with the plugin.
+ */
+export interface PluginWebChatDeps {
+  readonly drivers?: () => readonly WebChatProviderDriver[];
+}
+
+export function apply(
+  ctx: CordisContext,
+  config: ChatGPTWebPluginConfig = {},
+  webChat: PluginWebChatDeps = {},
+): void {
   const host = DEFAULT_HOST;
   let port = readPort(config.port);
   let autoStart = readBoolean(config.autoStart, true);
@@ -368,7 +385,13 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
         });
     });
   }
-  const registerAdapter = (): { adapter: ChatGptWebLlmAdapter; dispose: () => void } => {
+  /**
+   * The drivers this deployment actually composed, so shutdown releases exactly the list the
+   * registration decision was taken from — including the injected list when the route was refused.
+   */
+  let shutdownWebChatDrivers: (() => Promise<void>) | undefined;
+
+  const registerAdapter = (): { adapter: ChatGptWebLlmAdapter; dispose: () => void } | undefined => {
     const adapter = new ChatGptWebLlmAdapter({
       resolveNativeDshContext: (options, turnId, threadId) =>
         resolveNativeDshContext(ctx, options, turnId, threadId),
@@ -380,6 +403,36 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
         };
       },
     });
+    // The list is built *here*, after the adapter exists, because the adapter owns the provider
+    // configuration: when no driver is injected, the default driver is the one the adapter composes
+    // for its own route. `ctx.llm.registerAdapter` stays the only public authority; this only decides
+    // which routes may be handed to it, and a route without a driver is refused instead of being
+    // registered pretend-complete.
+    let drivers: readonly WebChatProviderDriver[];
+    try {
+      drivers = webChat.drivers?.() ?? [adapter.webChatDriver()];
+    } catch (error) {
+      // A provider whose own configuration cannot be resolved has no driver yet: the route stays
+      // unregistered, exactly like a route this deployment does not implement, and the plugin still
+      // loads. The configuration failure still reaches the caller as a typed PROVIDER_CONFIG failure
+      // at call time.
+      logger.warn(
+        `[dsh-chatgpt-web] The WebChat driver for "${CHATGPT_WEB_PROVIDER_ID}" could not be composed: the route is not registered ${safeErrorDescriptor(error)}`,
+      );
+      return undefined;
+    }
+    shutdownWebChatDrivers = createWebChatShutdown(
+      drivers,
+      (error, providerId) => logger.error(
+        `[dsh-chatgpt-web] WebChat driver "${providerId}" failed to shut down ${safeErrorDescriptor(error)}`,
+      ),
+    );
+    if (!registerableRouteIds([CHATGPT_WEB_PROVIDER_ID], drivers).includes(CHATGPT_WEB_PROVIDER_ID)) {
+      logger.warn(
+        `[dsh-chatgpt-web] The WebChat driver for "${CHATGPT_WEB_PROVIDER_ID}" is not composed: the route is not registered`,
+      );
+      return undefined;
+    }
     const dispose = ctx.llm.registerAdapter([CHATGPT_WEB_PROVIDER_ID], adapter);
     logger.info(`[dsh-chatgpt-web] Registered native DSH provider "${CHATGPT_WEB_PROVIDER_ID}"`);
     return { adapter, dispose };
@@ -412,25 +465,27 @@ export function apply(ctx: CordisContext, config: ChatGPTWebPluginConfig = {}): 
 
   if (typeof ctx.effect === "function") {
     ctx.effect(() => {
-      const { adapter, dispose } = registerAdapter();
+      const registered = registerAdapter();
       const disposeProjection = registerSidecarProjection();
       void startDaemon();
       return async () => {
-        await adapter.shutdown();
+        await registered?.adapter.shutdown();
+        await shutdownWebChatDrivers?.();
         await stopDaemon();
-        dispose();
+        registered?.dispose();
         disposeProjection?.();
       };
     });
   } else {
-    const { adapter, dispose } = registerAdapter();
+    const registered = registerAdapter();
     const disposeProjection = registerSidecarProjection();
     void startDaemon();
     process.once("beforeExit", () => {
       void (async () => {
-        await adapter.shutdown();
+        await registered?.adapter.shutdown();
+        await shutdownWebChatDrivers?.();
         await stopDaemon();
-        dispose();
+        registered?.dispose();
         disposeProjection?.();
       })();
     });

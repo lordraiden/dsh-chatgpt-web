@@ -13,7 +13,8 @@
  * - a corrupt file, a document with an unknown `version`, an invalid record or one carrying
  *   authentication material is an explicit failure — never an empty store, because an empty store
  *   would silently turn a lost conversation into a new one;
- * - updates are serialized per store instance and per affinity.
+ * - updates are serialized per store instance and per affinity, and `close()` waits for that queue:
+ *   releasing the writer slot never races an accepted update that has not reached the file yet.
  *
  * The provider handle is stored and returned verbatim: this module never parses it.
  */
@@ -203,6 +204,10 @@ export function createFileConversationStore(
     async close() {
       if (closed) return;
       closed = true;
+      // Drain before releasing: every update/forget this store accepted is serialized on `queue`, and
+      // releasing the writer slot while one is still running would hand the file to a second writer
+      // (or let the process exit) with a committed update not yet on disk.
+      await queue.catch(() => undefined);
       ownedStoreFiles.delete(file);
     },
     forget(identity) {

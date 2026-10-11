@@ -2,6 +2,14 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import type { AppConfig } from "./config";
 import { getConfigDir, getConfigPath, loadConfig } from "./config";
 import { join } from "node:path";
+import { createChatGptWebDriver } from "./adapters/chatgpt-web/chatgpt-driver";
+import { effectiveChatGptWebProviderConfig } from "./adapters/chatgpt-web/llm-adapter";
+import { safeErrorDescriptor } from "./lib/safe-diagnostics";
+import {
+  inspectWebChatProvider,
+  webChatDoctorCheck,
+} from "./web-chat/host/dsh-integration";
+import type { WebChatProviderDriver } from "./web-chat/core";
 import { inspectCodexIntegration } from "./codex-integration";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
 import { getServiceStatus } from "./service";
@@ -59,6 +67,44 @@ function launcherOwnershipError(config: AppConfig, health: Record<string, unknow
     return `Responses proxy pid ${String(health.pid)} does not match launcher-owned pid ${String(state.daemonPid)}`;
   }
   return undefined;
+}
+
+/**
+ * The WebChat providers this deployment composes for diagnostics.
+ *
+ * The doctor resolves the same effective provider configuration the runtime uses, so what it reports
+ * is what a turn would actually see. A provider whose driver cannot be composed at all is reported as
+ * an error by {@link webChatProviderChecks} instead of being omitted from the report.
+ */
+export function webChatDoctorDrivers(config: AppConfig): readonly WebChatProviderDriver[] {
+  return [createChatGptWebDriver({ provider: effectiveChatGptWebProviderConfig(config) })];
+}
+
+/**
+ * One doctor check per WebChat provider: authentication, capabilities and health.
+ *
+ * The facts come from the driver through the host boundary, never from a credential: the account is
+ * described by a shortened fingerprint, a driver that throws is reported unhealthy rather than
+ * hidden, and a provider that is reachable but unauthenticated is a warning rather than an error.
+ */
+export async function webChatProviderChecks(
+  drivers: readonly WebChatProviderDriver[],
+): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [];
+  for (const driver of drivers) {
+    const check = webChatDoctorCheck(await inspectWebChatProvider(driver));
+    checks.push({
+      id: `webchat-${check.providerId}`,
+      status: check.status,
+      message: check.status === "ok"
+        ? `WebChat provider "${check.providerId}" is authenticated and healthy`
+        : check.status === "warning"
+          ? `WebChat provider "${check.providerId}" is reachable but not authenticated`
+          : `WebChat provider "${check.providerId}" is unhealthy`,
+      detail: check.detail,
+    });
+  }
+  return checks;
 }
 
 async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
@@ -146,6 +192,19 @@ export async function runDoctor(): Promise<DoctorReport> {
     } else {
       checks.push({ id: "login", status: "ok", message: "ChatGPT login state has authenticated browser evidence" });
     }
+  }
+
+  // Per-provider WebChat status: authentication, capabilities and health, straight from the driver.
+  // A provider whose driver cannot be composed is reported here rather than omitted.
+  try {
+    checks.push(...await webChatProviderChecks(webChatDoctorDrivers(config)));
+  } catch (error) {
+    checks.push({
+      id: "webchat-chatgpt-web",
+      status: "error",
+      message: "WebChat provider diagnostics could not be assembled",
+      detail: safeErrorDescriptor(error),
+    });
   }
 
   const codex = inspectCodexIntegration();
