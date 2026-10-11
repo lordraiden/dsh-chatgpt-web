@@ -42,6 +42,14 @@ export interface ChatGptWebDriverOptions {
   readonly provider: CodexProviderConfig;
   /** Turn-session registry that owns the physical generations and the installed fingerprints. */
   readonly sessions?: ChatGptTurnSessions;
+  /**
+   * Deployment namespace the conversation key is derived with.
+   *
+   * The caller that also derives the core's affinity passes the same value, so the driver and the core
+   * identity can never disagree about which conversation a turn belongs to. It defaults to the
+   * provider's own execution namespace.
+   */
+  readonly namespace?: string;
 }
 
 /** The opaque handle this provider records for one physical conversation. */
@@ -60,6 +68,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
   const { provider } = options;
   const sessions = options.sessions ?? chatGptTurnSessions;
   const authority = createChatGptWebRouteAuthorityFromProvider(provider);
+  const namespace = options.namespace ?? chatGptWebExecutionNamespace(provider);
 
   const descriptorOf = (model: string): WebChatModelDescriptor | undefined => {
     const route = availableChatGptWebRoutes(authority).find(candidate => candidate.slug === model);
@@ -83,7 +92,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
       bindingId: selection.affinity.bindingId,
       dshSessionId,
       threadId: selection.affinity.threadId,
-      namespace: chatGptWebExecutionNamespace(provider),
+      namespace,
     });
   };
 
