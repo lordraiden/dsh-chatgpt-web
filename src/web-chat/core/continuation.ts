@@ -218,8 +218,16 @@ export async function resolveWebChatContinuation(
     ...(stored ? { conversation: conversationOf(stored) } : {}),
   });
 
+  // A route the provider cannot serve is refused for every intent: no continuations, replays or new
+  // conversations can be built on it.
+  if (assessment.status === "unsupported") {
+    return failure(identity, "UNSUPPORTED_OPTION", assessment.reason ?? "The provider cannot serve this turn in this conversation", stored);
+  }
+
   // An explicit new conversation or replay is honored only through the driver, and the record is
-  // committed only after the driver established the new conversation (§7.3).
+  // committed only after the driver established the new conversation (§7.3). An explicit intent is
+  // exactly how a lost or unreachable conversation is left behind, so a refusing verdict does not
+  // block it.
   if (request.intent.kind === "new_conversation") {
     return startNewConversation(deps, identity, request, stored, request.intent.reason);
   }
@@ -235,23 +243,9 @@ export async function resolveWebChatContinuation(
     return replayConversation(deps, identity, request, stored, request.intent.reason);
   }
 
-  // intent: continue
-  if (assessment.conversation) {
-    // The driver reconciled continuity itself (e.g. it found the remote conversation after a store
-    // loss). Adopting it is explicit: the driver established it, the core records it.
-    const adopted = await deps.store.update(identity, () => draftFromConversation(assessment.conversation!));
-    return {
-      outcome: "exact_resume",
-      identity,
-      record: adopted,
-      conversation: conversationOf(adopted),
-      reason: `the driver reconciled the provider conversation${assessment.reason ? ` (${assessment.reason})` : ""}`,
-    };
-  }
-
-  if (assessment.status === "unsupported") {
-    return failure(identity, "UNSUPPORTED_OPTION", assessment.reason ?? "The provider cannot serve this turn in this conversation", stored);
-  }
+  // intent: continue. Every verdict that refuses continuity is decided before anything else, so
+  // neither a reconciled conversation nor a missing record can turn an explicit refusal into a
+  // continuation or into a new conversation by inference (architecture §7.1, §10.1).
   if (assessment.status === "lost") {
     return failure(identity, "CONVERSATION_LOST", assessment.reason ?? "The provider conversation is lost", stored);
   }
@@ -263,6 +257,25 @@ export async function resolveWebChatContinuation(
       stored,
     );
   }
+  if (assessment.status === "unreachable") {
+    return failure(identity, "TRANSPORT_UNAVAILABLE", assessment.reason ?? "The provider conversation state is unknown", stored);
+  }
+
+  if (assessment.conversation) {
+    // The driver reconciled continuity itself (e.g. it found the remote conversation after a store
+    // loss). Only a verdict that authorizes a continuation is allowed to hand one back, and the
+    // commit is conditional on the state the driver assessed: if the affinity moved while it was
+    // assessing (its revision changed), the adoption is refused instead of overwriting the change.
+    const adopted = await commitAdoption(deps, identity, stored, assessment.conversation);
+    return {
+      outcome: "exact_resume",
+      identity,
+      record: adopted,
+      conversation: conversationOf(adopted),
+      reason: `the driver reconciled the provider conversation${assessment.reason ? ` (${assessment.reason})` : ""}`,
+    };
+  }
+
   if (!stored) {
     if (assessment.status === "resumable") {
       return failure(
@@ -272,10 +285,6 @@ export async function resolveWebChatContinuation(
       );
     }
     return startNewConversation(deps, identity, request, undefined, "no prior conversation for this affinity");
-  }
-
-  if (assessment.status === "unreachable") {
-    return failure(identity, "TRANSPORT_UNAVAILABLE", assessment.reason ?? "The provider conversation state is unknown", stored);
   }
   if (stored.status === "lost" || stored.status === "unreachable" || stored.status === "unsupported") {
     return failure(
@@ -297,12 +306,16 @@ export async function resolveWebChatContinuation(
     return failure(identity, "CONVERSATION_STATE_MISMATCH", "A resumable conversation has no provider handle", stored);
   }
 
-  // Exact resume: the same generation and the same opaque handle, re-confirmed.
-  const resumed = await deps.store.update(identity, (current) => ({
-    ...(current as WebChatConversationRecord),
-    status: "resumable",
-    checkpoint: "confirmed",
-  }));
+  // Exact resume: the same generation and the same opaque handle, re-confirmed. The commit is
+  // conditional on the revision the driver assessed, so a concurrent change is never overwritten.
+  const resumed = await deps.store.update(identity, (current) => {
+    assertUnchangedSinceAssessment(current, stored);
+    return {
+      ...(current as WebChatConversationRecord),
+      status: "resumable",
+      checkpoint: "confirmed",
+    };
+  });
   return {
     outcome: "exact_resume",
     identity,
@@ -310,6 +323,39 @@ export async function resolveWebChatContinuation(
     conversation: conversationOf(resumed),
     reason: assessment.reason ?? "the provider confirmed the conversation can continue",
   };
+}
+
+/**
+ * Refuse to overwrite continuity that changed while the driver was assessing it.
+ *
+ * The store cannot move a generation backwards, but it could still replace a handle or a checkpoint
+ * inside the same generation: the decision was made from the state that was read, so it is only
+ * committed if that state is still the current one.
+ */
+function assertUnchangedSinceAssessment(
+  current: WebChatConversationRecord | undefined,
+  assessed: WebChatConversationRecord | undefined,
+): void {
+  if (!assessed) return;
+  if (!current || current.revision !== assessed.revision) {
+    throw webChatError(
+      "CONVERSATION_STATE_MISMATCH",
+      "The conversation changed while the provider was assessing it; the decision is not applied",
+    );
+  }
+}
+
+/** Adopt a conversation a driver reconciled, conditional on the assessed revision. */
+async function commitAdoption(
+  deps: { readonly store: WebChatConversationStore },
+  identity: WebChatConversationIdentity,
+  assessed: WebChatConversationRecord | undefined,
+  conversation: WebChatConversation,
+): Promise<WebChatConversationRecord> {
+  return deps.store.update(identity, (current) => {
+    assertUnchangedSinceAssessment(current, assessed);
+    return draftFromConversation(conversation);
+  });
 }
 
 /** The core's view of a stored record. */

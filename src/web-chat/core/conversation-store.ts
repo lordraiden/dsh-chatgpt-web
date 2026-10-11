@@ -245,6 +245,24 @@ export function validateWebChatConversationRecord(value: unknown): WebChatConver
   }
   assertNoWebChatSecrets(candidate);
   assertKnownRecordKeys(candidate as WebChatConversationDraft);
+  // The nested fields are validated too: a malformed inner value must not reach a consumer as if it
+  // were a valid record.
+  if (candidate.initialization !== undefined) {
+    const initialization = candidate.initialization as Partial<WebChatConversationInitialization> | null;
+    if (!initialization || typeof initialization !== "object"
+      || !Number.isSafeInteger(initialization.generation) || (initialization.generation as number) < 1
+      || typeof initialization.fingerprint !== "string" || initialization.fingerprint.length === 0) {
+      throw webChatError("CONVERSATION_STATE_MISMATCH", "Stored initialization state is malformed");
+    }
+  }
+  if (candidate.lastConfirmedTurn !== undefined) {
+    const turn = candidate.lastConfirmedTurn as { turnId?: unknown; at?: unknown } | null;
+    if (!turn || typeof turn !== "object"
+      || typeof turn.turnId !== "string" || turn.turnId.length === 0
+      || typeof turn.at !== "number" || !Number.isFinite(turn.at)) {
+      throw webChatError("CONVERSATION_STATE_MISMATCH", "Stored confirmed-turn state is malformed");
+    }
+  }
   const revalidated = commitWebChatConversationDraft(identity, undefined, {
     identity,
     generation: candidate.generation as number,

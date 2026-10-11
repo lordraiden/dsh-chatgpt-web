@@ -719,3 +719,80 @@ describe("issue #190 — migration evidence from the current provider path", () 
     expect(registry.isLost("conversation-key")).toBe(false);
   });
 });
+
+describe("issue #190 — continuity decisions under review (review of #217)", () => {
+  const request = (overrides: Partial<Parameters<typeof resolveWebChatContinuation>[1]> = {}) => ({
+    binding: BINDING,
+    dshSession: { sessionId: "dsh-session-1" },
+    threadId: "dsh-thread-1",
+    namespace: "dsh-chatgpt-web",
+    model: "model-1",
+    intent: { kind: "continue" } as const,
+    ...overrides,
+  });
+
+  test("an unknown remote state with no record is a failure, never a new conversation", async () => {
+    const store = createMemoryConversationStore();
+    const { driver } = scriptedDriver({ assessment: { status: "unreachable", reason: "the surface state is unknown" } });
+    const plan = await resolveWebChatContinuation({ store, driver }, request());
+    expect(plan.outcome).toBe("failed");
+    expect(plan.error?.category).toBe("TRANSPORT_UNAVAILABLE");
+    // Nothing was created for a state the provider could not establish.
+    expect(await store.list()).toHaveLength(0);
+  });
+
+  test("a reconciled conversation is adopted only when the verdict authorizes it", async () => {
+    const store = createMemoryConversationStore();
+    const seeded = await seedConversation(store);
+    const handedBack: WebChatConversation = {
+      key: seeded.identity.key,
+      providerId: seeded.identity.providerId,
+      bindingId: seeded.identity.bindingId,
+      generation: 1,
+      handle: webChatConversationHandle("other-handle")!,
+      status: "resumable",
+    };
+    // A lost conversation that comes with a handle is still lost: the verdict decides.
+    const { driver } = scriptedDriver({ assessment: { status: "lost", reason: "gone", conversation: handedBack } });
+    const plan = await resolveWebChatContinuation({ store, driver }, request());
+    expect(plan.outcome).toBe("failed");
+    expect(plan.error?.category).toBe("CONVERSATION_LOST");
+    // The stored handle was not replaced by the one the verdict carried.
+    expect((await store.read(seeded.identity))?.handle as string | undefined).toBe("handle-1");
+  });
+
+  test("a decision is refused when the conversation changed while the provider assessed it", async () => {
+    const store = createMemoryConversationStore();
+    const seeded = await seedConversation(store);
+    const { driver } = scriptedDriver({ assessment: { status: "resumable" } });
+    // Another writer advances the record between the read and the commit.
+    const concurrent: WebChatProviderDriver["assessConversation"] = async () => {
+      await store.update(seeded.identity, current => ({
+        ...(current as WebChatConversationDraft),
+        checkpoint: "unconfirmed",
+      }));
+      return { status: "resumable" as const };
+    };
+    const racing = { ...driver, assessConversation: concurrent };
+    await expect(resolveWebChatContinuation({ store, driver: racing as WebChatProviderDriver }, request()))
+      .rejects.toThrow(/changed while the provider was assessing it/);
+    // The concurrent change is intact.
+    expect((await store.read(seeded.identity))?.checkpoint).toBe("unconfirmed");
+  });
+
+  test("malformed nested continuity state is refused", async () => {
+    const valid = await seedConversation(createMemoryConversationStore());
+    expect(() => validateWebChatConversationRecord({
+      ...JSON.parse(JSON.stringify(valid)),
+      initialization: { generation: "1", fingerprint: 7 },
+    })).toThrow(/initialization state is malformed/);
+    expect(() => validateWebChatConversationRecord({
+      ...JSON.parse(JSON.stringify(valid)),
+      initialization: { generation: 1, fingerprint: "" },
+    })).toThrow(/initialization state is malformed/);
+    expect(() => validateWebChatConversationRecord({
+      ...JSON.parse(JSON.stringify(valid)),
+      lastConfirmedTurn: { turnId: 7, at: "yesterday" },
+    })).toThrow(/confirmed-turn state is malformed/);
+  });
+});
