@@ -103,6 +103,13 @@ export interface WebChatConversationStore {
    * a caller decides to start a new one.
    */
   forget(identity: WebChatConversationIdentity): Promise<boolean>;
+  /**
+   * Release whatever this store owns.
+   *
+   * A backend that owns a durable file refuses a second instance for it, so it must be able to give
+   * it back; nothing else needs to call this.
+   */
+  close?(): Promise<void>;
 }
 
 /** Options shared by the store implementations. */
@@ -359,6 +366,10 @@ export function createMemoryConversationStore(
     },
     async forget(identity) {
       return records.delete(id(identity));
+    },
+    async close() {
+      // Nothing to release: the memory store owns no resource.
+      records.clear();
     },
   };
 }

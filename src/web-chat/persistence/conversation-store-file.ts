@@ -18,7 +18,7 @@
  * The provider handle is stored and returned verbatim: this module never parses it.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../../config";
 import {
   commitWebChatConversationDraft,
@@ -52,6 +52,22 @@ interface ConversationStoreDocument {
   records: WebChatConversationRecord[];
 }
 
+/**
+ * Durable files this process already owns.
+ *
+ * Two stores over one file would each keep their own queue and write the whole document, so a second
+ * instance is refused instead of silently overwriting the first one's updates.
+ */
+const ownedStoreFiles = new Set<string>();
+
+/** The durable store could not be written because another writer changed it first. */
+export class WebChatConversationStoreConflictError extends WebChatConversationStoreUnavailableError {
+  constructor(file: string, options: { cause?: unknown } = {}) {
+    super(file, "another writer changed it while this update was being prepared", options);
+    this.name = "WebChatConversationStoreConflictError";
+  }
+}
+
 /** Where a deployment keeps its durable conversation continuity state. */
 export function defaultWebChatConversationStorePath(): string {
   return join(getConfigDir(), "web-chat", "conversations.json");
@@ -64,7 +80,19 @@ function identityKey(identity: WebChatConversationIdentity): string {
 
 /** Read and validate the whole document. */
 function readDocument(file: string): ConversationStoreDocument {
-  if (!existsSync(file)) return { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records: [] };
+  return readDocumentWithRaw(file).document;
+}
+
+/**
+ * Read and validate the document, keeping the exact bytes it was read from.
+ *
+ * The bytes are what makes a lost update detectable: the writer refuses to replace a document that
+ * another writer changed in the meantime, instead of overwriting that change.
+ */
+function readDocumentWithRaw(file: string): { document: ConversationStoreDocument; raw: string | undefined } {
+  if (!existsSync(file)) {
+    return { document: { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records: [] }, raw: undefined };
+  }
   let raw: string;
   try {
     raw = readFileSync(file, "utf8");
@@ -93,7 +121,20 @@ function readDocument(file: string): ConversationStoreDocument {
   } catch (error) {
     throw new WebChatConversationStoreUnavailableError(file, (error as Error).message, { cause: error });
   }
-  return { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records };
+  return { document: { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records }, raw };
+}
+
+/**
+ * Refuse to write over a document another writer changed since it was read.
+ *
+ * This is detection, not mutual exclusion: the window between this check and the atomic replace is
+ * still open, which is why the store also refuses a second instance for the same file. Cross-process
+ * mutual exclusion is the host's decision (the deployment chooses the path and whether more than one
+ * runtime may open it).
+ */
+function assertUnchangedSinceRead(file: string, raw: string | undefined): void {
+  const current = existsSync(file) ? readFileSync(file, "utf8") : undefined;
+  if (current !== raw) throw new WebChatConversationStoreConflictError(file);
 }
 
 /** Write the document atomically. */
@@ -115,10 +156,17 @@ function writeDocument(file: string, document: ConversationStoreDocument): void 
 export function createFileConversationStore(
   options: WebChatConversationStoreOptions & { readonly file: string },
 ): WebChatConversationStore {
-  const file = options.file;
-  if (typeof file !== "string" || file.length === 0) {
+  if (typeof options.file !== "string" || options.file.length === 0) {
     throw new TypeError("The durable WebChat conversation store requires a file path");
   }
+  // One writer per file in this process: a second store would keep its own queue and write the whole
+  // document, so its updates could silently overwrite the first one's.
+  const file = resolve(options.file);
+  if (ownedStoreFiles.has(file)) {
+    throw new WebChatConversationStoreUnavailableError(file, "another store instance in this process already owns it");
+  }
+  ownedStoreFiles.add(file);
+  let closed = false;
   const now = options.now ?? (() => Date.now());
   // One writer per store instance: every mutation is a whole-document read-modify-write.
   let queue: Promise<unknown> = Promise.resolve();
@@ -139,7 +187,7 @@ export function createFileConversationStore(
     },
     update(identity, mutate) {
       return serialized(() => {
-        const document = readDocument(file);
+        const { document, raw } = readDocumentWithRaw(file);
         const key = identityKey(identity);
         const previous = document.records.find((record) => identityKey(record.identity) === key);
         const draft: WebChatConversationDraft = mutate(previous);
@@ -147,16 +195,23 @@ export function createFileConversationStore(
         const records = previous
           ? document.records.map((record) => (identityKey(record.identity) === key ? committed : record))
           : [...document.records, committed];
+        assertUnchangedSinceRead(file, raw);
         writeDocument(file, { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records });
         return committed;
       });
     },
+    async close() {
+      if (closed) return;
+      closed = true;
+      ownedStoreFiles.delete(file);
+    },
     forget(identity) {
       return serialized(() => {
-        const document = readDocument(file);
+        const { document, raw } = readDocumentWithRaw(file);
         const key = identityKey(identity);
         const records = document.records.filter((record) => identityKey(record.identity) !== key);
         if (records.length === document.records.length) return false;
+        assertUnchangedSinceRead(file, raw);
         writeDocument(file, { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records });
         return true;
       });

@@ -381,6 +381,8 @@ describe("issue #190 — durable file backend", () => {
       const first = createFileConversationStore({ file, now: () => 111 });
       const written = await seedConversation(first, { initialization: { generation: 1, fingerprint: "fp-system" } });
       expect(written.revision).toBe(1);
+      // A restart releases the previous runtime's ownership before the next one opens the file.
+      await first.close?.();
 
       // A second store instance is a restarted runtime: no shared memory, same durable state.
       const second = createFileConversationStore({ file, now: () => 222 });
@@ -396,6 +398,48 @@ describe("issue #190 — durable file backend", () => {
       expect(document.version).toBe(WEB_CHAT_CONVERSATION_STORE_VERSION);
       expect(document.records).toHaveLength(1);
       expect(JSON.stringify(document)).not.toContain("messages");
+    });
+  });
+
+  test("one file has one writer per process, and the owner can give it back", async () => {
+    await withTempDir(async (file) => {
+      const first = createFileConversationStore({ file });
+      // A second store over the same file would keep its own queue and could overwrite the first
+      // one's updates: it is refused instead of being allowed to lose them.
+      expect(() => createFileConversationStore({ file })).toThrow(/already owns it/);
+      await first.close?.();
+      const second = createFileConversationStore({ file });
+      await second.close?.();
+      // Closing is idempotent and reopens cleanly.
+      const third = createFileConversationStore({ file });
+      await third.close?.();
+    });
+  });
+
+  test("a change made by another writer is detected instead of overwritten", async () => {
+    await withTempDir(async (file) => {
+      const store = createFileConversationStore({ file });
+      const identity = identityOf();
+      await seedConversation(store);
+
+      // Another process (or runtime) commits its own change in the window between this store's read
+      // and its write: exactly the lost update the guard exists to catch.
+      await expect(store.update(identity, current => {
+        const external = JSON.parse(readFileSync(file, "utf8")) as { version: number; records: Array<Record<string, unknown>> };
+        writeFileSync(file, JSON.stringify({
+          version: external.version,
+          records: [{ ...external.records[0], revision: 99 }],
+        }));
+        return {
+          ...(current as WebChatConversationDraft),
+          checkpoint: "unconfirmed",
+        };
+      })).rejects.toThrow(/another writer changed it while this update was being prepared/);
+
+      // The external change is intact: nothing was overwritten.
+      const after = JSON.parse(readFileSync(file, "utf8")) as { records: Array<{ revision: number }> };
+      expect(after.records[0]?.revision).toBe(99);
+      await store.close?.();
     });
   });
 
