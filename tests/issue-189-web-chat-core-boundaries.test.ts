@@ -60,7 +60,9 @@ describe("issue #189 — the core carries no provider, browser or routing knowle
     { pattern: /\bCodexParsedRequest\b|\bGenerateOptions\b|\bStreamChunk\b|\bAppConfig\b/, why: "host wire shapes are not the common contract" },
     { pattern: /chatgpt|qwen|deepseek/i, why: "a provider name in the core means provider knowledge leaked" },
     { pattern: /\/v1\/|https?:\/\//, why: "endpoint schemas belong to the driver" },
-    { pattern: /\.cookie\b|document\.cookie|navigator\.credentials|controlToken\s*[:=]|storageState\s*[:=]|_authToken/, why: "credentials and session material never reach the core" },
+    // The rule catches credential *access or storage*, not the names themselves: the core must be
+    // able to refuse to persist them (conversation-store.ts owns that refusal).
+    { pattern: /\.cookie\s*[(=]|document\.cookie|navigator\.credentials|controlToken\s*[:=]|storageState\s*[:=]|_authToken\s*[:=]/, why: "credentials and session material never reach the core" },
   ];
 
   test("no forbidden concept appears in any core module", () => {
@@ -97,18 +99,32 @@ describe("issue #189 — the core is not a store, a registry or a transcript", (
       .sort();
 
     const EXPECTED_CORE_SURFACE = [
+      "WEB_CHAT_ERROR_CATEGORIES",
+      "WEB_CHAT_EXCHANGE_EVENT_TYPES",
       "WebChatAccountBinding",
+      "WebChatAccountBindingId",
       "WebChatAccountInspection",
+      "WebChatAffinityKeyInput",
+      "WebChatContinuationIntent",
+      "WebChatContinuationOutcome",
+      "WebChatContinuationPlan",
+      "WebChatContinuationRequest",
       "WebChatConversation",
       "WebChatConversationAffinity",
       "WebChatConversationAssessment",
       "WebChatConversationAssessmentInput",
       "WebChatConversationCreateInput",
+      "WebChatConversationDraft",
       "WebChatConversationHandle",
+      "WebChatConversationIdentity",
+      "WebChatConversationInitialization",
+      "WebChatConversationRecord",
       "WebChatConversationReplayInput",
       "WebChatConversationResumeInput",
       "WebChatConversationSelection",
       "WebChatConversationStatus",
+      "WebChatConversationStore",
+      "WebChatConversationStoreOptions",
       "WebChatDriverResolver",
       "WebChatDshSessionIdentity",
       "WebChatError",
@@ -133,26 +149,44 @@ describe("issue #189 — the core is not a store, a registry or a transcript", (
       "WebChatTurnCandidate",
       "WebChatTurnIdentity",
       "WebChatTurnInput",
-      "WEB_CHAT_ERROR_CATEGORIES",
-      "WEB_CHAT_EXCHANGE_EVENT_TYPES",
+      "assertCurrentWebChatGeneration",
+      "assertNoWebChatSecrets",
       "assertTextOnlyWebChatTurn",
       "assertWebChatReplayStateOwner",
+      "beginWebChatConversationAttempt",
+      "commitWebChatConversationDraft",
+      "confirmWebChatConversation",
+      "createMemoryConversationStore",
       "createWebChatDriverResolver",
       "isWebChatError",
       "isWebChatExchangeEventType",
+      "isWebChatInitializationCurrent",
       "isWebChatModelDescriptor",
       "isWebChatProviderReplayState",
+      "legacyWebChatThreadKey",
       "rejectUnsupportedWebChatFeatures",
+      "resolveWebChatContinuation",
+      "validateWebChatConversationRecord",
+      "webChatAccountBindingId",
+      "webChatAffinityKey",
+      "webChatContinuationIdentity",
       "webChatConversationHandle",
-      "webChatConversationKey",
       "webChatError",
       "webChatReplayStateOwnedBy",
     ];
     // Code-unit sort, exactly what the parser's `.sort()` produces.
     expect(exported).toEqual([...EXPECTED_CORE_SURFACE].sort());
 
-    // The pin is what keeps the core small: no store, transcript, catalog or registry owner.
-    for (const name of exported) {
+    // The pin is what keeps the core small: no durable implementation, no transcript, no catalog
+    // and no provider registry. The conversation-store seam is the one allowed state surface —
+    // architecture §18 puts `core/conversation-store.ts` in the core — and it is a port plus its
+    // in-memory reference implementation: it holds no module state and performs no I/O.
+    const CONVERSATION_STORE_SEAM = new Set([
+      "WebChatConversationStore",
+      "WebChatConversationStoreOptions",
+      "createMemoryConversationStore",
+    ]);
+    for (const name of exported.filter((entry) => !CONVERSATION_STORE_SEAM.has(entry))) {
       expect(
         /store|transcript|persist|catalog|registry|register|append/i.test(name),
         `the core exports "${name}", which owns state or provider policy`,
