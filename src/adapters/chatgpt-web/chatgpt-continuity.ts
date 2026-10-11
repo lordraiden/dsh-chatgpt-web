@@ -24,6 +24,7 @@ import {
   type WebChatAccountBinding,
   type WebChatConversationIdentity,
   type WebChatConversationStore,
+  type WebChatConversationRecord,
   type WebChatContinuationIntent,
   type WebChatReplayMessage,
 } from "../../web-chat/core";
@@ -100,6 +101,44 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
   });
   const store = deps.store ?? createMemoryConversationStore();
 
+  /**
+   * Whether the provider can prove it can continue the recorded conversation.
+   *
+   * The verdict is the driver's, and only two explicit intents are derived from it. A verdict this
+   * caller cannot take (a driver that throws) is not proof of continuity: the core then decides on the
+   * intent the caller would have chosen anyway.
+   */
+  const providerCanResume = async (
+    stored: WebChatConversationRecord,
+    scope: {
+      readonly binding: WebChatAccountBinding;
+      readonly dshSession: { readonly sessionId?: string };
+      readonly threadId: string;
+    },
+    model: string,
+  ): Promise<boolean> => {
+    if (!stored.handle) return false;
+    try {
+      const assessment = await driver.assessConversation({
+        dshSession: scope.dshSession,
+        binding: scope.binding,
+        affinity: { providerId: deps.affinity.providerId, bindingId: deps.affinity.bindingId, threadId: scope.threadId },
+        model,
+        conversation: {
+          key: stored.identity.key,
+          providerId: stored.identity.providerId,
+          bindingId: stored.identity.bindingId,
+          generation: stored.generation,
+          handle: stored.handle,
+          status: stored.status,
+        },
+      });
+      return assessment.status === "resumable";
+    } catch {
+      return false;
+    }
+  };
+
   return {
     async resolveRecovery(facts) {
       const identity = extractChatGptTurnIdentity(facts.parsed);
@@ -141,7 +180,26 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
             reason: "ChatGPT continuity was lost and no canonical history remains",
           };
       } else if (stored) {
-        intent = { kind: "continue" };
+        // A durable record proves the conversation existed, but not that *this process* can resume it:
+        // the provider's installation state is process-local, so the first turn after a restart has to
+        // be rebuilt. The verdict is the trigger, and it only chooses between two **explicit** intents:
+        // a continuation when the provider can prove the installation, and an explicit replay from
+        // canonical history when it cannot. It never turns into a silent replacement conversation.
+        if (await providerCanResume(stored, scope, facts.parsed.modelId)) {
+          intent = { kind: "continue" };
+        } else {
+          const history = chatGptReplayHistory(facts.parsed);
+          intent = history.length > 0
+            ? {
+              kind: "replay",
+              expectedGeneration: currentGeneration,
+              reason: "the provider cannot prove the installation state of this conversation; it is rebuilt explicitly from canonical host history",
+              history,
+            }
+            // Nothing canonical to rebuild from: the explicit refusal is kept. A new conversation here
+            // would be the silent fork the contract forbids, so the core refuses instead.
+            : { kind: "continue" };
+        }
       } else {
         intent = {
           kind: "new_conversation",

@@ -48,12 +48,14 @@ const BINDING = chatGptWebChatAccountBinding({
 });
 const AFFINITY = { providerId: CHATGPT_WEB_PROVIDER_ID, bindingId: webChatAccountBindingId(BINDING) };
 
-function parsed(): CodexParsedRequest {
+function parsed(options: { readonly withHistory?: boolean } = {}): CodexParsedRequest {
   return {
     modelId: "chatgpt-web/luna",
     context: {
-      systemPrompt: [],
-      messages: [{ role: "user", content: [{ type: "text", text: "arregla el bug" }] }],
+      systemPrompt: ["eres un asistente"],
+      messages: options.withHistory === false
+        ? []
+        : [{ role: "user", content: [{ type: "text", text: "arregla el bug" }] }],
     },
     stream: false,
     options: {},
@@ -153,7 +155,7 @@ describe("issue #193 — the native continuity store is durable and configuratio
     expect(await resumed.instance.resolveRecovery({ ...firstTurn, legacyRecovery: "EXACT_RESUME" })).toBe("EXACT_RESUME");
   });
 
-  test("a restart never invents continuity: the core refuses when the record cannot be resumed", async () => {
+  test("a restart with nothing to rebuild from never invents continuity: the refusal is explicit", async () => {
     const file = join(home, "conversations.json");
     installConfig(file);
 
@@ -164,14 +166,20 @@ describe("issue #193 — the native continuity store is durable and configuratio
     await closeNativeChatGptContinuityStores();
 
     // A fresh process whose provider cannot prove the installation state must not silently replace the
-    // durable conversation with a new one: the refusal is explicit and carries the provider's reason.
+    // durable conversation with a new one. Without canonical history there is nothing to replay from,
+    // so the refusal is explicit and carries the provider's reason. (With history the next turn
+    // replays the same conversation explicitly; that path is covered by
+    // tests/issue-193-chatgpt-continuity-restart-replay.test.ts.)
     const restarted = resolveNativeChatGptContinuityStore();
     const next = nativeContinuity(restarted, new ChatGptTurnSessions());
-    await expect(next.instance.resolveRecovery(firstTurn)).rejects.toThrow(
+    await expect(next.instance.resolveRecovery({ ...firstTurn, parsed: parsed({ withHistory: false }) })).rejects.toThrow(
       /conversation must be established from canonical host history/,
     );
     // Nothing was rewritten: the durable record still describes the same conversation.
-    expect((await restarted.list())[0]?.lastConfirmedTurn?.turnId).toBe("turn-1");
+    const records = await restarted.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]?.generation).toBe(1);
+    expect(records[0]?.lastConfirmedTurn?.turnId).toBe("turn-1");
   });
 
   test("a corrupt file or an unknown version fails explicitly instead of inventing continuity", async () => {
