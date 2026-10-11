@@ -85,6 +85,15 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
 }
 
+/**
+ * The authenticated account fingerprint of this deployment (single owner for the provider, the lease
+ * and the WebChat binding identity).
+ */
+export function chatGptWebAccountFingerprint(provider: CodexProviderConfig): string {
+  return provider.chatgptWeb?.accountIdentityFingerprint
+    ?? accountIdentityFromUnknownSession().fingerprint;
+}
+
 function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string): {
   accountIdentity: string;
   browserProfile: string;
@@ -92,8 +101,7 @@ function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string
   pageIdentity: string;
 } {
   const browser = provider.chatgptWeb;
-  const accountIdentity = browser?.accountIdentityFingerprint
-    ?? accountIdentityFromUnknownSession().fingerprint;
+  const accountIdentity = chatGptWebAccountFingerprint(provider);
   const browserProfile = browser?.chromeExecutablePath
     ?? browser?.browserHost
     ?? "managed-chrome";
