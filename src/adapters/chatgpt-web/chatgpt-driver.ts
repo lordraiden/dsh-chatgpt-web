@@ -81,6 +81,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
       id: route.slug.slice(CHATGPT_WEB_MODEL_PREFIX.length),
       label: route.displayName,
       text: true,
+      reasoningModes: [route.adapterEffort],
     };
   };
 
@@ -154,8 +155,11 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
       });
     },
 
-    async resolveModel(model: string): Promise<WebChatModelDescriptor | undefined> {
-      return descriptorOf(model);
+    async resolveModel(model: string, reasoningMode?: string): Promise<WebChatModelDescriptor | undefined> {
+      const descriptor = descriptorOf(model);
+      if (!descriptor) return undefined;
+      if (reasoningMode !== undefined && !descriptor.reasoningModes?.includes(reasoningMode)) return undefined;
+      return descriptor;
     },
 
     /**
