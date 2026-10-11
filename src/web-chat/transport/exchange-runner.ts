@@ -91,19 +91,26 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
   const context = (): WebChatTextTransportContext => ({
     identity,
     turn,
+    epoch: lifecycle.snapshot().epoch,
     signal: controller.signal,
   });
 
-  const publishSettlement = async (): Promise<WebChatPhysicalSettlement> => {
-    // One publication per exchange: a settlement that is already established is never asked for
-    // again, while a `pending` one may still resolve.
-    if (settlement !== undefined && settlement !== "pending") return settlement;
-    const reported = await transport.settle(context());
-    settlement = reported;
-    lifecycle.markPhysicallySettled(reported);
-    // The exchange records what it saw; the lease owns what the resource may do next.
-    lease?.settle(reported);
-    return reported;
+  let settlementPromise: Promise<WebChatPhysicalSettlement> | undefined;
+  const publishSettlement = (): Promise<WebChatPhysicalSettlement> => {
+    // One publication per exchange, shared by every caller: the turn's end and a cancellation can
+    // race, and the provider must be asked exactly once.
+    if (settlement !== undefined && settlement !== "pending") return Promise.resolve(settlement);
+    settlementPromise ??= (async () => {
+      const reported = await transport.settle(context());
+      settlement = reported;
+      lifecycle.markPhysicallySettled(reported);
+      // The exchange records what it saw; the lease owns what the resource may do next.
+      lease?.settle(reported);
+      // A `pending` settlement may still resolve later, so a later caller may ask again.
+      if (reported === "pending") settlementPromise = undefined;
+      return reported;
+    })();
+    return settlementPromise;
   };
 
   /**
@@ -122,11 +129,14 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     }
   };
 
-  const disarm = (): void => {
-    if (externalSignal && abortListener) externalSignal.removeEventListener("abort", abortListener);
-  };
+  // The listener can fire before `exchange` exists (an already-aborted signal), so it goes through a
+  // reference assigned once the exchange is built: no temporal dead zone, no ReferenceError.
+  let exchangeRef: WebChatExchangeRunner | undefined;
   const abortListener = (): void => {
-    void exchange.abort("the caller aborted the exchange").catch(() => undefined);
+    void exchangeRef?.abort("the caller aborted the exchange").catch(() => undefined);
+  };
+  const disarm = (): void => {
+    if (externalSignal) externalSignal.removeEventListener("abort", abortListener);
   };
 
   // §9.2: the provider exchange is aborted exactly once, whatever asked for the cancellation, and
@@ -140,14 +150,12 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
       .catch(() => undefined);
     return abortPromise;
   };
+  // Cancelling also aborts the signal the transport was given, so a transport that races on the
+  // signal sees the same cancellation as one that uses `abort()`.
   lifecycle.attachCancellation((error) => {
     void issueAbort(error);
+    controller.abort(error);
   });
-  if (externalSignal) {
-    if (externalSignal.aborted) abortListener();
-    else externalSignal.addEventListener("abort", abortListener);
-  }
-
   const exchange: WebChatExchangeRunner = {
     identity,
 
@@ -176,6 +184,15 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     },
 
     async submit() {
+      const state = lifecycle.snapshot().state;
+      if (state !== "TRANSPORT_READY" && state !== "SUBMITTING") {
+        // A retry of the same logical turn re-submits from SUBMITTING; anything else means the
+        // exchange was never prepared, and the provider must not be asked to send.
+        throw webChatError(
+          "CONVERSATION_STATE_MISMATCH",
+          `An exchange can only submit after it is transport-ready, not from ${state}`,
+        );
+      }
       lifecycle.markSubmitting();
       let phase: WebChatSubmissionPhase;
       try {
@@ -196,7 +213,6 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     },
 
     async *stream() {
-      let sawDelta = false;
       try {
         for await (const event of transport.stream(context())) {
           if (!lifecycle.acceptsResult(lifecycle.snapshot().epoch)) {
@@ -204,7 +220,6 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
             continue;
           }
           if (event.type === "text_delta") {
-            sawDelta = true;
             partialOutputObserved = true;
             lifecycle.markStreaming();
           }
@@ -226,8 +241,10 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
           yield event;
         }
         if (!lifecycle.isTerminal()) {
+          // The transport owes a terminal event. A stream that ends without one is an incomplete
+          // exchange: partial output is not evidence that the turn finished, and reporting it as
+          // completed would present a truncated answer as the answer.
           if (lifecycle.snapshot().cancelRequested) lifecycle.markCancelled();
-          else if (sawDelta) lifecycle.markCompleted();
           else lifecycle.markFailed();
         }
       } finally {
@@ -241,12 +258,12 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     async abort(reason?: unknown) {
       const already = lifecycle.snapshot().cancelRequested;
       lifecycle.cancel(typeof reason === "string" ? reason : undefined);
-      if (already) return;
-      if (!lifecycle.isTerminal() && lifecycle.snapshot().state !== "SUBMISSION_AMBIGUOUS") {
+      if (!already && !lifecycle.isTerminal() && lifecycle.snapshot().state !== "SUBMISSION_AMBIGUOUS") {
         lifecycle.markCancelled();
       }
       // §9.2 order: logical cancellation -> abort the provider exchange -> wait for or force physical
-      // settlement -> release the resource.
+      // settlement -> release the resource. A second caller waits for those same operations instead
+      // of returning while the first one is still settling.
       await issueAbort(reason);
       await settleUnknownOutcome();
       disarm();
@@ -266,6 +283,12 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     },
   };
 
+  exchangeRef = exchange;
+  // Wired after the exchange exists, so an already-aborted signal can cancel it immediately.
+  if (externalSignal) {
+    if (externalSignal.aborted) abortListener();
+    else externalSignal.addEventListener("abort", abortListener);
+  }
   return exchange;
 }
 
@@ -277,7 +300,9 @@ export function isWebChatExchangeOpen(exchange: WebChatExchangeRunner): boolean 
 
 /** Refuse to run a second exchange on a conversation that still has an unsettled one. */
 export function assertWebChatExchangeSettled(exchange: WebChatExchangeRunner): void {
-  if (!exchange.snapshot().retired && !exchange.settlement()) {
+  const settlement = exchange.settlement();
+  if (!exchange.snapshot().retired
+    && settlement !== "fulfilled" && settlement !== "rejected" && settlement !== "not_started") {
     throw webChatError(
       "TRANSPORT_UNAVAILABLE",
       "The previous exchange on this conversation has not settled its transport",

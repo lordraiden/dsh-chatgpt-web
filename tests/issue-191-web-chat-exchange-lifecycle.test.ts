@@ -780,3 +780,75 @@ describe("issue #191 — migration evidence from the existing provider lifecycle
     expect(webChatRetrySafetyOf({ snapshot: coreActivated.snapshot() })).toBe("ambiguous");
   });
 });
+
+describe("issue #191 — stream ends, concurrency and preparation (review of #218)", () => {
+  test("a stream that ends without a terminal event is never a completed answer", async () => {
+    const { transport } = scriptedTransport({ events: [{ type: "text_delta", text: "parcial" }] });
+    const { exchange } = await runnerWith(transport);
+    await exchange.prepare();
+    await exchange.submit();
+    const events = await collect(exchange);
+    expect(events.map(event => event.type)).toEqual(["text_delta"]);
+    expect(exchange.snapshot().state).toBe("FAILED");
+    expect(exchange.snapshot().logical).toBe("failed");
+    // Partial output is still not evidence that nothing was sent.
+    expect(exchange.retrySafety()).toBe("not_retry_safe");
+  });
+
+  test("two concurrent cancellations wait for the same abort and settle once", async () => {
+    let releaseAbort: () => void = () => {};
+    const abortGate = new Promise<void>(resolve => { releaseAbort = resolve; });
+    const order: string[] = [];
+    let settleCalls = 0;
+    const transport: WebChatTextTransport = {
+      id: "gated-cancel",
+      ready: async () => {},
+      submit: async () => "accepted",
+      // eslint-disable-next-line require-yield
+      async *stream() { /* cancelled before streaming */ },
+      async settle() { settleCalls += 1; order.push("settle"); return "fulfilled"; },
+      async abort() { order.push("abort:start"); await abortGate; order.push("abort:end"); },
+    };
+    const { exchange } = await runnerWith(transport);
+    await exchange.prepare();
+    await exchange.submit();
+
+    const first = exchange.abort("one");
+    const second = exchange.abort("two");
+    await Promise.resolve();
+    await Promise.resolve();
+    // Neither solver has finished: nothing may be settled yet.
+    expect(order).toEqual(["abort:start"]);
+
+    releaseAbort();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["abort:start", "abort:end", "settle"]);
+    expect(settleCalls).toBe(1);
+    expect(exchange.snapshot().cancelRequested).toBe(true);
+  });
+
+  test("a submission before the exchange is transport-ready is refused", async () => {
+    const { transport, calls } = scriptedTransport();
+    const { exchange } = await runnerWith(transport);
+    await expect(exchange.submit()).rejects.toThrow(/transport-ready/);
+    expect(calls.submit).toBe(0);
+  });
+
+  test("an already-aborted external signal cancels without a reference error", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { transport, calls } = scriptedTransport({ events: [] });
+    const exchange = createWebChatExchange({
+      identity: IDENTITY,
+      turn: TURN,
+      transport,
+      leases: createWebChatTransportLeaseRegistry(),
+      createResource: async () => resource(),
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(exchange.snapshot().cancelRequested).toBe(true);
+    expect(calls.abort).toBe(1);
+  });
+});

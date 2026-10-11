@@ -19,7 +19,19 @@ export interface WebChatTextTransportContext {
   readonly identity: WebChatTurnIdentity;
   /** The semantic turn to carry. */
   readonly turn: WebChatTurnInput;
-  /** Cancellation signal for this exchange. */
+  /**
+   * Conversation epoch of the exchange.
+   *
+   * A transport tags the work it produces with it, so a result that arrives after the conversation
+   * moved on can be recognized as stale instead of being attributed to the current turn.
+   */
+  readonly epoch: number;
+  /**
+   * Cancellation signal for this exchange.
+   *
+   * Aborted when the exchange is cancelled, so a transport that races on the signal observes the
+   * same cancellation as one that uses `abort()`.
+   */
   readonly signal: AbortSignal;
 }
 
