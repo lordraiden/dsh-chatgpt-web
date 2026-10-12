@@ -1442,6 +1442,31 @@ A future provider becomes eligible for Advisor use when its WebChat driver is in
 
 The shared WebChat contract remains text-only. This separation prevents both ChatGPT-specific compatibility features and the Advisor orchestration from becoming a generic agent runtime inside WebChat Core.
 
+### 20.1 Normal Chat Mode is incremental; Advisor Mode owns its context
+
+Normal Chat Mode is the ordinary automatic conversation (the chat-only route). It is a minimal
+conversational transport to the provider:
+
+- the first physical message of a conversation carries only a deterministic project header and the
+  current user message;
+- every later message carries only the current user message;
+- the provider conversation itself is the conversation history, so DSH does not serialize its
+  session history, previous assistant responses, runtime/environment context, Git state, tool
+  descriptions or memory content into the request;
+- the project header is generated programmatically from authoritative package metadata
+  (`package.json`), never inferred from the user's message, the working directory or a model answer;
+  when that metadata cannot be resolved, the repository line is omitted rather than fabricated.
+
+Advisor Mode is a separate feature with its own context. It owns its reviewer system prompt, the
+project/preset label, the review instructions, the last human request and the last final DSH
+response, and it runs in its own retained conversation. A Chat Mode change must not disable it, and
+an Advisor request must never be routed through the minimal Chat Mode envelope.
+
+The DSH tool-execution route and the manual/compaction transports keep their own documented context
+contracts; they are not Chat Mode. Because the provider conversation is the history, an explicit
+replay/rebuild (a replacement physical generation) deliberately re-projects canonical DSH history;
+that recovery path is not normal Chat Mode.
+
 ---
 
 ## 21. Provider-specific design expectations
