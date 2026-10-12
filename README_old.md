@@ -24,7 +24,7 @@
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [Configuration Reference](#configuration-reference)
-- [ChatGPT Advisor](#chatgpt-advisor)
+- [Advisor](#advisor)
 - [Diagnostics & Health Check](#diagnostics--health-check)
 - [Troubleshooting](#troubleshooting)
 - [Notes & Limitations](#notes--limitations)
@@ -67,7 +67,7 @@ The definitive ownership and recovery rules live in [`doc/architecture.md`](./do
 - **Cordis Plugin-First Lifecycle:** Managed by DSH via `ctx.effect`. DeepSeek Harness starts the background sidecar automatically on launch and shuts it down on exit.
 - **Runtime model/account discovery:** Detects the ChatGPT Web account/model surface available to the authenticated session.
 - **Streaming and provider semantics:** Exposes streamed text, reasoning, usage, errors, and cancellation through the DSH-facing transport.
-- **ChatGPT Advisor:** Reviews the last completed turn in a separate retained ChatGPT Web conversation and hands the review back to DSH on request.
+- **Advisor:** Reviews the last completed turn in a separate provider conversation, as a tracked background task, and hands the review back to DSH on request.
 - **Control and diagnostics surfaces:** Includes setup/login/doctor tooling plus a local control surface for transport status and tuning.
 - **Portable, Validated Artifacts:** The published tarball is validated by CI (clean install, runtime smoke test, dependency resolution, no build-environment path contamination) before it can reach the registries.
 
@@ -527,19 +527,22 @@ For browser path, an explicit --chrome setup value overrides automatic executabl
 
 For capability/model selection, the authenticated ChatGPT Web product surface is authoritative. Local route names or backend IDs cannot override a failed capability check.
 
-## ChatGPT Advisor
+## Advisor
 
-The composer offers **Review with ChatGPT** on the last completed `user → assistant` turn of the session. The review carries that step only — the project name, your review instructions, the last human request and the last final response — into a **separate retained ChatGPT Web conversation**, so a review never enters the DSH session history and never collides with the chat's own conversation.
+The composer offers **Review with Advisor** on the last completed `user → assistant` turn of the session. The review carries that step only — the project name, your review instructions, the last human request and the last final response — into a **separate provider conversation**, so a review never enters the DSH session history and never collides with the chat's own conversation.
 
 The review dialog is a modal centred over the composer:
 
-- **Model** — `Normal` (lightest non-Pro route) or `Think` (deepest non-Pro route).
+- **Model** — a single dropdown of the WebChat models that are currently eligible: every integrated provider that is authenticated right now and that its own website-UI discovery reports as selectable. Each choice names its provider and model, so two providers exposing the same model name stay distinguishable. There is no `Normal`/`Think` pair and no hardcoded model list: open the dialog again to refresh the list, and use **Retry** if loading failed.
+- **Include in the review** — the human request and the DSH response are selected by default; the project name is included when available and can be omitted. Submission is disabled when nothing substantive remains selected.
 - **Review instructions** — editable, and remembered in this browser.
 - **Context (read-only)** — the human request and the DSH response under review.
 
-`Escape`, the close control and a click on the backdrop dismiss the dialog. A review that is already running is never cancelled by an outside click.
+**Start review** accepts a tracked background task: the dialog closes by default, the review keeps running while you work, and the **Advisor activity** entry in the composer control reopens its status and result. Closing the dialog, switching sessions or refreshing the browser never cancels an accepted review. The selected provider and model are frozen on the task and recorded with the result; a choice that becomes unavailable is never silently replaced.
 
-A successful review appears as a **ChatGPT Advisor** card in that turn's tail, with its mode and model. **Send to DSH** submits the full review through the normal DSH prompt flow as a new prompt, and the plugin executes nothing by itself.
+`Escape`, the close control and a click on the backdrop dismiss the dialog.
+
+A successful review appears as an **Advisor** card in that turn's tail, with its provider and model. **Send to DSH** submits the full review through the normal DSH prompt flow as a new prompt, and the plugin executes nothing by itself. A genuine failure is reported as a failure with an explicit **Start a new review** action: nothing is retried automatically, and the read-only **Recover retained answer** action is available for a review whose provider finished the answer anyway.
 
 ---
 

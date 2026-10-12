@@ -80,14 +80,6 @@ function find(tree: any, className: string): any[] | undefined {
   return found;
 }
 
-function findAll(tree: any, className: string): any[][] {
-  const found: any[][] = [];
-  walk(tree, (element) => {
-    if (element[1] && element[1].className === className) found.push(element);
-  });
-  return found;
-}
-
 /** Every rendered button, whatever class combination it carries. */
 function findButtons(tree: any): any[][] {
   const found: any[][] = [];
@@ -113,13 +105,16 @@ const CONFIG_FORM = { getSnapshot: () => ({ value: { port: 17841 } }) };
 /** Render the open dialog for the singleton store with a controllable fetch. */
 function renderDialog() {
   const chat = chatSnapshot([textUserNode(1, 1, "arregla el bug"), settledStep(2, 1, "hecho")]);
-  const button = mod.__test.AdvisorReviewButton(T, {
+  const control = mod.__test.AdvisorReviewButton(T, {
     sessionId: "sess-1",
     useChat: (selector: (snapshot: unknown) => unknown) => selector(chat),
     useSession: (selector: (session: unknown) => unknown) => selector({ running: false }),
   });
-  expect(button).not.toBeNull();
-  button[1].onClick();
+  expect(control).not.toBeNull();
+  // The composer control is a container holding the launch action (and the activity entry).
+  const button = buttonByText(control, "Review with Advisor");
+  expect(button).toBeDefined();
+  button![1].onClick();
 
   const props = {
     sessionId: "sess-1",
@@ -130,7 +125,7 @@ function renderDialog() {
     useWorkspaces: (selector: (snapshot: unknown) => unknown) => selector({ items: [] }),
   };
   const render = () => mod.__test.AdvisorReviewDialog(T, props, CONFIG_FORM);
-  return { render, button };
+  return { render, button: control };
 }
 
 /**
@@ -188,27 +183,93 @@ beforeAll(async () => {
   mod = captured.descriptor.factory(requireShim);
 });
 
+const CHOICE = {
+  route: "chatgpt-web/light",
+  providerId: "chatgpt-web",
+  providerLabel: "ChatGPT Web",
+  modelId: "light",
+  modelLabel: "Light",
+  label: "ChatGPT Web — Light",
+  reasoningModes: [],
+};
+
+/**
+ * A fresh browser storage for one test, with the shared store's in-memory activity reset to it.
+ * The dialog drives one singleton store, so a test must not inherit the previous test's reviews.
+ */
+function freshStorage(): any {
+  const storage = makeStorage();
+  (globalThis as any).window.localStorage = storage;
+  mod.__test.advisorStore.hydrateActivity(storage);
+  return storage;
+}
+
+/** The base URL the config form resolves to in this suite. */
+const BASE = "http://127.0.0.1:17841";
+
+/** One task record as the sidecar returns it. */
+function taskRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    reviewId: "review-1",
+    state: "running",
+    sessionId: "sess-1",
+    reviewedTurnId: "dsh-turn:1",
+    provenance: {
+      route: CHOICE.route,
+      providerId: CHOICE.providerId,
+      providerLabel: CHOICE.providerLabel,
+      modelId: CHOICE.modelId,
+      modelLabel: CHOICE.modelLabel,
+    },
+    source: { includedRequest: true, includedResponse: true, includedProject: false, instructions: "i" },
+    createdAt: 1,
+    ...overrides,
+  };
+}
+
+/** The task status/list answer of a review the provider's own turn gave up on (issue #214). */
+function failedTask() {
+  return taskRecord({
+    state: "failed",
+    failure: { code: "advisor_turn_failed", message: "ChatGPT response DOM disappeared while the browser turn was active" },
+  });
+}
+
+/** Open the tracked-activity view through the real composer control. */
+function openActivityView(): void {
+  const chat = chatSnapshot([textUserNode(1, 1, "arregla el bug"), settledStep(2, 1, "hecho")]);
+  const control = mod.__test.AdvisorReviewButton(T, {
+    sessionId: "sess-1",
+    useChat: (selector: (snapshot: unknown) => unknown) => selector(chat),
+    useSession: (selector: (session: unknown) => unknown) => selector({ running: false }),
+  });
+  expect(control).not.toBeNull();
+  const activityButton = buttonByText(control, "Advisor activity");
+  expect(activityButton).toBeDefined();
+  activityButton![1].onClick();
+}
+
 describe("issue #214 — the recovery request", () => {
-  test("targets the recover endpoint with the session, mode and bounded wait", () => {
+  test("targets the recover endpoint with the session, the route and the bounded wait", () => {
     const { url, options } = mod.__test.buildAdvisorRecoverFetch({
-      base: "http://127.0.0.1:17841",
+      base: BASE,
       token: "tok",
       sessionId: "sess-1",
-      mode: "think",
+      route: "chatgpt-web/light",
       timeoutMs: 120000,
     });
-    expect(url).toBe("http://127.0.0.1:17841/v1/control/advisor/recover");
+    expect(url).toBe(`${BASE}/v1/control/advisor/recover`);
     expect(options.method).toBe("POST");
     expect(options.headers.Authorization).toBe("Bearer tok");
-    expect(JSON.parse(options.body)).toEqual({ sessionId: "sess-1", mode: "think", timeoutMs: 120000 });
+    expect(JSON.parse(options.body)).toEqual({ sessionId: "sess-1", route: "chatgpt-web/light", timeoutMs: 120000 });
   });
 
-  test("omits an unusable mode or timeout instead of sending junk", () => {
+  test("omits an unusable route or timeout instead of sending junk", () => {
     const { options } = mod.__test.buildAdvisorRecoverFetch({
-      base: "http://127.0.0.1:17841",
+      base: BASE,
       token: "tok",
       sessionId: "sess-1",
-      mode: "deep",
+      route: "",
       timeoutMs: -1,
     });
     expect(JSON.parse(options.body)).toEqual({ sessionId: "sess-1" });
@@ -216,50 +277,66 @@ describe("issue #214 — the recovery request", () => {
 
   test("carries the cancellation signal", () => {
     const signal = { aborted: false };
-    const { options } = mod.__test.buildAdvisorRecoverFetch({ base: "http://127.0.0.1:17841", token: "t", sessionId: "s", signal });
+    const { options } = mod.__test.buildAdvisorRecoverFetch({ base: BASE, token: "t", sessionId: "s", signal });
     expect(options.signal).toBe(signal);
   });
 });
 
-describe("issue #214 — a failed review offers the recovery, and the answer is copyable", () => {
-  test("the failed review shows the recover action, and recovering shows the recorded answer", async () => {
+describe("issue #214 — a tracked failure offers the recovery, and the answer is copyable", () => {
+  test("the failed task shows the recover action, and recovering shows the recorded answer", async () => {
+    const storage = freshStorage();
     const calls: Array<{ url: string; body: any }> = [];
-    const storage = makeStorage();
-    (globalThis as any).window.localStorage = storage;
     const { render } = renderDialog();
+    mod.__test.advisorStore.applyModels([CHOICE], undefined);
+
     await withFetch(async (url: string, options: any) => {
-      calls.push({ url, body: JSON.parse(options.body) });
-      if (url.endsWith("/advisor/review")) {
+      calls.push({ url, body: options && options.body ? JSON.parse(options.body) : null });
+      if (url.endsWith("/advisor/reviews")) {
+        return { ok: true, status: 202, json: async () => ({ ok: true, duplicate: false, task: taskRecord() }) };
+      }
+      if (url.endsWith("/advisor/recover")) {
         return {
-          ok: false,
-          status: 502,
-          json: async () => ({ ok: false, code: "advisor_turn_failed", message: "ChatGPT response DOM disappeared while the browser turn was active" }),
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            reviewId: "recover-1",
+            route: CHOICE.route,
+            providerLabel: CHOICE.providerLabel,
+            modelLabel: CHOICE.modelLabel,
+            text: "**Verdict: request changes.**\n\n- arreglar X",
+            capturedAt: 5,
+          }),
         };
       }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, reviewId: "recover-1", mode: "normal", model: "chatgpt-web/luna", recovered: true, text: "**Verdict: request changes.**\n\n- arreglar X" }),
-      };
+      if (url.includes("/advisor/reviews?")) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, reviews: [failedTask()] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, choices: [CHOICE] }) };
     }, async () => {
-      // The dialog is open: start the review and let it fail while ChatGPT keeps working.
-      const dialog = render();
-      buttonByText(dialog, "Review")![1].onClick();
+      // Start the review, then let the sidecar report that its turn failed.
+      buttonByText(render(), "Start review")![1].onClick();
+      await settle();
+      mod.__test.advisorStore.refreshActivity({
+        base: BASE,
+        token: "tok",
+        sessionId: "sess-1",
+        storage,
+        fetch: (u: string, o: any) => (globalThis as any).fetch(u, o),
+      });
       await settle();
 
-      const failed = render();
-      expect(textOf(find(failed, "cwg-advisor-error"))).toContain("The review failed. You can retry.");
-      expect(textOf(find(failed, "cwg-advisor-error"))).toContain("response DOM disappeared");
-
-      // The failure offers the read-only recovery instead of only an error.
-      const recoverButton = buttonByText(failed, "Recover answer from ChatGPT");
-      expect(recoverButton).toBeDefined();
-      recoverButton![1].onClick();
+      // The failure is tracked, so the activity entry offers the read-only recovery.
+      openActivityView();
+      const activity = render();
+      expect(buttonByText(activity, "Recover retained answer")).toBeDefined();
+      buttonByText(activity, "Recover retained answer")![1].onClick();
       await settle();
     });
 
-    expect(calls.at(-1)?.url).toBe("http://127.0.0.1:17841/v1/control/advisor/recover");
-    expect(calls.at(-1)?.body).toEqual({ sessionId: "sess-1", mode: "normal" });
+    // The recovery named the failed review's route and no mode at all.
+    expect(calls.at(-1)?.url).toBe(`${BASE}/v1/control/advisor/recover`);
+    expect(calls.at(-1)?.body).toEqual({ sessionId: "sess-1", route: CHOICE.route });
 
     // The answer is shown in a selectable read-only field with a copy action.
     const recovered = render();
@@ -268,91 +345,78 @@ describe("issue #214 — a failed review offers the recovery, and the answer is 
     expect(field![1].readOnly).toBe(true);
     expect(field![1].value).toContain("Verdict: request changes");
     expect(textOf(find(recovered, "cwg-advisor-result-note"))).toContain("Recorded for this turn");
-    const copyButton = buttonByText(recovered, "Copy");
-    expect(copyButton).toBeDefined();
-    // The recover action is replaced by the recovered result.
-    expect(buttonByText(recovered, "Recover answer from ChatGPT")).toBeUndefined();
+    expect(buttonByText(recovered, "Copy")).toBeDefined();
   });
 
   test("a recovered review is recorded for the turn, so the card and the handoff carry it", async () => {
-    const storage = makeStorage();
-    (globalThis as any).window.localStorage = storage;
-    const { render } = renderDialog();
-    await withFetch(async (url: string) => {
-      if (url.endsWith("/advisor/review")) {
-        return { ok: false, status: 502, json: async () => ({ ok: false, message: "turn failed" }) };
-      }
-      return {
+    const storage = freshStorage();
+    const store = mod.__test.createAdvisorStore();
+    store.applyModels([CHOICE], undefined);
+    store.openReview({ humanRequest: "h", dshResponse: "d", dshTurn: 1, reviewedTurnId: "dsh-turn:1" }, "i");
+    store.recover({
+      base: BASE,
+      token: "tok",
+      sessionId: "sess-1",
+      route: CHOICE.route,
+      storage,
+      fetch: async () => ({
         ok: true,
         status: 200,
-        json: async () => ({ ok: true, reviewId: "recover-2", mode: "normal", model: "chatgpt-web/luna", recovered: true, text: "respuesta recuperada" }),
-      };
-    }, async () => {
-      const dialog = render();
-      buttonByText(dialog, "Review")![1].onClick();
-      await settle();
-      buttonByText(render(), "Recover answer from ChatGPT")![1].onClick();
-      await settle();
+        json: async () => ({ ok: true, reviewId: "recover-2", route: CHOICE.route, providerLabel: CHOICE.providerLabel, modelLabel: CHOICE.modelLabel, text: "respuesta recuperada", capturedAt: 9 }),
+      }),
     });
+    await settle();
 
     const results = mod.__test.loadAdvisorResults(storage);
     expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({ turn: 1, recovered: true, text: "respuesta recuperada", model: "chatgpt-web/luna" });
+    expect(results[0]).toMatchObject({ turn: 1, recovered: true, text: "respuesta recuperada", route: CHOICE.route });
     expect(mod.__test.buildHandoffPrompt(results[0])).toContain("respuesta recuperada");
   });
 
-  test("a failed recovery keeps the review error and shows its own reason", async () => {
-    const { render } = renderDialog();
-    await withFetch(async (url: string) => {
-      if (url.endsWith("/advisor/review")) {
-        return { ok: false, status: 502, json: async () => ({ ok: false, message: "turn failed" }) };
-      }
-      return {
+  test("a failed recovery keeps its own reason and stays retryable", async () => {
+    const storage = freshStorage();
+    const store = mod.__test.createAdvisorStore();
+    store.applyModels([CHOICE], undefined);
+    store.openReview({ humanRequest: "h", dshResponse: "d", dshTurn: 1, reviewedTurnId: "dsh-turn:1" }, "i");
+    store.recover({
+      base: BASE,
+      token: "tok",
+      sessionId: "sess-1",
+      route: CHOICE.route,
+      storage,
+      fetch: async () => ({
         ok: false,
         status: 502,
         json: async () => ({ ok: false, code: "advisor_recovery_unavailable", message: "The retained ChatGPT conversation is no longer available." }),
-      };
-    }, async () => {
-      const dialog = render();
-      buttonByText(dialog, "Review")![1].onClick();
-      await settle();
-      buttonByText(render(), "Recover answer from ChatGPT")![1].onClick();
-      await settle();
+      }),
     });
-
-    const failed = render();
-    const errors = findAll(failed, "cwg-advisor-error").map(textOf);
-    // The review error stays visible, and the recovery reports its own reason next to it.
-    expect(errors.some((text) => text.includes("The review failed"))).toBe(true);
-    expect(errors.some((text) => text.includes("no longer available"))).toBe(true);
-    expect(find(failed, "cwg-advisor-result-body")).toBeUndefined();
-    // The action stays available for a retry: a recovery is read-only.
-    expect(buttonByText(failed, "Recover answer from ChatGPT")).toBeDefined();
+    await settle();
+    expect(store.getSnapshot().recovery).toMatchObject({ status: "error", error: "The retained ChatGPT conversation is no longer available." });
+    expect(mod.__test.loadAdvisorResults(storage)).toEqual([]);
   });
 
   test("a recovery failure never clobbers the review error", () => {
     const store = mod.__test.createAdvisorStore();
-    store.openDialog({ humanRequest: "h", dshResponse: "d", dshTurn: 1 }, "i");
+    store.openReview({ humanRequest: "h", dshResponse: "d", dshTurn: 1, reviewedTurnId: "dsh-turn:1" }, "i");
     store.fail("review boom");
     store.failRecovery("recovery boom");
     const snapshot = store.getSnapshot();
-    expect(snapshot.status).toBe("error");
-    expect(snapshot.error).toBe("review boom");
+    expect(snapshot.start).toMatchObject({ status: "error", error: "review boom" });
     expect(snapshot.recovery).toMatchObject({ status: "error", error: "recovery boom" });
     store.clearRecovery();
     expect(store.getSnapshot().recovery).toEqual({ status: "idle", text: "", error: null });
-    expect(store.getSnapshot().error).toBe("review boom");
+    expect(store.getSnapshot().start.error).toBe("review boom");
     store.closeDialog();
     expect(store.getSnapshot().recovery.status).toBe("idle");
   });
 
   test("a cancelled recovery returns to idle instead of reporting an error", async () => {
     const store = mod.__test.createAdvisorStore();
-    store.openDialog({ humanRequest: "h", dshResponse: "d", dshTurn: 1 }, "i");
+    store.openReview({ humanRequest: "h", dshResponse: "d", dshTurn: 1, reviewedTurnId: "dsh-turn:1" }, "i");
     let rejectFetch: (error: unknown) => void = () => {};
     const pending = new Promise((_resolve, reject) => { rejectFetch = reject; });
     store.recover({
-      base: "http://127.0.0.1:17841",
+      base: BASE,
       token: "tok",
       sessionId: "sess-1",
       storage: makeStorage(),
@@ -370,12 +434,11 @@ describe("issue #214 — a failed review offers the recovery, and the answer is 
 
   test("a recovery for a turn with no resolvable DSH turn still shows the answer", async () => {
     const storage = makeStorage();
-    (globalThis as any).window.localStorage = storage;
     const store = mod.__test.createAdvisorStore();
     // No dshTurn: the answer is shown, it simply cannot be attached to a turn card.
-    store.openDialog({ humanRequest: "h", dshResponse: "d" }, "i");
+    store.openReview({ humanRequest: "h", dshResponse: "d" }, "i");
     store.recover({
-      base: "http://127.0.0.1:17841",
+      base: BASE,
       token: "tok",
       sessionId: "sess-1",
       storage,

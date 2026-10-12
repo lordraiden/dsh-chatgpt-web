@@ -100,14 +100,33 @@ function settledStep(seq: number, turn: number, ...blocks: Array<Record<string, 
   return assistantStep(seq, turn, "settled", ...blocks);
 }
 
-/** The composer control under test: the exact slot entry the plugin registers. */
+/** Every rendered button inside one composer-control tree. */
+function findButtons(node: any): any[][] {
+  const found: any[][] = [];
+  const walk = (value: any): void => {
+    if (!Array.isArray(value)) return;
+    if (value[0] === "button") found.push(value);
+    for (const child of value.slice(2)) walk(child);
+  };
+  walk(node);
+  return found;
+}
+
+/**
+ * The composer control under test: the exact slot entry the plugin registers.
+ *
+ * Issue #224: the entry is a container holding the launch action (and, when reviews are tracked, the
+ * activity entry), so the launch button itself is what these cases assert on.
+ */
 function renderButton(chat: unknown, { running = false } = {}) {
   const t = (_key: string, fallback: string) => fallback;
-  return mod.__test.AdvisorReviewButton(t, {
+  const control = mod.__test.AdvisorReviewButton(t, {
     sessionId: "sess-1",
     useChat: (selector: (snapshot: unknown) => unknown) => selector(chat),
     useSession: (selector: (session: unknown) => unknown) => selector({ running }),
   });
+  if (!control) return null;
+  return findButtons(control).find((node) => String(node[2]).includes("Review with Advisor")) || control;
 }
 
 beforeAll(async () => {
@@ -159,7 +178,7 @@ describe("issue #186 — case 1: an existing session with a completed turn rende
     expect(button[0]).toBe("button");
     expect(button[1].className).toBe("cwg-advisor-btn");
     expect(button[1].disabled).toBe(false);
-    expect(button[2]).toBe("Review with ChatGPT");
+    expect(button[2]).toBe("Review with Advisor");
   });
 
   test("the pre-#186 node shape ('assistant' + top-level blocks) is no longer selected", () => {
@@ -330,12 +349,13 @@ describe("issue #186 — case 7: the DSH turn number survives for the result car
     ]);
     const reviewable = mod.__test.selectReviewableTurn(chat);
 
-    // This is exactly what runReview() records after a successful review.
+    // This is exactly what a completed tracked review records (issue #224).
     mod.__test.recordAdvisorResult(storage, {
       turn: reviewable.dshTurn,
       reviewId: "r1",
-      mode: "normal",
-      model: "gpt",
+      route: "chatgpt-web/light",
+      providerLabel: "ChatGPT Web",
+      modelLabel: "Light",
       text: "review body",
     });
 
@@ -361,7 +381,7 @@ describe("issue #186 — case 7: the DSH turn number survives for the result car
     const reviewable = mod.__test.selectReviewableTurn(chat);
     expect(reviewable).not.toBeNull();
     expect(reviewable.dshTurn).toBeUndefined();
-    // runReview() records nothing without a turn number: the card stays empty.
+    // The start flow records nothing without a turn number: the card stays empty.
     expect(mod.__test.selectResultForTurn(mod.__test.loadAdvisorResults(makeStorage()), reviewable.dshTurn)).toBeNull();
   });
 });

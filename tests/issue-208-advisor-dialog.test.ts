@@ -110,13 +110,16 @@ const T = (_key: string, fallback: string) => fallback;
 /** Open the singleton dialog through the real composer control. */
 async function renderDialog() {
   const chat = chatSnapshot([textUserNode(1, 1, "arregla el bug"), settledStep(2, 1, "hecho")]);
-  const button = mod.__test.AdvisorReviewButton(T, {
+  const control = mod.__test.AdvisorReviewButton(T, {
     sessionId: "sess-1",
     useChat: (selector: (snapshot: unknown) => unknown) => selector(chat),
     useSession: (selector: (session: unknown) => unknown) => selector({ running: false }),
   });
-  expect(button).not.toBeNull();
-  button[1].onClick();
+  expect(control).not.toBeNull();
+  // Issue #224: the composer control is a container; its launch action opens the panel.
+  const button = buttonByText(control, "Review with Advisor");
+  expect(button).toBeDefined();
+  button![1].onClick();
 
   const props = {
     sessionId: "sess-1",
@@ -222,21 +225,24 @@ describe("issue #223 — the dialog has no DSH agent-preset integration", () => 
   });
 
   test("a review request never carries a preset field", () => {
-    const { url, options } = mod.__test.buildAdvisorFetch({
+    const { url, options } = mod.__test.buildAdvisorStartFetch({
       base: "http://127.0.0.1:17841",
       token: "tok",
       sessionId: "sess-1",
+      reviewedTurnId: "dsh-turn:2",
       humanRequest: "arregla el bug",
       dshResponse: "hecho",
       instructions: "review it",
-      mode: "normal",
+      route: "chatgpt-web/light",
       project: "dsh-chatgpt-web",
     });
-    expect(url).toBe("http://127.0.0.1:17841/v1/control/advisor/review");
+    expect(url).toBe("http://127.0.0.1:17841/v1/control/advisor/reviews");
     const body = JSON.parse(options.body);
     expect("preset" in body).toBe(false);
+    // Issue #224: the request names the selected public route and the reviewed turn; there is no
+    // ChatGPT Normal/Think mode field left to carry a preset-shaped value either.
     expect(Object.keys(body).sort()).toEqual(
-      ["dshResponse", "humanRequest", "instructions", "mode", "project", "sessionId"],
+      ["dshResponse", "humanRequest", "instructions", "project", "reviewedTurnId", "route", "sessionId"],
     );
   });
 

@@ -37,9 +37,9 @@ window.__ModuleLoader__.load({
       'tuning.sendEnableGraceMs': 'Send-button grace (ms)',
       'tuning.generationRunningStallMs': 'Generation stall budget (ms)',
       'tuning.turnTimeoutMs': 'Turn timeout (ms)',
-      'advisor.recover.action': 'Recover answer from ChatGPT',
-      'advisor.recover.loading': 'Reading the answer from ChatGPT',
-      'advisor.recover.hint': 'Read the answer ChatGPT already produced in this Advisor conversation. Nothing is sent.',
+      'advisor.recover.action': 'Recover retained answer',
+      'advisor.recover.loading': 'Reading the retained answer',
+      'advisor.recover.hint': 'Read the answer the provider already produced in this Advisor conversation. Nothing is sent.',
       'advisor.recover.failed': 'The answer could not be read.',
       'advisor.result.title': 'Recovered review',
       'advisor.result.copy': 'Copy',
@@ -68,25 +68,47 @@ window.__ModuleLoader__.load({
       'runtime.readOnly': 'Runtime configuration is not writable in this profile.',
       'runtime.portInvalid': 'Port must be an integer between 1 and 65535.',
       'runtime.timeoutInvalid': 'Ready timeout must be zero or a positive number of milliseconds.',
-      'advisor.btn': 'Review with ChatGPT',
-      'advisor.btnHint': 'Review the last completed turn with ChatGPT in a separate Advisor conversation.',
-      'advisor.dialog.title': 'Review with ChatGPT',
-      'advisor.dialog.mode': 'Model',
-      'advisor.dialog.modeNormal': 'Normal',
-      'advisor.dialog.modeThink': 'Think',
+      'advisor.btn': 'Review with Advisor',
+      'advisor.btnHint': 'Review the last completed turn with the selected WebChat model in a separate Advisor conversation.',
+      'advisor.btnBusy': 'Advisor review running…',
+      'advisor.activity.open': 'Advisor activity',
+      'advisor.activity.title': 'Advisor activity',
+      'advisor.activity.empty': 'No Advisor reviews yet.',
+      'advisor.activity.close': 'Close',
+      'advisor.activity.openResult': 'Open result',
+      'advisor.activity.newReview': 'Start a new review',
+      'advisor.activity.thisSession': 'this session',
+      'advisor.state.queued': 'queued',
+      'advisor.state.running': 'running',
+      'advisor.state.completed': 'completed',
+      'advisor.state.failed': 'failed',
+      'advisor.state.interrupted': 'interrupted',
+      'advisor.state.unavailable': 'unavailable',
+      'advisor.dialog.title': 'Review with Advisor',
+      'advisor.dialog.model': 'Model',
+      'advisor.dialog.modelLoading': 'Loading available models…',
+      'advisor.dialog.modelNone': 'No supported authenticated WebChat model is available.',
+      'advisor.dialog.modelFailed': 'The available models could not be loaded.',
+      'advisor.dialog.modelRetry': 'Retry',
+      'advisor.dialog.modelUnavailable': 'This selection is no longer available. Choose an eligible model.',
+      'advisor.dialog.modelUnavailableShort': 'unavailable',
+      'advisor.dialog.include': 'Include in the review',
+      'advisor.dialog.includeRequest': 'Human request',
+      'advisor.dialog.includeResponse': 'DSH response',
+      'advisor.dialog.includeProject': 'Project name',
+      'advisor.dialog.noSource': 'Select at least one source to review.',
       'advisor.dialog.instructions': 'Review instructions',
       'advisor.dialog.context': 'Context (read-only)',
       'advisor.dialog.humanRequest': 'Last human request',
       'advisor.dialog.dshResponse': 'Last DSH response',
       'advisor.dialog.cancel': 'Cancel',
-      'advisor.dialog.review': 'Review',
-      'advisor.dialog.reviewing': 'Reviewing…',
-      'advisor.dialog.error': 'The review failed. You can retry.',
+      'advisor.dialog.review': 'Start review',
+      'advisor.dialog.starting': 'Starting…',
+      'advisor.dialog.error': 'The review could not be started.',
+      'advisor.task.title': 'Advisor review',
       'advisor.errNoEndpoint': 'The sidecar endpoint is not configured.',
       'advisor.errNoToken': 'The sidecar control token is unavailable in this profile.',
-      'advisor.card.title': 'ChatGPT Advisor',
-      'advisor.card.modeNormal': 'Normal',
-      'advisor.card.modeThink': 'Think',
+      'advisor.card.title': 'Advisor',
       'advisor.card.send': 'Send to DSH',
       'advisor.card.sending': 'Sending…',
       'advisor.card.sendingStatus': 'Submitting through the normal DSH prompt flow…',
@@ -169,6 +191,25 @@ window.__ModuleLoader__.load({
       .cwg-advisor-card-status { font-size: 12px; margin-right: auto; }
       .cwg-advisor-card-status.cwg-ok { color: var(--dsw-alias-state-success-primary); }
       .cwg-advisor-card-status.cwg-err { color: var(--dsw-alias-state-error-primary); }
+      .cwg-advisor-model { width: 100%; font-size: 13px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }
+      .cwg-advisor-model:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+      .cwg-advisor-note { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+      .cwg-advisor-includes { display: flex; flex-wrap: wrap; gap: 10px; }
+      .cwg-advisor-includes label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-primary); }
+      .cwg-advisor-includes input[type="checkbox"] { accent-color: var(--dsw-alias-brand-primary); }
+      .cwg-advisor-ok { font-size: 12px; color: var(--dsw-alias-state-success-primary); }
+      .cwg-advisor-activity { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
+      .cwg-advisor-activity-item { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-base); }
+      .cwg-advisor-activity-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .cwg-advisor-activity-label { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+      .cwg-advisor-activity-meta { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+      .cwg-advisor-activity-state { font-size: 11px; font-weight: 600; margin-left: auto; }
+      .cwg-advisor-activity-state.cwg-ok { color: var(--dsw-alias-state-success-primary); }
+      .cwg-advisor-activity-state.cwg-err { color: var(--dsw-alias-state-error-primary); }
+      .cwg-advisor-activity-body { margin: 0; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow-y: auto; color: var(--dsw-alias-label-primary); }
+      .cwg-advisor-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+      .cwg-advisor-busy { font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+      .cwg-advisor-review { display: flex; flex-direction: column; gap: 12px; }
     `;
 
     const NS = 'dsh-chatgpt-web';
@@ -595,15 +636,21 @@ window.__ModuleLoader__.load({
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ChatGPT Advisor (issue #179): composer button + review dialog. The dialog
-    // calls the #178 sidecar endpoint POST /v1/control/advisor/review; the
-    // control token arrives through the official session-projection channel
+    // Advisor (issue #224): composer control + review dialog + tracked activity.
+    //
+    // The Advisor is provider-neutral. The dialog fills its single model dropdown
+    // from GET /v1/control/advisor/models, starts a tracked background task with
+    // POST /v1/control/advisor/reviews, and observes that task by its reviewId;
+    // closing the dialog never cancels a task. The control token arrives through
+    // the official session-projection channel
     // (`useProjection('dsh-chatgpt-web:sidecar')`), the port through the live
     // plugin config form, and the review context through the Chat snapshot
     // selector hooks — no parallel state machinery.
     // ─────────────────────────────────────────────────────────────────────────
     const ADVISOR_PROJECTION_KEY = 'dsh-chatgpt-web:sidecar';
     const LAST_INSTRUCTIONS_KEY = 'dsh-chatgpt-web.advisor.lastInstructions';
+    const LAST_SELECTION_KEY = 'dsh-chatgpt-web.advisor.lastSelection';
+    const ACTIVITY_KEY = 'dsh-chatgpt-web.advisor.activity';
     const DEFAULT_INSTRUCTIONS =
       'Review this development step as a senior software engineer.\n' +
       'Identify correctness problems, missed requirements, risks, and concrete improvements.\n' +
@@ -671,12 +718,23 @@ window.__ModuleLoader__.load({
       // associates results with; `anchorSeq` is only the node's render
       // position (the #179 `turn` field), never a turn number.
       const dshTurn = typeof assistant.data.turn === 'number' ? assistant.data.turn : undefined;
-      return { humanRequest: user.text, dshResponse: assistant.text, turn: assistant.anchorSeq, dshTurn };
+      // The reviewed turn identity the sidecar freezes on the task: the DSH turn
+      // number when the target exposes one, otherwise the node's render anchor.
+      const reviewedTurnId = dshTurn !== undefined ? `dsh-turn:${dshTurn}` : `anchor:${assistant.anchorSeq}`;
+      return { humanRequest: user.text, dshResponse: assistant.text, turn: assistant.anchorSeq, dshTurn, reviewedTurnId };
     }
 
-    /** The button is actionable only with a reviewable turn, no generation, and no in-flight review. */
-    function canStartReview({ running, inFlight, reviewable }) {
-      return Boolean(reviewable) && running !== true && inFlight !== true;
+    /** The composer control needs a reviewable turn and no running generation. */
+    function canStartReview({ running, reviewable }) {
+      return Boolean(reviewable) && running !== true;
+    }
+
+    /** Whether the dialogue has at least one substantive selected source. */
+    function hasSelectedSource(context, include) {
+      if (!context) return false;
+      if (include.request !== false && Boolean(context.humanRequest)) return true;
+      if (include.response !== false && Boolean(context.dshResponse)) return true;
+      return include.project !== false && Boolean(context.project);
     }
 
     /** Workspace basename for the optional `project` field (never a path). */
@@ -688,12 +746,60 @@ window.__ModuleLoader__.load({
       return segments.length > 0 ? segments[segments.length - 1] : undefined;
     }
 
-    /** Pure request builder for the #178 endpoint (testable without fetch). */
-    function buildAdvisorFetch({ base, token, sessionId, humanRequest, dshResponse, instructions, mode, project, signal }) {
-      const body = { sessionId, humanRequest, dshResponse, instructions, mode };
-      if (project) body.project = project;
+    /**
+     * One eligible choice from the catalogue response, or null when malformed.
+     *
+     * The provider-qualified identity is mandatory: a choice whose provider or provider-local model
+     * is unknown cannot be displayed or submitted, and inventing one is exactly what the dynamic
+     * catalogue exists to prevent.
+     */
+    function advisorChoice(value) {
+      if (!value || typeof value !== 'object') return null;
+      if (typeof value.route !== 'string' || !value.route.trim()) return null;
+      if (typeof value.providerId !== 'string' || !value.providerId.trim()) return null;
+      if (typeof value.modelId !== 'string' || !value.modelId.trim()) return null;
       return {
-        url: `${base}/v1/control/advisor/review`,
+        route: value.route,
+        providerId: value.providerId,
+        providerLabel: typeof value.providerLabel === 'string' ? value.providerLabel : '',
+        modelId: value.modelId,
+        modelLabel: typeof value.modelLabel === 'string' ? value.modelLabel : '',
+        label: typeof value.label === 'string' && value.label ? value.label : value.route,
+        reasoningModes: Array.isArray(value.reasoningModes) ? value.reasoningModes.filter((m) => typeof m === 'string') : [],
+      };
+    }
+
+    /** Pure request builder for the eligible-model catalogue (testable without fetch). */
+    function buildAdvisorModelsFetch({ base, token, signal }) {
+      return {
+        url: `${base}/v1/control/advisor/models`,
+        options: {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          ...(signal ? { signal } : {}),
+        },
+      };
+    }
+
+    /**
+     * Pure request builder for the tracked start endpoint (testable without fetch).
+     *
+     * The already-selected public route and the explicit inclusion choices travel with the captured
+     * source; the request carries no mode and no provider-specific assumption.
+     */
+    function buildAdvisorStartFetch({ base, token, sessionId, reviewedTurnId, humanRequest, dshResponse, instructions, route, reasoningMode, project, include, signal }) {
+      const body = { sessionId, reviewedTurnId, route, instructions };
+      if (typeof humanRequest === 'string') body.humanRequest = humanRequest;
+      if (typeof dshResponse === 'string') body.dshResponse = dshResponse;
+      if (project) body.project = project;
+      if (reasoningMode) body.reasoningMode = reasoningMode;
+      if (include) {
+        body.includeRequest = include.request !== false;
+        body.includeResponse = include.response !== false;
+        body.includeProject = include.project !== false;
+      }
+      return {
+        url: `${base}/v1/control/advisor/reviews`,
         options: {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -703,14 +809,41 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /** Pure request builder for one tracked review status (testable without fetch). */
+    function buildAdvisorStatusFetch({ base, token, reviewId, signal }) {
+      return {
+        url: `${base}/v1/control/advisor/reviews/${encodeURIComponent(reviewId)}`,
+        options: {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          ...(signal ? { signal } : {}),
+        },
+      };
+    }
+
+    /** Pure request builder for the tracked review list (testable without fetch). */
+    function buildAdvisorListFetch({ base, token, sessionId, limit, signal }) {
+      const query = [];
+      if (sessionId) query.push(`sessionId=${encodeURIComponent(sessionId)}`);
+      if (typeof limit === 'number' && Number.isFinite(limit) && limit > 0) query.push(`limit=${Math.trunc(limit)}`);
+      return {
+        url: `${base}/v1/control/advisor/reviews${query.length ? `?${query.join('&')}` : ''}`,
+        options: {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          ...(signal ? { signal } : {}),
+        },
+      };
+    }
+
     /**
      * Pure request builder for the #214 recovery endpoint (testable without fetch). A recovery is
-     * read-only: it identifies the session whose retained Advisor conversation is read, and
-     * nothing else.
+     * read-only: it names the session whose retained Advisor conversation is read and, when one is
+     * displayed, the public route that conversation belongs to.
      */
-    function buildAdvisorRecoverFetch({ base, token, sessionId, mode, timeoutMs, signal }) {
+    function buildAdvisorRecoverFetch({ base, token, sessionId, route, timeoutMs, signal }) {
       const body = { sessionId };
-      if (mode === 'think' || mode === 'normal') body.mode = mode;
+      if (route) body.route = route;
       if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0) body.timeoutMs = timeoutMs;
       return {
         url: `${base}/v1/control/advisor/recover`,
@@ -740,126 +873,274 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** The last successfully used public route, when one was recorded. */
+    function loadLastSelection(storage) {
+      try {
+        const value = storage ? storage.getItem(LAST_SELECTION_KEY) : null;
+        return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+
+    function saveLastSelection(storage, route) {
+      try {
+        if (storage && typeof route === 'string' && route.trim()) storage.setItem(LAST_SELECTION_KEY, route.trim());
+      } catch {
+        // Browser storage may be unavailable; the preference is best-effort.
+      }
+    }
+
     /**
-     * Shared dialog state, module-scoped so the button slot and the overlay
-     * slot (two distinct slot entries) drive one dialog. Plain listeners —
-     * the framework drives both components to re-render on change.
+     * Shared Advisor state, module-scoped so the button slot and the overlay
+     * slot (two distinct slot entries) drive one panel. Plain listeners — the
+     * framework drives both components to re-render on change.
+     *
+     * An accepted review is a tracked task: the start call returns its reviewId
+     * promptly, the dialog closes by default, and the task keeps running while
+     * only its identity/display metadata is kept here (persisted by the caller).
+     * Closing the dialog never cancels a task.
      */
     function createAdvisorStore() {
-      let state = { open: false, mode: 'normal', instructions: DEFAULT_INSTRUCTIONS, context: null, status: 'idle', error: null, recovery: { status: 'idle', text: '', error: null } };
+      let state = {
+        open: false,
+        view: 'review',
+        instructions: DEFAULT_INSTRUCTIONS,
+        context: null,
+        include: { request: true, response: true, project: true },
+        models: { status: 'idle', choices: [], error: null },
+        selection: null,
+        start: { status: 'idle', error: null },
+        activity: { status: 'idle', reviews: [], error: null },
+        recovery: { status: 'idle', text: '', error: null },
+      };
       let inFlight = false;
       let abortController = null;
       const listeners = new Set();
       const notify = () => { for (const listener of listeners) { try { listener(); } catch { /* listener errors never break the store */ } } };
+      const setState = (patch) => { state = { ...state, ...patch }; notify(); };
+
+      /**
+       * Apply one catalogue response. The FIRST load picks the initial selection
+       * (the last successfully used route when it is still eligible, otherwise the
+       * deterministic first eligible choice). A later load never silently replaces
+       * a displayed selection: a choice that became unavailable stays displayed as
+       * unavailable until the user selects an eligible one.
+       */
+      const applyModels = (choices, preferredRoute, options) => {
+        let selection = state.selection;
+        if (!selection || (options && options.reset === true)) {
+          const preferred = typeof preferredRoute === 'string' ? choices.find((c) => c.route === preferredRoute) : undefined;
+          selection = preferred || choices[0] || null;
+        }
+        setState({ models: { status: 'ready', choices, error: null }, selection });
+      };
+
+      /** Load the eligible model catalogue; failure is explicit and retryable. */
+      const loadModels = (env) => {
+        if (inFlight || !env || !env.base || !env.token) return;
+        inFlight = true;
+        const controller = new AbortController();
+        abortController = controller;
+        setState({ models: { status: 'loading', choices: state.models.choices, error: null } });
+        const finish = () => { inFlight = false; abortController = null; notify(); };
+        const { url, options } = buildAdvisorModelsFetch({ base: env.base, token: env.token, signal: controller.signal });
+        env.fetch(url, options)
+          .then(async (res) => {
+            let data = null;
+            try { data = await res.json(); } catch { /* non-JSON body */ }
+            if (!res.ok || !data || data.ok !== true) {
+              const message = data && typeof data.message === 'string' && data.message ? data.message : `HTTP ${res.status}`;
+              setState({ models: { status: 'error', choices: [], error: message } });
+              return;
+            }
+            const choices = Array.isArray(data.choices) ? data.choices.map(advisorChoice).filter(Boolean) : [];
+            applyModels(choices, env.lastRoute);
+          })
+          .catch((error) => {
+            setState({ models: { status: 'error', choices: [], error: error instanceof Error ? error.message : String(error) } });
+          })
+          .finally(finish);
+      };
+
+      /**
+       * Accept one review as a tracked background task. The selected route and
+       * everything included are frozen by the sidecar; this only records the
+       * returned task identity so the activity view can reopen it.
+       */
+      const startReview = (env) => {
+        const context = state.context;
+        const selection = state.selection;
+        if (inFlight || !context || !selection || !env || !env.base || !env.token) return;
+        inFlight = true;
+        const controller = new AbortController();
+        abortController = controller;
+        setState({ start: { status: 'starting', error: null } });
+        const finish = () => { inFlight = false; abortController = null; notify(); };
+        // A selection that became unavailable is never silently substituted: the catalogue is
+        // refreshed and the user must choose an eligible model explicitly.
+        let reloadCatalogue = false;
+        const { url, options } = buildAdvisorStartFetch({
+          base: env.base,
+          token: env.token,
+          sessionId: env.sessionId,
+          reviewedTurnId: context.reviewedTurnId,
+          humanRequest: context.humanRequest,
+          dshResponse: context.dshResponse,
+          instructions: state.instructions,
+          route: selection.route,
+          reasoningMode: Array.isArray(selection.reasoningModes) && selection.reasoningModes.length === 1 ? selection.reasoningModes[0] : undefined,
+          project: env.project,
+          include: state.include,
+          signal: controller.signal,
+        });
+        env.fetch(url, options)
+          .then(async (res) => {
+            let data = null;
+            try { data = await res.json(); } catch { /* non-JSON body */ }
+            if (!res.ok || !data || data.ok !== true || !data.task) {
+              const message = data && typeof data.message === 'string' && data.message ? data.message : `HTTP ${res.status}`;
+              reloadCatalogue = Boolean(data && data.code === 'advisor_model_unavailable');
+              setState({ start: { status: 'error', error: message } });
+              return;
+            }
+            saveLastInstructions(env.storage, state.instructions);
+            saveLastSelection(env.storage, selection.route);
+            upsertAdvisorActivity(env.storage, advisorTaskEntry(data.task, { dshTurn: context.dshTurn }));
+            // Accepted: close the dialog and return focus to DSH. The tracked
+            // status entry keeps the review reachable; nothing is cancelled here.
+            setState({
+              open: false,
+              view: 'review',
+              start: { status: 'idle', error: null },
+              activity: { status: 'ready', reviews: loadAdvisorActivity(env.storage), error: null },
+            });
+          })
+          .catch((error) => {
+            const aborted = error && (error.name === 'AbortError' || error.code === 20);
+            if (aborted && !state.open) {
+              // The dialog closed while the start request was still in flight: the
+              // rejection is that cancellation, not a product failure.
+              setState({ start: { status: 'idle', error: null } });
+              return;
+            }
+            setState({ start: { status: 'error', error: aborted ? 'cancelled' : (error instanceof Error ? error.message : String(error)) } });
+          })
+          .finally(() => { finish(); if (reloadCatalogue) loadModels(env); });
+      };
+
+      /**
+       * Reconcile the tracked activity with the sidecar, then persist it.
+       *
+       * The sidecar is authoritative for the tasks it still knows; a persisted
+       * task it no longer knows is shown as unavailable rather than as running.
+       * Completed results stay associated with their originating session/turn.
+       */
+      const refreshActivity = (env) => {
+        if (!env || !env.base || !env.token) return;
+        const controller = new AbortController();
+        setState({ activity: { status: 'loading', reviews: state.activity.reviews, error: null } });
+        const { url, options } = buildAdvisorListFetch({ base: env.base, token: env.token, limit: 50, signal: controller.signal });
+        env.fetch(url, options)
+          .then(async (res) => {
+            let data = null;
+            try { data = await res.json(); } catch { /* non-JSON body */ }
+            if (!res.ok || !data || data.ok !== true || !Array.isArray(data.reviews)) {
+              const message = data && typeof data.message === 'string' && data.message ? data.message : `HTTP ${res.status}`;
+              setState({ activity: { status: 'error', reviews: state.activity.reviews, error: message } });
+              return;
+            }
+            const merged = reconcileAdvisorActivity(loadAdvisorActivity(env.storage), data.reviews);
+            saveAdvisorActivity(env.storage, merged);
+            recordAdvisorResultsForActivity(env.storage, merged, env.sessionId);
+            setState({ activity: { status: 'ready', reviews: merged, error: null } });
+          })
+          .catch((error) => {
+            setState({ activity: { status: 'error', reviews: state.activity.reviews, error: error instanceof Error ? error.message : String(error) } });
+          });
+      };
+
       return {
         getSnapshot: () => state,
         subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
         get inFlight() { return inFlight; },
-        openDialog(context, instructions) {
-          state = {
-            ...state,
+        /** Show only what browser storage already knows, before the sidecar answers. */
+        hydrateActivity(storage) {
+          setState({ activity: { status: state.activity.status, reviews: loadAdvisorActivity(storage), error: state.activity.error } });
+        },
+        openReview(context, instructions) {
+          setState({
             open: true,
-            status: 'idle',
-            error: null,
+            view: 'review',
+            start: { status: 'idle', error: null },
             recovery: { status: 'idle', text: '', error: null },
+            // A new dialog starts from the captured turn with both text sources selected.
+            include: { request: true, response: true, project: true },
             context,
             instructions: typeof instructions === 'string' && instructions.trim() ? instructions : DEFAULT_INSTRUCTIONS,
-          };
-          notify();
+          });
+        },
+        openActivity() {
+          setState({ open: true, view: 'activity' });
+        },
+        setView(view) {
+          setState({ view: view === 'activity' ? 'activity' : 'review' });
         },
         closeDialog() {
           if (abortController) { try { abortController.abort(); } catch { /* already settled */ } }
-          state = { ...state, open: false, status: 'idle', error: null, recovery: { status: 'idle', text: '', error: null } };
-          notify();
+          inFlight = false;
+          abortController = null;
+          // Closing is a UI act: an accepted review keeps running and stays
+          // reachable from the activity entry.
+          setState({ open: false, view: 'review', start: { status: 'idle', error: null }, recovery: { status: 'idle', text: '', error: null } });
         },
         /** Clear a previous recovered answer (a new review or a new recovery starts clean). */
-        clearRecovery() { state = { ...state, recovery: { status: 'idle', text: '', error: null } }; notify(); },
+        clearRecovery() { setState({ recovery: { status: 'idle', text: '', error: null } }); },
         /** Fail the recovery itself without replacing the review error beside it. */
         failRecovery(message) {
-          state = { ...state, recovery: { status: 'error', text: '', error: typeof message === 'string' ? message : String(message) } };
-          notify();
+          setState({ recovery: { status: 'error', text: '', error: typeof message === 'string' ? message : String(message) } });
         },
-        setMode(mode) { state = { ...state, mode: mode === 'think' ? 'think' : 'normal' }; notify(); },
-        setInstructions(text) { state = { ...state, instructions: typeof text === 'string' ? text : '' }; notify(); },
-        fail(message) { state = { ...state, status: 'error', error: message }; notify(); },
-        runReview(env) {
-          if (inFlight || !state.open || !state.context) return;
-          inFlight = true;
-          const controller = new AbortController();
-          abortController = controller;
-          state = { ...state, status: 'loading', error: null };
-          notify();
-          const finish = () => { inFlight = false; abortController = null; };
-          const { url, options } = buildAdvisorFetch({
-            base: env.base,
-            token: env.token,
-            sessionId: env.sessionId,
-            humanRequest: state.context.humanRequest,
-            dshResponse: state.context.dshResponse,
-            instructions: state.instructions,
-            mode: state.mode,
-            project: env.project,
-            signal: controller.signal,
-          });
-          env.fetch(url, options)
-            .then(async (res) => {
-              let data = null;
-              try { data = await res.json(); } catch { /* non-JSON body */ }
-              if (!res.ok || !data || data.ok !== true) {
-                const message = data && typeof data.message === 'string' && data.message ? data.message : `HTTP ${res.status}`;
-                state = { ...state, status: 'error', error: message };
-              } else {
-                saveLastInstructions(env.storage, state.instructions);
-                // Issue #180: record the result for the reviewed DSH turn so
-                // the chat turnTail card can show it. This is browser-storage
-                // state, NOT a Session event — the review never enters model
-                // history. A reviewable turn without a resolvable DSH turn
-                // number (dshTurn) is not recordable and skips the card.
-                if (typeof state.context.dshTurn === 'number') {
-                  recordAdvisorResult(env.storage, {
-                    turn: state.context.dshTurn,
-                    reviewId: data.reviewId,
-                    mode: state.mode,
-                    model: data.model,
-                    text: data.text,
-                  });
-                }
-                state = { ...state, open: false, status: 'idle', error: null };
-              }
-            })
-            .catch((error) => {
-              const aborted = error && (error.name === 'AbortError' || error.code === 20);
-              if (aborted && !state.open) {
-                state = { ...state, status: 'idle', error: null };
-              } else if (aborted) {
-                // The dialog stayed open while the request was cancelled
-                // externally: surface it as a retryable error.
-                state = { ...state, status: 'error', error: 'cancelled' };
-              } else {
-                state = { ...state, status: 'error', error: error instanceof Error ? error.message : String(error) };
-              }
-            })
-            .finally(() => { finish(); notify(); });
+        setInstructions(text) { setState({ instructions: typeof text === 'string' ? text : '' }); },
+        setInclude(field, value) {
+          const key = field === 'request' || field === 'response' || field === 'project' ? field : null;
+          if (!key) return;
+          setState({ include: { ...state.include, [key]: value !== false } });
         },
+        /** Explicit user selection: it is authoritative until the user changes it. */
+        setSelection(route) {
+          const choice = state.models.choices.find((c) => c.route === route);
+          if (!choice) return;
+          setState({ selection: choice });
+        },
+        fail(message) { setState({ start: { status: 'error', error: message } }); },
+        applyModels,
+        loadModels,
+        startReview,
+        refreshActivity,
         /**
-         * Read the finalized answer of this session's retained Advisor conversation (issue #214).
-         * This is the recovery path behind a review the browser turn already gave up on: it never
-         * submits anything, so it can be retried freely, and a successful read is recorded exactly
-         * like a produced review (turn card + "Send to DSH").
+         * Read the finalized answer of this session's retained Advisor conversation
+         * (issue #214). Read-only: it never submits, so it can be retried freely, and
+         * a successful read is recorded exactly like a produced review.
+         *
+         * The route of a tracked failure is used when the caller names one (a failed
+         * review whose model was not the one currently displayed); otherwise the
+         * displayed selection decides.
          */
         recover(env) {
-          if (inFlight || !state.open || !state.context) return;
+          if (inFlight || !env || !env.base || !env.token) return;
           inFlight = true;
           const controller = new AbortController();
           abortController = controller;
-          state = { ...state, recovery: { status: 'loading', text: '', error: null } };
-          notify();
-          const finish = () => { inFlight = false; abortController = null; };
+          setState({ recovery: { status: 'loading', text: '', error: null } });
+          const finish = () => { inFlight = false; abortController = null; notify(); };
+          const route = typeof env.route === 'string' && env.route
+            ? env.route
+            : (state.selection ? state.selection.route : undefined);
           const { url, options } = buildAdvisorRecoverFetch({
             base: env.base,
             token: env.token,
             sessionId: env.sessionId,
-            mode: state.mode,
+            route,
             ...(env.timeoutMs !== undefined ? { timeoutMs: env.timeoutMs } : {}),
             signal: controller.signal,
           });
@@ -870,30 +1151,32 @@ window.__ModuleLoader__.load({
               const text = data && typeof data.text === 'string' ? data.text.trim() : '';
               if (!res.ok || !data || data.ok !== true || !text) {
                 const message = data && typeof data.message === 'string' && data.message ? data.message : `HTTP ${res.status}`;
-                state = { ...state, recovery: { status: 'error', text: '', error: message } };
+                setState({ recovery: { status: 'error', text: '', error: message } });
                 return;
               }
-              if (typeof state.context.dshTurn === 'number') {
+              const context = state.context;
+              if (context && typeof context.dshTurn === 'number') {
                 recordAdvisorResult(env.storage, {
-                  turn: state.context.dshTurn,
+                  turn: context.dshTurn,
                   reviewId: typeof data.reviewId === 'string' ? data.reviewId : '',
-                  mode: state.mode,
-                  model: typeof data.model === 'string' ? data.model : '',
+                  route: typeof data.route === 'string' ? data.route : '',
+                  providerLabel: typeof data.providerLabel === 'string' ? data.providerLabel : '',
+                  modelLabel: typeof data.modelLabel === 'string' ? data.modelLabel : '',
                   recovered: true,
                   text,
                 });
               }
-              state = { ...state, recovery: { status: 'ready', text, error: null } };
+              setState({ recovery: { status: 'ready', text, error: null } });
             })
             .catch((error) => {
               const aborted = error && (error.name === 'AbortError' || error.code === 20);
-              if (aborted) {
-                state = { ...state, recovery: { status: 'idle', text: '', error: null } };
-              } else {
-                state = { ...state, recovery: { status: 'error', text: '', error: error instanceof Error ? error.message : String(error) } };
-              }
+              setState({
+                recovery: aborted
+                  ? { status: 'idle', text: '', error: null }
+                  : { status: 'error', text: '', error: error instanceof Error ? error.message : String(error) },
+              });
             })
-            .finally(() => { finish(); notify(); });
+            .finally(finish);
         },
       };
     }
@@ -901,7 +1184,7 @@ window.__ModuleLoader__.load({
     const advisorStore = createAdvisorStore();
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ChatGPT Advisor result card + "Send to DSH" handoff (issue #180).
+    // Advisor result card + "Send to DSH" handoff (issue #180).
     //
     // The result is recorded in browser storage keyed by the reviewed DSH turn
     // (latest result per turn). It is NOT written to the Session log, so it
@@ -935,8 +1218,12 @@ window.__ModuleLoader__.load({
         out.push({
           turn: entry.turn,
           reviewId: typeof entry.reviewId === 'string' ? entry.reviewId : '',
-          mode: entry.mode === 'think' ? 'think' : 'normal',
-          model: typeof entry.model === 'string' ? entry.model : '',
+          // Provenance of the provider/model the review ran with (issue #224). It
+          // replaces the retired Normal/Think pair: the card shows the recorded
+          // provider-qualified identity instead of a hardcoded mode.
+          route: typeof entry.route === 'string' ? entry.route : '',
+          providerLabel: typeof entry.providerLabel === 'string' ? entry.providerLabel : '',
+          modelLabel: typeof entry.modelLabel === 'string' ? entry.modelLabel : '',
           recovered: entry.recovered === true,
           text: entry.text,
           at: typeof entry.at === 'number' ? entry.at : 0,
@@ -972,8 +1259,9 @@ window.__ModuleLoader__.load({
       const entry = {
         turn: result.turn,
         reviewId: typeof result.reviewId === 'string' ? result.reviewId : '',
-        mode: result.mode === 'think' ? 'think' : 'normal',
-        model: typeof result.model === 'string' ? result.model : '',
+        route: typeof result.route === 'string' ? result.route : '',
+        providerLabel: typeof result.providerLabel === 'string' ? result.providerLabel : '',
+        modelLabel: typeof result.modelLabel === 'string' ? result.modelLabel : '',
         recovered: result.recovered === true,
         text: result.text,
         at: Date.now(),
@@ -989,9 +1277,173 @@ window.__ModuleLoader__.load({
       return results.find((entry) => entry && entry.turn === turn) || null;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tracked Advisor activity (issue #224).
+    //
+    // The client persists task identity/display metadata so observation resumes
+    // after the dialog closes, a remount, a session switch or a browser refresh,
+    // while the task itself stays owned by the sidecar process. The sidecar is
+    // authoritative for the status of the tasks it still knows; a persisted task
+    // it no longer knows is shown as unavailable, never as still running.
+    // ─────────────────────────────────────────────────────────────────────────
+    const TASK_STATES = ['queued', 'running', 'completed', 'failed', 'interrupted'];
+    const ADVISOR_TASK_UNAVAILABLE_STATE = 'unavailable';
+
+    /** One task entry from the sidecar's task record (or from storage). */
+    function advisorTaskEntry(task, extra) {
+      if (!task || typeof task !== 'object') return null;
+      if (typeof task.reviewId !== 'string' || !task.reviewId) return null;
+      const provenance = task.provenance && typeof task.provenance === 'object' ? task.provenance : {};
+      const providerLabel = typeof provenance.providerLabel === 'string' ? provenance.providerLabel : '';
+      const modelLabel = typeof provenance.modelLabel === 'string' ? provenance.modelLabel : '';
+      const failure = task.failure && typeof task.failure === 'object' ? task.failure : null;
+      return {
+        reviewId: task.reviewId,
+        sessionId: typeof task.sessionId === 'string' ? task.sessionId : '',
+        reviewedTurnId: typeof task.reviewedTurnId === 'string' ? task.reviewedTurnId : '',
+        state: TASK_STATES.includes(task.state) ? task.state : 'failed',
+        route: typeof provenance.route === 'string' ? provenance.route : '',
+        providerId: typeof provenance.providerId === 'string' ? provenance.providerId : '',
+        providerLabel,
+        modelLabel,
+        label: [providerLabel, modelLabel].filter(Boolean).join(' \u2014 ') || (typeof provenance.route === 'string' ? provenance.route : ''),
+        instructions: task.source && typeof task.source.instructions === 'string' ? task.source.instructions : '',
+        createdAt: typeof task.createdAt === 'number' ? task.createdAt : Date.now(),
+        completedAt: typeof task.completedAt === 'number' ? task.completedAt : undefined,
+        text: typeof task.text === 'string' ? task.text : '',
+        capturedAt: typeof task.capturedAt === 'number' ? task.capturedAt : undefined,
+        failure: failure && typeof failure.message === 'string'
+          ? { code: typeof failure.code === 'string' ? failure.code : '', message: failure.message }
+          : null,
+        dshTurn: extra && typeof extra.dshTurn === 'number' ? extra.dshTurn : undefined,
+      };
+    }
+
+    /** Validate persisted activity JSON into normalized entries; never throws. */
+    function parseAdvisorActivity(raw) {
+      if (!raw) return [];
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return [];
+      }
+      if (!Array.isArray(parsed)) return [];
+      const out = [];
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (typeof entry.reviewId !== 'string' || !entry.reviewId) continue;
+        out.push({
+          reviewId: entry.reviewId,
+          sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : '',
+          reviewedTurnId: typeof entry.reviewedTurnId === 'string' ? entry.reviewedTurnId : '',
+          state: TASK_STATES.includes(entry.state) ? entry.state : ADVISOR_TASK_UNAVAILABLE_STATE,
+          route: typeof entry.route === 'string' ? entry.route : '',
+          providerId: typeof entry.providerId === 'string' ? entry.providerId : '',
+          providerLabel: typeof entry.providerLabel === 'string' ? entry.providerLabel : '',
+          modelLabel: typeof entry.modelLabel === 'string' ? entry.modelLabel : '',
+          label: typeof entry.label === 'string' ? entry.label : '',
+          instructions: typeof entry.instructions === 'string' ? entry.instructions : '',
+          createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : 0,
+          completedAt: typeof entry.completedAt === 'number' ? entry.completedAt : undefined,
+          text: typeof entry.text === 'string' ? entry.text : '',
+          capturedAt: typeof entry.capturedAt === 'number' ? entry.capturedAt : undefined,
+          failure: entry.failure && typeof entry.failure.message === 'string'
+            ? { code: typeof entry.failure.code === 'string' ? entry.failure.code : '', message: entry.failure.message }
+            : null,
+          dshTurn: typeof entry.dshTurn === 'number' ? entry.dshTurn : undefined,
+        });
+      }
+      return out;
+    }
+
+    function loadAdvisorActivity(storage) {
+      try {
+        return parseAdvisorActivity(storage ? storage.getItem(ACTIVITY_KEY) : null);
+      } catch {
+        return [];
+      }
+    }
+
+    function saveAdvisorActivity(storage, entries) {
+      try {
+        if (storage) storage.setItem(ACTIVITY_KEY, JSON.stringify(entries.slice(0, 50)));
+      } catch {
+        // Browser storage may be unavailable; the activity stays session-local.
+      }
+    }
+
+    /** Insert or update one tracked task, newest first. */
+    function upsertAdvisorActivity(storage, entry) {
+      if (!entry) return loadAdvisorActivity(storage);
+      const next = [entry, ...loadAdvisorActivity(storage).filter((item) => item.reviewId !== entry.reviewId)].slice(0, 50);
+      saveAdvisorActivity(storage, next);
+      return next;
+    }
+
+    /**
+     * Merge the persisted activity with the sidecar's authoritative answer.
+     *
+     * A sidecar task always wins. A persisted task the sidecar no longer knows
+     * keeps its recorded result when it completed, and becomes `unavailable`
+     * when it did not: a review whose owner is gone is never shown as running.
+     */
+    function reconcileAdvisorActivity(persisted, serverTasks) {
+      const fromServer = [];
+      for (const task of Array.isArray(serverTasks) ? serverTasks : []) {
+        const entry = advisorTaskEntry(task, {});
+        if (entry) fromServer.push(entry);
+      }
+      const known = new Set(fromServer.map((entry) => entry.reviewId));
+      const kept = [];
+      for (const entry of Array.isArray(persisted) ? persisted : []) {
+        if (known.has(entry.reviewId)) continue;
+        const terminal = entry.state === 'completed' || entry.state === 'failed' || entry.state === 'interrupted';
+        kept.push(
+          terminal || entry.state === ADVISOR_TASK_UNAVAILABLE_STATE
+            ? entry
+            : { ...entry, state: ADVISOR_TASK_UNAVAILABLE_STATE, failure: { code: 'advisor_task_unavailable', message: 'This review is no longer available on this sidecar.' } },
+        );
+      }
+      // Preserve the persisted per-review DSH turn identity: the sidecar does not
+      // know which chat turn the client associated a review with.
+      const turns = new Map();
+      for (const entry of Array.isArray(persisted) ? persisted : []) {
+        if (typeof entry.dshTurn === 'number') turns.set(entry.reviewId, entry.dshTurn);
+      }
+      const withTurns = (entry) => (turns.has(entry.reviewId) ? { ...entry, dshTurn: turns.get(entry.reviewId) } : entry);
+      const merged = [...fromServer.map(withTurns), ...kept.map(withTurns)];
+      merged.sort((left, right) => (right.createdAt || 0) - (left.createdAt || 0));
+      return merged;
+    }
+
+    /**
+     * Record the result of every newly completed review of the CURRENT session.
+     *
+     * A completed review of another session is never recorded here: the turn card
+     * belongs to the session/turn it was produced for, and writing it into the
+     * current chat would be cross-session contamination.
+     */
+    function recordAdvisorResultsForActivity(storage, reviews, currentSessionId) {
+      for (const entry of Array.isArray(reviews) ? reviews : []) {
+        if (!entry || entry.state !== 'completed') continue;
+        if (!entry.text || typeof entry.dshTurn !== 'number') continue;
+        if (!currentSessionId || entry.sessionId !== currentSessionId) continue;
+        recordAdvisorResult(storage, {
+          turn: entry.dshTurn,
+          reviewId: entry.reviewId,
+          route: entry.route,
+          providerLabel: entry.providerLabel,
+          modelLabel: entry.modelLabel,
+          recovered: typeof entry.capturedAt === 'number',
+          text: entry.text,
+        });
+      }
+    }
+
     /**
      * The minimum handoff prompt (issue #180): the full review, clearly marked
-     * as coming from ChatGPT Advisor, asking the agent to evaluate it against
+     * as coming from the Advisor, asking the agent to evaluate it against
      * the current task and apply the relevant recommendations. Excludes Advisor
      * history, internal IDs, HTML/UI markup, bridge details, and transport terms.
      */
@@ -999,7 +1451,7 @@ window.__ModuleLoader__.load({
       const review = result && typeof result.text === 'string' ? result.text.trim() : '';
       if (!review) return '';
       return (
-        'ChatGPT Advisor review:\n\n' +
+        'Advisor review:\n\n' +
         review +
         '\n\n' +
         'Evaluate this review against the current task and apply the relevant recommendations.\n' +
@@ -1121,10 +1573,9 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'cwg-advisor-card', 'data-advisor-turn': String(turn) },
         h('div', { className: 'cwg-advisor-card-head' },
-          h('span', { className: 'cwg-advisor-card-title' }, t('advisor.card.title', 'ChatGPT Advisor')),
+          h('span', { className: 'cwg-advisor-card-title' }, t('advisor.card.title', 'Advisor')),
           h('span', { className: 'cwg-advisor-card-meta' },
-            t(result.mode === 'think' ? 'advisor.card.modeThink' : 'advisor.card.modeNormal', result.mode === 'think' ? 'Think' : 'Normal')
-            + (result.model ? ` · ${result.model}` : '')
+            ([result.providerLabel, result.modelLabel].filter(Boolean).join(' \u2014 ') || result.route || '')
             + (result.recovered ? ` · ${t('advisor.card.recovered', 'recovered')}` : '')),
         ),
         h('pre', { className: 'cwg-advisor-card-body' }, result.text),
@@ -1152,7 +1603,10 @@ window.__ModuleLoader__.load({
       return { snapshot, inFlight: store.inFlight };
     }
 
-    /** Composer control: visible only with a reviewable turn; disabled while DSH generates or a review is in flight. */
+    /**
+     * Composer control: the Advisor launch action for a reviewable turn, plus the
+     * persistent activity entry while any tracked review exists.
+     */
     function AdvisorReviewButton(t, props) {
       // Two stable-reference selectors (never a fresh object): the selector
       // hooks cache by reference, and order/nodes are stable across snapshots.
@@ -1160,18 +1614,36 @@ window.__ModuleLoader__.load({
       const nodes = typeof props.useChat === 'function' ? props.useChat((s) => s.nodes) : undefined;
       const chat = order && nodes ? { order, nodes } : null;
       const running = typeof props.useSession === 'function' ? props.useSession((s) => s.running) : false;
-      const { snapshot, inFlight } = useAdvisorState(advisorStore);
+      const { snapshot } = useAdvisorState(advisorStore);
       if (!props.sessionId) return null;
       const reviewable = selectReviewableTurn(chat);
-      if (!reviewable) return null;
-      return h('button', {
-        type: 'button',
-        className: 'cwg-advisor-btn',
-        disabled: !canStartReview({ running, inFlight, reviewable }),
-        title: t('advisor.btnHint', 'Review the last completed turn with ChatGPT in a separate Advisor conversation.'),
-        'aria-label': t('advisor.btn', 'Review with ChatGPT'),
-        onClick: () => advisorStore.openDialog(reviewable, loadLastInstructions(window.localStorage)),
-      }, t('advisor.btn', 'Review with ChatGPT'));
+      const reviews = Array.isArray(snapshot.activity.reviews) ? snapshot.activity.reviews : [];
+      const active = reviews.filter((entry) => entry.state === 'queued' || entry.state === 'running').length;
+      if (!reviewable && reviews.length === 0) return null;
+      return h('div', { className: 'cwg-advisor-controls' },
+        reviewable
+          ? h('button', {
+              type: 'button',
+              className: 'cwg-advisor-btn',
+              disabled: !canStartReview({ running, reviewable }),
+              title: t('advisor.btnHint', 'Review the last completed turn with the selected WebChat model in a separate Advisor conversation.'),
+              'aria-label': t('advisor.btn', 'Review with Advisor'),
+              onClick: () => advisorStore.openReview(reviewable, loadLastInstructions(window.localStorage)),
+            }, t('advisor.btn', 'Review with Advisor'))
+          : null,
+        active > 0
+          ? h('span', { className: 'cwg-advisor-busy' }, t('advisor.btnBusy', 'Advisor review running…'))
+          : null,
+        reviews.length > 0
+          ? h('button', {
+              type: 'button',
+              className: 'cwg-advisor-btn',
+              title: t('advisor.activity.open', 'Advisor activity'),
+              'aria-label': t('advisor.activity.open', 'Advisor activity'),
+              onClick: () => advisorStore.openActivity(),
+            }, `${t('advisor.activity.open', 'Advisor activity')} (${reviews.length})`)
+          : null,
+      );
     }
 
     /**
@@ -1182,14 +1654,54 @@ window.__ModuleLoader__.load({
      * reads as a panel under the text box. The dialog therefore leaves that flow explicitly
      * (`position: fixed` backdrop) and centres itself over the composer.
      */
+    /**
+     * The Advisor panel. It is a real modal over the composer (it leaves the composer's flow with a
+     * fixed backdrop, per the slot's zero-height anchor) and has two views:
+     *
+     * - the **review launcher**: the dynamic, provider-qualified model choice, the inclusion
+     *   checkboxes, the editable instructions, and the start action;
+     * - the **tracked activity list**: active reviews and recent completed results, including the
+     *   ones produced in other DSH sessions.
+     *
+     * Reading a retained answer (#214) stays available from the launcher.
+     */
     function AdvisorReviewDialog(t, props, configForm) {
       const { snapshot, inFlight } = useAdvisorState(advisorStore);
       const projection = typeof props.useProjection === 'function' ? props.useProjection(ADVISOR_PROJECTION_KEY) : undefined;
       const workspaceItems = typeof props.useWorkspaces === 'function' ? props.useWorkspaces((s) => s.items) : undefined;
+      // Two stable-reference selectors (never a fresh object), so the activity view can offer a
+      // review of the current session's latest turn.
+      const order = typeof props.useChat === 'function' ? props.useChat((s) => s.order) : undefined;
+      const nodes = typeof props.useChat === 'function' ? props.useChat((s) => s.nodes) : undefined;
       // Transient copy feedback for the recovered answer ('' = nothing to say).
       const [copyState, setCopyState] = React.useState('');
 
       const open = snapshot.open === true;
+      const view = snapshot.view === 'activity' ? 'activity' : 'review';
+      const sessionId = props.sessionId;
+      const base = resolveSidecarBase(configForm);
+      const token = projection && typeof projection.controlToken === 'string' ? projection.controlToken : undefined;
+      const available = Boolean(base && token);
+      const modelsStatus = snapshot.models.status;
+      const choices = Array.isArray(snapshot.models.choices) ? snapshot.models.choices : [];
+      const reviews = Array.isArray(snapshot.activity.reviews) ? snapshot.activity.reviews : [];
+      const activeReviews = reviews.filter((entry) => entry.state === 'queued' || entry.state === 'running').length;
+      const chat = order && nodes ? { order, nodes } : null;
+
+      /** A fresh request environment. The endpoint/token are resolved on every call, never cached. */
+      const makeEnv = () => (base && token ? {
+        base,
+        token,
+        sessionId,
+        project: selectProjectName(workspaceItems, sessionId),
+        storage: window.localStorage,
+        lastRoute: loadLastSelection(window.localStorage),
+        fetch: (url, options) => fetch(url, options),
+      } : null);
+
+      // Show what browser storage already knows, before the sidecar answers.
+      React.useEffect(() => { advisorStore.hydrateActivity(window.localStorage); }, []);
+
       React.useEffect(() => {
         if (!open) return undefined;
         const onKey = (event) => { if (event.key === 'Escape') advisorStore.closeDialog(); };
@@ -1197,9 +1709,41 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener('keydown', onKey);
       }, [open]);
 
-      if (!snapshot.open || !snapshot.context) return null;
+      // Reconcile the tracked activity with the sidecar. The panel refreshes on open, and while any
+      // review is still active it also keeps observing it with the panel closed: a review completes
+      // in the background, and its result must reach the turn card without the user reopening
+      // anything. Nothing polls once no review is active.
+      React.useEffect(() => {
+        if (!available) return undefined;
+        const current = makeEnv();
+        if (!current) return undefined;
+        if (open) advisorStore.refreshActivity(current);
+        if (activeReviews === 0) return undefined;
+        const timer = setInterval(() => advisorStore.refreshActivity(current), open ? 3000 : 5000);
+        return () => clearInterval(timer);
+      }, [open, available, activeReviews, base, token, sessionId]);
 
-      const project = selectProjectName(workspaceItems, props.sessionId);
+      // The eligible catalogue is loaded when the launcher is shown, and explicitly on retry.
+      React.useEffect(() => {
+        if (!open || view !== 'review' || !available || modelsStatus !== 'idle') return;
+        const current = makeEnv();
+        if (current) advisorStore.loadModels(current);
+      }, [open, view, available, modelsStatus, base, token, sessionId]);
+
+      if (!open) return null;
+      const context = snapshot.context;
+      if (view === 'review' && !context) return null;
+
+      const project = selectProjectName(workspaceItems, sessionId);
+      const selection = snapshot.selection;
+      const selectionEligible = Boolean(selection) && choices.some((choice) => choice.route === selection.route);
+      const sourceContext = context
+        ? { humanRequest: context.humanRequest, dshResponse: context.dshResponse, project }
+        : null;
+      const sourceSelected = hasSelectedSource(sourceContext, snapshot.include);
+      const starting = snapshot.start.status === 'starting';
+      const canSubmit = Boolean(selection) && selectionEligible && sourceSelected && !starting && !inFlight;
+
       /** Modal keyboard contract: Tab cycles inside the dialog, never into the composer behind it. */
       function onDialogKeyDown(event) {
         if (event.key !== 'Tab') return;
@@ -1217,34 +1761,35 @@ window.__ModuleLoader__.load({
         if (!event.shiftKey && (!inside || active === last)) { event.preventDefault(); first.focus(); }
       }
 
-      function onReview() {
-        const base = resolveSidecarBase(configForm);
-        const token = projection && typeof projection.controlToken === 'string' ? projection.controlToken : undefined;
-        if (!base) { advisorStore.fail(t('advisor.errNoEndpoint', 'The sidecar endpoint is not configured.')); return; }
-        if (!token) { advisorStore.fail(t('advisor.errNoToken', 'The sidecar control token is unavailable in this profile.')); return; }
-        advisorStore.runReview({
-          base,
-          token,
-          sessionId: props.sessionId,
-          project,
-          storage: window.localStorage,
-          fetch: (url, options) => fetch(url, options),
-        });
+      function onRetryModels() {
+        const current = makeEnv();
+        if (current) advisorStore.loadModels(current);
       }
 
-      /** Read the answer ChatGPT already produced; read-only, so it can be retried freely. */
+      function onReview() {
+        if (!base) { advisorStore.fail(t('advisor.errNoEndpoint', 'The sidecar endpoint is not configured.')); return; }
+        if (!token) { advisorStore.fail(t('advisor.errNoToken', 'The sidecar control token is unavailable in this profile.')); return; }
+        const current = makeEnv();
+        if (current) advisorStore.startReview(current);
+      }
+
+      /** Read the answer the provider already produced; read-only, so it can be retried freely. */
       function onRecover() {
-        const base = resolveSidecarBase(configForm);
-        const token = projection && typeof projection.controlToken === 'string' ? projection.controlToken : undefined;
         if (!base) { advisorStore.failRecovery(t('advisor.errNoEndpoint', 'The sidecar endpoint is not configured.')); return; }
         if (!token) { advisorStore.failRecovery(t('advisor.errNoToken', 'The sidecar control token is unavailable in this profile.')); return; }
-        advisorStore.recover({
-          base,
-          token,
-          sessionId: props.sessionId,
-          storage: window.localStorage,
-          fetch: (url, options) => fetch(url, options),
-        });
+        const current = makeEnv();
+        if (current) advisorStore.recover(current);
+      }
+
+      /**
+       * Read the retained answer of one tracked review. A failed task names its own route, so the
+       * recovery reads the conversation the review actually used, not the currently displayed one.
+       */
+      function onRecoverEntry(entry) {
+        if (!base) { advisorStore.failRecovery(t('advisor.errNoEndpoint', 'The sidecar endpoint is not configured.')); return; }
+        if (!token) { advisorStore.failRecovery(t('advisor.errNoToken', 'The sidecar control token is unavailable in this profile.')); return; }
+        const current = makeEnv();
+        if (current) advisorStore.recover({ ...current, ...(entry && entry.route ? { route: entry.route } : {}) });
       }
 
       /** Copy the recovered answer, falling back to telling the user to select it. */
@@ -1262,12 +1807,244 @@ window.__ModuleLoader__.load({
         );
       }
 
+      /** Start a new review explicitly; a failed review is never retried automatically. */
+      function onStartNewReview() {
+        const reviewable = selectReviewableTurn(chat);
+        if (!reviewable) { advisorStore.closeDialog(); return; }
+        advisorStore.openReview(reviewable, loadLastInstructions(window.localStorage));
+        const current = makeEnv();
+        if (current) advisorStore.loadModels(current);
+      }
+
+      /** Open one tracked result for the current session's turn card, then close. */
+      function onOpenResult(entry) {
+        if (entry && entry.text && typeof entry.dshTurn === 'number' && entry.sessionId === sessionId) {
+          recordAdvisorResult(window.localStorage, {
+            turn: entry.dshTurn,
+            reviewId: entry.reviewId,
+            route: entry.route,
+            providerLabel: entry.providerLabel,
+            modelLabel: entry.modelLabel,
+            recovered: typeof entry.capturedAt === 'number',
+            text: entry.text,
+          });
+        }
+        advisorStore.closeDialog();
+      }
+
+      const modelSection = h('div', null,
+        h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.model', 'Model')),
+        modelsStatus === 'loading' && choices.length === 0
+          ? h('div', { className: 'cwg-advisor-note' }, t('advisor.dialog.modelLoading', 'Loading available models…'))
+          : null,
+        modelsStatus === 'error'
+          ? h('div', { className: 'cwg-advisor-recover' },
+              h('div', { className: 'cwg-advisor-error', role: 'alert' },
+                t('advisor.dialog.modelFailed', 'The available models could not be loaded.'),
+                snapshot.models.error ? ` (${snapshot.models.error})` : ''),
+              h('div', { className: 'cwg-advisor-recover-actions' },
+                h('button', {
+                  type: 'button',
+                  className: 'cwg-btn cwg-secondary',
+                  onClick: onRetryModels,
+                }, t('advisor.dialog.modelRetry', 'Retry')),
+              ),
+            )
+          : null,
+        modelsStatus === 'ready' && choices.length === 0
+          ? h('div', { className: 'cwg-advisor-error', role: 'alert' }, t('advisor.dialog.modelNone', 'No supported authenticated WebChat model is available.'))
+          : null,
+        choices.length > 0
+          ? h('select', {
+              className: 'cwg-advisor-model',
+              value: selection ? selection.route : '',
+              disabled: starting,
+              'aria-label': t('advisor.dialog.model', 'Model'),
+              onChange: (event) => advisorStore.setSelection(event.target.value),
+            },
+              selection && !selectionEligible
+                ? h('option', { value: selection.route },
+                    `${selection.label} (${t('advisor.dialog.modelUnavailableShort', 'unavailable')})`)
+                : null,
+              ...choices.map((choice) => h('option', { key: choice.route, value: choice.route }, choice.label)),
+            )
+          : null,
+        selection && !selectionEligible
+          ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
+              t('advisor.dialog.modelUnavailable', 'This selection is no longer available. Choose an eligible model.'))
+          : null,
+      );
+
+      const includeSection = h('div', null,
+        h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.include', 'Include in the review')),
+        h('div', { className: 'cwg-advisor-includes' },
+          !context ? null : h('label', null,
+            h('input', {
+              type: 'checkbox',
+              checked: snapshot.include.request !== false,
+              disabled: !context.humanRequest,
+              onChange: (event) => advisorStore.setInclude('request', event.target.checked),
+            }),
+            t('advisor.dialog.includeRequest', 'Human request'),
+          ),
+          !context ? null : h('label', null,
+            h('input', {
+              type: 'checkbox',
+              checked: snapshot.include.response !== false,
+              disabled: !context.dshResponse,
+              onChange: (event) => advisorStore.setInclude('response', event.target.checked),
+            }),
+            t('advisor.dialog.includeResponse', 'DSH response'),
+          ),
+          project ? h('label', null,
+            h('input', {
+              type: 'checkbox',
+              checked: snapshot.include.project !== false,
+              onChange: (event) => advisorStore.setInclude('project', event.target.checked),
+            }),
+            t('advisor.dialog.includeProject', 'Project name'),
+          ) : null,
+        ),
+        !sourceSelected
+          ? h('div', { className: 'cwg-advisor-error', role: 'alert' }, t('advisor.dialog.noSource', 'Select at least one source to review.'))
+          : null,
+      );
+
+      const recoverySection = snapshot.recovery.status === 'ready' && snapshot.recovery.text
+        ? h('div', { className: 'cwg-advisor-result' },
+            h('div', { className: 'cwg-advisor-section-label' }, t('advisor.result.title', 'Recovered review')),
+            h('textarea', {
+              className: 'cwg-advisor-result-body',
+              readOnly: true,
+              spellCheck: false,
+              value: snapshot.recovery.text,
+              'aria-label': t('advisor.result.title', 'Recovered review'),
+              onFocus: (event) => { if (typeof event.target.select === 'function') event.target.select(); },
+            }),
+            h('div', { className: 'cwg-advisor-result-note' },
+              t('advisor.result.recorded', 'Recorded for this turn: it also appears in the turn card and can be sent to DSH.')),
+            h('div', { className: 'cwg-advisor-recover-actions' },
+              h('button', {
+                type: 'button',
+                className: 'cwg-btn cwg-secondary',
+                onClick: onCopyRecovered,
+              }, t('advisor.result.copy', 'Copy')),
+              copyState ? h('span', { className: 'cwg-advisor-context-label' }, copyState) : null,
+            ),
+          )
+        : null;
+
+      const reviewBody = h('div', { className: 'cwg-advisor-review' },
+        modelSection,
+        includeSection,
+        h('div', null,
+          h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.instructions', 'Review instructions')),
+          h('textarea', {
+            className: 'cwg-advisor-instructions',
+            value: snapshot.instructions,
+            disabled: starting,
+            onChange: (event) => advisorStore.setInstructions(event.target.value),
+          }),
+        ),
+        h('div', null,
+          h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.context', 'Context (read-only)')),
+          h('div', { className: 'cwg-advisor-context' },
+            h('div', null,
+              h('div', { className: 'cwg-advisor-context-label' }, t('advisor.dialog.humanRequest', 'Last human request')),
+              h('pre', null, context ? context.humanRequest : ''),
+            ),
+            h('div', null,
+              h('div', { className: 'cwg-advisor-context-label' }, t('advisor.dialog.dshResponse', 'Last DSH response')),
+              h('pre', null, context ? context.dshResponse : ''),
+            ),
+          ),
+        ),
+        snapshot.start.status === 'error' && snapshot.start.error
+          ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
+              t('advisor.dialog.error', 'The review could not be started.'),
+              snapshot.start.error !== 'cancelled' ? ` (${snapshot.start.error})` : '',
+            )
+          : null,
+        // A failed review is not a lost answer: the provider usually finished it in the retained
+        // conversation, and the recovery reads it back without sending anything (issue #214).
+        snapshot.start.status === 'error' || snapshot.recovery.status !== 'idle'
+          ? h('div', { className: 'cwg-advisor-recover' },
+              h('div', { className: 'cwg-advisor-recover-actions' },
+                h('button', {
+                  type: 'button',
+                  className: 'cwg-btn cwg-secondary',
+                  title: t('advisor.recover.hint', 'Read the answer the provider already produced in this Advisor conversation. Nothing is sent.'),
+                  disabled: snapshot.recovery.status === 'loading' || inFlight,
+                  onClick: onRecover,
+                }, snapshot.recovery.status === 'loading'
+                  ? t('advisor.recover.loading', 'Reading the retained answer')
+                  : t('advisor.recover.action', 'Recover retained answer')),
+              ),
+              snapshot.recovery.status === 'error' && snapshot.recovery.error
+                ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
+                    t('advisor.recover.failed', 'The answer could not be read.'),
+                    ` (${snapshot.recovery.error})`)
+                : null,
+            )
+          : null,
+        recoverySection,
+      );
+
+      const activityBody = h('div', { className: 'cwg-advisor-activity' },
+        snapshot.activity.status === 'error' && snapshot.activity.error
+          ? h('div', { className: 'cwg-advisor-error', role: 'alert' }, snapshot.activity.error)
+          : null,
+        reviews.length === 0
+          ? h('div', { className: 'cwg-advisor-note' }, t('advisor.activity.empty', 'No Advisor reviews yet.'))
+          : null,
+        ...reviews.map((entry) => h('div', { key: entry.reviewId, className: 'cwg-advisor-activity-item' },
+          h('div', { className: 'cwg-advisor-activity-head' },
+            h('span', { className: 'cwg-advisor-activity-label' }, entry.label || entry.route || t('advisor.task.title', 'Advisor review')),
+            entry.sessionId === sessionId
+              ? h('span', { className: 'cwg-advisor-activity-meta' }, t('advisor.activity.thisSession', 'this session'))
+              : null,
+            h('span', {
+              className: `cwg-advisor-activity-state ${entry.state === 'completed' ? 'cwg-ok' : entry.state === 'failed' || entry.state === 'interrupted' || entry.state === 'unavailable' ? 'cwg-err' : ''}`,
+            }, t(`advisor.state.${entry.state}`, entry.state)),
+          ),
+          h('div', { className: 'cwg-advisor-activity-meta' },
+            [entry.reviewedTurnId, entry.createdAt ? new Date(entry.createdAt).toLocaleString() : ''].filter(Boolean).join(' · ')),
+          entry.text ? h('pre', { className: 'cwg-advisor-activity-body' }, entry.text) : null,
+          entry.failure ? h('div', { className: 'cwg-advisor-error', role: 'alert' }, entry.failure.message) : null,
+          entry.text
+            ? (entry.sessionId === sessionId && typeof entry.dshTurn === 'number'
+                ? h('div', { className: 'cwg-advisor-recover-actions' },
+                    h('button', {
+                      type: 'button',
+                      className: 'cwg-btn cwg-secondary',
+                      onClick: () => onOpenResult(entry),
+                    }, t('advisor.activity.openResult', 'Open result')),
+                  )
+                : null)
+            // A review that did not produce text keeps the read-only recovery of #214: the provider
+            // may have finished the answer even though the task failed.
+            : h('div', { className: 'cwg-advisor-recover-actions' },
+                h('button', {
+                  type: 'button',
+                  className: 'cwg-btn cwg-secondary',
+                  title: t('advisor.recover.hint', 'Read the answer the provider already produced in this Advisor conversation. Nothing is sent.'),
+                  disabled: snapshot.recovery.status === 'loading' || inFlight,
+                  onClick: () => onRecoverEntry(entry),
+                }, snapshot.recovery.status === 'loading'
+                  ? t('advisor.recover.loading', 'Reading the retained answer')
+                  : t('advisor.recover.action', 'Recover retained answer')),
+              ),
+        )),
+      );
+
+      const canOfferNewReview = Boolean(selectReviewableTurn(chat));
+
       return h('div', {
         className: 'cwg-advisor-backdrop',
         onClick: (event) => {
-          // Only a click on the backdrop itself dismisses, and never mid-review: the request is
-          // tied to this dialog and cancelling it by an outside click would lose the review.
-          if (event.target === event.currentTarget && snapshot.status !== 'loading') advisorStore.closeDialog();
+          // Only a click on the backdrop itself dismisses, and never while the start
+          // request is still being accepted.
+          if (event.target === event.currentTarget && !starting) advisorStore.closeDialog();
         },
         onKeyDown: onDialogKeyDown,
       },
@@ -1275,7 +2052,9 @@ window.__ModuleLoader__.load({
           className: 'cwg-advisor-dialog',
           role: 'dialog',
           'aria-modal': 'true',
-          'aria-label': t('advisor.dialog.title', 'Review with ChatGPT'),
+          'aria-label': view === 'activity'
+            ? t('advisor.activity.title', 'Advisor activity')
+            : t('advisor.dialog.title', 'Review with Advisor'),
           tabIndex: -1,
           ref: (node) => {
             // Move focus into the modal once, on mount, so Escape/Tab act inside it instead of on
@@ -1287,119 +2066,67 @@ window.__ModuleLoader__.load({
         },
           h('style', null, CSS),
           h('div', { className: 'cwg-advisor-head' },
-            h('span', { className: 'cwg-advisor-title' }, t('advisor.dialog.title', 'Review with ChatGPT')),
-            h('button', {
-              type: 'button',
-              className: 'cwg-advisor-close',
-              'aria-label': t('advisor.dialog.cancel', 'Cancel'),
-              disabled: snapshot.status === 'loading',
-              onClick: () => advisorStore.closeDialog(),
-            }, '\u00d7'),
+            h('span', { className: 'cwg-advisor-title' },
+              view === 'activity'
+                ? t('advisor.activity.title', 'Advisor activity')
+                : t('advisor.dialog.title', 'Review with Advisor')),
+            view === 'activity'
+              ? h('button', {
+                  type: 'button',
+                  className: 'cwg-advisor-close',
+                  'aria-label': t('advisor.activity.close', 'Close'),
+                  onClick: () => advisorStore.setView('review'),
+                }, '\u00d7')
+              : h('button', {
+                  type: 'button',
+                  className: 'cwg-advisor-close',
+                  'aria-label': t('advisor.dialog.cancel', 'Cancel'),
+                  disabled: starting,
+                  onClick: () => advisorStore.closeDialog(),
+                }, '\u00d7'),
           ),
-          h('div', null,
-            h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.mode', 'Model')),
-            h('div', { className: 'cwg-advisor-mode' },
-              h('button', {
-                type: 'button',
-                'aria-pressed': String(snapshot.mode === 'normal'),
-                disabled: snapshot.status === 'loading',
-                onClick: () => advisorStore.setMode('normal'),
-              }, t('advisor.dialog.modeNormal', 'Normal')),
-              h('button', {
-                type: 'button',
-                'aria-pressed': String(snapshot.mode === 'think'),
-                disabled: snapshot.status === 'loading',
-                onClick: () => advisorStore.setMode('think'),
-              }, t('advisor.dialog.modeThink', 'Think')),
-            ),
-          ),
-          h('div', null,
-            h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.instructions', 'Review instructions')),
-            h('textarea', {
-              className: 'cwg-advisor-instructions',
-              value: snapshot.instructions,
-              disabled: snapshot.status === 'loading',
-              onChange: (event) => advisorStore.setInstructions(event.target.value),
-            }),
-          ),
-          h('div', null,
-            h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.context', 'Context (read-only)')),
-            h('div', { className: 'cwg-advisor-context' },
-              h('div', null,
-                h('div', { className: 'cwg-advisor-context-label' }, t('advisor.dialog.humanRequest', 'Last human request')),
-                h('pre', null, snapshot.context.humanRequest),
-              ),
-              h('div', null,
-                h('div', { className: 'cwg-advisor-context-label' }, t('advisor.dialog.dshResponse', 'Last DSH response')),
-                h('pre', null, snapshot.context.dshResponse),
-              ),
-            ),
-          ),
-          snapshot.status === 'error' && snapshot.error
-            ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
-                t('advisor.dialog.error', 'The review failed. You can retry.'),
-                snapshot.error !== 'cancelled' ? ` (${snapshot.error})` : '',
-              )
-            : null,
-          // A failed turn is not a lost answer: ChatGPT usually finished it in the retained
-          // conversation, and the recovery reads it back without sending anything (issue #214).
-          snapshot.status === 'error' && snapshot.recovery.status !== 'ready'
-            ? h('div', { className: 'cwg-advisor-recover' },
-                h('div', { className: 'cwg-advisor-recover-actions' },
-                  h('button', {
-                    type: 'button',
-                    className: 'cwg-btn cwg-secondary',
-                    title: t('advisor.recover.hint', 'Read the answer ChatGPT already produced in this Advisor conversation. Nothing is sent.'),
-                    disabled: snapshot.recovery.status === 'loading' || inFlight,
-                    onClick: onRecover,
-                  }, snapshot.recovery.status === 'loading'
-                    ? t('advisor.recover.loading', 'Reading the answer from ChatGPT')
-                    : t('advisor.recover.action', 'Recover answer from ChatGPT')),
-                ),
+          view === 'activity'
+            ? h('div', null,
+                h('div', { className: 'cwg-advisor-section-label' }, t('advisor.activity.title', 'Advisor activity')),
+                activityBody,
+                // A recovery started from a tracked failure renders here too, beside its entry.
+                recoverySection,
                 snapshot.recovery.status === 'error' && snapshot.recovery.error
                   ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
                       t('advisor.recover.failed', 'The answer could not be read.'),
                       ` (${snapshot.recovery.error})`)
                   : null,
               )
-            : null,
-          snapshot.recovery.status === 'ready' && snapshot.recovery.text
-            ? h('div', { className: 'cwg-advisor-result' },
-                h('div', { className: 'cwg-advisor-section-label' }, t('advisor.result.title', 'Recovered review')),
-                h('textarea', {
-                  className: 'cwg-advisor-result-body',
-                  readOnly: true,
-                  spellCheck: false,
-                  value: snapshot.recovery.text,
-                  'aria-label': t('advisor.result.title', 'Recovered review'),
-                  onFocus: (event) => { if (typeof event.target.select === 'function') event.target.select(); },
-                }),
-                h('div', { className: 'cwg-advisor-result-note' },
-                  t('advisor.result.recorded', 'Recorded for this turn: it also appears in the turn card and can be sent to DSH.')),
-                h('div', { className: 'cwg-advisor-recover-actions' },
-                  h('button', {
-                    type: 'button',
-                    className: 'cwg-btn cwg-secondary',
-                    onClick: onCopyRecovered,
-                  }, t('advisor.result.copy', 'Copy')),
-                  copyState ? h('span', { className: 'cwg-advisor-context-label' }, copyState) : null,
-                ),
+            : reviewBody,
+          view === 'activity'
+            ? h('div', { className: 'cwg-advisor-foot' },
+                canOfferNewReview
+                  ? h('button', {
+                      type: 'button',
+                      className: 'cwg-btn cwg-secondary',
+                      onClick: onStartNewReview,
+                    }, t('advisor.activity.newReview', 'Start a new review'))
+                  : null,
+                h('button', {
+                  type: 'button',
+                  className: 'cwg-btn',
+                  onClick: () => advisorStore.closeDialog(),
+                }, t('advisor.activity.close', 'Close')),
               )
-            : null,
-          h('div', { className: 'cwg-advisor-foot' },
-            h('button', {
-              type: 'button',
-              className: 'cwg-btn cwg-secondary',
-              disabled: snapshot.status === 'loading',
-              onClick: () => advisorStore.closeDialog(),
-            }, t('advisor.dialog.cancel', 'Cancel')),
-            h('button', {
-              type: 'button',
-              className: 'cwg-btn',
-              disabled: snapshot.status === 'loading' || inFlight,
-              onClick: onReview,
-            }, snapshot.status === 'loading' ? t('advisor.dialog.reviewing', 'Reviewing\u2026') : t('advisor.dialog.review', 'Review')),
-          ),
+            : h('div', { className: 'cwg-advisor-foot' },
+                h('button', {
+                  type: 'button',
+                  className: 'cwg-btn cwg-secondary',
+                  disabled: starting,
+                  onClick: () => advisorStore.closeDialog(),
+                }, t('advisor.dialog.cancel', 'Cancel')),
+                h('button', {
+                  type: 'button',
+                  className: 'cwg-btn',
+                  disabled: !canSubmit,
+                  onClick: onReview,
+                }, starting ? t('advisor.dialog.starting', 'Starting…') : t('advisor.dialog.review', 'Start review')),
+              ),
         ),
       );
     }
@@ -1465,21 +2192,38 @@ window.__ModuleLoader__.load({
       __test: {
         ADVISOR_PROJECTION_KEY,
         LAST_INSTRUCTIONS_KEY,
+        LAST_SELECTION_KEY,
+        ACTIVITY_KEY,
         DEFAULT_INSTRUCTIONS,
         selectReviewableTurn,
         canStartReview,
+        hasSelectedSource,
         selectProjectName,
-        buildAdvisorFetch,
+        advisorChoice,
+        buildAdvisorModelsFetch,
+        buildAdvisorStartFetch,
+        buildAdvisorStatusFetch,
+        buildAdvisorListFetch,
         buildAdvisorRecoverFetch,
         loadLastInstructions,
         saveLastInstructions,
+        loadLastSelection,
+        saveLastSelection,
         createAdvisorStore,
+        advisorStore,
         RESULTS_KEY,
         parseAdvisorResults,
         loadAdvisorResults,
         saveAdvisorResults,
         recordAdvisorResult,
         selectResultForTurn,
+        parseAdvisorActivity,
+        loadAdvisorActivity,
+        saveAdvisorActivity,
+        upsertAdvisorActivity,
+        advisorTaskEntry,
+        reconcileAdvisorActivity,
+        recordAdvisorResultsForActivity,
         buildHandoffPrompt,
         createSendStore,
         AdvisorReviewButton,

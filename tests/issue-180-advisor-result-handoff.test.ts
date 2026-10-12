@@ -124,14 +124,16 @@ describe("issue #180 — case 1: result associated to the correct turn", () => {
 
   test("record + select round-trips per turn and keeps the latest result per turn", () => {
     const storage = makeStorage();
-    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r1", mode: "normal", model: "gpt", text: "primera" });
-    mod.__test.recordAdvisorResult(storage, { turn: 9, reviewId: "r2", mode: "think", model: "gpt", text: "otra" });
-    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r3", mode: "think", model: "gpt", text: "nueva" });
+    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r1", route: "chatgpt-web/light", providerLabel: "ChatGPT Web", modelLabel: "Light", text: "primera" });
+    mod.__test.recordAdvisorResult(storage, { turn: 9, reviewId: "r2", route: "chatgpt-web/high", providerLabel: "ChatGPT Web", modelLabel: "High", text: "otra" });
+    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r3", route: "qwen-web/fast", providerLabel: "Qwen Chat", modelLabel: "Fast", text: "nueva" });
 
     const results = mod.__test.loadAdvisorResults(storage);
     expect(results).toHaveLength(2);
     expect(mod.__test.selectResultForTurn(results, 7)?.text).toBe("nueva");
-    expect(mod.__test.selectResultForTurn(results, 7)?.mode).toBe("think");
+    // Issue #224: the recorded provenance is the provider-qualified model identity.
+    expect(mod.__test.selectResultForTurn(results, 7)?.route).toBe("qwen-web/fast");
+    expect(mod.__test.selectResultForTurn(results, 7)?.providerLabel).toBe("Qwen Chat");
     expect(mod.__test.selectResultForTurn(results, 9)?.reviewId).toBe("r2");
     expect(mod.__test.selectResultForTurn(results, 8)).toBeNull();
     expect(mod.__test.selectResultForTurn(results, "7" as unknown as number)).toBeNull();
@@ -163,12 +165,12 @@ describe("issue #180 — case 2: result does not auto-enter model history", () =
           { turn: "7", text: "x" },
           { turn: 7 },
           { turn: 7, text: "   " },
-          { turn: 3, text: "ok", mode: "weird", model: 5, at: "no" },
+          { turn: 3, text: "ok", route: 5, providerLabel: 5, at: "no" },
           null,
         ]),
       ),
     ).toEqual([
-      { turn: 3, reviewId: "", mode: "normal", model: "", recovered: false, text: "ok", at: 0 },
+      { turn: 3, reviewId: "", route: "", providerLabel: "", modelLabel: "", recovered: false, text: "ok", at: 0 },
     ]);
   });
 });
@@ -209,8 +211,8 @@ describe("issue #180 — cases 3+5: Send to DSH produces exactly one new NORMAL 
 describe("issue #180 — case 4: prompt contains the review + minimal Advisor context", () => {
   test("buildHandoffPrompt carries the FULL review, the Advisor marker, and the evaluation instruction", () => {
     const review = "## Findings\n1. Correctness bug in X\n2. Missing test for Y";
-    const prompt = mod.__test.buildHandoffPrompt({ text: review, reviewId: "r-123", mode: "think" });
-    expect(prompt.startsWith("ChatGPT Advisor review:\n\n")).toBe(true);
+    const prompt = mod.__test.buildHandoffPrompt({ text: review, reviewId: "r-123", route: "chatgpt-web/high" });
+    expect(prompt.startsWith("Advisor review:\n\n")).toBe(true);
     expect(prompt).toContain(review);
     expect(prompt).toContain("Evaluate this review against the current task and apply the relevant recommendations.");
     expect(prompt).toContain("Do not blindly follow recommendations that are incorrect or inconsistent with the current task.");
@@ -331,7 +333,7 @@ describe("issue #180 — case 8: no auto-execution of recommendations", () => {
 
   test("the card component renders the recorded result for its turn and null for other turns", () => {
     const storage = makeStorage();
-    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r1", mode: "think", model: "gpt-x", text: "review body" });
+    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r1", route: "chatgpt-web/high", providerLabel: "ChatGPT Web", modelLabel: "High", text: "review body" });
     (globalThis as any).window.localStorage = storage;
 
     const propsFor = (turn: number) => ({
@@ -346,9 +348,12 @@ describe("issue #180 — case 8: no auto-execution of recommendations", () => {
     // The card tree contains the result text, the title, and the Send button.
     const serialized = JSON.stringify(matching);
     expect(serialized).toContain("review body");
-    expect(serialized).toContain("ChatGPT Advisor");
+    // Issue #224: the card shows the recorded provider-qualified model, not a provider name or a
+    // hardcoded Normal/Think mode.
+    expect(serialized).toContain("Advisor");
+    expect(serialized).toContain("ChatGPT Web — High");
     expect(serialized).toContain("Send to DSH");
-    expect(serialized).toContain("gpt-x");
+    expect(serialized).toContain("ChatGPT Web — High");
 
     expect(mod.__test.AdvisorResultCard(t, propsFor(8))).toBeNull();
     expect(mod.__test.AdvisorResultCard(t, { turn: undefined, useInput: (sel: (s: any) => unknown) => sel({ phase: "plain", draft: "" }) })).toBeNull();

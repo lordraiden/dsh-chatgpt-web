@@ -1438,6 +1438,8 @@ The Advisor selects an already-registered public model route, submits a semantic
 
 A future provider becomes eligible for Advisor use when its WebChat driver is integrated, exposes a usable route through the existing DSH route authority, and can discover/operate its website models through the UI-only contract. It does not implement its own copy of Advisor.
 
+**Implementation status (issue #224).** The provider-neutral Advisor host, the eligible-model catalogue, the tracked task lifecycle and the client surface are implemented (`src/advisor/**`, with `client.js` and the sidecar control API). The review turn itself currently executes through the host-boundary text-turn seam (`src/web-chat/host/text-turn.ts`) that each provider composes next to its driver, rather than through the shared exchange. That seam is an interim one with a stated retirement trigger: when a provider gains its `WebChatTextTransport`, its runtime delegates the same call to the existing exchange runner (`src/web-chat/transport`) and no Advisor caller changes.
+
 The shared WebChat contract remains text-only. This separation prevents both ChatGPT-specific compatibility features and the Advisor orchestration from becoming a generic agent runtime inside WebChat Core.
 
 ---
