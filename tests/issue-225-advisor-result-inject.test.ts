@@ -66,8 +66,9 @@ beforeAll(async () => {
     },
     localStorage: makeStorage(),
   };
+  // Cache-busted path: the other Advisor suites import client.js in the same process.
   // @ts-expect-error plain-JS browser module without type declarations
-  await import("../client.js");
+  await import("../client.js?advisor-225");
   expect(captured.descriptor).not.toBeNull();
   expect(captured.descriptor.id).toBe("@lordraiden/dsh-chatgpt-web");
 
