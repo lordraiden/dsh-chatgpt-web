@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.27
+
+- Reject a healthy-but-outdated sidecar instead of reusing it after a plugin package upgrade.
+- Include the running daemon's reported version and PID in the diagnostic, and direct the user to restart the old `serve` process and DSH safely.
+- Require sidecar service identity and exact version agreement both when reusing an existing daemon and when waiting for a newly started daemon.
+
+
 ## 1.0.26
 
 - Separate normal Chat Mode from Advisor: normal turns retain provider-native continuity and send only the current user input; deterministic project metadata supplies the optional repository header.
