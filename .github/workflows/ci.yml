@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
@@ -35,6 +37,49 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.19.0"
+
+      - name: Detect release version bump on main
+        id: version-bump
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          source_version="$(sed -n "s/^export const VERSION = '\([^']*\)';$/\1/p" src/version.ts)"
+          if [ "$version" != "$source_version" ]; then
+            echo "package.json ($version) and src/version.ts ($source_version) disagree" >&2
+            exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release versions must use X.Y.Z: $version" >&2
+            exit 1
+          fi
+
+          previous_version=""
+          if [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "${BEFORE_SHA}:package.json" 2>/dev/null; then
+            previous_version="$(git show "${BEFORE_SHA}:package.json" | node -e 'let s=""; process.stdin.on("data", c => s += c).on("end", () => console.log(JSON.parse(s).version))')"
+          fi
+
+          publish=false
+          if [ -n "$previous_version" ] && [ "$version" != "$previous_version" ]; then
+            node - "$previous_version" "$version" <<'NODE'
+          const [previous, current] = process.argv.slice(2);
+          const parse = (value) => {
+            if (!/^\d+\.\d+\.\d+$/.test(value)) throw new Error(`Invalid semver: ${value}`);
+            return value.split(".").map(Number);
+          };
+          const a = parse(previous), b = parse(current);
+          const greater = b[0] > a[0] || (b[0] === a[0] && (b[1] > a[1] || (b[1] === a[1] && b[2] > a[2])));
+          if (!greater) throw new Error(`Version must increase: ${previous} -> ${current}`);
+          NODE
+            publish=true
+          fi
+
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Release intent: publish=$publish; previous=$previous_version; current=$version"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -50,6 +95,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A rerun checks out the original event SHA. Accept only the bot's already-pushed
+          # generated-lib commit; refuse to build/tag against a main branch with newer source.
+          git fetch origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "The event commit is not an ancestor of current main; refusing to overwrite newer history" >&2
+            exit 1
+          fi
+          if ! git diff --quiet HEAD origin/main -- . ':!lib'; then
+            echo "main contains source changes beyond this workflow's event commit; refusing stale release" >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            git reset --hard origin/main
+          fi
+
           if git diff --quiet -- lib; then
             echo "Checked-in lib is already synchronized with src"
             exit 0
@@ -113,13 +173,45 @@ jobs:
       - name: Smoke test the exact validated artifact
         run: node scripts/smoke-tarball.mjs "$GITHUB_WORKSPACE/artifact/${{ steps.package.outputs.artifact_name }}"
 
+      - name: Create version tag from the verified main commit
+        if: ${{ steps.version-bump.outputs.publish == 'true' }}
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version-bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+          git fetch origin main
+          release_commit="$(git rev-parse HEAD)"
+          main_commit="$(git rev-parse origin/main)"
+          if [ "$release_commit" != "$main_commit" ]; then
+            echo "Refusing to tag a commit that is not the current tested main HEAD" >&2
+            echo "tested=$release_commit main=$main_commit" >&2
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/$tag:refs/tags/$tag"
+            existing_commit="$(git rev-parse "${tag}^{commit}")"
+            if [ "$existing_commit" != "$release_commit" ]; then
+              echo "Tag $tag already points at $existing_commit, not tested commit $release_commit" >&2
+              exit 1
+            fi
+            echo "Verified existing tag $tag -> $release_commit"
+          else
+            git tag "$tag" "$release_commit"
+            git push origin "$tag"
+            echo "Created tag $tag -> $release_commit"
+          fi
+
       - name: Publish release to GitHub Packages
-        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+        if: ${{ (github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || steps.version-bump.outputs.publish == 'true' }}
         id: publish-release
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.version-bump.outputs.publish == 'true' && format('v{0}', steps.version-bump.outputs.version) || github.ref_name }}
+          ARTIFACT_NAME: ${{ steps.package.outputs.artifact_name }}
         run: |
           set -euo pipefail
 
@@ -138,6 +230,107 @@ jobs:
             exit 0
           fi
 
-          tarball="$(find artifact -maxdepth 1 -type f -name '*.tgz' -print -quit)"
-          test -n "$tarball"
+          tarball="artifact/${ARTIFACT_NAME}"
+          test -f "$tarball"
           npm publish "./$tarball" --registry https://npm.pkg.github.com
+
+      - name: Verify package is available in GitHub Packages
+        if: ${{ steps.version-bump.outputs.publish == 'true' }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version-bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            '@lordraiden:registry=https://npm.pkg.github.com/' \
+            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
+            > ~/.npmrc
+
+          for attempt in {1..60}; do
+            published="$(npm view "@lordraiden/dsh-chatgpt-web@${RELEASE_VERSION}" version --registry https://npm.pkg.github.com 2>/dev/null || true)"
+            if [ "$published" = "$RELEASE_VERSION" ]; then
+              echo "GitHub Packages publication is available: @lordraiden/dsh-chatgpt-web@${RELEASE_VERSION}"
+              exit 0
+            fi
+            echo "Waiting for package visibility (attempt ${attempt}/60)"
+            sleep 10
+          done
+
+          echo "Timed out waiting for published package @lordraiden/dsh-chatgpt-web@${RELEASE_VERSION}" >&2
+          exit 1
+
+      - name: Download and smoke-test the exact published package
+        if: ${{ steps.version-bump.outputs.publish == 'true' }}
+        id: published-artifact
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version-bump.outputs.version }}
+          EXPECTED_SHA256: ${{ steps.package.outputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            '@lordraiden:registry=https://npm.pkg.github.com/' \
+            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
+            > ~/.npmrc
+
+          published_dir="$RUNNER_TEMP/published-package"
+          mkdir -p "$published_dir"
+          npm pack "@lordraiden/dsh-chatgpt-web@${RELEASE_VERSION}" \
+            --registry https://npm.pkg.github.com \
+            --pack-destination "$published_dir"
+
+          mapfile -t tarballs < <(find "$published_dir" -maxdepth 1 -type f -name '*.tgz' -print)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected exactly one registry tarball, found ${#tarballs[@]}" >&2
+            exit 1
+          fi
+
+          tarball="${tarballs[0]}"
+          node scripts/smoke-tarball.mjs "$tarball"
+          checksum="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+          if [ "$checksum" != "$EXPECTED_SHA256" ]; then
+            echo "Registry tarball SHA-256 ($checksum) does not match the validated build artifact ($EXPECTED_SHA256)" >&2
+            exit 1
+          fi
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "sha256=$checksum" >> "$GITHUB_OUTPUT"
+          echo "Published package matches the validated build artifact and passed the clean-tarball smoke test; SHA-256: $checksum"
+
+      - name: Publish GitHub Release with verified provenance
+        if: ${{ steps.version-bump.outputs.publish == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ format('v{0}', steps.version-bump.outputs.version) }}
+          RELEASE_VERSION: ${{ steps.version-bump.outputs.version }}
+          PUBLISHED_SHA256: ${{ steps.published-artifact.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          tag_commit="$(git rev-parse "${tag}^{commit}")"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          marker="## Verified release provenance"
+
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$tag" \
+              --generate-notes \
+              --latest
+          fi
+
+          body="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+          if ! grep -Fq "$marker" <<< "$body"; then
+            {
+              printf '%s\n\n' "$body"
+              printf '%s\n\n' "$marker"
+              printf -- '- Package: `@lordraiden/dsh-chatgpt-web@%s`\n' "$RELEASE_VERSION"
+              printf -- '- Tag commit: `%s`\n' "$tag_commit"
+              printf -- '- CI run: %s\n' "$run_url"
+              printf -- '- SHA-256 of registry tarball verified by the clean-tarball smoke test: `%s`\n' "$PUBLISHED_SHA256"
+            } > "$RUNNER_TEMP/release-notes.md"
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+          fi

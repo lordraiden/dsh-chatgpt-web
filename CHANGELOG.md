@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.25
+
+- Fix the standalone CLI/sidecar dependency boundary: the CLI no longer imports the host-only `@deepseek-ai/dsh-llm` adapter peer (PR #230).
+- Resolve ChatGPT Web provider identity from the canonical WebChat host route while retaining the public native adapter alias.
+- Add a clean-tarball regression check that the CLI bundle does not import the host-only peer.
+
 ## 1.0.16
 
 - send the retained ChatGPT Web first turn as plain composer text with the persona prefix, project name, and human message.
