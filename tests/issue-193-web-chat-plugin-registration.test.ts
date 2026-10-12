@@ -146,12 +146,16 @@ describe("issue #193 — the plugin registers the ChatGPT route in production", 
   test("does not silently reuse a healthy sidecar from an older plugin release", async () => {
     saveConfig(defaultConfig());
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => Response.json({
-      status: "ok",
-      service: "dsh-chatgpt-web",
-      version: "1.0.24",
-      pid: 4242,
-      mode: "browser-only",
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async () => Response.json({
+        status: "ok",
+        service: "dsh-chatgpt-web",
+        version: "1.0.24",
+        pid: 4242,
+        mode: "browser-only",
+      }),
     });
 
     const outdated = harness();
@@ -176,12 +180,16 @@ describe("issue #193 — the plugin registers the ChatGPT route in production", 
   test("reuses a healthy sidecar only when its version matches the installed plugin", async () => {
     saveConfig(defaultConfig());
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => Response.json({
-      status: "ok",
-      service: "dsh-chatgpt-web",
-      version: VERSION,
-      pid: 4243,
-      mode: "browser-only",
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async () => Response.json({
+        status: "ok",
+        service: "dsh-chatgpt-web",
+        version: VERSION,
+        pid: 4243,
+        mode: "browser-only",
+      }),
     });
 
     const current = harness();
