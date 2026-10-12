@@ -529,18 +529,17 @@ For capability/model selection, the authenticated ChatGPT Web product surface is
 
 ## ChatGPT Advisor
 
-The composer offers **Review with ChatGPT** on the last completed `user → assistant` turn of the session. The review carries that step only — the project name, the DSH agent preset it ran under, your review instructions, the last human request and the last final response — into a **separate retained ChatGPT Web conversation**, so a review never enters the DSH session history and never collides with the chat's own conversation.
+The composer offers **Review with ChatGPT** on the last completed `user → assistant` turn of the session. The review carries that step only — the project name, your review instructions, the last human request and the last final response — into a **separate retained ChatGPT Web conversation**, so a review never enters the DSH session history and never collides with the chat's own conversation.
 
 The review dialog is a modal centred over the composer:
 
 - **Model** — `Normal` (lightest non-Pro route) or `Think` (deepest non-Pro route).
-- **DSH agent preset** — the presets this deployment composes, read from DSH (broken presets are not offered). It is preselected to the preset the session already runs and travels with the review as context: it labels the review, appears on the result card, and is carried into `Send to DSH`. It never composes a DSH session and never changes the model route. A deployment with no agent-preset registry simply offers `No preset`.
 - **Review instructions** — editable, and remembered in this browser.
 - **Context (read-only)** — the human request and the DSH response under review.
 
 `Escape`, the close control and a click on the backdrop dismiss the dialog. A review that is already running is never cancelled by an outside click.
 
-A successful review appears as a **ChatGPT Advisor** card in that turn's tail, with its mode, model and preset. **Send to DSH** submits the full review through the normal DSH prompt flow as a new prompt, and the plugin executes nothing by itself.
+A successful review appears as a **ChatGPT Advisor** card in that turn's tail, with its mode and model. **Send to DSH** submits the full review through the normal DSH prompt flow as a new prompt, and the plugin executes nothing by itself.
 
 ---
 

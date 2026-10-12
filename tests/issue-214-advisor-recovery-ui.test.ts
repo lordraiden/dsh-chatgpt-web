@@ -111,7 +111,7 @@ const T = (_key: string, fallback: string) => fallback;
 const CONFIG_FORM = { getSnapshot: () => ({ value: { port: 17841 } }) };
 
 /** Render the open dialog for the singleton store with a controllable fetch. */
-function renderDialog(roster: any[] = [{ id: "reviewer", name: "Senior reviewer" }]) {
+function renderDialog() {
   const chat = chatSnapshot([textUserNode(1, 1, "arregla el bug"), settledStep(2, 1, "hecho")]);
   const button = mod.__test.AdvisorReviewButton(T, {
     sessionId: "sess-1",
@@ -125,18 +125,12 @@ function renderDialog(roster: any[] = [{ id: "reviewer", name: "Senior reviewer"
     sessionId: "sess-1",
     useProjection: (key: string) => {
       if (key === mod.__test.ADVISOR_PROJECTION_KEY) return { controlToken: "tok" };
-      if (key === mod.__test.SESSION_PRESET_PROJECTION_KEY) return "reviewer";
       return undefined;
     },
     useWorkspaces: (selector: (snapshot: unknown) => unknown) => selector({ items: [] }),
   };
-  const store = mod.__test.createAdvisorPresetStore();
-  // The dialog's roster effect does not run under the react stub, so the roster is pre-loaded the
-  // way the effect would load it.
-  const ready = store.load(async () => mod.__test.advisorPresetOptions(roster));
-  const presets = { store, read: async () => [] };
-  const render = () => mod.__test.AdvisorReviewDialog(T, props, CONFIG_FORM, presets);
-  return { render, button, ready };
+  const render = () => mod.__test.AdvisorReviewDialog(T, props, CONFIG_FORM);
+  return { render, button };
 }
 
 /**
@@ -232,8 +226,7 @@ describe("issue #214 — a failed review offers the recovery, and the answer is 
     const calls: Array<{ url: string; body: any }> = [];
     const storage = makeStorage();
     (globalThis as any).window.localStorage = storage;
-    const { render, ready } = renderDialog();
-    await ready;
+    const { render } = renderDialog();
     await withFetch(async (url: string, options: any) => {
       calls.push({ url, body: JSON.parse(options.body) });
       if (url.endsWith("/advisor/review")) {
@@ -284,8 +277,7 @@ describe("issue #214 — a failed review offers the recovery, and the answer is 
   test("a recovered review is recorded for the turn, so the card and the handoff carry it", async () => {
     const storage = makeStorage();
     (globalThis as any).window.localStorage = storage;
-    const { render, ready } = renderDialog();
-    await ready;
+    const { render } = renderDialog();
     await withFetch(async (url: string) => {
       if (url.endsWith("/advisor/review")) {
         return { ok: false, status: 502, json: async () => ({ ok: false, message: "turn failed" }) };
@@ -309,26 +301,8 @@ describe("issue #214 — a failed review offers the recovery, and the answer is 
     expect(mod.__test.buildHandoffPrompt(results[0])).toContain("respuesta recuperada");
   });
 
-  test("the fix hint is offered as the preset label context of the review", async () => {
-    const calls: any[] = [];
-    const { render, ready } = renderDialog();
-    await ready;
-    await withFetch(async (url: string, options: any) => {
-      calls.push({ url, body: JSON.parse(options.body) });
-      return { ok: false, status: 502, json: async () => ({ ok: false, message: "turn failed" }) };
-    }, async () => {
-      const dialog = render();
-      buttonByText(dialog, "Review")![1].onClick();
-      await settle();
-    });
-    expect(calls[0]?.url).toContain("/advisor/review");
-    // The session preset is resolved to its reviewer-facing label before the request.
-    expect(calls[0]?.body.preset).toBe("Senior reviewer");
-  });
-
   test("a failed recovery keeps the review error and shows its own reason", async () => {
-    const { render, ready } = renderDialog();
-    await ready;
+    const { render } = renderDialog();
     await withFetch(async (url: string) => {
       if (url.endsWith("/advisor/review")) {
         return { ok: false, status: 502, json: async () => ({ ok: false, message: "turn failed" }) };
