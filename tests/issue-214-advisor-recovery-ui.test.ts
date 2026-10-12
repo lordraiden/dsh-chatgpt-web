@@ -370,7 +370,7 @@ describe("issue #214 — a tracked failure offers the recovery, and the answer i
     const results = mod.__test.loadAdvisorResults(storage);
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({ turn: 1, recovered: true, text: "respuesta recuperada", route: CHOICE.route });
-    expect(mod.__test.buildHandoffPrompt(results[0])).toContain("respuesta recuperada");
+    expect(mod.__test.buildInjectedPrompt(results[0].text)).toContain("respuesta recuperada");
   });
 
   test("a failed recovery keeps its own reason and stays retryable", async () => {

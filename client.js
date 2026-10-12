@@ -109,11 +109,28 @@ window.__ModuleLoader__.load({
       'advisor.errNoEndpoint': 'The sidecar endpoint is not configured.',
       'advisor.errNoToken': 'The sidecar control token is unavailable in this profile.',
       'advisor.card.title': 'Advisor',
-      'advisor.card.send': 'Send to DSH',
-      'advisor.card.sending': 'Sending…',
-      'advisor.card.sendingStatus': 'Submitting through the normal DSH prompt flow…',
-      'advisor.card.sent': 'Sent to DSH as a new prompt.',
-      'advisor.card.sendError': 'Send failed — the text remains in the composer; you can retry.',
+      'advisor.card.open': 'Open result',
+      'advisor.card.injected': 'Injected into its DSH session.',
+      'advisor.card.injectUnknown': 'Delivery could not be confirmed — open the result to inspect it.',
+      'advisor.card.injectFailed': 'Not delivered — open the result to retry.',
+      'advisor.result.title': 'Advisor result',
+      'advisor.result.review': 'Review',
+      'advisor.result.origin': 'originating session',
+      'advisor.result.originUnknown': 'unknown',
+      'advisor.result.original': 'Original response (immutable)',
+      'advisor.result.draft': 'Handoff text',
+      'advisor.result.injected': 'Injected into its DSH session.',
+      'advisor.result.injecting': 'Delivering…',
+      'advisor.result.injectFailed': 'The review was not delivered.',
+      'advisor.result.injectUnknown': 'Delivery could not be confirmed. The review may already have been delivered; check the originating session before delivering it again.',
+      'advisor.result.discard': 'Discard result',
+      'advisor.result.discardConfirm': 'Discard this result and your edits? The DSH session is not changed.',
+      'advisor.result.discardConfirmAction': 'Discard',
+      'advisor.result.edited': 'edited',
+      'advisor.result.inject': 'Inject into DSH',
+      'advisor.result.injectedAction': 'Injected',
+      'advisor.result.deliverAgain': 'Deliver again',
+      'advisor.result.back': 'Back to activity',
     };
 
     const CSS = `
@@ -210,6 +227,10 @@ window.__ModuleLoader__.load({
       .cwg-advisor-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
       .cwg-advisor-busy { font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
       .cwg-advisor-review { display: flex; flex-direction: column; gap: 12px; }
+      .cwg-advisor-result-editor { display: flex; flex-direction: column; gap: 10px; }
+      .cwg-advisor-result-original { width: 100%; min-height: 120px; max-height: 220px; resize: vertical; overflow-y: auto; font-family: var(--ds-font-family-code, monospace); font-size: 12px; line-height: 1.45; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 8px; }
+      .cwg-advisor-result-draft { width: 100%; min-height: 120px; max-height: 260px; resize: vertical; overflow-y: auto; font-family: var(--ds-font-family-code, monospace); font-size: 12px; line-height: 1.45; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 8px; }
+      .cwg-advisor-result-draft:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
     `;
 
     const NS = 'dsh-chatgpt-web';
@@ -651,6 +672,9 @@ window.__ModuleLoader__.load({
     const LAST_INSTRUCTIONS_KEY = 'dsh-chatgpt-web.advisor.lastInstructions';
     const LAST_SELECTION_KEY = 'dsh-chatgpt-web.advisor.lastSelection';
     const ACTIVITY_KEY = 'dsh-chatgpt-web.advisor.activity';
+    // Advisor-owned result drafts (issue #225): the immutable original response plus the user's
+    // editable handoff draft and delivery state, kept per review and never mixed with DSH history.
+    const DRAFTS_KEY = 'dsh-chatgpt-web.advisor.drafts';
     const DEFAULT_INSTRUCTIONS =
       'Review this development step as a senior software engineer.\n' +
       'Identify correctness problems, missed requirements, risks, and concrete improvements.\n' +
@@ -913,6 +937,9 @@ window.__ModuleLoader__.load({
         start: { status: 'idle', error: null },
         activity: { status: 'idle', reviews: [], error: null },
         recovery: { status: 'idle', text: '', error: null },
+        // Issue #225: the open result editor, when one is open.
+        result: null,
+        discard: { confirming: false },
       };
       let inFlight = false;
       let abortController = null;
@@ -1091,7 +1118,109 @@ window.__ModuleLoader__.load({
           setState({ open: true, view: 'activity' });
         },
         setView(view) {
-          setState({ view: view === 'activity' ? 'activity' : 'review' });
+          setState({ view: view === 'activity' ? 'activity' : view === 'result' && state.result ? 'result' : 'review' });
+        },
+        /**
+         * Open one Advisor result for inspection, editing, discarding or injection
+         * (issue #225). The original response is captured immutably on first open and
+         * never rewritten; an existing editable draft is restored as it was.
+         */
+        openResult(record, storage) {
+          const entry = ensureAdvisorDraft(storage, record);
+          if (!entry) return;
+          setState({
+            open: true,
+            view: 'result',
+            discard: { confirming: false },
+            result: {
+              reviewId: entry.reviewId,
+              sessionId: entry.sessionId,
+              turn: record && typeof record.turn === 'number' ? record.turn : undefined,
+              route: record && typeof record.route === 'string' ? record.route : '',
+              providerLabel: record && typeof record.providerLabel === 'string' ? record.providerLabel : '',
+              modelLabel: record && typeof record.modelLabel === 'string' ? record.modelLabel : '',
+              recovered: Boolean(record && record.recovered),
+              original: entry.original,
+              draft: entry.draft,
+              injectState: entry.injectState,
+              failureCode: entry.failureCode,
+              failureMessage: entry.failureMessage,
+              injectedAt: entry.injectedAt,
+            },
+          });
+        },
+        /** Edit the handoff draft; the immutable original is never touched. */
+        setDraft(text, storage) {
+          const current = state.result;
+          if (!current) return;
+          const draft = typeof text === 'string' ? text : '';
+          updateAdvisorDraft(storage, current.reviewId, { draft });
+          setState({ result: { ...current, draft } });
+        },
+        /** Ask for confirmation before discarding a draft that differs from the original. */
+        requestDiscard() {
+          if (!state.result) return;
+          setState({ discard: { confirming: state.result.draft !== state.result.original } });
+        },
+        cancelDiscard() { setState({ discard: { confirming: false } }); },
+        /**
+         * Discard the Advisor-owned result and its draft (issue #225).
+         *
+         * Only Advisor-owned browser state is removed: no DSH Session event is deleted
+         * or rewritten, and a message already injected into the session stays there.
+         */
+        discardResult(storage) {
+          const current = state.result;
+          if (!current) return;
+          removeAdvisorDraft(storage, current.reviewId);
+          if (typeof current.turn === 'number') {
+            saveAdvisorResults(storage, loadAdvisorResults(storage).filter((entry) => entry.turn !== current.turn));
+          }
+          setState({
+            view: 'activity',
+            result: null,
+            discard: { confirming: false },
+            activity: { status: state.activity.status, reviews: loadAdvisorActivity(storage), error: state.activity.error },
+          });
+        },
+        /**
+         * Deliver the edited review to the DSH session it belongs to (issue #225).
+         *
+         * The single-flight guard plus the persisted delivery identity mean a double
+         * activation cannot insert a second message, and an ambiguous acceptance is
+         * never retried automatically.
+         */
+        injectResult(remote, storage) {
+          const current = state.result;
+          if (!current) return;
+          if (current.injectState === 'injecting' || current.injectState === 'injected') return;
+          const existing = loadAdvisorDraft(storage, current.reviewId);
+          const requestId = (existing && existing.requestId) || createInjectionRequestId();
+          updateAdvisorDraft(storage, current.reviewId, {
+            requestId,
+            injectState: 'injecting',
+            failureCode: undefined,
+            failureMessage: undefined,
+          });
+          setState({ result: { ...current, injectState: 'injecting', failureCode: undefined, failureMessage: undefined } });
+          const finish = (status, code, message) => {
+            const patch = status === 'injected'
+              ? { injectState: 'injected', injectedAt: Date.now(), failureCode: undefined, failureMessage: undefined }
+              : { injectState: status, failureCode: code, failureMessage: message };
+            updateAdvisorDraft(storage, current.reviewId, patch);
+            const latest = state.result;
+            if (!latest || latest.reviewId !== current.reviewId) return;
+            setState({ result: { ...latest, ...patch } });
+          };
+          return deliverAdvisorReview(remote, {
+            requestId,
+            sessionId: current.sessionId,
+            text: current.draft,
+            clientTimeZone: advisorClientTimeZone(),
+          }).then(
+            (outcome) => finish(outcome.status, outcome.code, outcome.message),
+            (error) => finish('unknown', 'advisor_inject_unavailable', error instanceof Error ? error.message : String(error)),
+          );
         },
         closeDialog() {
           if (abortController) { try { abortController.abort(); } catch { /* already settled */ } }
@@ -1169,6 +1298,7 @@ window.__ModuleLoader__.load({
                   route: typeof data.route === 'string' ? data.route : '',
                   providerLabel: typeof data.providerLabel === 'string' ? data.providerLabel : '',
                   modelLabel: typeof data.modelLabel === 'string' ? data.modelLabel : '',
+                  sessionId: env.sessionId,
                   recovered: true,
                   text,
                 });
@@ -1231,6 +1361,9 @@ window.__ModuleLoader__.load({
           route: typeof entry.route === 'string' ? entry.route : '',
           providerLabel: typeof entry.providerLabel === 'string' ? entry.providerLabel : '',
           modelLabel: typeof entry.modelLabel === 'string' ? entry.modelLabel : '',
+          // The originating DSH session (issue #225): an injection targets the session
+          // the review belongs to, never whichever session is currently selected.
+          sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : '',
           recovered: entry.recovered === true,
           text: entry.text,
           at: typeof entry.at === 'number' ? entry.at : 0,
@@ -1269,6 +1402,7 @@ window.__ModuleLoader__.load({
         route: typeof result.route === 'string' ? result.route : '',
         providerLabel: typeof result.providerLabel === 'string' ? result.providerLabel : '',
         modelLabel: typeof result.modelLabel === 'string' ? result.modelLabel : '',
+        sessionId: typeof result.sessionId === 'string' ? result.sessionId : '',
         recovered: result.recovered === true,
         text: result.text,
         at: Date.now(),
@@ -1282,6 +1416,170 @@ window.__ModuleLoader__.load({
     function selectResultForTurn(results, turn) {
       if (!Array.isArray(results) || typeof turn !== 'number') return null;
       return results.find((entry) => entry && entry.turn === turn) || null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Advisor result drafts (issue #225).
+    //
+    // One record per review, keyed by reviewId: the immutable original response,
+    // the user's editable handoff draft, and the delivery state. It is the single
+    // owner of "inspect / edit / discard / inject" state, so the result survives
+    // closing and reopening the editor and a page refresh. It never holds DSH
+    // history: discarding it cannot retract a message already injected.
+    // ─────────────────────────────────────────────────────────────────────────
+    const ADVISOR_INJECT_STATES = ['ready', 'injecting', 'injected', 'failed', 'unknown'];
+    const DRAFT_LIMIT = 50;
+
+    /** Validate persisted draft JSON into normalized records; never throws. */
+    function parseAdvisorDrafts(raw) {
+      if (!raw) return [];
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return [];
+      }
+      if (!Array.isArray(parsed)) return [];
+      const out = [];
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (typeof entry.reviewId !== 'string' || !entry.reviewId) continue;
+        if (typeof entry.original !== 'string') continue;
+        const state = ADVISOR_INJECT_STATES.includes(entry.injectState) ? entry.injectState : 'ready';
+        out.push({
+          reviewId: entry.reviewId,
+          sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : '',
+          original: entry.original,
+          draft: typeof entry.draft === 'string' ? entry.draft : entry.original,
+          injectState: entry.injectedAt ? 'injected' : state,
+          ...(typeof entry.failureCode === 'string' && entry.failureCode ? { failureCode: entry.failureCode } : {}),
+          ...(typeof entry.failureMessage === 'string' && entry.failureMessage ? { failureMessage: entry.failureMessage } : {}),
+          ...(typeof entry.requestId === 'string' && entry.requestId ? { requestId: entry.requestId } : {}),
+          ...(typeof entry.injectedAt === 'number' ? { injectedAt: entry.injectedAt } : {}),
+          at: typeof entry.at === 'number' ? entry.at : 0,
+        });
+      }
+      return out;
+    }
+
+    function loadAdvisorDrafts(storage) {
+      try {
+        return parseAdvisorDrafts(storage ? storage.getItem(DRAFTS_KEY) : null);
+      } catch {
+        return [];
+      }
+    }
+
+    function saveAdvisorDrafts(storage, drafts) {
+      try {
+        if (storage) storage.setItem(DRAFTS_KEY, JSON.stringify(drafts.slice(0, DRAFT_LIMIT)));
+      } catch {
+        // Browser storage may be unavailable; the draft then lives only for this page.
+      }
+    }
+
+    function loadAdvisorDraft(storage, reviewId) {
+      if (typeof reviewId !== 'string' || !reviewId) return null;
+      return loadAdvisorDrafts(storage).find((entry) => entry.reviewId === reviewId) || null;
+    }
+
+    /**
+     * The draft record of one review, created from the immutable original when absent.
+     *
+     * The original is captured once and never rewritten: reopening an editor, editing
+     * the draft or injecting must not change the provider's response.
+     */
+    function ensureAdvisorDraft(storage, record) {
+      if (!record || typeof record.reviewId !== 'string' || !record.reviewId) return null;
+      const original = typeof record.original === 'string' ? record.original : '';
+      const existing = loadAdvisorDraft(storage, record.reviewId);
+      if (existing) {
+        // Refresh the recorded identity without touching the preserved original/draft.
+        if (record.sessionId && record.sessionId !== existing.sessionId) {
+          return updateAdvisorDraft(storage, record.reviewId, { sessionId: record.sessionId }) || existing;
+        }
+        return existing;
+      }
+      const entry = {
+        reviewId: record.reviewId,
+        sessionId: typeof record.sessionId === 'string' ? record.sessionId : '',
+        original,
+        draft: original,
+        injectState: 'ready',
+        at: Date.now(),
+      };
+      saveAdvisorDrafts(storage, [entry, ...loadAdvisorDrafts(storage)]);
+      return entry;
+    }
+
+    /** Patch one draft record, returning the updated record (or null when it is gone). */
+    function updateAdvisorDraft(storage, reviewId, patch) {
+      const drafts = loadAdvisorDrafts(storage);
+      const index = drafts.findIndex((entry) => entry.reviewId === reviewId);
+      if (index < 0) return null;
+      const next = { ...drafts[index], ...patch };
+      const rest = drafts.filter((entry) => entry.reviewId !== reviewId);
+      saveAdvisorDrafts(storage, [next, ...rest]);
+      return next;
+    }
+
+    /** Remove one Advisor-owned draft record. DSH history is untouched by construction. */
+    function removeAdvisorDraft(storage, reviewId) {
+      const drafts = loadAdvisorDrafts(storage);
+      const rest = drafts.filter((entry) => entry.reviewId !== reviewId);
+      if (rest.length !== drafts.length) saveAdvisorDrafts(storage, rest);
+    }
+
+    /**
+     * The prompt one injection delivers: the user's edited review in a stable,
+     * provider-neutral wrapper. It carries no internal identifiers (review id, route,
+     * provider id, session id) and never re-sends the reviewed request/answer, which
+     * already exist in the canonical DSH history.
+     */
+    function buildInjectedPrompt(text) {
+      const review = typeof text === 'string' ? text.trim() : '';
+      if (!review) return '';
+      return (
+        'WebChat Advisor review:\n\n' +
+        review +
+        '\n\n' +
+        'Evaluate this feedback against the current task and available context.\n' +
+        'Verify the findings independently and apply only the relevant, correct recommendations.\n' +
+        'If a finding is incorrect or inconsistent with the task, explain why rather than following it blindly.'
+      );
+    }
+
+    /** A client-minted delivery identity; the request id makes a retry idempotent. */
+    function createInjectionRequestId() {
+      const webCrypto = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+      if (webCrypto && typeof webCrypto.randomUUID === 'function') {
+        try {
+          return webCrypto.randomUUID();
+        } catch {
+          /* fall through to the non-crypto identity */
+        }
+      }
+      return 'advisor-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+    }
+
+    /**
+     * Classify one failed delivery.
+     *
+     * A domain refusal (`gateway/bad-request` or any `session/*` code) is a confirmed
+     * rejection: the Host validated the call and refused it, so an explicit retry is
+     * safe. `gateway/internal` (carrier, dispatch or unclassified Host failure) and a
+     * cancelled call are ambiguous — the message may already be admitted — so the
+     * caller never retries those automatically.
+     */
+    function classifyAdvisorInjectionFailure(error) {
+      const code = error && typeof error.code === 'string' ? error.code : '';
+      const message = error && typeof error.message === 'string' && error.message
+        ? error.message
+        : (code || 'The review could not be delivered.');
+      if (code === 'gateway/internal' || code === 'gateway/cancelled') {
+        return { status: 'unknown', code, message };
+      }
+      return { status: 'failed', code: code || 'advisor_inject_unavailable', message };
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1442,6 +1740,9 @@ window.__ModuleLoader__.load({
           route: entry.route,
           providerLabel: entry.providerLabel,
           modelLabel: entry.modelLabel,
+          // The review belongs to the session it was produced in; recording it here is only
+          // possible because that is the session being observed.
+          sessionId: currentSessionId,
           recovered: typeof entry.capturedAt === 'number',
           text: entry.text,
         });
@@ -1449,133 +1750,113 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The minimum handoff prompt (issue #180): the full review, clearly marked
-     * as coming from the Advisor, asking the agent to evaluate it against
-     * the current task and apply the relevant recommendations. Excludes Advisor
-     * history, internal IDs, HTML/UI markup, bridge details, and transport terms.
+     * Deliver one Advisor result to its originating session through the platform's
+     * public session-addressed prompt admission (issue #225).
+     *
+     * This is the supported path: it creates exactly one ordinary user-authored
+     * message in the addressed session through the Host, so the plugin never appends
+     * to a Session log, never fabricates events, never touches an unrelated composer
+     * draft and never routes the review through a hidden model path.
+     *
+     * The call is idempotent by `requestId`: the Host returns the original acceptance
+     * when that identity is already queued or logged, so a retry cannot insert a
+     * second message.
+     *
+     * @returns `{status: 'injected'}` or a classified failure (`failed` = confirmed
+     * refusal, `unknown` = acceptance could not be established).
      */
-    function buildHandoffPrompt(result) {
-      const review = result && typeof result.text === 'string' ? result.text.trim() : '';
-      if (!review) return '';
-      return (
-        'Advisor review:\n\n' +
-        review +
-        '\n\n' +
-        'Evaluate this review against the current task and apply the relevant recommendations.\n' +
-        'Do not blindly follow recommendations that are incorrect or inconsistent with the current task.'
-      );
+    async function deliverAdvisorReview(remote, request) {
+      const session = remote && remote.session;
+      if (!session || typeof session.prompt !== 'function') {
+        return {
+          status: 'failed',
+          code: 'advisor_inject_unavailable',
+          message: 'The DSH session prompt API is unavailable in this client.',
+        };
+      }
+      if (!request || typeof request.sessionId !== 'string' || !request.sessionId) {
+        return {
+          status: 'failed',
+          code: 'advisor_inject_unavailable',
+          message: 'This review does not record the DSH session it belongs to.',
+        };
+      }
+      const text = buildInjectedPrompt(request.text);
+      if (!text) {
+        return {
+          status: 'failed',
+          code: 'advisor_inject_empty',
+          message: 'The review is empty; nothing was delivered.',
+        };
+      }
+      let pending;
+      try {
+        pending = session.prompt({
+          requestId: request.requestId,
+          sessionId: request.sessionId,
+          // `queue` is the Host's Agent follow-up: it starts a turn on an idle session and queues
+          // behind a running one, so an injected review is never lost and never interrupts work.
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+          ...(request.clientTimeZone ? { clientTimeZone: request.clientTimeZone } : {}),
+        });
+      } catch (error) {
+        return classifyAdvisorInjectionFailure(error);
+      }
+      let result;
+      try {
+        result = await pending;
+      } catch (error) {
+        // The Remote face folds carrier failures into the error branch, so a rejection is an
+        // assembly fault: the call never reached the Host and nothing was admitted.
+        return classifyAdvisorInjectionFailure(error);
+      }
+      if (result && result.ok === true) return { status: 'injected' };
+      return classifyAdvisorInjectionFailure(result && result.error);
     }
 
-    /**
-     * Per-turn send states for "Send to DSH" (sending / sent / send-error) with
-     * a single-flight dedup guard: one submission in progress at a time, so a
-     * double activation of the button never produces two prompts.
-     */
-    function createSendStore() {
-      let sending = new Set();
-      let sent = new Set();
-      let errors = new Map();
-      let activeTurn = null;
-      const listeners = new Set();
-      const notify = () => {
-        for (const listener of listeners) {
-          try {
-            listener();
-          } catch {
-            /* listener errors never break the store */
-          }
-        }
-      };
-      const snapshot = () => ({ sending: new Set(sending), sent: new Set(sent), errors: new Map(errors) });
-      return {
-        getSnapshot: snapshot,
-        subscribe: (listener) => {
-          listeners.add(listener);
-          return () => listeners.delete(listener);
-        },
-        get activeTurn() {
-          return activeTurn;
-        },
-        /**
-         * Deliver the handoff prompt through the normal DSH prompt flow.
-         * @returns 'sent-requested' | 'busy' | 'empty' | 'unavailable' | 'error'.
-         */
-        send({ turn, prompt, inputActions }) {
-          if (activeTurn !== null) return 'busy';
-          if (typeof prompt !== 'string' || !prompt.trim()) return 'empty';
-          if (!inputActions || typeof inputActions.setDraft !== 'function' || typeof inputActions.submit !== 'function') return 'unavailable';
-          activeTurn = turn;
-          sending = new Set(sending).add(turn);
-          sent.delete(turn);
-          errors.delete(turn);
-          notify();
-          try {
-            inputActions.setDraft(prompt);
-            inputActions.submit();
-            return 'sent-requested';
-          } catch (error) {
-            sending.delete(turn);
-            errors.set(turn, error instanceof Error ? error.message : String(error));
-            activeTurn = null;
-            notify();
-            return 'error';
-          }
-        },
-        /** Called by the card when the official flow consumed the draft. */
-        markSent(turn) {
-          sending.delete(turn);
-          sent.add(turn);
-          errors.delete(turn);
-          if (activeTurn === turn) activeTurn = null;
-          notify();
-        },
-      };
-    }
-
-    const advisorSendStore = createSendStore();
-
-    function useAdvisorSendState(store) {
-      const [snapshot, setSnapshot] = React.useState(store.getSnapshot());
-      React.useEffect(() => store.subscribe(() => setSnapshot(store.getSnapshot())), [store]);
-      return { snapshot };
+    /** The browser's IANA time zone, when it can be established. */
+    function advisorClientTimeZone() {
+      try {
+        const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        return typeof zone === 'string' && zone ? zone : undefined;
+      } catch {
+        return undefined;
+      }
     }
 
     /**
      * Advisor result card for one finalized turn (chat turnTail slot). Renders
      * only when a recorded result is associated with this turn — a fresh slot
      * entry whose component returns null leaves the tail unchanged.
+     *
+     * Issue #225: the card is an entry point to the result editor (inspect, edit,
+     * discard, inject). It never submits anything by itself, and it shows the
+     * delivery state the editor recorded.
      */
     function AdvisorResultCard(t, props) {
       const turn = props && props.turn && typeof props.turn.turn === 'number' ? props.turn.turn : undefined;
-      // Re-render whenever a review completes (advisor store) or send states
-      // change; results themselves come from browser storage.
+      // Re-render whenever a review completes or a result draft changes; results themselves come
+      // from browser storage.
       const { snapshot } = useAdvisorState(advisorStore);
-      const { snapshot: sendSnapshot } = useAdvisorSendState(advisorSendStore);
-      const phase = typeof props.useInput === 'function' ? props.useInput((s) => s.phase) : 'plain';
-      const draft = typeof props.useInput === 'function' ? props.useInput((s) => s.draft) : '';
       const results = React.useMemo(() => loadAdvisorResults(window.localStorage), [snapshot]);
-      const sending = sendSnapshot.sending.has(turn);
-      const sent = sendSnapshot.sent.has(turn);
-      const error = sendSnapshot.errors.get(turn);
-
-      // Hooks stay above every early return: the card mounts with no result
-      // (null) and later re-renders with one, so the hook count must not change.
-      React.useEffect(() => {
-        // The prompt flow consumed the draft (phase back to plain, draft
-        // cleared): the handoff became a normal DSH prompt.
-        if (turn !== undefined && sending && phase === 'plain' && draft === '') advisorSendStore.markSent(turn);
-      }, [turn, sending, phase, draft]);
 
       if (turn === undefined) return null;
       const result = selectResultForTurn(results, turn);
       if (!result) return null;
+      const draft = loadAdvisorDraft(window.localStorage, result.reviewId);
 
-      function onSend() {
-        advisorSendStore.send({
+      function onOpen() {
+        advisorStore.openResult({
+          reviewId: result.reviewId,
+          sessionId: result.sessionId || (props && props.sessionId) || '',
           turn,
-          prompt: buildHandoffPrompt(result),
-          inputActions: props.inputActions,
-        });
+          original: result.text,
+          route: result.route,
+          providerLabel: result.providerLabel,
+          modelLabel: result.modelLabel,
+          recovered: result.recovered,
+        }, window.localStorage);
       }
 
       return h('div', { className: 'cwg-advisor-card', 'data-advisor-turn': String(turn) },
@@ -1587,19 +1868,18 @@ window.__ModuleLoader__.load({
         ),
         h('pre', { className: 'cwg-advisor-card-body' }, result.text),
         h('div', { className: 'cwg-advisor-card-foot' },
-          sent
-            ? h('span', { className: 'cwg-advisor-card-status cwg-ok' }, t('advisor.card.sent', 'Sent to DSH as a new prompt.'))
-            : sending
-              ? h('span', { className: 'cwg-advisor-card-status' }, t('advisor.card.sendingStatus', 'Submitting through the normal DSH prompt flow…'))
-              : error
-                ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.sendError', 'Send failed — the text remains in the composer; you can retry.'))
+          draft && draft.injectState === 'injected'
+            ? h('span', { className: 'cwg-advisor-card-status cwg-ok' }, t('advisor.card.injected', 'Injected into its DSH session.'))
+            : draft && draft.injectState === 'unknown'
+              ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.injectUnknown', 'Delivery could not be confirmed — open the result to inspect it.'))
+              : draft && draft.injectState === 'failed'
+                ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.injectFailed', 'Not delivered — open the result to retry.'))
                 : null,
-          !sent && h('button', {
+          h('button', {
             type: 'button',
             className: 'cwg-btn',
-            disabled: sending,
-            onClick: onSend,
-          }, sending ? t('advisor.card.sending', 'Sending…') : t('advisor.card.send', 'Send to DSH')),
+            onClick: onOpen,
+          }, t('advisor.card.open', 'Open result')),
         ),
       );
     }
@@ -1663,16 +1943,20 @@ window.__ModuleLoader__.load({
      */
     /**
      * The Advisor panel. It is a real modal over the composer (it leaves the composer's flow with a
-     * fixed backdrop, per the slot's zero-height anchor) and has two views:
+     * fixed backdrop, per the slot's zero-height anchor) and has three views:
      *
      * - the **review launcher**: the dynamic, provider-qualified model choice, the inclusion
      *   checkboxes, the editable instructions, and the start action;
      * - the **tracked activity list**: active reviews and recent completed results, including the
-     *   ones produced in other DSH sessions.
+     *   ones produced in other DSH sessions;
+     * - the **result editor** (issue #225): the immutable original response, the editable handoff
+     *   draft, and the explicit Discard / Inject actions.
      *
      * Reading a retained answer (#214) stays available from the launcher.
+     *
+     * @param ctx - the client Cordis context, used only for the platform's public session remote.
      */
-    function AdvisorReviewDialog(t, props, configForm) {
+    function AdvisorReviewDialog(t, props, configForm, ctx) {
       const { snapshot, inFlight } = useAdvisorState(advisorStore);
       const projection = typeof props.useProjection === 'function' ? props.useProjection(ADVISOR_PROJECTION_KEY) : undefined;
       const workspaceItems = typeof props.useWorkspaces === 'function' ? props.useWorkspaces((s) => s.items) : undefined;
@@ -1684,7 +1968,11 @@ window.__ModuleLoader__.load({
       const [copyState, setCopyState] = React.useState('');
 
       const open = snapshot.open === true;
-      const view = snapshot.view === 'activity' ? 'activity' : 'review';
+      const view = snapshot.view === 'activity'
+        ? 'activity'
+        : snapshot.view === 'result' && snapshot.result
+          ? 'result'
+          : 'review';
       const sessionId = props.sessionId;
       const base = resolveSidecarBase(configForm);
       const token = projection && typeof projection.controlToken === 'string' ? projection.controlToken : undefined;
@@ -1823,20 +2111,70 @@ window.__ModuleLoader__.load({
         if (current) advisorStore.loadModels(current);
       }
 
-      /** Open one tracked result for the current session's turn card, then close. */
+      /** The platform's public session remote, when this client has it. */
+      function advisorRemote() {
+        return ctx && ctx.remote ? ctx.remote : undefined;
+      }
+
+      /**
+       * Open one Advisor result in the editor (issue #225).
+       *
+       * A completed review of the current session is also recorded for its turn card, so the
+       * card affordance and the editor address the same result.
+       */
       function onOpenResult(entry) {
-        if (entry && entry.text && typeof entry.dshTurn === 'number' && entry.sessionId === sessionId) {
+        if (!entry || typeof entry.reviewId !== 'string' || !entry.reviewId) return;
+        if (entry.text && typeof entry.dshTurn === 'number' && entry.sessionId === sessionId) {
           recordAdvisorResult(window.localStorage, {
             turn: entry.dshTurn,
             reviewId: entry.reviewId,
             route: entry.route,
             providerLabel: entry.providerLabel,
             modelLabel: entry.modelLabel,
+            sessionId: entry.sessionId,
             recovered: typeof entry.capturedAt === 'number',
             text: entry.text,
           });
         }
-        advisorStore.closeDialog();
+        advisorStore.openResult({
+          reviewId: entry.reviewId,
+          sessionId: entry.sessionId,
+          turn: typeof entry.dshTurn === 'number' ? entry.dshTurn : undefined,
+          original: entry.text,
+          route: entry.route,
+          providerLabel: entry.providerLabel,
+          modelLabel: entry.modelLabel,
+          recovered: typeof entry.capturedAt === 'number',
+        }, window.localStorage);
+      }
+
+      /** One draft edit; the immutable original is never touched. */
+      function onDraftChange(text) {
+        advisorStore.setDraft(text, window.localStorage);
+      }
+
+      /** Deliver the edited review to the session the result belongs to. */
+      function onInject() {
+        advisorStore.injectResult(advisorRemote(), window.localStorage);
+      }
+
+      function onDiscard() { advisorStore.requestDiscard(); }
+      function onConfirmDiscard() { advisorStore.discardResult(window.localStorage); }
+      function onCancelDiscard() { advisorStore.cancelDiscard(); }
+
+      /** Copy the current handoff text (useful when the session is gone). */
+      function onCopyHandoff() {
+        const result = snapshot.result;
+        if (!result || !result.draft) return;
+        const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+        if (!clipboard || typeof clipboard.writeText !== 'function') {
+          setCopyState(t('advisor.result.copyFailed', 'Select the text and copy it manually.'));
+          return;
+        }
+        clipboard.writeText(result.draft).then(
+          () => setCopyState(t('advisor.result.copied', 'Copied.')),
+          () => setCopyState(t('advisor.result.copyFailed', 'Select the text and copy it manually.')),
+        );
       }
 
       const modelSection = h('div', null,
@@ -2019,15 +2357,15 @@ window.__ModuleLoader__.load({
           entry.text ? h('pre', { className: 'cwg-advisor-activity-body' }, entry.text) : null,
           entry.failure ? h('div', { className: 'cwg-advisor-error', role: 'alert' }, entry.failure.message) : null,
           entry.text
-            ? (entry.sessionId === sessionId && typeof entry.dshTurn === 'number'
-                ? h('div', { className: 'cwg-advisor-recover-actions' },
-                    h('button', {
-                      type: 'button',
-                      className: 'cwg-btn cwg-secondary',
-                      onClick: () => onOpenResult(entry),
-                    }, t('advisor.activity.openResult', 'Open result')),
-                  )
-                : null)
+            ? h('div', { className: 'cwg-advisor-recover-actions' },
+                h('button', {
+                  type: 'button',
+                  className: 'cwg-btn cwg-secondary',
+                  // Issue #225: any completed result opens its editor, including one produced in
+                  // another DSH session; the editor injects into the session the result records.
+                  onClick: () => onOpenResult(entry),
+                }, t('advisor.activity.openResult', 'Open result')),
+              )
             // A review that did not produce text keeps the read-only recovery of #214: the provider
             // may have finished the answer even though the task failed.
             : h('div', { className: 'cwg-advisor-recover-actions' },
@@ -2046,6 +2384,84 @@ window.__ModuleLoader__.load({
 
       const canOfferNewReview = Boolean(selectReviewableTurn(chat));
 
+      // ── Issue #225: the result editor ────────────────────────────────────────
+      const openResult = snapshot.result;
+      const resultDirty = Boolean(openResult) && openResult.draft !== openResult.original;
+      const resultInjecting = Boolean(openResult) && openResult.injectState === 'injecting';
+      const resultInjected = Boolean(openResult) && openResult.injectState === 'injected';
+      const resultProvenance = openResult
+        ? ([openResult.providerLabel, openResult.modelLabel].filter(Boolean).join(' \u2014 ') || openResult.route || '')
+        : '';
+      const resultBody = openResult
+        ? h('div', { className: 'cwg-advisor-result-editor' },
+            h('div', { className: 'cwg-advisor-section-label' }, t('advisor.result.review', 'Review')),
+            h('div', { className: 'cwg-advisor-note' },
+              resultProvenance
+              + (openResult.recovered ? ` · ${t('advisor.card.recovered', 'recovered')}` : '')
+              + ` · ${t('advisor.result.origin', 'originating session')} ${openResult.sessionId || t('advisor.result.originUnknown', 'unknown')}`),
+            h('div', { className: 'cwg-advisor-section-label' }, t('advisor.result.original', 'Original response (immutable)')),
+            h('textarea', {
+              className: 'cwg-advisor-result-original',
+              readOnly: true,
+              spellCheck: false,
+              value: openResult.original,
+              'aria-label': t('advisor.result.original', 'Original response (immutable)'),
+            }),
+            h('div', { className: 'cwg-advisor-section-label' }, t('advisor.result.draft', 'Handoff text')),
+            h('textarea', {
+              className: 'cwg-advisor-result-draft',
+              value: openResult.draft,
+              disabled: resultInjecting,
+              spellCheck: false,
+              'aria-label': t('advisor.result.draft', 'Handoff text'),
+              onChange: (event) => onDraftChange(event.target.value),
+            }),
+            resultInjected
+              ? h('div', { className: 'cwg-advisor-ok', role: 'status' }, t('advisor.result.injected', 'Injected into its DSH session.'))
+              : null,
+            resultInjecting
+              ? h('div', { className: 'cwg-advisor-note', role: 'status' }, t('advisor.result.injecting', 'Delivering…'))
+              : null,
+            openResult.injectState === 'failed'
+              ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
+                  t('advisor.result.injectFailed', 'The review was not delivered.'),
+                  openResult.failureMessage ? ` (${openResult.failureMessage})` : '')
+              : null,
+            openResult.injectState === 'unknown'
+              ? h('div', { className: 'cwg-advisor-error', role: 'alert' },
+                  t('advisor.result.injectUnknown', 'Delivery could not be confirmed. The review may already have been delivered; check the originating session before delivering it again.'),
+                  openResult.failureMessage ? ` (${openResult.failureMessage})` : '')
+              : null,
+            snapshot.discard.confirming
+              ? h('div', { className: 'cwg-advisor-recover' },
+                  h('div', { className: 'cwg-advisor-note' },
+                    t('advisor.result.discardConfirm', 'Discard this result and your edits? The DSH session is not changed.')),
+                  h('div', { className: 'cwg-advisor-recover-actions' },
+                    h('button', {
+                      type: 'button',
+                      className: 'cwg-btn cwg-secondary',
+                      onClick: onCancelDiscard,
+                    }, t('advisor.dialog.cancel', 'Cancel')),
+                    h('button', {
+                      type: 'button',
+                      className: 'cwg-btn',
+                      onClick: onConfirmDiscard,
+                    }, t('advisor.result.discardConfirmAction', 'Discard')),
+                  ),
+                )
+              : null,
+            h('div', { className: 'cwg-advisor-recover-actions' },
+              h('button', {
+                type: 'button',
+                className: 'cwg-btn cwg-secondary',
+                onClick: onCopyHandoff,
+              }, t('advisor.result.copy', 'Copy')),
+              copyState ? h('span', { className: 'cwg-advisor-context-label' }, copyState) : null,
+              resultDirty ? h('span', { className: 'cwg-advisor-note' }, t('advisor.result.edited', 'edited')) : null,
+            ),
+          )
+        : null;
+
       return h('div', {
         className: 'cwg-advisor-backdrop',
         onClick: (event) => {
@@ -2061,7 +2477,9 @@ window.__ModuleLoader__.load({
           'aria-modal': 'true',
           'aria-label': view === 'activity'
             ? t('advisor.activity.title', 'Advisor activity')
-            : t('advisor.dialog.title', 'Review with Advisor'),
+            : view === 'result'
+              ? t('advisor.result.title', 'Advisor result')
+              : t('advisor.dialog.title', 'Review with Advisor'),
           tabIndex: -1,
           ref: (node) => {
             // Move focus into the modal once, on mount, so Escape/Tab act inside it instead of on
@@ -2076,7 +2494,9 @@ window.__ModuleLoader__.load({
             h('span', { className: 'cwg-advisor-title' },
               view === 'activity'
                 ? t('advisor.activity.title', 'Advisor activity')
-                : t('advisor.dialog.title', 'Review with Advisor')),
+                : view === 'result'
+                  ? t('advisor.result.title', 'Advisor result')
+                  : t('advisor.dialog.title', 'Review with Advisor')),
             view === 'activity'
               ? h('button', {
                   type: 'button',
@@ -2084,13 +2504,20 @@ window.__ModuleLoader__.load({
                   'aria-label': t('advisor.activity.close', 'Close'),
                   onClick: () => advisorStore.setView('review'),
                 }, '\u00d7')
-              : h('button', {
-                  type: 'button',
-                  className: 'cwg-advisor-close',
-                  'aria-label': t('advisor.dialog.cancel', 'Cancel'),
-                  disabled: starting,
-                  onClick: () => advisorStore.closeDialog(),
-                }, '\u00d7'),
+              : view === 'result'
+                ? h('button', {
+                    type: 'button',
+                    className: 'cwg-advisor-close',
+                    'aria-label': t('advisor.result.back', 'Back to activity'),
+                    onClick: () => advisorStore.setView('activity'),
+                  }, '\u00d7')
+                : h('button', {
+                    type: 'button',
+                    className: 'cwg-advisor-close',
+                    'aria-label': t('advisor.dialog.cancel', 'Cancel'),
+                    disabled: starting,
+                    onClick: () => advisorStore.closeDialog(),
+                  }, '\u00d7'),
           ),
           view === 'activity'
             ? h('div', null,
@@ -2104,7 +2531,9 @@ window.__ModuleLoader__.load({
                       ` (${snapshot.recovery.error})`)
                   : null,
               )
-            : reviewBody,
+            : view === 'result'
+              ? resultBody
+              : reviewBody,
           view === 'activity'
             ? h('div', { className: 'cwg-advisor-foot' },
                 canOfferNewReview
@@ -2120,26 +2549,52 @@ window.__ModuleLoader__.load({
                   onClick: () => advisorStore.closeDialog(),
                 }, t('advisor.activity.close', 'Close')),
               )
-            : h('div', { className: 'cwg-advisor-foot' },
-                h('button', {
-                  type: 'button',
-                  className: 'cwg-btn cwg-secondary',
-                  disabled: starting,
-                  onClick: () => advisorStore.closeDialog(),
-                }, t('advisor.dialog.cancel', 'Cancel')),
-                h('button', {
-                  type: 'button',
-                  className: 'cwg-btn',
-                  disabled: !canSubmit,
-                  onClick: onReview,
-                }, starting ? t('advisor.dialog.starting', 'Starting…') : t('advisor.dialog.review', 'Start review')),
-              ),
+            : view === 'result'
+              ? h('div', { className: 'cwg-advisor-foot' },
+                  snapshot.discard.confirming
+                    ? null
+                    : h('button', {
+                        type: 'button',
+                        className: 'cwg-btn cwg-secondary',
+                        disabled: resultInjecting,
+                        onClick: onDiscard,
+                      }, t('advisor.result.discard', 'Discard result')),
+                  h('button', {
+                    type: 'button',
+                    className: 'cwg-btn',
+                    disabled: !openResult || resultInjecting || resultInjected || !openResult.draft.trim(),
+                    onClick: onInject,
+                  }, resultInjecting
+                    ? t('advisor.result.injecting', 'Delivering…')
+                    : resultInjected
+                      ? t('advisor.result.injectedAction', 'Injected')
+                      : openResult && openResult.injectState === 'unknown'
+                        ? t('advisor.result.deliverAgain', 'Deliver again')
+                        : t('advisor.result.inject', 'Inject into DSH')),
+                )
+              : h('div', { className: 'cwg-advisor-foot' },
+                  h('button', {
+                    type: 'button',
+                    className: 'cwg-btn cwg-secondary',
+                    disabled: starting,
+                    onClick: () => advisorStore.closeDialog(),
+                  }, t('advisor.dialog.cancel', 'Cancel')),
+                  h('button', {
+                    type: 'button',
+                    className: 'cwg-btn',
+                    disabled: !canSubmit,
+                    onClick: onReview,
+                  }, starting ? t('advisor.dialog.starting', 'Starting…') : t('advisor.dialog.review', 'Start review')),
+                ),
         ),
       );
     }
 
     return {
-      inject: ['slots', 'locale', 'configForms'],
+      // `remote` is the platform's typed Client Remote service; the result editor uses its
+      // session namespace to deliver one reviewed message to the session the review belongs to
+      // (issue #225). Official client plugins declare it the same way.
+      inject: ['slots', 'locale', 'configForms', 'remote'],
       apply(ctx) {
         ctx.effect(() => {
           try {
@@ -2181,7 +2636,7 @@ window.__ModuleLoader__.load({
           id: 'dsh-chatgpt-web-advisor-dialog',
           order: 2,
           locale: NS,
-        }, (props) => AdvisorReviewDialog(t, props, configForm))));
+        }, (props) => AdvisorReviewDialog(t, props, configForm, ctx))));
         // Issue #180: the Advisor result card in the per-turn tail slot
         // (session-scoped list; entries without content return null).
         disposers.push(ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
@@ -2231,8 +2686,20 @@ window.__ModuleLoader__.load({
         advisorTaskEntry,
         reconcileAdvisorActivity,
         recordAdvisorResultsForActivity,
-        buildHandoffPrompt,
-        createSendStore,
+        DRAFTS_KEY,
+        ADVISOR_INJECT_STATES,
+        parseAdvisorDrafts,
+        loadAdvisorDrafts,
+        saveAdvisorDrafts,
+        loadAdvisorDraft,
+        ensureAdvisorDraft,
+        updateAdvisorDraft,
+        removeAdvisorDraft,
+        buildInjectedPrompt,
+        createInjectionRequestId,
+        classifyAdvisorInjectionFailure,
+        deliverAdvisorReview,
+        advisorClientTimeZone,
         AdvisorReviewButton,
         AdvisorResultCard,
         AdvisorReviewDialog,

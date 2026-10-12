@@ -542,7 +542,12 @@ The review dialog is a modal centred over the composer:
 
 `Escape`, the close control and a click on the backdrop dismiss the dialog.
 
-A successful review appears as an **Advisor** card in that turn's tail, with its provider and model. **Send to DSH** submits the full review through the normal DSH prompt flow as a new prompt, and the plugin executes nothing by itself. A genuine failure is reported as a failure with an explicit **Start a new review** action: nothing is retried automatically, and the read-only **Recover retained answer** action is available for a review whose provider finished the answer anyway.
+A successful review appears as an **Advisor** card in that turn's tail, with its provider and model. **Open result** opens the result editor, which keeps the provider's original response immutable and gives you an editable **handoff text** beside it:
+
+- **Inject into DSH** sends the edited review to the DSH session the review belongs to — never whichever session happens to be open — as exactly one ordinary user message wrapped in a provider-neutral evaluation instruction. It goes through DSH's public session-addressed prompt API, so no Session log is written directly, no event is fabricated, no unrelated composer draft is touched, and nothing is delivered by merely opening or editing the result. The delivery is idempotent per attempt, a confirmed refusal can be retried, and an unconfirmed outcome is reported as unconfirmed instead of being resubmitted. The plugin executes nothing by itself.
+- **Discard result** removes the Advisor-owned result and your edits (asking first when you changed the text). It never changes DSH history and never retracts a message already injected.
+
+A genuine failure is reported as a failure with an explicit **Start a new review** action: nothing is retried automatically, and the read-only **Recover retained answer** action is available for a review whose provider finished the answer anyway.
 
 ---
 
