@@ -450,8 +450,8 @@ describe("issue #224 — launch, tracking and failure", () => {
     await new Promise((r) => setTimeout(r, 5));
     store.closeDialog();
     expect(store.getSnapshot().open).toBe(false);
-    expect(mod.__test.loadAdvisorActivity(storage)).toHaveLength(1);
-    expect(mod.__test.loadAdvisorActivity(storage)[0].state).toBe("running");
+    expect(mod.__test.loadAdvisorActivity(storage, "sess-1")).toHaveLength(1);
+    expect(mod.__test.loadAdvisorActivity(storage, "sess-1")[0].state).toBe("running");
   });
 
   test("a network failure keeps the context and stays retryable", async () => {
@@ -549,8 +549,57 @@ describe("issue #224 — launch, tracking and failure", () => {
       }),
     }));
     await new Promise((r) => setTimeout(r, 5));
-    expect(store.getSnapshot().activity.reviews).toHaveLength(1);
+    // Nothing about another session's review is shown here, and nothing is recorded for this one.
+    expect(store.getSnapshot().activity.reviews).toEqual([]);
     expect(mod.__test.loadAdvisorResults(storage)).toEqual([]);
+  });
+
+  test("the activity list is requested for this session", async () => {
+    const storage = makeStorage();
+    const store = opened(mod.__test.createAdvisorStore());
+    const seen: string[] = [];
+    store.refreshActivity(env({
+      storage,
+      fetch: async (url: string) => {
+        seen.push(String(url));
+        return { ok: true, status: 200, json: async () => ({ ok: true, reviews: [] }) };
+      },
+    }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain("v1/control/advisor/reviews?sessionId=sess-1");
+  });
+
+  test("persisted activity is stored per session and never shown across sessions", () => {
+    const storage = makeStorage();
+    const taskEntry = (reviewId: string, sessionId: string, createdAt: number) => mod.__test.advisorTaskEntry({
+      reviewId,
+      state: "completed",
+      sessionId,
+      reviewedTurnId: "dsh-turn:1",
+      provenance: { route: "chatgpt-web/light", providerId: "chatgpt-web", providerLabel: "ChatGPT Web", modelId: "light", modelLabel: "Light" },
+      source: { includedRequest: true, includedResponse: true, includedProject: false, instructions: "i" },
+      createdAt,
+    }, {});
+    const own = taskEntry("own", "sess-1", 2);
+    const foreign = taskEntry("foreign", "sess-otra", 1);
+    mod.__test.upsertAdvisorActivity(storage, own, "sess-1");
+    mod.__test.upsertAdvisorActivity(storage, foreign, "sess-otra");
+    expect(mod.__test.loadAdvisorActivity(storage, "sess-1").map((e: any) => e.reviewId)).toEqual(["own"]);
+    expect(mod.__test.loadAdvisorActivity(storage, "sess-otra").map((e: any) => e.reviewId)).toEqual(["foreign"]);
+    // A caller that cannot name its session sees nothing rather than another session's reviews.
+    expect(mod.__test.loadAdvisorActivity(storage)).toEqual([]);
+  });
+
+  test("activity persisted before it was session-scoped is adopted only for its own session", () => {
+    const storage = makeStorage();
+    const entry = (reviewId: string, sessionId: string) =>
+      ({ reviewId, sessionId, state: "completed", text: "t", createdAt: 1, dshTurn: 1 });
+    storage.setItem("dsh-chatgpt-web.advisor.activity", JSON.stringify([entry("a", "sess-1"), entry("b", "sess-otra")]));
+    expect(mod.__test.loadAdvisorActivity(storage, "sess-1").map((e: any) => e.reviewId)).toEqual(["a"]);
+    expect(mod.__test.loadAdvisorActivity(storage, "sess-otra").map((e: any) => e.reviewId)).toEqual(["b"]);
+    // Reading does not rewrite the legacy list, so the other session can still adopt its own slice.
+    expect(JSON.parse(String(storage.getItem("dsh-chatgpt-web.advisor.activity")))).toHaveLength(2);
   });
 
   test("recovery stays read-only and records the retained answer for the turn", async () => {
@@ -628,13 +677,13 @@ describe("issue #224 — persisted activity across dialog close, remount and res
   test("activity storage round-trips, is newest first, and is bounded", () => {
     const storage = makeStorage();
     for (let index = 0; index < 60; index += 1) {
-      mod.__test.upsertAdvisorActivity(storage, mod.__test.advisorTaskEntry(serverTask({ reviewId: `r-${index}`, createdAt: index }), {}));
+      mod.__test.upsertAdvisorActivity(storage, mod.__test.advisorTaskEntry(serverTask({ reviewId: `r-${index}`, createdAt: index }), {}), "sess-1");
     }
-    const entries = mod.__test.loadAdvisorActivity(storage);
+    const entries = mod.__test.loadAdvisorActivity(storage, "sess-1");
     expect(entries).toHaveLength(50);
     expect(entries[0].reviewId).toBe("r-59");
     expect(mod.__test.parseAdvisorActivity("not json")).toEqual([]);
-    expect(mod.__test.upsertAdvisorActivity(storage, null)).toHaveLength(50);
+    expect(mod.__test.upsertAdvisorActivity(storage, null, "sess-1")).toHaveLength(50);
   });
 
   test("only completed results of the current session with a known turn are recorded", () => {

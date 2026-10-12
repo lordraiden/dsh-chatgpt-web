@@ -3,6 +3,9 @@ import type { RequestMessage } from "@deepseek-ai/dsh-llm";
 const CODEX_CONTEXT_OPEN = "<codex_context_json>";
 const CODEX_CONTEXT_CLOSE = "</codex_context_json>";
 const TRANSPORT_BLOCKS = [
+  // The harness's own skills catalogue arrives as one system reminder; it is host context, never
+  // part of the conversation (issue: normal chat must not carry DSH context to the provider).
+  ["<system-reminder>", "</system-reminder>"],
   ["<hindsight_knowledge>", "</hindsight_knowledge>"],
   ["<hindsight_memory>", "</hindsight_memory>"],
   ["<hindsight_knowledge_refresh>", "</hindsight_knowledge_refresh>"],
@@ -10,6 +13,30 @@ const TRANSPORT_BLOCKS = [
   ["<dsh_transport_resume>", "</dsh_transport_resume>"],
   ["<AEGIS_DSH_ROUTING_BOOTSTRAP>", "</AEGIS_DSH_ROUTING_BOOTSTRAP>"],
 ] as const;
+
+/**
+ * Message kinds that carry the conversation itself.
+ *
+ * DSH delivers every injected block — runtime context, the skills catalogue, Hindsight recall, the
+ * Aegis bootstrap, the time snapshot — as a *user-role* message distinguished only by
+ * `source.kind`. Only the human turn may cross to the provider, so this is an allowlist and not a
+ * denylist: a user-role message carrying any other recognized kind is dropped, which means a new
+ * harness injection cannot leak by default.
+ *
+ * `tool` stays allowed because tool results are conversation, not host context. Messages without
+ * provenance (the Advisor's own requests, older callers and tests) are unaffected.
+ */
+const CONVERSATIONAL_USER_KINDS = new Set(["user", "tool"]);
+
+function carriesConversation(message: RequestMessage): boolean {
+  const role = (message as unknown as { role?: unknown }).role;
+  if (role !== "user") return true;
+  const source = (message as unknown as { source?: unknown }).source;
+  if (!isRecord(source)) return true;
+  const kind = source.kind;
+  if (typeof kind !== "string") return true;
+  return CONVERSATIONAL_USER_KINDS.has(kind);
+}
 
 const OPERATIONAL_LINE_PREFIXES = [
   "Time sampled while preparing turn ",
@@ -51,8 +78,13 @@ export function projectConversationalMessages(
     return text !== undefined && containsSanitizationMarker(text);
   });
 
+  // Provenance is decided before transport shape: injected host context must not cross even when
+  // no transport marker is present, which is the case that let the skills catalogue be sent as if it
+  // were the user's turn.
+  const conversational = messages.filter(carriesConversation);
+
   if (!canonicalEnvelopePresent && !protocolMarkerPresent && !sanitizationMarkerPresent) {
-    return [...messages];
+    return [...conversational];
   }
 
   if (protocolMarkerPresent && !canonicalEnvelopePresent) {
@@ -97,7 +129,7 @@ export function projectConversationalMessages(
     // a persona prefix) must survive: the adapter maps them to the request's
     // systemPrompt, and dropping them is what made persona prefixes invisible
     // to the retained composer transport.
-    for (const message of messages) {
+    for (const message of conversational) {
       const text = textContent(message);
       if (text === undefined) continue;
 

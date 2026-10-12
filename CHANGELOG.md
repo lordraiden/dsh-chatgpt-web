@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.28
+
+- Normal Chat Mode sends only the user's message — plus the deterministic `Project:`/`github:` header on the first message of a conversation. DSH host context (the skills catalogue, runtime context, the Aegis bootstrap, Hindsight recall and the time snapshot) can no longer reach ChatGPT Web, and can no longer be mistaken for the user's turn.
+- Scope Advisor state to the DSH session that produced it: the turn result card and the activity list no longer show another session's review, the activity list is requested and persisted per session, and recording a result no longer replaces another session's result for the same turn number.
+
+
 ## 1.0.27
 
 - Reject a healthy-but-outdated sidecar instead of reusing it after a plugin package upgrade.
