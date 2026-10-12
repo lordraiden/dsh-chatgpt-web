@@ -232,7 +232,6 @@ try {
           useWorkspaces: (selector) => selector({ items: [] }),
         },
         { getSnapshot: () => ({ value: { port: 17841 } }) },
-        { store: mod.__test.createAdvisorPresetStore(), read: async () => [] },
       );
     }
 

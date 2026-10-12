@@ -37,11 +37,6 @@ window.__ModuleLoader__.load({
       'tuning.sendEnableGraceMs': 'Send-button grace (ms)',
       'tuning.generationRunningStallMs': 'Generation stall budget (ms)',
       'tuning.turnTimeoutMs': 'Turn timeout (ms)',
-      'advisor.dialog.preset': 'DSH agent preset',
-      'advisor.dialog.presetNone': 'No preset',
-      'advisor.dialog.presetUnavailable': 'No DSH agent presets are available in this deployment.',
-      'advisor.dialog.presetError': 'The DSH agent presets could not be read.',
-      'advisor.dialog.presetRetry': 'Retry',
       'advisor.recover.action': 'Recover answer from ChatGPT',
       'advisor.recover.loading': 'Reading the answer from ChatGPT',
       'advisor.recover.hint': 'Read the answer ChatGPT already produced in this Advisor conversation. Nothing is sent.',
@@ -150,8 +145,6 @@ window.__ModuleLoader__.load({
       .cwg-advisor-mode { display: flex; gap: 6px; }
       .cwg-advisor-mode button { flex: 1; font-size: 13px; padding: 6px 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-primary); cursor: pointer; }
       .cwg-advisor-mode button[aria-pressed="true"] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-interactive-bg-hover-solid); }
-      .cwg-advisor-preset { width: 100%; font-size: 13px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: inherit; }
-      .cwg-advisor-preset:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
       .cwg-advisor-instructions { width: 100%; min-height: 72px; resize: vertical; font-size: 13px; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: inherit; }
       .cwg-advisor-instructions:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
       .cwg-advisor-context { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
@@ -696,12 +689,9 @@ window.__ModuleLoader__.load({
     }
 
     /** Pure request builder for the #178 endpoint (testable without fetch). */
-    function buildAdvisorFetch({ base, token, sessionId, humanRequest, dshResponse, instructions, mode, project, preset, signal }) {
+    function buildAdvisorFetch({ base, token, sessionId, humanRequest, dshResponse, instructions, mode, project, signal }) {
       const body = { sessionId, humanRequest, dshResponse, instructions, mode };
       if (project) body.project = project;
-      // The agent-preset label is review context only: the sidecar carries it into the review
-      // content and never composes a DSH session from it.
-      if (preset) body.preset = preset;
       return {
         url: `${base}/v1/control/advisor/review`,
         options: {
@@ -756,7 +746,7 @@ window.__ModuleLoader__.load({
      * the framework drives both components to re-render on change.
      */
     function createAdvisorStore() {
-      let state = { open: false, mode: 'normal', instructions: DEFAULT_INSTRUCTIONS, preset: '', context: null, status: 'idle', error: null, recovery: { status: 'idle', text: '', error: null } };
+      let state = { open: false, mode: 'normal', instructions: DEFAULT_INSTRUCTIONS, context: null, status: 'idle', error: null, recovery: { status: 'idle', text: '', error: null } };
       let inFlight = false;
       let abortController = null;
       const listeners = new Set();
@@ -765,7 +755,7 @@ window.__ModuleLoader__.load({
         getSnapshot: () => state,
         subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
         get inFlight() { return inFlight; },
-        openDialog(context, instructions, preset) {
+        openDialog(context, instructions) {
           state = {
             ...state,
             open: true,
@@ -773,9 +763,6 @@ window.__ModuleLoader__.load({
             error: null,
             recovery: { status: 'idle', text: '', error: null },
             context,
-            // `null` defers to the dialog default (the preset the session runs, else the
-            // deployment default); `''` is an explicit "no preset" choice.
-            preset: typeof preset === 'string' ? preset : null,
             instructions: typeof instructions === 'string' && instructions.trim() ? instructions : DEFAULT_INSTRUCTIONS,
           };
           notify();
@@ -794,7 +781,6 @@ window.__ModuleLoader__.load({
         },
         setMode(mode) { state = { ...state, mode: mode === 'think' ? 'think' : 'normal' }; notify(); },
         setInstructions(text) { state = { ...state, instructions: typeof text === 'string' ? text : '' }; notify(); },
-        setPreset(preset) { state = { ...state, preset: typeof preset === 'string' ? preset : '' }; notify(); },
         fail(message) { state = { ...state, status: 'error', error: message }; notify(); },
         runReview(env) {
           if (inFlight || !state.open || !state.context) return;
@@ -804,9 +790,6 @@ window.__ModuleLoader__.load({
           state = { ...state, status: 'loading', error: null };
           notify();
           const finish = () => { inFlight = false; abortController = null; };
-          const preset = typeof env.preset === 'string'
-            ? env.preset.trim()
-            : (typeof state.preset === 'string' ? state.preset.trim() : '');
           const { url, options } = buildAdvisorFetch({
             base: env.base,
             token: env.token,
@@ -816,7 +799,6 @@ window.__ModuleLoader__.load({
             instructions: state.instructions,
             mode: state.mode,
             project: env.project,
-            preset,
             signal: controller.signal,
           });
           env.fetch(url, options)
@@ -839,7 +821,6 @@ window.__ModuleLoader__.load({
                     reviewId: data.reviewId,
                     mode: state.mode,
                     model: data.model,
-                    preset,
                     text: data.text,
                   });
                 }
@@ -874,7 +855,6 @@ window.__ModuleLoader__.load({
           state = { ...state, recovery: { status: 'loading', text: '', error: null } };
           notify();
           const finish = () => { inFlight = false; abortController = null; };
-          const preset = typeof env.preset === 'string' ? env.preset.trim() : '';
           const { url, options } = buildAdvisorRecoverFetch({
             base: env.base,
             token: env.token,
@@ -899,7 +879,6 @@ window.__ModuleLoader__.load({
                   reviewId: typeof data.reviewId === 'string' ? data.reviewId : '',
                   mode: state.mode,
                   model: typeof data.model === 'string' ? data.model : '',
-                  preset,
                   recovered: true,
                   text,
                 });
@@ -920,97 +899,6 @@ window.__ModuleLoader__.load({
     }
 
     const advisorStore = createAdvisorStore();
-
-    /**
-     * DSH agent-preset roster for the Advisor dialog (issue #208).
-     *
-     * Options come from the host service through the typed client gateway
-     * (`ctx.remote.agentPresets.list()`), the call DSH's own agent-preset surfaces make. The read is
-     * defensive: `gateway/invocation-unavailable` means the deployment composes no agent-preset
-     * registry, which is a valid deployment rather than a failure, so the dialog then offers only
-     * the "no preset" option. A plugin that cannot list presets must never lose its own UI.
-     */
-    function createAdvisorPresetStore() {
-      let state = { status: 'idle', options: [], error: null };
-      let loading = null;
-      const listeners = new Set();
-      const notify = () => { for (const listener of listeners) { try { listener(); } catch { /* listener errors never break the store */ } } };
-      const set = (next) => { state = next; notify(); };
-      return {
-        getSnapshot: () => state,
-        subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
-        /** Read once; concurrent dialog opens share the in-flight read. */
-        load(read) {
-          if (loading) return loading;
-          set({ ...state, status: 'loading', error: null });
-          loading = Promise.resolve()
-            .then(() => read())
-            .then((options) => { set({ status: options.length > 0 ? 'ready' : 'unavailable', options, error: null }); })
-            // A refused read is not an empty deployment: the dialog shows the reason and offers a
-            // retry, while "unavailable" stays reserved for a deployment that composes no presets.
-            .catch((error) => { set({ status: 'error', options: [], error: error instanceof Error ? error.message : String(error) }); })
-            .finally(() => { loading = null; });
-          return loading;
-        },
-      };
-    }
-
-    const advisorPresetStore = createAdvisorPresetStore();
-
-    /**
-     * Read the DSH agent-preset roster through the client gateway. Mirrors DSH's own
-     * `readRoster`: an unavailable invocation is an empty roster, any other refusal is an error.
-     * @returns normalized selectable options; never the broken presets.
-     */
-    function loadAdvisorPresetOptions(remote) {
-      const api = remote && remote.agentPresets;
-      if (!api || typeof api.list !== 'function') return Promise.resolve([]);
-      return Promise.resolve(api.list()).then((result) => {
-        if (!result || result.ok !== true) {
-          const code = result && result.error ? result.error.code : undefined;
-          if (code === 'gateway/invocation-unavailable') return [];
-          const message = result && result.error && result.error.message ? result.error.message : 'agent preset roster unavailable';
-          throw new Error(message);
-        }
-        const roster = result.value || {};
-        const rows = Array.isArray(roster.presets) ? roster.presets : [];
-        return advisorPresetOptions(rows);
-      });
-    }
-
-    /** Normalize roster rows into selectable options, in roster order; broken rows are skipped. */
-    function advisorPresetOptions(rows) {
-      const options = [];
-      for (const row of Array.isArray(rows) ? rows : []) {
-        if (!row || typeof row !== 'object') continue;
-        const id = typeof row.id === 'string' ? row.id.trim() : '';
-        // A broken preset cannot compose a session, so offering it would only defer that fact.
-        if (!id || typeof row.broken === 'string' && row.broken.length > 0) continue;
-        const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id;
-        const description = typeof row.description === 'string' ? row.description.trim() : '';
-        options.push({ id, name, description, isDefault: row.isDefault === true });
-      }
-      return options;
-    }
-
-    /**
-     * The roster option the dialog preselects: the preset the session already runs (the DSH
-     * `agentPreset` session projection), else the deployment default, else nothing.
-     */
-    function defaultAdvisorPreset(options, sessionPreset) {
-      const list = Array.isArray(options) ? options : [];
-      const running = typeof sessionPreset === 'string' ? list.find((option) => option.id === sessionPreset) : undefined;
-      if (running) return running.id;
-      const fallback = list.find((option) => option.isDefault) || list[0];
-      return fallback ? fallback.id : '';
-    }
-
-    /** The label the reviewer reads for one option: its display name. */
-    function advisorPresetLabel(options, presetId) {
-      if (typeof presetId !== 'string' || !presetId) return '';
-      const option = (Array.isArray(options) ? options : []).find((candidate) => candidate.id === presetId);
-      return option ? option.name : presetId;
-    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // ChatGPT Advisor result card + "Send to DSH" handoff (issue #180).
@@ -1049,7 +937,6 @@ window.__ModuleLoader__.load({
           reviewId: typeof entry.reviewId === 'string' ? entry.reviewId : '',
           mode: entry.mode === 'think' ? 'think' : 'normal',
           model: typeof entry.model === 'string' ? entry.model : '',
-          preset: typeof entry.preset === 'string' ? entry.preset : '',
           recovered: entry.recovered === true,
           text: entry.text,
           at: typeof entry.at === 'number' ? entry.at : 0,
@@ -1087,7 +974,6 @@ window.__ModuleLoader__.load({
         reviewId: typeof result.reviewId === 'string' ? result.reviewId : '',
         mode: result.mode === 'think' ? 'think' : 'normal',
         model: typeof result.model === 'string' ? result.model : '',
-        preset: typeof result.preset === 'string' ? result.preset.trim() : '',
         recovered: result.recovered === true,
         text: result.text,
         at: Date.now(),
@@ -1112,12 +998,10 @@ window.__ModuleLoader__.load({
     function buildHandoffPrompt(result) {
       const review = result && typeof result.text === 'string' ? result.text.trim() : '';
       if (!review) return '';
-      const preset = result && typeof result.preset === 'string' ? result.preset.trim() : '';
       return (
         'ChatGPT Advisor review:\n\n' +
         review +
         '\n\n' +
-        (preset ? `Reviewed DSH agent preset: "${preset}"\n\n` : '') +
         'Evaluate this review against the current task and apply the relevant recommendations.\n' +
         'Do not blindly follow recommendations that are incorrect or inconsistent with the current task.'
       );
@@ -1241,7 +1125,6 @@ window.__ModuleLoader__.load({
           h('span', { className: 'cwg-advisor-card-meta' },
             t(result.mode === 'think' ? 'advisor.card.modeThink' : 'advisor.card.modeNormal', result.mode === 'think' ? 'Think' : 'Normal')
             + (result.model ? ` · ${result.model}` : '')
-            + (result.preset ? ` · ${result.preset}` : '')
             + (result.recovered ? ` · ${t('advisor.card.recovered', 'recovered')}` : '')),
         ),
         h('pre', { className: 'cwg-advisor-card-body' }, result.text),
@@ -1292,13 +1175,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The DSH session-projection key carrying the preset a session already runs (`agentPreset`
-     * from the agent-preset registry). Read defensively: a deployment without the registry simply
-     * answers `null`.
-     */
-    const SESSION_PRESET_PROJECTION_KEY = 'agentPreset';
-
-    /**
      * Review dialog. It is a real modal: the composer slot it is registered in renders its content
      * inside a zero-height absolutely-positioned anchor at the top of the composer card
      * (`conversation.input.overlay`), so dialog content that stays in flow lands on top of the
@@ -1306,13 +1182,9 @@ window.__ModuleLoader__.load({
      * reads as a panel under the text box. The dialog therefore leaves that flow explicitly
      * (`position: fixed` backdrop) and centres itself over the composer.
      */
-    function AdvisorReviewDialog(t, props, configForm, presets) {
+    function AdvisorReviewDialog(t, props, configForm) {
       const { snapshot, inFlight } = useAdvisorState(advisorStore);
-      // The roster store is injected (the plugin's own store, or a test double): the dialog never
-      // reads a second, module-global owner for the same state.
-      const { snapshot: presetState } = useAdvisorState(presets.store);
       const projection = typeof props.useProjection === 'function' ? props.useProjection(ADVISOR_PROJECTION_KEY) : undefined;
-      const sessionPreset = typeof props.useProjection === 'function' ? props.useProjection(SESSION_PRESET_PROJECTION_KEY) : undefined;
       const workspaceItems = typeof props.useWorkspaces === 'function' ? props.useWorkspaces((s) => s.items) : undefined;
       // Transient copy feedback for the recovered answer ('' = nothing to say).
       const [copyState, setCopyState] = React.useState('');
@@ -1325,22 +1197,9 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener('keydown', onKey);
       }, [open]);
 
-      React.useEffect(() => {
-        // The roster is deployment state: read it when the dialog opens, never at plugin load.
-        if (open) void presets.store.load(presets.read);
-      }, [open]);
-
       if (!snapshot.open || !snapshot.context) return null;
 
       const project = selectProjectName(workspaceItems, props.sessionId);
-      const presetOptions = presetState.options;
-      // `null` means "not chosen yet": follow the preset the session runs, else the deployment
-      // default. An explicit '' is the user's "no preset" choice and is never overridden.
-      const selectedPreset = snapshot.preset === null
-        ? defaultAdvisorPreset(presetOptions, sessionPreset)
-        : snapshot.preset;
-      const presetLabel = advisorPresetLabel(presetOptions, selectedPreset);
-
       /** Modal keyboard contract: Tab cycles inside the dialog, never into the composer behind it. */
       function onDialogKeyDown(event) {
         if (event.key !== 'Tab') return;
@@ -1368,7 +1227,6 @@ window.__ModuleLoader__.load({
           token,
           sessionId: props.sessionId,
           project,
-          preset: presetLabel,
           storage: window.localStorage,
           fetch: (url, options) => fetch(url, options),
         });
@@ -1384,7 +1242,6 @@ window.__ModuleLoader__.load({
           base,
           token,
           sessionId: props.sessionId,
-          preset: presetLabel,
           storage: window.localStorage,
           fetch: (url, options) => fetch(url, options),
         });
@@ -1455,41 +1312,6 @@ window.__ModuleLoader__.load({
                 onClick: () => advisorStore.setMode('think'),
               }, t('advisor.dialog.modeThink', 'Think')),
             ),
-          ),
-          h('div', null,
-            h('label', { className: 'cwg-advisor-section-label', htmlFor: 'cwg-advisor-preset' },
-              t('advisor.dialog.preset', 'DSH agent preset')),
-            h('select', {
-              id: 'cwg-advisor-preset',
-              className: 'cwg-advisor-preset',
-              value: selectedPreset,
-              disabled: snapshot.status === 'loading' || presetState.status === 'loading' || presetOptions.length === 0,
-              onChange: (event) => advisorStore.setPreset(event.target.value),
-            },
-              h('option', { value: '' }, t('advisor.dialog.presetNone', 'No preset')),
-              ...presetOptions.map((option) => h('option', {
-                key: option.id,
-                value: option.id,
-                ...(option.description ? { title: option.description } : {}),
-              }, option.name)),
-            ),
-            presetState.status === 'unavailable'
-              ? h('div', { className: 'cwg-advisor-context-label' },
-                  t('advisor.dialog.presetUnavailable', 'No DSH agent presets are available in this deployment.'))
-              : null,
-            presetState.status === 'error'
-              ? h('div', { className: 'cwg-advisor-recover-actions' },
-                  h('span', { className: 'cwg-advisor-error', role: 'alert' },
-                    t('advisor.dialog.presetError', 'The DSH agent presets could not be read.'),
-                    presetState.error ? ` (${presetState.error})` : ''),
-                  h('button', {
-                    type: 'button',
-                    className: 'cwg-btn cwg-secondary',
-                    disabled: snapshot.status === 'loading',
-                    onClick: () => { void presets.store.load(presets.read); },
-                  }, t('advisor.dialog.presetRetry', 'Retry')),
-                )
-              : null,
           ),
           h('div', null,
             h('div', { className: 'cwg-advisor-section-label' }, t('advisor.dialog.instructions', 'Review instructions')),
@@ -1625,11 +1447,7 @@ window.__ModuleLoader__.load({
           id: 'dsh-chatgpt-web-advisor-dialog',
           order: 2,
           locale: NS,
-        }, (props) => AdvisorReviewDialog(t, props, configForm, {
-          store: advisorPresetStore,
-          // Read through the typed client gateway; never a plugin-local registry.
-          read: () => loadAdvisorPresetOptions(ctx.remote),
-        }))));
+        }, (props) => AdvisorReviewDialog(t, props, configForm))));
         // Issue #180: the Advisor result card in the per-turn tail slot
         // (session-scoped list; entries without content return null).
         disposers.push(ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
@@ -1667,13 +1485,7 @@ window.__ModuleLoader__.load({
         AdvisorReviewButton,
         AdvisorResultCard,
         AdvisorReviewDialog,
-        SESSION_PRESET_PROJECTION_KEY,
         ADVISOR_CSS: CSS,
-        createAdvisorPresetStore,
-        advisorPresetOptions,
-        defaultAdvisorPreset,
-        advisorPresetLabel,
-        loadAdvisorPresetOptions,
       },
     };
   },

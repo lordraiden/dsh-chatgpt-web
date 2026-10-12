@@ -18,11 +18,10 @@
  *   as the native-llm endpoint), so the sidecar never participates in the DSH
  *   session loop and a review writes nothing to the main DSH history.
  *
- * The review content is deliberately minimal: project reference (a name, never
- * an absolute path), the DSH agent-preset label the reviewed step ran under
- * (review context only, never a DSH session), review instructions, the last
- * human request, and the last final DSH response. No full DSH history, no
- * Aegis/Codex/bridge details, no transport markers.
+ * The review content is deliberately minimal: the project reference (a name,
+ * never an absolute path), the review instructions, the last human request,
+ * and the last final DSH response. No full DSH history, no Aegis/Codex/bridge
+ * details, no transport markers, and no DSH agent-preset context.
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { AdapterEvent, CodexMessage, CodexParsedRequest } from "../../types";
@@ -44,12 +43,6 @@ export interface AdvisorReviewInput {
   mode: AdvisorMode;
   /** Project/repository name (a name, never an absolute path). Optional. */
   project?: string;
-  /**
-   * The DSH agent preset the reviewed step ran under, as the label the reviewer reads.
-   * Optional: a deployment without an agent-preset roster simply omits it. It is review
-   * context only — the Advisor never composes a DSH session.
-   */
-  preset?: string;
 }
 
 export interface AdvisorReviewResult {
@@ -60,8 +53,6 @@ export interface AdvisorReviewResult {
   mode: AdvisorMode;
   /** The model route used (public slug), echoed. */
   model: string;
-  /** The requested agent-preset label, echoed when the request carried one. */
-  preset?: string;
   /**
    * True when the text was read back from the retained Advisor conversation instead of produced
    * by a fresh review turn (issue #214).
@@ -79,9 +70,6 @@ export interface AdvisorReviewResult {
 
 export const ADVISOR_INPUT_INVALID_CODE = "advisor_input_invalid";
 export const ADVISOR_TURN_FAILED_CODE = "advisor_turn_failed";
-/** Bound on the optional agent-preset label carried into the review content. */
-export const ADVISOR_PRESET_LABEL_MAX = 120;
-
 /**
  * The Advisor persona. It is installed on the first Advisor turn of a
  * conversation through the existing retained composer install and stays frozen
@@ -144,9 +132,6 @@ export function composeAdvisorMessage(input: AdvisorReviewInput): string {
   if (input.project !== undefined) {
     blocks.push(`Project: "${input.project}"`);
   }
-  if (input.preset !== undefined) {
-    blocks.push(`Agent preset: "${input.preset}"`);
-  }
   blocks.push(
     `Review instructions:\n${input.instructions}`,
     `Human request:\n${input.humanRequest}`,
@@ -176,15 +161,6 @@ export function validateAdvisorReviewInput(body: unknown): AdvisorReviewInput {
   if (project !== undefined && (typeof project !== "string" || project.trim().length === 0)) {
     throw new Error('Advisor review field "project" must be a non-empty string when present');
   }
-  const preset = raw.preset;
-  if (preset !== undefined) {
-    if (typeof preset !== "string" || preset.trim().length === 0) {
-      throw new Error('Advisor review field "preset" must be a non-empty string when present');
-    }
-    if (preset.trim().length > ADVISOR_PRESET_LABEL_MAX) {
-      throw new Error(`Advisor review field "preset" must not exceed ${ADVISOR_PRESET_LABEL_MAX} characters`);
-    }
-  }
   // Normalize the project identifier through the same owner the retained
   // install uses (`projectContextName`): a bare name passes through
   // unchanged, a path collapses to its last segment, so a local filesystem
@@ -198,7 +174,6 @@ export function validateAdvisorReviewInput(body: unknown): AdvisorReviewInput {
     instructions: stringField("instructions"),
     mode,
     ...(projectName !== undefined ? { project: projectName } : {}),
-    ...(typeof preset === "string" ? { preset: preset.trim() } : {}),
   };
 }
 
@@ -282,7 +257,6 @@ export async function runAdvisorReview(
     reviewId: id,
     mode: input.mode,
     model: route.slug,
-    ...(input.preset !== undefined ? { preset: input.preset } : {}),
   };
   let text = "";
   let terminal: "done" | "incomplete" | "error" | undefined;
