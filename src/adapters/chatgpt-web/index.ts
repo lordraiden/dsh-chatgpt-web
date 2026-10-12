@@ -65,8 +65,11 @@ import {
   settleActiveZeroRiskCompactionSource,
 } from "./compaction-handoff";
 import { webChatAccountBindingId, type WebChatAccountBinding, type WebChatConversationStore } from "../../web-chat/core";
-import { closeWebChatConversationStore, createWebChatConversationStore } from "../../web-chat/host/dsh-integration";
-import { CHATGPT_WEB_PROVIDER_ID } from "./llm-adapter";
+import {
+  CHATGPT_WEB_DRIVER_ID,
+  closeWebChatConversationStore,
+  createWebChatConversationStore,
+} from "../../web-chat/host/dsh-integration";
 import {
   chatGptWebChatAccountBinding,
 } from "./web-chat-bridge";
@@ -266,7 +269,7 @@ function safeManualTerminalError(status: "cancelled" | "failed"): ChatGptWebAdap
 export function chatGptWebChatAccountBindingFor(provider: CodexProviderConfig): WebChatAccountBinding {
   const { accountIdentity, browserProfile, browserContext } = browserAccountLeaseInput(provider, "web-chat-affinity");
   return chatGptWebChatAccountBinding({
-    providerId: CHATGPT_WEB_PROVIDER_ID,
+    providerId: CHATGPT_WEB_DRIVER_ID,
     accountFingerprint: accountIdentity,
     browserProfile,
     browserContext,
@@ -713,7 +716,7 @@ export function createChatGptWebAdapter(
       : { parsed, applied: false };
     const conversationKey = retainConversationForTurn
       ? chatGptConversationKey(checkpointInput.parsed, executionNamespace, {
-        providerId: CHATGPT_WEB_PROVIDER_ID,
+        providerId: CHATGPT_WEB_DRIVER_ID,
         bindingId: chatGptWebChatBindingIdFor(provider),
       })
       : undefined;
@@ -1266,7 +1269,7 @@ export function createChatGptWebAdapter(
       // session/thread, resolved from the request the caller built (the Advisor builds the same
       // synthetic identity as its review turn).
       const conversationKey = chatGptConversationKey(parsed, executionNamespace, {
-        providerId: CHATGPT_WEB_PROVIDER_ID,
+        providerId: CHATGPT_WEB_DRIVER_ID,
         bindingId: chatGptWebChatBindingIdFor(provider),
       });
       if (!conversationKey) {
@@ -1404,7 +1407,7 @@ export function createChatGptWebAdapter(
                   handoffTimer.unref?.();
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace, {
-                    providerId: CHATGPT_WEB_PROVIDER_ID,
+                    providerId: CHATGPT_WEB_DRIVER_ID,
                     bindingId: chatGptWebChatBindingIdFor(provider),
                   });
                   const runFreshCompactionFallback = async (reason: string): Promise<string> => {
@@ -1620,7 +1623,7 @@ export function createChatGptWebAdapter(
         // deployment configured a durable location.
         const webChatContinuity = createChatGptContinuity({
           provider,
-          affinity: { providerId: CHATGPT_WEB_PROVIDER_ID, bindingId: chatGptWebChatBindingIdFor(provider) },
+          affinity: { providerId: CHATGPT_WEB_DRIVER_ID, bindingId: chatGptWebChatBindingIdFor(provider) },
           namespace: executionNamespace,
           binding: chatGptWebChatAccountBindingFor(provider),
           sessions: chatGptTurnSessions,

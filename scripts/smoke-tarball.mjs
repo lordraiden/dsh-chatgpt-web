@@ -112,6 +112,20 @@ try {
     fail(`doctor crashed (exit ${doctor.status}): ${doctorText.trim().slice(-400)}`);
   }
 
+  // The profile host supplies this peer to the Cordis plugin, but the standalone CLI/sidecar must
+  // not import the host-only adapter class: the profile's isolated package tree does not own it.
+  const cliBundlePath = join(pkgDir, "lib", "cli.js");
+  if (!existsSync(cliBundlePath)) {
+    fail("standalone CLI bundle is unavailable for the host-peer boundary check");
+  } else {
+    const cliBundle = readFileSync(cliBundlePath, "utf8");
+    if (/from\s+["']@deepseek-ai\/dsh-llm["']/.test(cliBundle)) {
+      fail("standalone CLI imports the host-only @deepseek-ai/dsh-llm peer");
+    } else {
+      ok("standalone CLI does not depend on the host-only DSH LLM peer");
+    }
+  }
+
   // 6. Build-environment contamination check on the packed artifact.
   execFileSync("tar", ["-xzf", tarball, "-C", extractDir]);
   const contaminationPatterns = [

@@ -38,6 +38,7 @@ import {
 } from "../../chatgpt-web-authority";
 import type { WebChatProviderDriver, WebChatSubmissionPhase } from "../../web-chat/core";
 import {
+  CHATGPT_WEB_DRIVER_ID,
   dshFailureSemanticsForSubmission,
 } from "../../web-chat/host/dsh-integration";
 import { loadConfig, providerConfig, type AppConfig } from "../../config";
@@ -57,7 +58,8 @@ import type { ProviderAdapter } from "../base";
 import { createChatGptWebAdapter } from "./index";
 import { createChatGptWebDriver } from "./chatgpt-driver";
 
-export const CHATGPT_WEB_PROVIDER_ID = "chatgpt-web";
+// Keep the native DSH-facing name aligned with the canonical WebChat route id.
+export const CHATGPT_WEB_PROVIDER_ID = CHATGPT_WEB_DRIVER_ID;
 
 export interface LlmAdapterDeps {
   /** Build the provider configuration. Defaults to `loadConfig() + providerConfig()`. */

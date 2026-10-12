@@ -3,7 +3,7 @@ import type { AppConfig } from "./config";
 import { getConfigDir, getConfigPath, loadConfig } from "./config";
 import { join } from "node:path";
 import { createChatGptWebDriver } from "./adapters/chatgpt-web/chatgpt-driver";
-import { effectiveChatGptWebProviderConfig } from "./adapters/chatgpt-web/llm-adapter";
+import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import {
   inspectWebChatProvider,
