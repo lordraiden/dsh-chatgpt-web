@@ -38,13 +38,13 @@ test("Luna retains the authenticated ChatGPT Web conversation without a Launcher
   ).toBe(true);
 });
 
-test("Sol retains only when local tools are enabled", () => {
+test("normal automatic Sol turns retain the provider conversation", () => {
   expect(
     shouldRetainChatGptWebConversation(nativeParsed({ modelId: "gpt-5.6-sol" }), { localTools: true }),
   ).toBe(true);
   expect(
     shouldRetainChatGptWebConversation(nativeParsed({ modelId: "gpt-5.6-sol" }), { localTools: false }),
-  ).toBe(false);
+  ).toBe(true);
 });
 
 test("manual Zero Risk turns keep their existing explicit launcher lifecycle", () => {
