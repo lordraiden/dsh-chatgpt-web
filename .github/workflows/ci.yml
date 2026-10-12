@@ -129,13 +129,11 @@ jobs:
           git commit -m "chore: regenerate checked-in lib [skip ci]"
           git push origin HEAD:main
 
-      - name: Install DSH runtime for Native2 integration test
-        run: bun add --no-save @deepseek-ai/dsh@0.2.0-rc.2
-
-      - name: Native2 to DSH runtime integration
-        env:
-          DSH_RUNTIME_ROOT: ${{ github.workspace }}/node_modules/@deepseek-ai/dsh
-        run: bun run test:native2-dsh-runtime
+      # The native2 integration installs the published DSH runtime at run time (its dependency
+      # resolution is third-party and has failed for reasons nothing here controls, e.g. the
+      # unresolvable @aws-sdk versions of 2026-10-12). It runs as its own job so that a failure
+      # there cannot block this job's tag, package publication or GitHub Release. Merge policy is
+      # unchanged: both jobs must be green.
 
       - name: Full regression suite
         run: bun run test
@@ -190,6 +188,11 @@ jobs:
         run: |
           set -euo pipefail
           tag="v${RELEASE_VERSION}"
+          source_version="$(sed -n "s/^export const VERSION = '\([^']*\)';$/\1/p" src/version.ts)"
+          if [ "$source_version" != "$RELEASE_VERSION" ]; then
+            echo "src/version.ts ($source_version) and package.json ($RELEASE_VERSION) disagree" >&2
+            exit 1
+          fi
           git fetch origin main
           release_commit="$(git rev-parse HEAD)"
           main_commit="$(git rev-parse origin/main)"
@@ -228,6 +231,11 @@ jobs:
           version="${tag#v}"
           package_version="$(node -p "require('./package.json').version")"
           test "$version" = "$package_version"
+          source_version="$(sed -n "s/^export const VERSION = '\([^']*\)';$/\1/p" src/version.ts)"
+          if [ "$source_version" != "$package_version" ]; then
+            echo "src/version.ts ($source_version) and package.json ($package_version) disagree" >&2
+            exit 1
+          fi
 
           printf '%s\n' \
             '@lordraiden:registry=https://npm.pkg.github.com/' \
@@ -343,3 +351,50 @@ jobs:
             } > "$RUNNER_TEMP/release-notes.md"
             gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
           fi
+
+  # Kept out of `verify` on purpose: this is the only job that resolves the published DSH runtime
+  # from the public registry, and a transient third-party resolution failure must not stop the
+  # release steps above from tagging and publishing.
+  native2:
+    if: ${{ github.event_name != 'push' || github.ref_type == 'tag' || github.ref_name == 'main' || github.ref_name == 'integration/staging' || startsWith(github.ref_name, 'feat/') }}
+    name: Native2 to DSH runtime integration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.19.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install DSH runtime for Native2 integration test
+        shell: bash
+        run: |
+          set -uo pipefail
+          # `bun add` re-resolves the runtime's whole tree, so retry a bounded number of times
+          # before reporting a failure.
+          for attempt in 1 2 3; do
+            if bun add --no-save @deepseek-ai/dsh@0.2.0-rc.2; then
+              exit 0
+            fi
+            echo "DSH runtime install failed (attempt ${attempt}/3); retrying in 15s" >&2
+            sleep 15
+          done
+          echo "Could not install @deepseek-ai/dsh@0.2.0-rc.2 after 3 attempts" >&2
+          exit 1
+
+      - name: Native2 to DSH runtime integration
+        env:
+          DSH_RUNTIME_ROOT: ${{ github.workspace }}/node_modules/@deepseek-ai/dsh
+        run: bun run test:native2-dsh-runtime

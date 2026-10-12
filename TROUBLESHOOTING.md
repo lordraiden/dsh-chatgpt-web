@@ -136,6 +136,29 @@ For the normal DSH-managed path, prefer changing the configured sidecar port rat
 
 Do not expose the sidecar beyond its intended loopback boundary.
 
+### An older daemon is still serving the port
+
+#### Symptom
+
+`doctor` reports `Daemon version is X; config requires Y` and `Doctor result: not ready`, and the plugin log says the sidecar is outdated, even though `dsh plugin ... list` shows the new version installed and you restarted DSH.
+
+#### Cause
+
+Updating the plugin replaces files on disk; it does not stop a `serve` process that the plugin did not start. On an OS without the managed service that process is long-lived and keeps the port, so the updated plugin finds a **healthy sidecar whose version differs from its own**. The plugin will not reuse or terminate a sidecar it does not own, and since `1.0.27` it also fails turns closed with that message instead of quietly serving the old daemon.
+
+#### Resolution
+
+Stop the old daemon, then let DSH start the matching one:
+
+~~~bash
+lsof -i :17841            # or: ss -ltnp | grep 17841
+kill <pid-from-doctor>    # the daemon doctor reported
+# restart DSH so the installed plugin starts its own daemon
+curl -s http://127.0.0.1:17841/healthz   # expect "version":"<installed version>"
+~~~
+
+Never edit `releaseVersion` in the config to silence the mismatch: it is runtime metadata that the plugin rewrites to the installed version, and hiding the disagreement would leave the old daemon serving turns.
+
 ## 6. DSH starts but the native provider is unavailable
 
 Confirm that the provider is configured through DSH's native ctx.llm route.

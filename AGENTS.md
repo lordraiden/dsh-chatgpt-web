@@ -406,7 +406,9 @@ Prefer verified behavior over stale memory.
 
 The numbered WebChat migration issues #189–#199 are released **one PR at a time**. Each completed migration PR produces exactly one stable patch release.
 
-The current `main` package version is `1.0.23`. Version `1.0.23` is an already-released maintenance version and is not reserved for the WebChat migration sequence. The migration sequence begins at `v1.0.18`; the next release for PR 6/11 is `v1.0.24`.
+The current `main` package version is `1.0.27` and it is released.
+
+**Release history as verified on 2026-10-12.** The private registry holds `1.0.6`–`1.0.17` (all but `1.0.12`), plus `1.0.25`, `1.0.26` and `1.0.27`. Only `v1.0.6`, `v1.0.17`, `v1.0.25`, `v1.0.26` and `v1.0.27` are tagged, and only `v1.0.17`, `v1.0.25`, `v1.0.26` and `v1.0.27` have GitHub Releases — most early versions were published without tag or Release, and `1.0.18`–`1.0.24` were never published at all. The table below is therefore the original migration **intent**, not a booking: a future numbered migration PR takes the next free patch version and states it in its own release preparation, and it must not renumber a version that has already been published.
 
 | Migration PR | Issue | Release |
 | --- | --- | --- |
@@ -448,12 +450,10 @@ Releases are tag-based. A merge to `main` is not itself a release.
 
 1. Bump `package.json` version in a normal PR.
 2. Merge into `main` and wait for green CI/tarball smoke.
-3. Tag the exact `main` commit and push the tag:
-   `git tag vX.Y.Z <main-sha>`
-   `git push origin vX.Y.Z`
-4. Tag CI validates the version and publishes the package **only to the private GitHub Packages npm registry** at `https://npm.pkg.github.com`.
-5. The Release workflow waits until that exact version is available in GitHub Packages and then creates the corresponding published GitHub Release.
-6. A stable version is complete only when the matching tag, private GitHub package, and GitHub Release exist.
+3. The verify job detects the bump against `package.json` and `src/version.ts`, synchronizes the checked-in `lib`, and creates `vX.Y.Z` **itself** from the exact commit it just tested. Do not push release tags by hand: a hand-made tag skips the `lib` synchronization, so the package would be built and published from a tree with a stale bundle.
+4. The same job validates the version and publishes the package **only to the private GitHub Packages npm registry** at `https://npm.pkg.github.com`.
+5. It then waits until that exact version is available in GitHub Packages, downloads the *published* tarball, smoke-tests those exact bytes, and creates the published GitHub Release with a `## Verified release provenance` section naming the tag commit, the CI run and the tarball SHA-256.
+6. A stable version is complete only when the matching tag, private GitHub package, and GitHub Release exist. `verify` is the single owner of the tag, the package and the Release; there is no separate Release workflow, because a tag pushed by CI cannot trigger one (GitHub suppresses runs caused by `GITHUB_TOKEN`).
 
 There is **no npmjs.com publication**. Do not add an npmjs.com publish step, token, or registry entry.
 
