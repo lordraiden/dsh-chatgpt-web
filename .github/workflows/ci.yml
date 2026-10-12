@@ -47,12 +47,12 @@ jobs:
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
-          source_version="$(sed -n "s/^export const VERSION = '\\([^']*\\)';$/\\1/p" src/version.ts)"
+          source_version="$(sed -n "s/^export const VERSION = '\([^']*\)';$/\1/p" src/version.ts)"
           if [ "$version" != "$source_version" ]; then
             echo "package.json ($version) and src/version.ts ($source_version) disagree" >&2
             exit 1
           fi
-          if [[ ! "$version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release versions must use X.Y.Z: $version" >&2
             exit 1
           fi
@@ -67,7 +67,7 @@ jobs:
             node - "$previous_version" "$version" <<'NODE'
           const [previous, current] = process.argv.slice(2);
           const parse = (value) => {
-            if (!/^\\d+\\.\\d+\\.\\d+$/.test(value)) throw new Error(`Invalid semver: ${value}`);
+            if (!/^\d+\.\d+\.\d+$/.test(value)) throw new Error(`Invalid semver: ${value}`);
             return value.split(".").map(Number);
           };
           const a = parse(previous), b = parse(current);
@@ -220,9 +220,9 @@ jobs:
           package_version="$(node -p "require('./package.json').version")"
           test "$version" = "$package_version"
 
-          printf '%s\\n' \\
-            '@lordraiden:registry=https://npm.pkg.github.com/' \\
-            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \\
+          printf '%s\n' \
+            '@lordraiden:registry=https://npm.pkg.github.com/' \
+            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
             > ~/.npmrc
 
           if npm view "@lordraiden/dsh-chatgpt-web@${version}" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
@@ -242,9 +242,9 @@ jobs:
           RELEASE_VERSION: ${{ steps.version-bump.outputs.version }}
         run: |
           set -euo pipefail
-          printf '%s\\n' \\
-            '@lordraiden:registry=https://npm.pkg.github.com/' \\
-            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \\
+          printf '%s\n' \
+            '@lordraiden:registry=https://npm.pkg.github.com/' \
+            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
             > ~/.npmrc
 
           for attempt in {1..60}; do
@@ -269,15 +269,15 @@ jobs:
           RELEASE_VERSION: ${{ steps.version-bump.outputs.version }}
         run: |
           set -euo pipefail
-          printf '%s\\n' \\
-            '@lordraiden:registry=https://npm.pkg.github.com/' \\
-            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \\
+          printf '%s\n' \
+            '@lordraiden:registry=https://npm.pkg.github.com/' \
+            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
             > ~/.npmrc
 
           published_dir="$RUNNER_TEMP/published-package"
           mkdir -p "$published_dir"
-          npm pack "@lordraiden/dsh-chatgpt-web@${RELEASE_VERSION}" \\
-            --registry https://npm.pkg.github.com \\
+          npm pack "@lordraiden/dsh-chatgpt-web@${RELEASE_VERSION}" \
+            --registry https://npm.pkg.github.com \
             --pack-destination "$published_dir"
 
           mapfile -t tarballs < <(find "$published_dir" -maxdepth 1 -type f -name '*.tgz' -print)
@@ -312,12 +312,12 @@ jobs:
             body="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
             if ! grep -Fq "$marker" <<< "$body"; then
               {
-                printf '%s\\n\\n' "$body"
-                printf '%s\\n\\n' "$marker"
-                printf -- '- Package: `@lordraiden/dsh-chatgpt-web@%s`\\n' "$RELEASE_VERSION"
-                printf -- '- Tag commit: `%s`\\n' "$tag_commit"
-                printf -- '- CI run: %s\\n' "$run_url"
-                printf -- '- SHA-256 of registry tarball verified by the clean-tarball smoke test: `%s`\\n' "$PUBLISHED_SHA256"
+                printf '%s\n\n' "$body"
+                printf '%s\n\n' "$marker"
+                printf -- '- Package: `@lordraiden/dsh-chatgpt-web@%s`\n' "$RELEASE_VERSION"
+                printf -- '- Tag commit: `%s`\n' "$tag_commit"
+                printf -- '- CI run: %s\n' "$run_url"
+                printf -- '- SHA-256 of registry tarball verified by the clean-tarball smoke test: `%s`\n' "$PUBLISHED_SHA256"
               } > "$RUNNER_TEMP/release-notes.md"
               gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
             fi
@@ -325,16 +325,16 @@ jobs:
             gh release notes "$tag" --repo "$GITHUB_REPOSITORY" --generate-notes > "$RUNNER_TEMP/generated-notes.md"
             {
               cat "$RUNNER_TEMP/generated-notes.md"
-              printf '\\n\\n%s\\n\\n' "$marker"
-              printf -- '- Package: `@lordraiden/dsh-chatgpt-web@%s`\\n' "$RELEASE_VERSION"
-              printf -- '- Tag commit: `%s`\\n' "$tag_commit"
-              printf -- '- CI run: %s\\n' "$run_url"
-              printf -- '- SHA-256 of registry tarball verified by the clean-tarball smoke test: `%s`\\n' "$PUBLISHED_SHA256"
+              printf '\n\n%s\n\n' "$marker"
+              printf -- '- Package: `@lordraiden/dsh-chatgpt-web@%s`\n' "$RELEASE_VERSION"
+              printf -- '- Tag commit: `%s`\n' "$tag_commit"
+              printf -- '- CI run: %s\n' "$run_url"
+              printf -- '- SHA-256 of registry tarball verified by the clean-tarball smoke test: `%s`\n' "$PUBLISHED_SHA256"
             } > "$RUNNER_TEMP/release-notes.md"
-            gh release create "$tag" \\
-              --repo "$GITHUB_REPOSITORY" \\
-              --verify-tag \\
-              --title "$tag" \\
-              --notes-file "$RUNNER_TEMP/release-notes.md" \\
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$tag" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
               --latest
           fi
