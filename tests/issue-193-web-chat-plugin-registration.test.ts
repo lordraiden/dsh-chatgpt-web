@@ -16,6 +16,7 @@ import { defaultConfig, saveConfig } from "../src/config";
 import { apply, type CordisContext } from "../src/plugin";
 import { CHATGPT_WEB_PROVIDER_ID } from "../src/adapters/chatgpt-web/llm-adapter";
 import type { WebChatProviderDriver } from "../src/web-chat/core";
+import { VERSION } from "../src/version";
 
 interface Registered {
   providers: string[];
@@ -26,12 +27,14 @@ interface Harness {
   readonly ctx: CordisContext;
   readonly registered: Registered[];
   readonly warnings: string[];
+  readonly errors: string[];
   dispose(): Promise<void>;
 }
 
 function harness(): Harness {
   const registered: Registered[] = [];
   const warnings: string[] = [];
+  const errors: string[] = [];
   let disposer: (() => void | Promise<void>) | undefined;
   const ctx = {
     llm: {
@@ -43,7 +46,7 @@ function harness(): Harness {
     logger: () => ({
       info() {},
       warn(message: string) { warnings.push(message); },
-      error() {},
+      error(message: string) { errors.push(message); },
       debug() {},
     }),
     effect(callback: () => void | Promise<void> | (() => void) | (() => Promise<void>)) {
@@ -54,6 +57,7 @@ function harness(): Harness {
     ctx,
     registered,
     warnings,
+    errors,
     dispose: async () => { await disposer?.(); },
   };
 }
@@ -137,5 +141,67 @@ describe("issue #193 — the plugin registers the ChatGPT route in production", 
     expect(missing.registered).toEqual([]);
     expect(missing.warnings.some(message => message.includes("could not be composed"))).toBe(true);
     await missing.dispose();
+  });
+
+  test("does not silently reuse a healthy sidecar from an older plugin release", async () => {
+    saveConfig(defaultConfig());
+    const originalFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async () => Response.json({
+        status: "ok",
+        service: "dsh-chatgpt-web",
+        version: "1.0.24",
+        pid: 4242,
+        mode: "browser-only",
+      }),
+    });
+
+    const outdated = harness();
+    try {
+      apply(outdated.ctx, installedConfig, {});
+      // startDaemon is intentionally fire-and-forget from the Cordis effect.
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(outdated.errors.some(message =>
+        message.includes("Outdated sidecar")
+        && message.includes("running version 1.0.24")
+        && message.includes(`installed plugin is ${VERSION}`)
+        && message.includes("restart DSH"),
+      )).toBe(true);
+      expect(outdated.warnings).toEqual([]);
+    } finally {
+      await outdated.dispose();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("reuses a healthy sidecar only when its version matches the installed plugin", async () => {
+    saveConfig(defaultConfig());
+    const originalFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async () => Response.json({
+        status: "ok",
+        service: "dsh-chatgpt-web",
+        version: VERSION,
+        pid: 4243,
+        mode: "browser-only",
+      }),
+    });
+
+    const current = harness();
+    try {
+      apply(current.ctx, installedConfig, {});
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(current.errors).toEqual([]);
+      expect(current.warnings).toEqual([]);
+    } finally {
+      await current.dispose();
+      globalThis.fetch = originalFetch;
+    }
   });
 });

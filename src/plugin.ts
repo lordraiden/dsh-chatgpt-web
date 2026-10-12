@@ -12,6 +12,7 @@ import { createWebChatShutdown, registerableRouteIds } from "./web-chat/host/dsh
 import type { WebChatProviderDriver } from "./web-chat/core";
 import type { DshNativeTurnContext } from "./types";
 import { safeErrorDescriptor, safeTextDescriptor } from "./lib/safe-diagnostics";
+import { VERSION } from "./version";
 
 export interface CordisContext {
   /**
@@ -209,20 +210,33 @@ function readReadyTimeout(value: number | Volatile<number> | undefined): number 
   return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
 }
 
-async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
+interface SidecarHealth {
+  status?: unknown;
+  service?: unknown;
+  version?: unknown;
+  pid?: unknown;
+}
+
+async function inspectSidecar(host: string, port: number): Promise<SidecarHealth | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
     const res = await fetch(`http://${host}:${port}/healthz`, {
       signal: controller.signal,
     });
-    clearTimeout(timer);
-    if (!res.ok) return false;
-    const body = (await res.json()) as { status?: string };
-    return body.status === "ok";
+    if (!res.ok) return undefined;
+    const body = await res.json() as SidecarHealth;
+    return body.status === "ok" ? body : undefined;
   } catch {
-    return false;
+    return undefined;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
+  const body = await inspectSidecar(host, port);
+  return body?.service === "dsh-chatgpt-web" && body.version === VERSION;
 }
 
 /**
@@ -255,9 +269,19 @@ export function apply(
   const startDaemon = async () => {
     const generation = ++startGeneration;
     const targetPort = port;
-    const alreadyHealthy = await isSidecarHealthy(host, targetPort);
-    if (alreadyHealthy) {
-      logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1`);
+    const existing = await inspectSidecar(host, targetPort);
+    if (existing) {
+      if (existing.service === "dsh-chatgpt-web" && existing.version === VERSION) {
+        logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1 (version ${VERSION})`);
+      } else if (existing.service === "dsh-chatgpt-web") {
+        logger.error(
+          `[dsh-chatgpt-web] Outdated sidecar at http://${host}:${targetPort}/v1: running version ${String(existing.version ?? "unknown")} (pid ${String(existing.pid ?? "unknown")}), but installed plugin is ${VERSION}. This plugin will not reuse or terminate a sidecar it does not own. Stop the old 'serve' process and restart DSH so the updated plugin can start the matching daemon.`,
+        );
+      } else {
+        logger.error(
+          `[dsh-chatgpt-web] Port ${targetPort} is occupied by a healthy service (${String(existing.service ?? "unknown service")}, version ${String(existing.version ?? "unknown")}); refusing to reuse it as the ChatGPT Web sidecar.`,
+        );
+      }
       return;
     }
 
