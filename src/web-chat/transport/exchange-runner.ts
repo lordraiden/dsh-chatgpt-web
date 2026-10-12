@@ -35,6 +35,14 @@ export interface WebChatExchangeRunner extends WebChatExchange {
   retrySafety(): WebChatRetrySafety;
   /** The last physical settlement this exchange published, when it did. */
   settlement(): WebChatPhysicalSettlement | undefined;
+  /**
+   * Establish and return this exchange's physical settlement.
+   *
+   * A caller that observes a terminal event must read the settlement through this method, not
+   * {@link settlement}: publication is asynchronous, so a synchronous read can precede it and report
+   * an unsettled resource that is in fact settled.
+   */
+  awaitSettlement(): Promise<WebChatPhysicalSettlement>;
   /** The lease this exchange owns, once `prepare()` acquired it. */
   lease(): WebChatTransportLease | undefined;
 }
@@ -278,6 +286,9 @@ export function createWebChatExchange(options: WebChatExchangeOptions): WebChatE
     },
     settlement() {
       return settlement;
+    },
+    awaitSettlement() {
+      return publishSettlement();
     },
     lease() {
       return lease;

@@ -5,26 +5,25 @@
  * **one portable ordinary user text** to the provider the selected public route resolved to; nothing
  * here knows a browser, a selector, a provider endpoint or a provider response shape.
  *
- * ## Why this port exists next to the WebChat exchange
+ * ## How a turn runs (issue #236)
  *
- * The architecture expects a text turn to run through the shared WebChat exchange
- * (`createWebChatExchange` + a provider `WebChatTextTransport`, architecture §8.3/§9). The ChatGPT
- * provider does not implement that transport yet: its turn still runs through the provider's own
- * browser execution path, while the core is used for continuity. The Advisor therefore needs the
- * smallest honest seam in the meantime, and this is it:
+ * A provider **opens an exchange**: it resolves the already-selected route to a
+ * `WebChatTextTransport` plus the identity and semantic turn the exchange runs under, and the host
+ * drives it through the shared lifecycle (`src/web-chat/host/text-exchange.ts` →
+ * `createWebChatExchange`, architecture §8.3/§9). There is no provider-specific execution seam left:
+ * readiness, the submission boundary, streaming, cancellation and physical settlement all belong to
+ * the exchange, and each provider's transport reports its own facts.
  *
- * - it is provider-neutral, so the Advisor never imports a provider adapter;
- * - it is composed **once** per provider together with that provider's driver, so it is not a second
- *   provider registry and cannot advertise a route the composition cannot serve;
- * - it carries an explicit retirement trigger: when a provider gains its `WebChatTextTransport`, its
- *   runtime delegates `runTextTurn` to the exchange runner and this request shape is translated to
- *   `WebChatTurnInput`. No Advisor caller changes.
+ * The composition stays provider-neutral, so the Advisor never imports a provider adapter, and it is
+ * composed **once** per provider together with that provider's driver: it is not a second provider
+ * registry and cannot advertise a route the composition cannot serve.
  *
  * The route is *already selected* by its caller (DSH's public catalogue identity); this module only
  * maps that route to the provider composition that already serves it — it is never a routing policy
  * (architecture §8.4, §17).
  */
 import type { WebChatConversationAffinity, WebChatModelDescriptor, WebChatProviderDriver } from "../core";
+import type { WebChatTextExchangeHandoff } from "./text-exchange";
 
 /** One public WebChat route identity: `providerId` + `/` + provider-local model id. */
 export function webChatPublicRoute(providerId: string, modelId: string): string {
@@ -120,7 +119,7 @@ export interface WebChatTextRecoveryRequest {
 }
 
 /**
- * One provider composition: the provider's driver plus the text-turn seam that serves it.
+ * One provider composition: the provider's driver plus the exchange seam that serves it.
  *
  * `providerLabel` is presentation metadata for a provider-qualified choice label; it carries no
  * routing authority (the driver id does).
@@ -128,8 +127,14 @@ export interface WebChatTextRecoveryRequest {
 export interface WebChatProviderRuntime {
   readonly driver: WebChatProviderDriver;
   readonly providerLabel?: string;
-  /** Run one ordinary user-text turn through this provider. */
-  runTextTurn(request: WebChatTextTurnRequest): Promise<WebChatTextTurnOutcome>;
+  /**
+   * Open one exchange for an already-selected route.
+   *
+   * The provider resolves the route, the model, the conversation identity and (when it needs one) the
+   * transport resource; the host runs the resulting handoff through the shared exchange. A route this
+   * provider does not serve fails explicitly instead of being substituted.
+   */
+  openTextExchange(request: WebChatTextTurnRequest): Promise<WebChatTextExchangeHandoff>;
   /**
    * Read the finalized answer of a retained provider conversation, when this provider can.
    *

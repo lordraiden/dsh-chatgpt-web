@@ -34,6 +34,7 @@ import {
   type AdvisorTaskRegistry,
 } from "./tasks";
 import type { AdvisorRecoveryRequest } from "./recovery";
+import { runWebChatTextExchange } from "../web-chat/host/text-exchange";
 import {
   resolveWebChatProviderRuntime,
   resolveWebChatRouteModel,
@@ -198,7 +199,10 @@ export function createAdvisorHost(options: AdvisorHostOptions): AdvisorHost {
   ): Promise<void> => {
     let outcome;
     try {
-      outcome = await runtime.runTextTurn({
+      // The review runs through the shared exchange: the provider opens a transport for the
+      // already-selected route and the host drives readiness, submission, streaming and settlement
+      // (issue #236). No provider-specific execution seam remains in this path.
+      outcome = await runWebChatTextExchange(await runtime.openTextExchange({
         route: request.route,
         model: modelId,
         ...(request.reasoningMode !== undefined ? { reasoningMode: request.reasoningMode } : {}),
@@ -206,7 +210,7 @@ export function createAdvisorHost(options: AdvisorHostOptions): AdvisorHost {
         dshSession: { sessionId: request.source.sessionId },
         affinity,
         turnId: reviewId,
-      });
+      }));
     } catch (error) {
       outcome = {
         ok: false,
@@ -220,10 +224,8 @@ export function createAdvisorHost(options: AdvisorHostOptions): AdvisorHost {
       return;
     }
     if (outcome.ok && typeof outcome.text === "string" && outcome.text.trim().length > 0) {
-      tasks.complete(reviewId, {
-        text: outcome.text.trim(),
-        ...(outcome.capturedAt !== undefined ? { capturedAt: outcome.capturedAt } : {}),
-      });
+      // A produced answer carries no `capturedAt`: that field marks a read-back (#214 recovery).
+      tasks.complete(reviewId, { text: outcome.text.trim() });
       return;
     }
     tasks.fail(reviewId, {
