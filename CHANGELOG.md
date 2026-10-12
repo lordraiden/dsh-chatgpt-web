@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.26
+
+- Separate normal Chat Mode from Advisor: normal turns retain provider-native continuity and send only the current user input; deterministic project metadata supplies the optional repository header.
+- Route normal ChatGPT Web turns through the shared provider-neutral WebChat exchange lifecycle and transport boundary.
+- Include the merged architecture, provider conformance, transport and CLI/sidecar boundary fixes present on `main` at release preparation.
+
+
 ## 1.0.25
 
 - Fix the standalone CLI/sidecar dependency boundary: the CLI no longer imports the host-only `@deepseek-ai/dsh-llm` adapter peer (PR #230).
