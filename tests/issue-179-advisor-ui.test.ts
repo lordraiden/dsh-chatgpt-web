@@ -173,89 +173,206 @@ describe("issue #179 — reviewable-turn selection (button visibility)", () => {
     expect(reviewable.humanRequest).toBe("segunda petición\nlínea dos");
     expect(reviewable.dshResponse).toBe("segunda respuesta\ncontinuación");
     expect(reviewable.turn).toBe(4);
+    // Issue #224: the reviewed-turn identity the sidecar freezes on the task.
+    expect(reviewable.reviewedTurnId).toBe("dsh-turn:4");
+  });
+
+  test("falls back to the render anchor when the target exposes no DSH turn number", () => {
+    const chat = chatSnapshot([userNode(1, "hola"), finalAssistant(2, { kind: "text", text: "respuesta" })]);
+    // `assistantStep` always sets `data.turn`; a node without one keeps a stable anchor identity.
+    const withoutTurn = {
+      ...finalAssistant(2, { kind: "text", text: "respuesta" }),
+      data: { ...finalAssistant(2, { kind: "text", text: "respuesta" }).data, turn: undefined },
+    };
+    const reviewable = mod.__test.selectReviewableTurn(chatSnapshot([userNode(1, "hola"), withoutTurn]));
+    expect(reviewable.reviewedTurnId).toBe("anchor:2");
+    // The chat fixture above still resolves the DSH turn normally.
+    expect(mod.__test.selectReviewableTurn(chat).reviewedTurnId).toBe("dsh-turn:2");
   });
 });
 
-describe("issue #179 — button gating (lock during generation/review)", () => {
-  const clean = { running: false, inFlight: false, reviewable: { turn: 4 } };
-  test("enabled only with a reviewable turn and nothing in flight", () => {
+describe("issue #179/#224 — button gating (lock during generation)", () => {
+  const clean = { running: false, reviewable: { turn: 4 } };
+  test("enabled only with a reviewable turn and no running generation", () => {
     expect(mod.__test.canStartReview(clean)).toBe(true);
   });
   test("disabled while DSH is generating", () => {
     expect(mod.__test.canStartReview({ ...clean, running: true })).toBe(false);
   });
-  test("disabled while a review is in flight (prevents a second simultaneous review)", () => {
-    expect(mod.__test.canStartReview({ ...clean, inFlight: true })).toBe(false);
-  });
   test("disabled with no reviewable turn", () => {
     expect(mod.__test.canStartReview({ ...clean, reviewable: null })).toBe(false);
   });
+
+  test("submission needs at least one substantive selected source", () => {
+    const context = { humanRequest: "h", dshResponse: "d", project: "p" };
+    expect(mod.__test.hasSelectedSource(context, { request: true, response: true, project: true })).toBe(true);
+    expect(mod.__test.hasSelectedSource(context, { request: false, response: false, project: true })).toBe(true);
+    expect(mod.__test.hasSelectedSource(context, { request: false, response: false, project: false })).toBe(false);
+    expect(mod.__test.hasSelectedSource({ humanRequest: "", dshResponse: "" }, { request: true, response: true, project: true })).toBe(false);
+  });
 });
 
-describe("issue #179 — dialog state (mode selection + instruction editing)", () => {
-  test("mode defaults to Normal; Think is selectable; unknown values fall back to Normal", () => {
-    const store = mod.__test.createAdvisorStore();
-    expect(store.getSnapshot().mode).toBe("normal");
-    store.setMode("think");
-    expect(store.getSnapshot().mode).toBe("think");
-    store.setMode("otro");
-    expect(store.getSnapshot().mode).toBe("normal");
+describe("issue #224 — dialog state (dynamic model + inclusion)", () => {
+  const choice = (route: string, label: string) => ({
+    route,
+    providerId: route.split("/")[0],
+    providerLabel: "ChatGPT Web",
+    modelId: route.split("/")[1],
+    modelLabel: label,
+    label: `ChatGPT Web — ${label}`,
+    reasoningModes: [],
   });
 
-  test("instructions are freely editable and the dialog preloads the given value", () => {
+  test("opening the launcher selects both text sources and the review view", () => {
     const store = mod.__test.createAdvisorStore();
-    const context = { humanRequest: "h", dshResponse: "d", turn: 4 };
-    store.openDialog(context, "mi instrucción propia");
+    const context = { humanRequest: "h", dshResponse: "d", turn: 4, reviewedTurnId: "dsh-turn:4" };
+    store.openReview(context, "mis instrucciones");
+    const snapshot = store.getSnapshot();
+    expect(snapshot.open).toBe(true);
+    expect(snapshot.view).toBe("review");
+    expect(snapshot.include).toEqual({ request: true, response: true, project: true });
+    expect(snapshot.instructions).toBe("mis instrucciones");
+    expect(snapshot.models.status).toBe("idle");
+    expect(snapshot.selection).toBeNull();
+  });
+
+  test("inclusion toggles default to included and a dismissed source stays dismissed", () => {
+    const store = mod.__test.createAdvisorStore();
+    store.openReview({ humanRequest: "h", dshResponse: "d", reviewedTurnId: "t" }, "i");
+    store.setInclude("response", false);
+    expect(store.getSnapshot().include.response).toBe(false);
+    store.setInclude("not-a-field", false);
+    expect(store.getSnapshot().include.request).toBe(true);
+  });
+
+  test("the first catalogue load preselects the last used route, else the deterministic first", () => {
+    const store = mod.__test.createAdvisorStore();
+    store.openReview({ humanRequest: "h", dshResponse: "d", reviewedTurnId: "t" }, "i");
+    const choices = [choice("chatgpt-web/high", "High"), choice("chatgpt-web/light", "Light")];
+    store.applyModels(choices, "chatgpt-web/light");
+    expect(store.getSnapshot().selection.route).toBe("chatgpt-web/light");
+    const fresh = mod.__test.createAdvisorStore();
+    fresh.openReview({ humanRequest: "h", dshResponse: "d", reviewedTurnId: "t" }, "i");
+    fresh.applyModels(choices, "gone-web/x");
+    expect(fresh.getSnapshot().selection.route).toBe("chatgpt-web/high");
+  });
+
+  test("a later load never silently replaces the displayed selection", () => {
+    const store = mod.__test.createAdvisorStore();
+    store.openReview({ humanRequest: "h", dshResponse: "d", reviewedTurnId: "t" }, "i");
+    store.applyModels([choice("chatgpt-web/high", "High"), choice("chatgpt-web/light", "Light")], undefined);
+    expect(store.getSnapshot().selection.route).toBe("chatgpt-web/high");
+    // The route disappeared from the refreshed catalogue: the selection stays, so the user must
+    // choose explicitly instead of being silently switched to another model.
+    store.applyModels([choice("chatgpt-web/light", "Light")], "chatgpt-web/light");
+    expect(store.getSnapshot().selection.route).toBe("chatgpt-web/high");
+    // An explicit choice is authoritative.
+    store.setSelection("chatgpt-web/light");
+    expect(store.getSnapshot().selection.route).toBe("chatgpt-web/light");
+    store.setSelection("unknown-web/x");
+    expect(store.getSnapshot().selection.route).toBe("chatgpt-web/light");
+  });
+
+  test("instructions are freely editable and the launcher preloads the given value", () => {
+    const store = mod.__test.createAdvisorStore();
+    const context = { humanRequest: "h", dshResponse: "d", turn: 4, reviewedTurnId: "dsh-turn:4" };
+    store.openReview(context, "mi instrucción propia");
     expect(store.getSnapshot().instructions).toBe("mi instrucción propia");
     store.setInstructions("texto modificado");
     expect(store.getSnapshot().instructions).toBe("texto modificado");
     store.closeDialog();
-    store.openDialog(context, "   ");
+    store.openReview(context, "   ");
     expect(store.getSnapshot().instructions).toBe(mod.__test.DEFAULT_INSTRUCTIONS);
     expect(store.getSnapshot().context).toEqual(context);
   });
 });
 
-describe("issue #179 — correct #178 advisor call", () => {
-  test("buildAdvisorFetch targets the control endpoint with Bearer auth and the full body", () => {
+describe("issue #224 — control-API request builders", () => {
+  test("the catalogue is a GET with Bearer auth", () => {
     const signal = { aborted: false };
-    const { url, options } = mod.__test.buildAdvisorFetch({
+    const { url, options } = mod.__test.buildAdvisorModelsFetch({
+      base: "http://127.0.0.1:17841",
+      token: "tok-123",
+      signal,
+    });
+    expect(url).toBe("http://127.0.0.1:17841/v1/control/advisor/models");
+    expect(options.method).toBe("GET");
+    expect(options.headers.Authorization).toBe("Bearer tok-123");
+    expect(options.signal).toBe(signal);
+  });
+
+  test("start names the selected public route, the reviewed turn and the inclusion choices", () => {
+    const signal = { aborted: false };
+    const { url, options } = mod.__test.buildAdvisorStartFetch({
       base: "http://127.0.0.1:17841",
       token: "tok-123",
       sessionId: "sess-1",
+      reviewedTurnId: "dsh-turn:4",
       humanRequest: "h",
       dshResponse: "d",
       instructions: "i",
-      mode: "think",
+      route: "chatgpt-web/light",
+      reasoningMode: "fast",
       project: "my-proj",
+      include: { request: true, response: false, project: true },
       signal,
     });
-    expect(url).toBe("http://127.0.0.1:17841/v1/control/advisor/review");
+    expect(url).toBe("http://127.0.0.1:17841/v1/control/advisor/reviews");
     expect(options.method).toBe("POST");
-    expect(options.headers.Authorization).toBe("Bearer tok-123");
     expect(options.signal).toBe(signal);
     expect(JSON.parse(options.body)).toEqual({
       sessionId: "sess-1",
+      reviewedTurnId: "dsh-turn:4",
+      route: "chatgpt-web/light",
+      instructions: "i",
       humanRequest: "h",
       dshResponse: "d",
-      instructions: "i",
-      mode: "think",
       project: "my-proj",
+      reasoningMode: "fast",
+      includeRequest: true,
+      includeResponse: false,
+      includeProject: true,
     });
   });
 
-  test("project is omitted when unknown (the API field is optional)", () => {
-    const { options } = mod.__test.buildAdvisorFetch({
+  test("the project, the reasoning variant and the source text are optional", () => {
+    const { options } = mod.__test.buildAdvisorStartFetch({
       base: "http://127.0.0.1:17841",
       token: "tok",
       sessionId: "s",
-      humanRequest: "h",
-      dshResponse: "d",
+      reviewedTurnId: "t",
       instructions: "i",
-      mode: "normal",
-      project: undefined,
+      route: "chatgpt-web/light",
+      include: { request: true, response: true, project: true },
     });
-    expect(JSON.parse(options.body).project).toBeUndefined();
+    const body = JSON.parse(options.body);
+    expect(body.project).toBeUndefined();
+    expect(body.reasoningMode).toBeUndefined();
+    expect(body.humanRequest).toBeUndefined();
+    expect(body.dshResponse).toBeUndefined();
+  });
+
+  test("status and list read by exact review id and by session", () => {
+    const status = mod.__test.buildAdvisorStatusFetch({ base: "http://h:1", token: "t", reviewId: "r/1" });
+    expect(status.url).toBe("http://h:1/v1/control/advisor/reviews/r%2F1");
+    expect(status.options.method).toBe("GET");
+    expect(mod.__test.buildAdvisorListFetch({ base: "http://h:1", token: "t" }).url)
+      .toBe("http://h:1/v1/control/advisor/reviews");
+    expect(mod.__test.buildAdvisorListFetch({ base: "http://h:1", token: "t", sessionId: "s 1", limit: 5 }).url)
+      .toBe("http://h:1/v1/control/advisor/reviews?sessionId=s%201&limit=5");
+  });
+
+  test("recovery is a read-only POST naming the session and the displayed route", () => {
+    const { url, options } = mod.__test.buildAdvisorRecoverFetch({
+      base: "http://127.0.0.1:17841",
+      token: "tok-123",
+      sessionId: "sess-1",
+      route: "chatgpt-web/light",
+      timeoutMs: 5000,
+    });
+    expect(url).toBe("http://127.0.0.1:17841/v1/control/advisor/recover");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({ sessionId: "sess-1", route: "chatgpt-web/light", timeoutMs: 5000 });
   });
 
   test("selectProjectName sends the workspace basename, never a path", () => {
@@ -268,7 +385,28 @@ describe("issue #179 — correct #178 advisor call", () => {
   });
 });
 
-describe("issue #179 — error handling with retry, context preserved", () => {
+describe("issue #224 — launch, tracking and failure", () => {
+  const choice = {
+    route: "chatgpt-web/light",
+    providerId: "chatgpt-web",
+    providerLabel: "ChatGPT Web",
+    modelId: "light",
+    modelLabel: "Light",
+    label: "ChatGPT Web — Light",
+    reasoningModes: [],
+  };
+  function task(overrides: Record<string, unknown> = {}) {
+    return {
+      reviewId: "review-1",
+      state: "running",
+      sessionId: "sess-1",
+      reviewedTurnId: "dsh-turn:4",
+      provenance: { route: "chatgpt-web/light", providerId: "chatgpt-web", providerLabel: "ChatGPT Web", modelId: "light", modelLabel: "Light" },
+      source: { includedRequest: true, includedResponse: true, includedProject: false, instructions: "i" },
+      createdAt: 1,
+      ...overrides,
+    };
+  }
   function env(overrides: Record<string, unknown> = {}) {
     return {
       base: "http://127.0.0.1:17841",
@@ -276,67 +414,243 @@ describe("issue #179 — error handling with retry, context preserved", () => {
       sessionId: "sess-1",
       project: undefined,
       storage: makeStorage(),
-      fetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, reviewId: "r1", text: "review" }) }),
+      fetch: async () => ({ ok: true, status: 202, json: async () => ({ ok: true, duplicate: false, task: task() }) }),
       ...overrides,
     };
   }
+  function opened(store: any) {
+    store.openReview({ humanRequest: "h", dshResponse: "d", turn: 4, dshTurn: 4, reviewedTurnId: "dsh-turn:4" }, "instr");
+    store.applyModels([choice], undefined);
+    return store;
+  }
 
-  test("network failure → error state, in-flight released, retry possible", async () => {
-    const store = mod.__test.createAdvisorStore();
-    store.openDialog({ humanRequest: "h", dshResponse: "d", turn: 4 }, "instr");
-    store.runReview(env({ fetch: async () => { throw new Error("ECONNREFUSED"); } }));
-    expect(store.getSnapshot().status).toBe("loading");
-    expect(store.inFlight).toBe(true);
-    await new Promise((r) => setTimeout(r, 5));
-    expect(store.getSnapshot().status).toBe("error");
-    expect(store.getSnapshot().error).toBe("ECONNREFUSED");
-    expect(store.getSnapshot().context).toEqual({ humanRequest: "h", dshResponse: "d", turn: 4 });
-    expect(store.inFlight).toBe(false);
-    // Retry: a second run after the error works.
-    store.runReview(env());
-    expect(store.inFlight).toBe(true);
-    await new Promise((r) => setTimeout(r, 5));
-    expect(store.getSnapshot().status).toBe("idle");
-    expect(store.getSnapshot().open).toBe(false);
-  });
-
-  test("sidecar 502 ok:false → error with the sidecar message", async () => {
-    const store = mod.__test.createAdvisorStore();
-    store.openDialog({ humanRequest: "h", dshResponse: "d", turn: 4 }, "instr");
-    store.runReview(env({ fetch: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, code: "browser_unavailable", message: "chatgpt web is unreachable" }) }) }));
-    await new Promise((r) => setTimeout(r, 5));
-    expect(store.getSnapshot().status).toBe("error");
-    expect(store.getSnapshot().error).toBe("chatgpt web is unreachable");
-  });
-
-  test("success closes the dialog and persists the instruction locally", async () => {
+  test("an accepted review closes the launcher promptly and is tracked locally", async () => {
     const storage = makeStorage();
-    const store = mod.__test.createAdvisorStore();
-    store.openDialog({ humanRequest: "h", dshResponse: "d", turn: 4 }, "instrucción final");
-    store.runReview(env({ storage }));
+    const store = opened(mod.__test.createAdvisorStore());
+    store.startReview(env({ storage }));
+    expect(store.getSnapshot().start.status).toBe("starting");
+    expect(store.inFlight).toBe(true);
     await new Promise((r) => setTimeout(r, 5));
-    expect(store.getSnapshot().open).toBe(false);
-    expect(store.getSnapshot().status).toBe("idle");
-    expect(storage.getItem(mod.__test.LAST_INSTRUCTIONS_KEY)).toBe("instrucción final");
+    const snapshot = store.getSnapshot();
+    expect(snapshot.open).toBe(false);
+    expect(snapshot.start.status).toBe("idle");
+    expect(snapshot.activity.reviews).toHaveLength(1);
+    expect(snapshot.activity.reviews[0].reviewId).toBe("review-1");
+    expect(snapshot.activity.reviews[0].state).toBe("running");
+    expect(snapshot.activity.reviews[0].label).toBe("ChatGPT Web — Light");
+    expect(storage.getItem(mod.__test.LAST_INSTRUCTIONS_KEY)).toBe("instr");
+    expect(storage.getItem(mod.__test.LAST_SELECTION_KEY)).toBe("chatgpt-web/light");
+    expect(store.inFlight).toBe(false);
   });
 
-  test("closing the dialog aborts the request without surfacing an error", async () => {
+  test("closing the dialog after acceptance does not cancel or lose the tracked review", async () => {
+    const storage = makeStorage();
+    const store = opened(mod.__test.createAdvisorStore());
+    store.startReview(env({ storage }));
+    await new Promise((r) => setTimeout(r, 5));
+    store.closeDialog();
+    expect(store.getSnapshot().open).toBe(false);
+    expect(mod.__test.loadAdvisorActivity(storage)).toHaveLength(1);
+    expect(mod.__test.loadAdvisorActivity(storage)[0].state).toBe("running");
+  });
+
+  test("a network failure keeps the context and stays retryable", async () => {
+    const store = opened(mod.__test.createAdvisorStore());
+    store.startReview(env({ fetch: async () => { throw new Error("ECONNREFUSED"); } }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.getSnapshot().start.status).toBe("error");
+    expect(store.getSnapshot().start.error).toBe("ECONNREFUSED");
+    expect(store.getSnapshot().open).toBe(true);
+    expect(store.inFlight).toBe(false);
+    store.startReview(env());
+    expect(store.inFlight).toBe(true);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.getSnapshot().open).toBe(false);
+  });
+
+  test("a refused model choice surfaces the failure and refreshes the catalogue", async () => {
+    const calls: string[] = [];
+    const store = opened(mod.__test.createAdvisorStore());
+    store.startReview(env({
+      fetch: async (url: string) => {
+        calls.push(String(url));
+        if (String(url).endsWith("/models")) {
+          return { ok: true, status: 200, json: async () => ({ ok: true, choices: [choice] }) };
+        }
+        return { ok: false, status: 409, json: async () => ({ ok: false, code: "advisor_model_unavailable", message: "no longer served" }) };
+      },
+    }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.getSnapshot().start.status).toBe("error");
+    expect(store.getSnapshot().start.error).toBe("no longer served");
+    // The catalogue was refreshed instead of silently substituting another model.
+    expect(calls.some((url) => url.endsWith("/models"))).toBe(true);
+    expect(store.getSnapshot().selection.route).toBe("chatgpt-web/light");
+  });
+
+  test("a catalogue load failure is explicit, retryable and never invents choices", async () => {
     const store = mod.__test.createAdvisorStore();
-    store.openDialog({ humanRequest: "h", dshResponse: "d", turn: 4 }, "instr");
+    store.openReview({ humanRequest: "h", dshResponse: "d", reviewedTurnId: "t" }, "i");
+    store.loadModels(env({ fetch: async () => { throw new Error("no sidecar"); } }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.getSnapshot().models.status).toBe("error");
+    expect(store.getSnapshot().models.choices).toEqual([]);
+    expect(store.getSnapshot().selection).toBeNull();
+    store.loadModels(env({
+      fetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, choices: [choice, { route: "broken" }] }) }),
+    }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.getSnapshot().models.status).toBe("ready");
+    // A malformed entry is dropped; a valid one is kept.
+    expect(store.getSnapshot().models.choices.map((c: any) => c.route)).toEqual(["chatgpt-web/light"]);
+    expect(store.getSnapshot().selection.route).toBe("chatgpt-web/light");
+  });
+
+  test("the activity view reconciles completed work and records the result for this session", async () => {
+    const storage = makeStorage();
+    const store = opened(mod.__test.createAdvisorStore());
+    store.startReview(env({ storage }));
+    await new Promise((r) => setTimeout(r, 5));
+    store.refreshActivity(env({
+      storage,
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          reviews: [task({ state: "completed", text: "the review", completedAt: 9 })],
+        }),
+      }),
+    }));
+    await new Promise((r) => setTimeout(r, 5));
+    const entry = store.getSnapshot().activity.reviews[0];
+    expect(entry.state).toBe("completed");
+    expect(entry.text).toBe("the review");
+    // The reviewed turn identity survived the reconciliation.
+    expect(entry.dshTurn).toBe(4);
+    const results = mod.__test.loadAdvisorResults(storage);
+    expect(results).toHaveLength(1);
+    expect(results[0].text).toBe("the review");
+    expect(results[0].providerLabel).toBe("ChatGPT Web");
+  });
+
+  test("a review of another session is never written into the current session's turn card", async () => {
+    const storage = makeStorage();
+    const store = opened(mod.__test.createAdvisorStore());
+    store.refreshActivity(env({
+      storage,
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          reviews: [task({ sessionId: "sess-other", state: "completed", text: "other review" })],
+        }),
+      }),
+    }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.getSnapshot().activity.reviews).toHaveLength(1);
+    expect(mod.__test.loadAdvisorResults(storage)).toEqual([]);
+  });
+
+  test("recovery stays read-only and records the retained answer for the turn", async () => {
+    const storage = makeStorage();
+    const store = opened(mod.__test.createAdvisorStore());
+    store.recover(env({
+      storage,
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, reviewId: "review-1", route: "chatgpt-web/light", providerLabel: "ChatGPT Web", modelLabel: "Light", text: "recovered", capturedAt: 3 }),
+      }),
+    }));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(store.getSnapshot().recovery.status).toBe("ready");
+    expect(store.getSnapshot().recovery.text).toBe("recovered");
+    const results = mod.__test.loadAdvisorResults(storage);
+    expect(results[0].recovered).toBe(true);
+    expect(results[0].modelLabel).toBe("Light");
+  });
+
+  test("closing the dialog aborts only the in-flight request, without an error", async () => {
+    const store = opened(mod.__test.createAdvisorStore());
     let rejectFn: (e: unknown) => void = () => {};
     const pending = new Promise((_, reject) => { rejectFn = reject; });
-    store.runReview(env({ fetch: () => pending }));
+    store.startReview(env({ fetch: () => pending }));
     store.closeDialog();
     const err = new Error("aborted");
     err.name = "AbortError";
     rejectFn(err);
     await new Promise((r) => setTimeout(r, 5));
-    expect(store.getSnapshot().status).toBe("idle");
-    expect(store.getSnapshot().error).toBeNull();
+    expect(store.getSnapshot().start.status).toBe("idle");
+    expect(store.getSnapshot().start.error).toBeNull();
+    expect(store.inFlight).toBe(false);
   });
 });
 
-describe("issue #179 — local persistence of the last instruction (browser only)", () => {
+describe("issue #224 — persisted activity across dialog close, remount and restart", () => {
+  function serverTask(overrides: Record<string, unknown> = {}) {
+    return {
+      reviewId: "review-1",
+      state: "running",
+      sessionId: "sess-1",
+      reviewedTurnId: "dsh-turn:4",
+      provenance: { route: "chatgpt-web/light", providerId: "chatgpt-web", providerLabel: "ChatGPT Web", modelId: "light", modelLabel: "Light" },
+      source: { includedRequest: true, includedResponse: true, includedProject: false, instructions: "i" },
+      createdAt: 1,
+      ...overrides,
+    };
+  }
+
+  test("a persisted task the sidecar still knows takes the sidecar's state", () => {
+    const persisted = [mod.__test.advisorTaskEntry(serverTask(), { dshTurn: 4 })];
+    const merged = mod.__test.reconcileAdvisorActivity(persisted, [serverTask({ state: "completed", text: "done" })]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].state).toBe("completed");
+    expect(merged[0].text).toBe("done");
+    expect(merged[0].dshTurn).toBe(4);
+  });
+
+  test("a persisted active task the sidecar no longer knows becomes unavailable, not running", () => {
+    const persisted = [mod.__test.advisorTaskEntry(serverTask(), { dshTurn: 4 })];
+    const merged = mod.__test.reconcileAdvisorActivity(persisted, []);
+    expect(merged[0].state).toBe("unavailable");
+    expect(merged[0].failure.code).toBe("advisor_task_unavailable");
+  });
+
+  test("a completed result the sidecar no longer knows is kept", () => {
+    const persisted = [mod.__test.advisorTaskEntry(serverTask({ state: "completed", text: "kept" }), { dshTurn: 4 })];
+    const merged = mod.__test.reconcileAdvisorActivity(persisted, []);
+    expect(merged[0].state).toBe("completed");
+    expect(merged[0].text).toBe("kept");
+  });
+
+  test("activity storage round-trips, is newest first, and is bounded", () => {
+    const storage = makeStorage();
+    for (let index = 0; index < 60; index += 1) {
+      mod.__test.upsertAdvisorActivity(storage, mod.__test.advisorTaskEntry(serverTask({ reviewId: `r-${index}`, createdAt: index }), {}));
+    }
+    const entries = mod.__test.loadAdvisorActivity(storage);
+    expect(entries).toHaveLength(50);
+    expect(entries[0].reviewId).toBe("r-59");
+    expect(mod.__test.parseAdvisorActivity("not json")).toEqual([]);
+    expect(mod.__test.upsertAdvisorActivity(storage, null)).toHaveLength(50);
+  });
+
+  test("only completed results of the current session with a known turn are recorded", () => {
+    const storage = makeStorage();
+    const reviews = [
+      { ...mod.__test.advisorTaskEntry(serverTask({ state: "completed", text: "a" }), {}), dshTurn: 4, sessionId: "sess-1" },
+      { ...mod.__test.advisorTaskEntry(serverTask({ reviewId: "r2", state: "completed", text: "b" }), {}), dshTurn: 5, sessionId: "other" },
+      { ...mod.__test.advisorTaskEntry(serverTask({ reviewId: "r3", state: "running" }), {}), dshTurn: 6, sessionId: "sess-1" },
+    ];
+    mod.__test.recordAdvisorResultsForActivity(storage, reviews, "sess-1");
+    const results = mod.__test.loadAdvisorResults(storage);
+    expect(results.map((entry: any) => entry.text)).toEqual(["a"]);
+  });
+});
+
+describe("issue #179 — local persistence of the last instruction and selection (browser only)", () => {
   test("returns the stored instruction when present and non-empty", () => {
     const storage = makeStorage();
     storage.setItem(mod.__test.LAST_INSTRUCTIONS_KEY, "recordada");
@@ -362,11 +676,23 @@ describe("issue #179 — local persistence of the last instruction (browser only
     const throwing = { getItem: () => null, setItem: () => { throw new Error("denied"); } };
     expect(() => mod.__test.saveLastInstructions(throwing, "x")).not.toThrow();
   });
+
+  test("the last successful model selection is remembered and best-effort", () => {
+    const storage = makeStorage();
+    expect(mod.__test.loadLastSelection(storage)).toBeUndefined();
+    mod.__test.saveLastSelection(storage, "chatgpt-web/light");
+    expect(mod.__test.loadLastSelection(storage)).toBe("chatgpt-web/light");
+    mod.__test.saveLastSelection(storage, "   ");
+    expect(mod.__test.loadLastSelection(storage)).toBe("chatgpt-web/light");
+    expect(() => mod.__test.saveLastSelection(undefined, "x")).not.toThrow();
+  });
 });
 
-describe("issue #179 — module wiring", () => {
-  test("registers the official projection key and the browser-storage key", () => {
+describe("issue #179/#224 — module wiring", () => {
+  test("registers the official projection key and the browser-storage keys", () => {
     expect(mod.__test.ADVISOR_PROJECTION_KEY).toBe("dsh-chatgpt-web:sidecar");
     expect(mod.__test.LAST_INSTRUCTIONS_KEY).toBe("dsh-chatgpt-web.advisor.lastInstructions");
+    expect(mod.__test.LAST_SELECTION_KEY).toBe("dsh-chatgpt-web.advisor.lastSelection");
+    expect(mod.__test.ACTIVITY_KEY).toBe("dsh-chatgpt-web.advisor.activity");
   });
 });

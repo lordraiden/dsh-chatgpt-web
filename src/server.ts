@@ -1,18 +1,21 @@
 import { chatGptWebTraceId, createChatGptWebAdapter, type ChatGptWebProviderAdapter } from "./adapters/chatgpt-web";
+import { createChatGptWebProviderRuntime } from "./adapters/chatgpt-web/provider-runtime";
 import {
+  AdvisorHostError,
   ADVISOR_INPUT_INVALID_CODE,
-  buildAdvisorTurnRequest,
-  resolveAdvisorRouteSlug,
-  runAdvisorRecovery,
-  runAdvisorReview,
-  validateAdvisorRecoveryInput,
-  validateAdvisorReviewInput,
-} from "./adapters/chatgpt-web/advisor";
+  ADVISOR_MODEL_UNAVAILABLE_CODE,
+  ADVISOR_TASK_UNAVAILABLE_CODE,
+  createAdvisorHost,
+  validateAdvisorRecoveryRequest,
+  validateAdvisorReviewSource,
+  type AdvisorHost,
+} from "./advisor";
+import type { WebChatProviderRuntime } from "./web-chat/host/text-turn";
 import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeNativeChatGptContinuityStores } from "./adapters/chatgpt-web/index";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
-import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -1007,83 +1010,134 @@ async function nativeDshTurnRequest(
 }
 
 /**
- * ChatGPT Advisor review endpoint (issue #178). Runs one review of a DSH
- * development step in the Advisor conversation (an independent, retained
- * ChatGPT Web conversation per DSH session) and returns the review text, the
- * mode/model used, and a `reviewId` that associates the result with the
- * requested review. The sidecar is stateless with respect to DSH history: the
- * last human request and the last final DSH response arrive in the request
- * body, and the review turn never participates in the DSH session loop.
+ * Advisor control API (issue #224).
+ *
+ * The Advisor is a provider-neutral feature above the WebChat host boundary: the sidecar's
+ * `AdvisorHost` resolves every request against the composed provider contributions, and these
+ * handlers only translate HTTP to that host. Nothing here selects a model, knows a provider, or
+ * ties a review's lifetime to the request.
+ *
+ * - `GET  /v1/control/advisor/models`          — the currently eligible model catalogue
+ * - `POST /v1/control/advisor/reviews`         — accept a review as a tracked background task
+ * - `GET  /v1/control/advisor/reviews`         — tracked tasks (activity view)
+ * - `GET  /v1/control/advisor/reviews/<id>`    — one task by its exact review id
+ * - `POST /v1/control/advisor/recover`         — read-only recovery of a retained answer (#214)
  */
-/**
- * Resolve one Advisor model route for a request mode. The route authority is the single source of
- * truth for the account's model family: the Advisor picks the mode→route mapping, the authority's
- * RESOLVED capability state (capabilityState folded over the legacy boolean) decides Sol vs Luna,
- * and requireChatGptWebRoute validates the slug on the same authority — no second, divergent
- * capability source. Both Advisor routes resolve through this one owner.
- */
-function resolveAdvisorRequestRoute(config: AppConfig, mode: ReturnType<typeof resolveAdvisorRouteSlug> extends never ? never : "normal" | "think"): ChatGptWebModelRoute {
-  const authority = chatGptWebRouteAuthority(config);
-  return requireChatGptWebRoute(resolveAdvisorRouteSlug(mode, authority.capabilities.solAvailable), authority);
+async function advisorModelsRequest(host: AdvisorHost): Promise<Response> {
+  try {
+    const catalogue = await host.catalogue();
+    return Response.json({ ok: true, ...catalogue }, { headers: controlCorsHeaders() });
+  } catch (error) {
+    return Response.json(
+      {
+        ok: false,
+        code: ADVISOR_MODEL_UNAVAILABLE_CODE,
+        message: error instanceof Error ? error.message : String(error),
+      },
+      { status: 502, headers: controlCorsHeaders() },
+    );
+  }
 }
 
-async function advisorReviewRequest(
-  req: Request,
-  config: AppConfig,
-  adapterFactory: ChatGptWebAdapterFactory,
-  signal: AbortSignal,
-): Promise<Response> {
+/** Map one Advisor host refusal to the control API's HTTP answer. */
+function advisorFailureResponse(error: unknown): Response {
+  if (error instanceof AdvisorHostError) {
+    return Response.json(
+      { ok: false, code: error.code, message: error.message },
+      { status: 409, headers: controlCorsHeaders() },
+    );
+  }
+  return Response.json(
+    { ok: false, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
+    { status: 500, headers: controlCorsHeaders() },
+  );
+}
+
+/**
+ * Accept one review. The task is created and started before this handler returns, and it keeps
+ * running independently of this request, the modal and any browser navigation within DSH.
+ */
+async function advisorStartRequest(req: Request, host: AdvisorHost): Promise<Response> {
   let raw: unknown;
   try {
     raw = await readJsonRequestBody(req);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Advisor review body must be valid JSON");
   }
-  let input: ReturnType<typeof validateAdvisorReviewInput>;
+  let source: ReturnType<typeof validateAdvisorReviewSource>;
   try {
-    input = validateAdvisorReviewInput(raw);
+    source = validateAdvisorReviewSource(raw);
   } catch (error) {
     return Response.json(
       { ok: false, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
       { status: 400, headers: controlCorsHeaders() },
     );
   }
-  const reviewId = randomUUID();
-  const provider = effectiveChatGptWebProviderConfig(config);
-  let route: ChatGptWebModelRoute;
-  try {
-    route = resolveAdvisorRequestRoute(config, input.mode);
-  } catch (error) {
+  const body = raw as Record<string, unknown>;
+  const route = typeof body.route === "string" ? body.route.trim() : "";
+  if (route.length === 0) {
     return Response.json(
-      { ok: false, reviewId, mode: input.mode, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
+      { ok: false, code: ADVISOR_INPUT_INVALID_CODE, message: 'Advisor review field "route" must be a non-empty string' },
       { status: 400, headers: controlCorsHeaders() },
     );
   }
-  const adapter = adapterFactory(provider);
-  const result = await runAdvisorReview(
-    { runTurn: adapter.runTurn },
-    input,
-    { slug: route.slug, backendModel: route.backendModel, effort: route.adapterEffort },
-    reviewId,
-    // The tracked execution signal (already wired to the client disconnect by
-    // HttpTurnCounter.track): a client disconnect aborts the browser turn and
-    // releases the Advisor surface, exactly like nativeDshTurnRequest.
-    { abortSignal: signal },
-  );
-  return Response.json(result, { status: result.ok ? 200 : 502, headers: controlCorsHeaders() });
+  const reasoningMode = typeof body.reasoningMode === "string" && body.reasoningMode.trim().length > 0
+    ? body.reasoningMode.trim()
+    : undefined;
+  try {
+    const result = await host.start({
+      source,
+      route,
+      ...(reasoningMode !== undefined ? { reasoningMode } : {}),
+    });
+    return Response.json(
+      { ok: true, duplicate: result.duplicate, task: result.task },
+      { status: result.duplicate ? 200 : 202, headers: controlCorsHeaders() },
+    );
+  } catch (error) {
+    return advisorFailureResponse(error);
+  }
+}
+
+/** One tracked task by its exact review id. */
+function advisorStatusRequest(host: AdvisorHost, reviewId: string): Response {
+  const task = host.status(reviewId);
+  if (!task) {
+    return Response.json(
+      {
+        ok: false,
+        code: ADVISOR_TASK_UNAVAILABLE_CODE,
+        message: "This review is no longer available on this sidecar; start a new review.",
+      },
+      { status: 404, headers: controlCorsHeaders() },
+    );
+  }
+  return Response.json({ ok: true, task }, { headers: controlCorsHeaders() });
+}
+
+/** The tracked task list behind the persistent activity view. */
+function advisorListRequest(host: AdvisorHost, url: URL): Response {
+  const sessionId = url.searchParams.get("sessionId");
+  const requested = Number(url.searchParams.get("limit") ?? 20);
+  const limit = Number.isFinite(requested) ? Math.min(Math.max(Math.trunc(requested), 1), 50) : 20;
+  const reviews = host.list({
+    ...(sessionId ? { sessionId } : {}),
+    limit,
+  });
+  return Response.json({ ok: true, reviews }, { headers: controlCorsHeaders() });
 }
 
 /**
- * ChatGPT Advisor recovery endpoint (issue #214): read the finalized answer of the DSH session's
- * retained Advisor conversation. Read-only by construction — it never submits, navigates or
- * creates a conversation — so the answer ChatGPT finished after the plugin's own browser turn
- * gave up on it stays recoverable without opening the ChatGPT tab. Everything the read cannot
- * deliver becomes a typed `ok: false` result carrying `advisor_recovery_unavailable`.
+ * Read the finalized answer of one DSH session's retained Advisor conversation (issue #214).
+ *
+ * Read-only by construction: it never submits, navigates or creates a conversation, so a review the
+ * plugin's own browser turn gave up on stays recoverable. Everything the read cannot deliver becomes
+ * a typed `ok: false` result carrying `advisor_recovery_unavailable`. The tracked execution signal
+ * aborts a bounded read instead of leaving it polling the retained page.
  */
 async function advisorRecoverRequest(
   req: Request,
-  config: AppConfig,
-  adapterFactory: ChatGptWebAdapterFactory,
+  host: AdvisorHost,
   signal: AbortSignal,
 ): Promise<Response> {
   let raw: unknown;
@@ -1092,51 +1146,16 @@ async function advisorRecoverRequest(
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Advisor recovery body must be valid JSON");
   }
-  let input: ReturnType<typeof validateAdvisorRecoveryInput>;
+  let input: ReturnType<typeof validateAdvisorRecoveryRequest>;
   try {
-    input = validateAdvisorRecoveryInput(raw);
+    input = validateAdvisorRecoveryRequest(raw);
   } catch (error) {
     return Response.json(
       { ok: false, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
       { status: 400, headers: controlCorsHeaders() },
     );
   }
-  const reviewId = randomUUID();
-  const mode = input.mode ?? "normal";
-  const provider = effectiveChatGptWebProviderConfig(config);
-  let route: ChatGptWebModelRoute;
-  try {
-    route = resolveAdvisorRequestRoute(config, mode);
-  } catch (error) {
-    return Response.json(
-      { ok: false, reviewId, mode, code: ADVISOR_INPUT_INVALID_CODE, message: error instanceof Error ? error.message : String(error) },
-      { status: 400, headers: controlCorsHeaders() },
-    );
-  }
-  const adapter = adapterFactory(provider);
-  const recover = adapter.recoverRetainedAnswer;
-  if (typeof recover !== "function") {
-    return Response.json(
-      {
-        ok: false,
-        reviewId,
-        mode,
-        code: ADVISOR_INPUT_INVALID_CODE,
-        message: "This ChatGPT Web adapter cannot read a retained conversation.",
-      },
-      { status: 501, headers: controlCorsHeaders() },
-    );
-  }
-  const result = await runAdvisorRecovery(
-    // The applied adapter method owns its own transport and retained-surface bookkeeping.
-    { recoverAnswer: (parsed, options) => recover.call(adapter, parsed, options) },
-    input,
-    { slug: route.slug, backendModel: route.backendModel, effort: route.adapterEffort },
-    reviewId,
-    // The tracked execution signal: a client disconnect aborts a bounded read instead of leaving
-    // it polling the retained page.
-    { abortSignal: signal },
-  );
+  const result = await host.recover({ ...input, signal });
   return Response.json(result, { status: result.ok ? 200 : 502, headers: controlCorsHeaders() });
 }
 
@@ -1184,6 +1203,20 @@ export function startServer(
     const actual = Buffer.from(header);
     return actual.length === expected.length && timingSafeEqual(actual, expected);
   };
+  /**
+   * The provider composition the Advisor resolves routes against.
+   *
+   * It is rebuilt per Advisor operation so a configuration change (tuning, browser host) is picked up
+   * exactly like the rest of the control API, while the host itself — and therefore the tracked
+   * reviews — stays one owner for the life of this listener. The ChatGPT Web adapter keeps sharing
+   * the listener's ProviderCore, so the Advisor can never become a second execution authority.
+   */
+  const advisorRuntimes = (): readonly WebChatProviderRuntime[] => {
+    const provider = effectiveChatGptWebProviderConfig(config);
+    const adapter = adapterFactory(provider);
+    return [createChatGptWebProviderRuntime({ provider, adapter })];
+  };
+  const advisorHost: AdvisorHost = createAdvisorHost({ runtimes: advisorRuntimes });
   const handleFetch = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/healthz") {
@@ -1257,19 +1290,42 @@ export function startServer(
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 10) || 10, 1), 25);
       return Response.json({ turns: readRecentBrowserTurns(limit) }, { headers: controlCorsHeaders() });
     }
-    if (req.method === "POST" && url.pathname === "/v1/control/advisor/review") {
-      if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
+    if (req.method === "GET" && url.pathname === "/v1/control/advisor/models") {
       return httpTurns.track(
-        signal => advisorReviewRequest(new Request(req, { signal }), config, adapterFactory, signal),
+        () => advisorModelsRequest(advisorHost),
         req.signal,
         process.platform,
         "unspecified",
       );
     }
+    if (req.method === "POST" && url.pathname === "/v1/control/advisor/reviews") {
+      if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
+      return httpTurns.track(
+        // The accepted task is deliberately NOT bound to this request's signal: the review continues
+        // after the dialog closes. Only the acceptance itself is tracked.
+        () => advisorStartRequest(new Request(req), advisorHost),
+        req.signal,
+        process.platform,
+        "unspecified",
+      );
+    }
+    if (req.method === "GET" && url.pathname === "/v1/control/advisor/reviews") {
+      return advisorListRequest(advisorHost, url);
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/v1/control/advisor/reviews/")) {
+      const reviewId = decodeURIComponent(url.pathname.slice("/v1/control/advisor/reviews/".length)).trim();
+      if (!reviewId || reviewId.includes("/")) {
+        return Response.json(
+          { ok: false, code: ADVISOR_TASK_UNAVAILABLE_CODE, message: "A review id is required" },
+          { status: 400, headers: controlCorsHeaders() },
+        );
+      }
+      return advisorStatusRequest(advisorHost, reviewId);
+    }
     if (req.method === "POST" && url.pathname === "/v1/control/advisor/recover") {
       if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
       return httpTurns.track(
-        signal => advisorRecoverRequest(new Request(req, { signal }), config, adapterFactory, signal),
+        signal => advisorRecoverRequest(new Request(req, { signal }), advisorHost, signal),
         req.signal,
         process.platform,
         "unspecified",
@@ -1528,6 +1584,9 @@ export function startServer(
     if (shutdownPromise) return;
     draining = true;
     chatGptTurnSessions.clear();
+    // An accepted review has no owner once this process stops: it is reported as interrupted, never
+    // as still running (issue #224).
+    advisorHost.dispose();
     flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([

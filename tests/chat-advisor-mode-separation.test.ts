@@ -17,7 +17,8 @@ import {
   closeNativeChatGptContinuityStores,
   createChatGptWebAdapter,
 } from "../src/adapters/chatgpt-web/index";
-import { ADVISOR_SYSTEM_PROMPT, buildAdvisorTurnRequest } from "../src/adapters/chatgpt-web/advisor";
+import { ADVISOR_REVIEWER_PERSONA, advisorConversationThread, composeAdvisorReviewText, validateAdvisorReviewSource } from "../src/advisor";
+import { createChatGptWebProviderRuntime } from "../src/adapters/chatgpt-web/provider-runtime";
 import type { ChatGptWebSurfaceTransport, WebSurfaceTurn } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { defaultConfig, saveConfig } from "../src/config";
@@ -173,47 +174,61 @@ describe("Chat Mode at the browser transport boundary", () => {
 });
 
 describe("Advisor Mode at the browser transport boundary", () => {
-  test("the Advisor install keeps the reviewer prompt and the review message", async () => {
+  const ADVISOR_SOURCE = validateAdvisorReviewSource({
+    sessionId: SESSION,
+    reviewedTurnId: "dsh-turn:1",
+    humanRequest: "Add a retry to the login flow",
+    dshResponse: "I added a retry with exponential backoff in src/login.ts",
+    instructions: "Review the retry implementation for correctness",
+    project: "dsh-chatgpt-web",
+  });
+
+  /**
+   * Run one review through the provider-neutral Advisor port over the real adapter (issue #224): the
+   * review reaches the browser as one portable user-text prompt through the provider's own turn
+   * execution, exactly like production.
+   */
+  async function runAdvisorReview(
+    adapter: ReturnType<typeof createChatGptWebAdapter>,
+    turnId: string,
+  ): Promise<{ ok: boolean; text?: string }> {
+    const runtime = createChatGptWebProviderRuntime({ provider: PROVIDER, adapter });
+    const outcome = await runtime.runTextTurn({
+      route: "chatgpt-web/light",
+      model: "light",
+      userText: composeAdvisorReviewText(ADVISOR_SOURCE),
+      dshSession: { sessionId: SESSION },
+      affinity: {
+        providerId: "chatgpt-web",
+        bindingId: "binding-chat-advisor-separation",
+        threadId: advisorConversationThread(SESSION),
+      },
+      turnId,
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    return outcome;
+  }
+
+  test("the Advisor turn keeps the reviewer prompt and the review message", async () => {
     const surface = new RecordingSurface();
     const adapter = createChatGptWebAdapter(PROVIDER, { surfaceTransport: surface.transport });
-    const advisor = buildAdvisorTurnRequest(
-      {
-        sessionId: SESSION,
-        humanRequest: "Add a retry to the login flow",
-        dshResponse: "I added a retry with exponential backoff in src/login.ts",
-        instructions: "Review the retry implementation for correctness",
-        mode: "normal",
-        project: "dsh-chatgpt-web",
-      },
-      { slug: "chatgpt-web/light", backendModel: "gpt-5.6-sol", effort: "low" },
-      "review-1",
-    );
-    await runTurn(adapter, advisor);
+    const outcome = await runAdvisorReview(adapter, "review-1");
 
+    expect(outcome.ok).toBe(true);
     expect(surface.payloads).toHaveLength(1);
     const payload = surface.payloads[0]!;
-    expect(payload).toContain(ADVISOR_SYSTEM_PROMPT);
+    expect(payload).toContain(ADVISOR_REVIEWER_PERSONA);
     expect(payload).toContain("Review the retry implementation for correctness");
     expect(payload).toContain("Add a retry to the login flow");
+    // The Advisor conversation never receives the normal Chat Mode project header.
     expect(payload).not.toContain(EXPECTED_HEADER);
   });
 
   test("an Advisor turn never uses the minimal Chat Mode payload", async () => {
     const surface = new RecordingSurface();
     const adapter = createChatGptWebAdapter(PROVIDER, { surfaceTransport: surface.transport });
-    const advisor = buildAdvisorTurnRequest(
-      {
-        sessionId: SESSION,
-        humanRequest: "Add a retry to the login flow",
-        dshResponse: "I added a retry with exponential backoff in src/login.ts",
-        instructions: "Review the retry implementation for correctness",
-        mode: "normal",
-        project: "dsh-chatgpt-web",
-      },
-      { slug: "chatgpt-web/light", backendModel: "gpt-5.6-sol", effort: "low" },
-      "review-2",
-    );
-    await runTurn(adapter, advisor);
+    const outcome = await runAdvisorReview(adapter, "review-2");
+    expect(outcome.ok).toBe(true);
     expect(surface.payloads[0]).not.toBe(`${EXPECTED_HEADER}\n\nAdd a retry to the login flow`);
   });
 });

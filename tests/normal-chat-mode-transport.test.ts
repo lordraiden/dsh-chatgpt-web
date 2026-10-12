@@ -6,7 +6,7 @@ import {
   compileChatGptWebInstall,
   compileRetainedChatGptWebInstall,
 } from "../src/adapters/chatgpt-web/prompt";
-import { ADVISOR_SYSTEM_PROMPT, buildAdvisorTurnRequest } from "../src/adapters/chatgpt-web/advisor";
+import { ADVISOR_REVIEWER_PERSONA, composeAdvisorReviewText, validateAdvisorReviewSource } from "../src/advisor";
 import type { CodexMessage, CodexParsedRequest } from "../src/types";
 
 /**
@@ -99,27 +99,38 @@ describe("deterministic repository identity", () => {
 });
 
 describe("Chat Mode never inherits Advisor Mode context", () => {
-  const ADVISOR_INPUT = {
+  const ADVISOR_SOURCE = validateAdvisorReviewSource({
     sessionId: "session-advisor-separation",
+    reviewedTurnId: "dsh-turn:1",
     humanRequest: "Add a retry to the login flow",
     dshResponse: "I added a retry with exponential backoff in src/login.ts",
     instructions: "Review the retry implementation for correctness",
-    mode: "normal" as const,
     project: "dsh-chatgpt-web",
-  };
-  const ROUTE = { slug: "chatgpt-web/light", backendModel: "gpt-5.6-sol", effort: "low" as const };
+  });
 
-  test("the Advisor install still carries the reviewer prompt and the review message", () => {
-    const advisor = buildAdvisorTurnRequest(ADVISOR_INPUT, ROUTE, "review-1");
+  test("the Advisor install carries the reviewer prompt and the review message, never the Chat Mode header", () => {
+    // Issue #224: the Advisor submits one portable ordinary user-text prompt — the persona is part of
+    // the text, never a hidden system block — and the retained install passes exactly that text.
+    const text = composeAdvisorReviewText(ADVISOR_SOURCE);
+    const advisor = {
+      modelId: "gpt-5.6-sol",
+      stream: true,
+      options: { reasoning: "low" },
+      context: { messages: [{ role: "user", content: text, timestamp: 1 }] },
+      _dshContext: { dshSessionId: ADVISOR_SOURCE.sessionId, threadId: "advisor-session", turnId: "review-1" },
+      _advisorReview: { reviewId: "review-1" },
+    } as unknown as CodexParsedRequest;
     const install = compileRetainedChatGptWebInstall(advisor, {});
-    expect(install.text).toContain(ADVISOR_SYSTEM_PROMPT);
+    expect(install.text).toContain(ADVISOR_REVIEWER_PERSONA);
     expect(install.text).toContain("Review the retry implementation for correctness");
     expect(install.text).toContain("Add a retry to the login flow");
+    // The normal Chat Mode project header is never injected into an Advisor install.
+    expect(install.text).not.toContain('github: "https://github.com/lordraiden/dsh-chatgpt-web"');
   });
 
   test("the minimal Chat Mode install never contains Advisor-specific instructions", () => {
     const normal = compileChatGptWebInstall(parsed([user("hola")]));
-    expect(normal.text).not.toContain(ADVISOR_SYSTEM_PROMPT);
+    expect(normal.text).not.toContain(ADVISOR_REVIEWER_PERSONA);
     expect(normal.text).not.toContain("Review instructions:");
   });
 });

@@ -105,6 +105,34 @@ try {
   await page.route("http://advisor-verify.local/**", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: SHELL });
   });
+  // The real dialog loads its eligible model catalogue and its tracked activity through the sidecar
+  // control API (issue #224). Serving those two reads makes the mounted dialog the production tree,
+  // not an error state.
+  await page.route("http://127.0.0.1:17841/v1/control/advisor/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const headers = { "content-type": "application/json", "access-control-allow-origin": "*" };
+    if (pathname === "/v1/control/advisor/models") {
+      await route.fulfill({
+        status: 200,
+        headers,
+        body: JSON.stringify({
+          ok: true,
+          generatedAt: 1,
+          providers: [],
+          choices: [
+            { route: "chatgpt-web/light", providerId: "chatgpt-web", providerLabel: "ChatGPT Web", modelId: "light", modelLabel: "ChatGPT Web — Instant", label: "ChatGPT Web — Instant", reasoningModes: ["low"] },
+            { route: "chatgpt-web/high", providerId: "chatgpt-web", providerLabel: "ChatGPT Web", modelId: "high", modelLabel: "ChatGPT Web — High", label: "ChatGPT Web — High", reasoningModes: ["high"] },
+          ],
+        }),
+      });
+      return;
+    }
+    if (pathname === "/v1/control/advisor/reviews") {
+      await route.fulfill({ status: 200, headers, body: JSON.stringify({ ok: true, reviews: [] }) });
+      return;
+    }
+    await route.fulfill({ status: 404, headers, body: JSON.stringify({ ok: false, message: "not found" }) });
+  });
   await page.goto("http://advisor-verify.local/", { waitUntil: "load" });
 
   const report = await page.evaluate(async ({ source }) => {
@@ -223,16 +251,31 @@ try {
       flushRefs();
     };
 
+    // The dialog is rendered directly (not through createElement), so it gets its own persistent hook
+    // store: one render pass reuses the same slots and starts at the first one, exactly like React.
+    // Sharing the ambient store would collide with the composer control's slots, and appending new
+    // slots on every render would defeat `useEffect`'s deps comparison — an effect that updates state
+    // would then re-register forever (a runaway render loop).
+    const dialogHooks = [];
     function renderDialog() {
-      return mod.__test.AdvisorReviewDialog(
-        (key, fallback) => fallback,
-        {
-          sessionId: "sess-verify",
-          useProjection: (key) => (key === mod.__test.ADVISOR_PROJECTION_KEY ? { controlToken: "token" } : undefined),
-          useWorkspaces: (selector) => selector({ items: [] }),
-        },
-        { getSnapshot: () => ({ value: { port: 17841 } }) },
-      );
+      const previousHooks = current.hooks;
+      const previousIndex = current.index;
+      current.hooks = dialogHooks;
+      current.index = 0;
+      try {
+        return mod.__test.AdvisorReviewDialog(
+          (key, fallback) => fallback,
+          {
+            sessionId: "sess-verify",
+            useProjection: (key) => (key === mod.__test.ADVISOR_PROJECTION_KEY ? { controlToken: "token" } : undefined),
+            useWorkspaces: (selector) => selector({ items: [] }),
+          },
+          { getSnapshot: () => ({ value: { port: 17841 } }) },
+        );
+      } finally {
+        current.hooks = previousHooks;
+        current.index = previousIndex;
+      }
     }
 
     const rerender = () => mount(renderDialog());
@@ -252,9 +295,13 @@ try {
       useChat: (selector) => selector(chat),
       useSession: (selector) => selector({ running: false }),
     });
+    // The composer control is a container holding the launch action (issue #224 adds the activity
+    // entry beside it), so the harness activates the launch action itself.
+    const launchButton = [...button.querySelectorAll("button")]
+      .find((node) => node.textContent.includes("Review with Advisor")) || button;
     // The composer control is a real element in this harness; activate its listener the way the
     // renderer would, without depending on a detached-node click.
-    const activateButton = () => { handlers.get(button)(); };
+    const activateButton = () => { handlers.get(launchButton)(); };
     activateButton();
     rerender();
     const drain = () => { flushRefs(); const pending = roots.__pendingEffects.splice(0); pending.forEach((run) => run()); };
