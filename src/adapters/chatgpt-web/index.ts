@@ -30,7 +30,7 @@ import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGpt
 import { createChatGptContinuity } from "./chatgpt-continuity";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { compileChatGptWebPrompt, compileRetainedChatGptWebContinuation, compileRetainedChatGptWebInstall, type CompiledChatGptWebPrompt } from "./prompt";
+import { compileChatGptWebPrompt, compileChatGptWebContinuation, compileChatGptWebInstall, compileRetainedChatGptWebContinuation, compileRetainedChatGptWebInstall, type CompiledChatGptWebPrompt } from "./prompt";
 import { projectCanonicalChatGptWebContext } from "./context-projection";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
@@ -301,9 +301,12 @@ export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexPa
  *
  * Continuity is a property of the DSH chat identity, not of a particular
  * browser surface: a retained Launcher is not required, so plugin-managed
- * browsers keep the same affinity. Manual Zero Risk turns own an explicit
- * launcher lifecycle and compaction requests follow a separate retention
- * path, so neither retains here.
+ * browsers keep the same affinity. Every normal automatic turn retains — the
+ * provider conversation is the history, both for normal Chat Mode and for the
+ * DSH tool-execution route — so local-tool capability no longer decides
+ * retention. Manual Zero Risk turns own an explicit launcher lifecycle and
+ * compaction requests follow a separate retention path, so neither retains
+ * here.
  */
 export function shouldRetainChatGptWebConversation(
   parsed: CodexParsedRequest,
@@ -312,14 +315,16 @@ export function shouldRetainChatGptWebConversation(
 ): boolean {
   if (manualRequest || parsed._compactionRequest) return false;
   // A ChatGPT Advisor review turn (issue #178) always retains its independent
-  // Advisor conversation, even in chat-only mode where ordinary Sol turns do
-  // not retain: the marker is the owner of the Advisor continuity decision.
+  // Advisor conversation: the marker is the owner of the Advisor continuity
+  // decision.
   if (parsed._advisorReview !== undefined) return true;
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     const identity = extractChatGptTurnIdentity(parsed);
     return Boolean(identity.threadId && identity.turnId);
   }
-  return mode.localTools;
+  // Normal automatic Chat Mode retains the provider conversation so ChatGPT's
+  // native history carries continuity; local tools remain an independent mode.
+  return true;
 }
 
 function structuredContent(text: string): unknown | undefined {
@@ -732,6 +737,23 @@ export function createChatGptWebAdapter(
     const conversationGeneration = conversationKey
       ? replayOptions?.conversationGeneration ?? chatGptTurnSessions.conversationGeneration(conversationKey)
       : undefined;
+    // Normal Chat Mode: the ordinary automatic conversation, where ChatGPT Web
+    // owns the history and DSH sends only the incremental user input. It is a
+    // distinct feature from the other context-aware paths and excludes them
+    // explicitly: the Advisor review conversation (`_advisorReview`), the DSH
+    // tool-execution route (a documented agent contract), manual Zero Risk, and
+    // compaction each keep their own context-building behavior.
+    const normalChatMode = !advisorTurn
+      && !mode.localTools
+      && !manualRequest
+      && !parsed._compactionRequest;
+    // The project header is initialization metadata for the FIRST physical
+    // message of a brand-new conversation. A later generation is an explicit
+    // replay/rebuild, which deliberately re-projects canonical DSH history into
+    // the replacement conversation and therefore keeps the retained compiler.
+    const minimalChatInstall = normalChatMode
+      && conversationKey !== undefined
+      && conversationGeneration === 1;
     // Whether THIS turn physically installs the prefix into the current
     // conversation generation (issue #172 fingerprint semantics): a retained
     // first turn installs; a retained resume installs only when the branch is
@@ -811,12 +833,16 @@ export function createChatGptWebAdapter(
         const experimentalMultipartParts = experimentalBiggerContext
           ? resolveBiggerContextMultipartParts(input, turnCapabilities)
           : undefined;
-        return compileRetainedChatGptWebContinuation(input, {
-          captureLunaCheckpoint,
-          ...(experimentalMultipartParts !== undefined ? { experimentalMultipartParts } : {}),
-        });
+        return normalChatMode
+          ? compileChatGptWebContinuation(input)
+          : compileRetainedChatGptWebContinuation(input, {
+            captureLunaCheckpoint,
+            ...(experimentalMultipartParts !== undefined ? { experimentalMultipartParts } : {}),
+          });
       }
-      return compileRetainedChatGptWebInstall(input, compileOptionsFor(input));
+      return minimalChatInstall
+        ? compileChatGptWebInstall(input)
+        : compileRetainedChatGptWebInstall(input, compileOptionsFor(input));
     };
     // The fingerprint is recorded ONLY after a successful settlement of the
     // turn that carried the system block, and is associated with the physical
@@ -1104,17 +1130,21 @@ export function createChatGptWebAdapter(
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
         prepare: async () => ({
-          // Retained routes (Luna with identity) install the composer prefix on
-          // their first physical turn; non-retained read-only turns keep the
-          // full envelope compile (each turn is a fresh conversation for them).
-          ...(retainConversation
-            ? compileRetainedChatGptWebInstall(checkpointInput.parsed, compileOptionsFor(checkpointInput.parsed))
-            : compileChatGptWebPrompt(
-              checkpointInput.parsed,
-              turnCapabilities,
-              undefined,
-              compileOptionsFor(checkpointInput.parsed),
-            )),
+          // Normal Chat Mode installs the deterministic project header plus only
+          // the current user message on its first physical turn. Other retained
+          // routes (Luna with identity, Advisor) install the composer prefix;
+          // non-retained read-only turns keep the full envelope compile (each
+          // turn is a fresh conversation for them).
+          ...(minimalChatInstall
+            ? compileChatGptWebInstall(checkpointInput.parsed)
+            : retainConversation
+              ? compileRetainedChatGptWebInstall(checkpointInput.parsed, compileOptionsFor(checkpointInput.parsed))
+              : compileChatGptWebPrompt(
+                checkpointInput.parsed,
+                turnCapabilities,
+                undefined,
+                compileOptionsFor(checkpointInput.parsed),
+              )),
           release: () => {},
         }),
         // A retained conversation (managed-chrome, issue #171) continues on the existing surface,
