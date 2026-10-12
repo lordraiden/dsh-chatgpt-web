@@ -15,7 +15,7 @@ assert(client.includes("localStorage.removeItem(LEGACY_TOKEN_KEY)"), "migration 
 assert(!client.includes("sessionStorage"), "control token must not use sessionStorage");
 assert(!client.includes("127.0.0.1:17841"), "client must not hard-code the default sidecar port");
 assert(client.includes("configForms.get(CONFIG_ID)"), "client must consume the DSH config form");
-assert(client.includes("inject: ['slots', 'locale', 'configForms']"), "client must inject configForms");
+assert(client.includes("inject: ['slots', 'locale', 'configForms', 'remote']"), "client must inject configForms and the platform Client Remote service");
 assert(client.includes("plugins.bundle.config"), "client must use the DSH 0.2 plugin configuration seat");
 assert(client.includes("BUNDLE_CONFIG_KEY = '@lordraiden/dsh-chatgpt-web'"), "client must key bundle configuration by package name");
 assert(!client.includes("settings.section"), "client must not register an obsolete settings.section page");

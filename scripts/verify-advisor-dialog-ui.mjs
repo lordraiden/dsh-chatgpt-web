@@ -225,6 +225,17 @@ try {
     const useCallback = (fn) => fn;
 
     globalThis.window.__ModuleLoader__ = { load: (descriptor) => { globalThis.__advisorDescriptor = descriptor; } };
+    // The result editor delivers through the platform's Client Remote service (issue #225); this
+    // stub records the exact request the real component would send.
+    globalThis.__injectCalls = [];
+    const stubbedRemote = {
+      session: {
+        prompt: (request) => {
+          globalThis.__injectCalls.push(request);
+          return Promise.resolve({ ok: true, value: { accepted: true } });
+        },
+      },
+    };
     // The page's own localStorage, window listeners and event dispatch are real: the plugin uses
     // browser storage for the last instructions, and the harness dispatches real events.
     globalThis.window.React = { createElement, useState, useEffect, useMemo, useCallback };
@@ -271,6 +282,7 @@ try {
             useWorkspaces: (selector) => selector({ items: [] }),
           },
           { getSnapshot: () => ({ value: { port: 17841 } }) },
+          { remote: stubbedRemote },
         );
       } finally {
         current.hooks = previousHooks;
@@ -362,6 +374,44 @@ try {
         return { stillOpen: document.querySelector(".cwg-advisor-backdrop") !== null };
       },
       reopen() { activateButton(); rerender(); drain(); return { open: document.querySelector(".cwg-advisor-backdrop") !== null }; },
+      /** Open one result in the editor (issue #225) and report what it rendered. */
+      openResultEditor() {
+        const callsBefore = globalThis.__injectCalls.length;
+        mod.__test.advisorStore.openResult({
+          reviewId: "review-verify",
+          sessionId: "sess-verify",
+          turn: 1,
+          original: "original provider review",
+          route: "chatgpt-web/light",
+          providerLabel: "ChatGPT Web",
+          modelLabel: "Light",
+        }, globalThis.window.localStorage);
+        rerender();
+        drain();
+        const original = document.querySelector(".cwg-advisor-result-original");
+        const draft = document.querySelector(".cwg-advisor-result-draft");
+        const inject = [...document.querySelectorAll("button")]
+          .find((node) => (node.textContent || "").includes("Inject into DSH"));
+        return {
+          open: document.querySelector(".cwg-advisor-backdrop") !== null,
+          hasEditor: document.querySelector(".cwg-advisor-result-editor") !== null,
+          originalReadOnly: Boolean(original && original.readOnly),
+          originalValue: original ? original.value : null,
+          draftEditable: Boolean(draft && !draft.disabled),
+          hasInject: Boolean(inject),
+          callsBefore,
+        };
+      },
+      /** Activate Inject and report exactly what the platform received. */
+      async clickInject() {
+        const inject = [...document.querySelectorAll("button")]
+          .find((node) => (node.textContent || "").includes("Inject into DSH"));
+        if (!inject) return { clicked: false, calls: [] };
+        handlers.get(inject)();
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        const status = document.querySelector(".cwg-advisor-ok");
+        return { clicked: true, calls: globalThis.__injectCalls.slice(), status: status ? status.textContent : null };
+      },
     };
     globalThis.__advisorInteract = interact;
     return measure();
@@ -401,6 +451,27 @@ try {
   check(insideClick.stillOpen === true, "a click inside the dialog does not dismiss it", insideClick);
   const backdropClick = await page.evaluate(() => globalThis.__advisorInteract.clickBackdrop());
   check(backdropClick.closed === true, "a click on the backdrop dismisses the dialog", backdropClick);
+
+  // Issue #225: the result editor inspects, edits and delivers exactly one message.
+  const editor = await page.evaluate(() => globalThis.__advisorInteract.openResultEditor());
+  check(editor.hasEditor === true, "the result editor renders for a finished review", editor);
+  check(editor.originalReadOnly === true, "the original response is immutable (read-only)", editor);
+  check(editor.originalValue === "original provider review", "the original response is shown verbatim", editor.originalValue);
+  check(editor.draftEditable === true, "the handoff text is editable", editor);
+  check(editor.hasInject === true, "the editor offers Inject into DSH", editor);
+  check(editor.callsBefore === 0, "opening a result delivers nothing", editor.callsBefore);
+
+  const injected = await page.evaluate(() => globalThis.__advisorInteract.clickInject());
+  check(injected.clicked === true && injected.calls.length === 1, "Inject delivers exactly one message", injected);
+  check(injected.calls[0]?.sessionId === "sess-verify", "the delivery addresses the originating session", injected.calls[0]?.sessionId);
+  check(injected.calls[0]?.mode === "queue", "the delivery uses the queue mode (Agent follow-up)", injected.calls[0]?.mode);
+  check(
+    typeof injected.calls[0]?.content?.[0]?.text === "string"
+      && injected.calls[0].content[0].text.startsWith("WebChat Advisor review:"),
+    "the delivered text is the provider-neutral wrapper",
+    String(injected.calls[0]?.content?.[0]?.text || "").slice(0, 48),
+  );
+  check(typeof injected.status === "string" && injected.status.includes("Injected"), "the editor reports the injected state", injected.status);
 
   mkdirSync(artifactsDir, { recursive: true });
   writeFileSync(resolve(artifactsDir, "advisor-dialog-layout.json"), `${JSON.stringify({ chromePath, checks, report, tab, escape, reopened, insideClick, backdropClick }, null, 2)}\n`);

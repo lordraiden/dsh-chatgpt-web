@@ -170,192 +170,75 @@ describe("issue #180 — case 2: result does not auto-enter model history", () =
         ]),
       ),
     ).toEqual([
-      { turn: 3, reviewId: "", route: "", providerLabel: "", modelLabel: "", recovered: false, text: "ok", at: 0 },
+      { turn: 3, reviewId: "", route: "", providerLabel: "", modelLabel: "", sessionId: "", recovered: false, text: "ok", at: 0 },
     ]);
   });
 });
 
-describe("issue #180 — cases 3+5: Send to DSH produces exactly one new NORMAL prompt via the official flow", () => {
-  test("send() drives inputActions.setDraft + inputActions.submit in order — the normal prompt flow", () => {
-    const calls: string[] = [];
-    const inputActions = {
-      setDraft: (text: string) => {
-        calls.push(`setDraft:${text.length > 0 ? "text" : "empty"}`);
-      },
-      submit: () => {
-        calls.push("submit");
-      },
-    };
-    const store = mod.__test.createSendStore();
-    const outcome = store.send({ turn: 7, prompt: "ChatGPT Advisor review:\n\nr", inputActions });
-    expect(outcome).toBe("sent-requested");
-    expect(calls).toEqual(["setDraft:text", "submit"]);
-    expect(store.getSnapshot().sending.has(7)).toBe(true);
-  });
-
-  test("markSent resolves the sending state once the flow consumed the draft", () => {
-    const store = mod.__test.createSendStore();
-    store.send({
-      turn: 7,
-      prompt: "p",
-      inputActions: { setDraft: () => {}, submit: () => {} },
-    });
-    store.markSent(7);
-    const snapshot = store.getSnapshot();
-    expect(snapshot.sending.has(7)).toBe(false);
-    expect(snapshot.sent.has(7)).toBe(true);
-    expect(snapshot.errors.get(7)).toBeUndefined();
-  });
-});
-
-describe("issue #180 — case 4: prompt contains the review + minimal Advisor context", () => {
-  test("buildHandoffPrompt carries the FULL review, the Advisor marker, and the evaluation instruction", () => {
+describe("issue #180 — case 4: the injected message contains the review + minimal Advisor context", () => {
+  test("buildInjectedPrompt carries the FULL review, the Advisor marker, and the evaluation instruction", () => {
     const review = "## Findings\n1. Correctness bug in X\n2. Missing test for Y";
-    const prompt = mod.__test.buildHandoffPrompt({ text: review, reviewId: "r-123", route: "chatgpt-web/high" });
-    expect(prompt.startsWith("Advisor review:\n\n")).toBe(true);
+    const prompt = mod.__test.buildInjectedPrompt(review);
+    expect(prompt.startsWith("WebChat Advisor review:\n\n")).toBe(true);
     expect(prompt).toContain(review);
-    expect(prompt).toContain("Evaluate this review against the current task and apply the relevant recommendations.");
-    expect(prompt).toContain("Do not blindly follow recommendations that are incorrect or inconsistent with the current task.");
+    expect(prompt).toContain("Evaluate this feedback against the current task and available context.");
+    expect(prompt).toContain("Verify the findings independently and apply only the relevant, correct recommendations.");
+    expect(prompt).toContain("If a finding is incorrect or inconsistent with the task, explain why rather than following it blindly.");
     // Minimum handoff content excludes internal IDs, history, and UI markup.
-    expect(prompt).not.toContain("r-123");
     expect(prompt).not.toContain("reviewId");
     expect(prompt).not.toContain("<html");
   });
 
-  test("buildHandoffPrompt returns an empty string without a usable review", () => {
-    expect(mod.__test.buildHandoffPrompt(null)).toBe("");
-    expect(mod.__test.buildHandoffPrompt({ text: "   " })).toBe("");
-  });
-});
-
-describe("issue #180 — case 6: double activation produces no duplicate prompt", () => {
-  test("a second send while one is in flight is refused and calls the actions exactly once", () => {
-    let draftCalls = 0;
-    let submitCalls = 0;
-    const inputActions = {
-      setDraft: () => {
-        draftCalls += 1;
-      },
-      submit: () => {
-        submitCalls += 1;
-      },
-    };
-    const store = mod.__test.createSendStore();
-    const first = store.send({ turn: 7, prompt: "p", inputActions });
-    const second = store.send({ turn: 7, prompt: "p", inputActions });
-    const third = store.send({ turn: 9, prompt: "p", inputActions });
-    expect(first).toBe("sent-requested");
-    expect(second).toBe("busy");
-    expect(third).toBe("busy");
-    expect(draftCalls).toBe(1);
-    expect(submitCalls).toBe(1);
+  test("buildInjectedPrompt returns an empty string without a usable review", () => {
+    expect(mod.__test.buildInjectedPrompt(null)).toBe("");
+    expect(mod.__test.buildInjectedPrompt("   ")).toBe("");
   });
 
-  test("after markSent the guard is released and the next send works again", () => {
-    let submitCalls = 0;
-    const inputActions = {
-      setDraft: () => {},
-      submit: () => {
-        submitCalls += 1;
-      },
-    };
-    const store = mod.__test.createSendStore();
-    store.send({ turn: 7, prompt: "p", inputActions });
-    store.markSent(7);
-    const again = store.send({ turn: 7, prompt: "p2", inputActions });
-    expect(again).toBe("sent-requested");
-    expect(submitCalls).toBe(2);
-  });
-});
-
-describe("issue #180 — case 7: send error is surfaced and retry is possible", () => {
-  test("submit() throwing → error state with the message, then a retry succeeds", () => {
-    let fail = true;
-    const inputActions = {
-      setDraft: () => {},
-      submit: () => {
-        if (fail) throw new Error("composer locked");
-      },
-    };
-    const store = mod.__test.createSendStore();
-    const first = store.send({ turn: 7, prompt: "p", inputActions });
-    expect(first).toBe("error");
-    let snapshot = store.getSnapshot();
-    expect(snapshot.errors.get(7)).toBe("composer locked");
-    expect(snapshot.sending.has(7)).toBe(false);
-    // The guard is released: retry with a working composer.
-    fail = false;
-    const retry = store.send({ turn: 7, prompt: "p", inputActions });
-    expect(retry).toBe("sent-requested");
-    snapshot = store.getSnapshot();
-    expect(snapshot.errors.get(7)).toBeUndefined();
-    expect(snapshot.sending.has(7)).toBe(true);
-  });
-
-  test("missing or partial input actions → 'unavailable' (no session), without entering sending", () => {
-    const store = mod.__test.createSendStore();
-    expect(store.send({ turn: 7, prompt: "p", inputActions: undefined })).toBe("unavailable");
-    expect(store.send({ turn: 7, prompt: "p", inputActions: { setDraft: () => {} } })).toBe("unavailable");
-    const snapshot = store.getSnapshot();
-    expect(snapshot.sending.has(7)).toBe(false);
-    expect(snapshot.errors.get(7)).toBeUndefined();
-  });
-
-  test("an empty prompt is refused without touching the composer", () => {
-    let draftCalls = 0;
-    const store = mod.__test.createSendStore();
-    const outcome = store.send({
-      turn: 7,
-      prompt: "   ",
-      inputActions: {
-        setDraft: () => {
-          draftCalls += 1;
-        },
-        submit: () => {},
-      },
-    });
-    expect(outcome).toBe("empty");
-    expect(draftCalls).toBe(0);
+  test("the injected message never carries the reviewed request/answer or internal identifiers", () => {
+    const prompt = mod.__test.buildInjectedPrompt("only the edited review");
+    for (const leaked of ["chatgpt-web/light", "session-1", "dsh-turn:4", "review-1", "Human request:", "DSH response:"]) {
+      expect(prompt).not.toContain(leaked);
+    }
   });
 });
 
 describe("issue #180 — case 8: no auto-execution of recommendations", () => {
-  test("the handoff asks the agent to evaluate and apply — nothing is executed by the plugin", () => {
-    const prompt = mod.__test.buildHandoffPrompt({ text: "apply fix A and add test B" });
-    // The prompt is an instruction to the agent, not a command list: the
-    // evaluation instruction is always appended and the review is quoted.
+  test("the injected message asks the agent to evaluate and apply — nothing is executed by the plugin", () => {
+    const prompt = mod.__test.buildInjectedPrompt("apply fix A and add test B");
+    // The message is an instruction to the agent, not a command list: the evaluation instruction is
+    // always appended and the edited review is quoted.
     expect(prompt).toContain("apply fix A and add test B");
-    expect(prompt).toContain("Evaluate this review against the current task");
-    // The send path only touches the normal input actions (case 3+5): no
-    // session/event/execution API exists in the handoff units.
-    expect(mod.__test.buildHandoffPrompt).not.toHaveProperty("execute");
+    expect(prompt).toContain("Evaluate this feedback against the current task");
   });
 
-  test("the card component renders the recorded result for its turn and null for other turns", () => {
+  test("the card renders the recorded result for its turn and null for other turns", () => {
     const storage = makeStorage();
-    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r1", route: "chatgpt-web/high", providerLabel: "ChatGPT Web", modelLabel: "High", text: "review body" });
+    mod.__test.recordAdvisorResult(storage, {
+      turn: 7,
+      reviewId: "r1",
+      route: "chatgpt-web/high",
+      providerLabel: "ChatGPT Web",
+      modelLabel: "High",
+      sessionId: "session-1",
+      text: "review body",
+    });
     (globalThis as any).window.localStorage = storage;
 
-    const propsFor = (turn: number) => ({
-      turn: tailTurn(turn),
-      useInput: (sel: (s: any) => unknown) => sel({ phase: "plain", draft: "" }),
-      inputActions: { setDraft: () => {}, submit: () => {} },
-    });
+    const propsFor = (turn: number) => ({ turn: tailTurn(turn), sessionId: "session-1" });
     const t = (key: string, fallback: string) => fallback;
 
     const matching = mod.__test.AdvisorResultCard(t, propsFor(7));
     expect(matching).not.toBeNull();
-    // The card tree contains the result text, the title, and the Send button.
     const serialized = JSON.stringify(matching);
     expect(serialized).toContain("review body");
-    // Issue #224: the card shows the recorded provider-qualified model, not a provider name or a
-    // hardcoded Normal/Think mode.
     expect(serialized).toContain("Advisor");
+    // Issue #224: the card shows the recorded provider-qualified model, not a hardcoded mode.
     expect(serialized).toContain("ChatGPT Web — High");
-    expect(serialized).toContain("Send to DSH");
-    expect(serialized).toContain("ChatGPT Web — High");
+    // Issue #225: the card is an entry point to the result editor, never a submit action.
+    expect(serialized).toContain("Open result");
+    expect(serialized).not.toContain("Send to DSH");
 
     expect(mod.__test.AdvisorResultCard(t, propsFor(8))).toBeNull();
-    expect(mod.__test.AdvisorResultCard(t, { turn: undefined, useInput: (sel: (s: any) => unknown) => sel({ phase: "plain", draft: "" }) })).toBeNull();
+    expect(mod.__test.AdvisorResultCard(t, { turn: undefined })).toBeNull();
   });
 });
