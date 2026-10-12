@@ -13,7 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { defaultConfig, saveConfig } from "../src/config";
-import { apply, type CordisContext } from "../src/plugin";
+import { apply, createSidecarAgreement, sidecarRefusal, type CordisContext } from "../src/plugin";
+import type { GenerateOptions, StreamChunk } from "@deepseek-ai/dsh-llm";
 import { CHATGPT_WEB_PROVIDER_ID } from "../src/adapters/chatgpt-web/llm-adapter";
 import type { WebChatProviderDriver } from "../src/web-chat/core";
 import { VERSION } from "../src/version";
@@ -201,6 +202,112 @@ describe("issue #193 — the plugin registers the ChatGPT route in production", 
       expect(current.warnings).toEqual([]);
     } finally {
       await current.dispose();
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+/**
+ * The startup decision alone left turns flowing to a daemon the plugin had refused, so the same
+ * agreement is asserted on the turn path (issue #236 follow-up: release/runtime hygiene).
+ */
+describe("the sidecar agreement guard", () => {
+  const where = { url: "http://127.0.0.1:17841/v1", port: 17841 };
+
+  test("refuses an outdated daemon with its version, pid and the remedy", () => {
+    const refusal = sidecarRefusal({ service: "dsh-chatgpt-web", version: "1.0.24", pid: 4242 }, VERSION, where);
+    expect(refusal).toContain("Outdated sidecar");
+    expect(refusal).toContain("1.0.24");
+    expect(refusal).toContain("pid 4242");
+    expect(refusal).toContain(`installed plugin is ${VERSION}`);
+    expect(refusal).toContain("restart DSH");
+  });
+
+  test("refuses a healthy foreign service instead of adopting its port", () => {
+    const refusal = sidecarRefusal({ service: "something-else", version: "9.9.9" }, VERSION, where);
+    expect(refusal).toContain("Port 17841");
+    expect(refusal).toContain("something-else");
+  });
+
+  test("accepts a matching daemon and an empty port", () => {
+    expect(sidecarRefusal({ service: "dsh-chatgpt-web", version: VERSION }, VERSION, where)).toBeUndefined();
+    expect(sidecarRefusal(undefined, VERSION, where)).toBeUndefined();
+  });
+
+  test("the remembered agreement fails closed and asks for a re-inspection", () => {
+    let refreshes = 0;
+    const agreement = createSidecarAgreement(VERSION, { onRefusal: () => { refreshes += 1; } });
+    // Nothing inspected yet: the guard does not invent a refusal.
+    expect(() => agreement.assertUsable()).not.toThrow();
+    agreement.observe({ service: "dsh-chatgpt-web", version: "1.0.24" }, where);
+    expect(() => agreement.assertUsable()).toThrow(/Outdated sidecar/);
+    expect(refreshes).toBe(1);
+    // A daemon the operator has since replaced is accepted again.
+    agreement.observe({ service: "dsh-chatgpt-web", version: VERSION }, where);
+    expect(() => agreement.assertUsable()).not.toThrow();
+    // A free port clears the refusal rather than remembering it.
+    agreement.observe(undefined, where);
+    expect(agreement.refusal()).toBeUndefined();
+  });
+});
+
+describe("issue #193 — an outdated sidecar fails the turn path closed", () => {
+  function nativeTurnOptions(text: string): GenerateOptions {
+    return {
+      provider: CHATGPT_WEB_PROVIDER_ID,
+      model: "chatgpt-web/luna",
+      messages: [
+        {
+          role: "user",
+          id: "msg-1",
+          source: { kind: "user" },
+          content: [{ type: "text", text }],
+        } as unknown as GenerateOptions["messages"][number],
+      ],
+    };
+  }
+
+  async function collect(iterable: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
+    const chunks: StreamChunk[] = [];
+    for await (const chunk of iterable) chunks.push(chunk);
+    return chunks;
+  }
+
+  test("a turn refuses with the same message the startup log reports", async () => {
+    saveConfig(defaultConfig());
+    const originalFetch = globalThis.fetch;
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async () => Response.json({
+        status: "ok",
+        service: "dsh-chatgpt-web",
+        version: "1.0.24",
+        pid: 4242,
+        mode: "browser-only",
+      }),
+    });
+
+    const outdated = harness();
+    try {
+      apply(outdated.ctx, installedConfig, {});
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const adapter = outdated.registered[0]?.adapter as
+        | { stream(options: GenerateOptions): AsyncIterable<StreamChunk> }
+        | undefined;
+      expect(adapter).toBeDefined();
+
+      const chunks = await collect(adapter!.stream(nativeTurnOptions("hi")));
+      const finish = chunks[chunks.length - 1] as Extract<StreamChunk, { type: "finish" }>;
+      expect(finish?.type).toBe("finish");
+      const failure = (finish as unknown as { reason?: { failure?: { message?: string; code?: string } } }).reason?.failure;
+      expect(failure?.message).toContain("Outdated sidecar");
+      expect(failure?.message).toContain("1.0.24");
+      expect(failure?.message).toContain(`installed plugin is ${VERSION}`);
+      expect(failure?.code).toBe("PROVIDER_ERROR");
+    } finally {
+      await outdated.dispose();
       globalThis.fetch = originalFetch;
     }
   });

@@ -239,6 +239,66 @@ async function isSidecarHealthy(host: string, port: number): Promise<boolean> {
   return body?.service === "dsh-chatgpt-web" && body.version === VERSION;
 }
 
+/** Where a remembered sidecar inspection happened, for the message and the log. */
+interface SidecarLocation {
+  readonly url: string;
+  readonly port: number;
+}
+
+/**
+ * Why a healthy sidecar on the configured port may not be used, or `undefined` when it may.
+ *
+ * This is the single owner of the "is the daemon on my port mine and current?" comparison and of its
+ * wording: the startup log and the turn path must not disagree about it.
+ */
+export function sidecarRefusal(
+  health: SidecarHealth | undefined,
+  installedVersion: string,
+  where: SidecarLocation,
+): string | undefined {
+  if (!health) return undefined;
+  if (health.service !== "dsh-chatgpt-web") {
+    return `Port ${where.port} is occupied by a healthy service (${String(health.service ?? "unknown service")}, version ${String(health.version ?? "unknown")}); refusing to reuse it as the ChatGPT Web sidecar.`;
+  }
+  if (health.version !== installedVersion) {
+    return `Outdated sidecar at ${where.url}: running version ${String(health.version ?? "unknown")} (pid ${String(health.pid ?? "unknown")}), but installed plugin is ${installedVersion}. This plugin will not reuse or terminate a sidecar it does not own. Stop the old 'serve' process and restart DSH so the updated plugin can start the matching daemon.`;
+  }
+  return undefined;
+}
+
+/**
+ * The sidecar agreement remembered from the last inspection, asserted on the turn path.
+ *
+ * A daemon is a long-lived process that a package update does not replace, so the startup decision
+ * alone is not enough: refusing to *reuse* an outdated daemon in a log still left turns flowing to
+ * it over the port. Recording the decision here lets the turn path fail closed with the same
+ * message, and `onRefusal` re-inspects so a daemon the operator has since fixed is accepted again.
+ */
+export function createSidecarAgreement(
+  installedVersion: string,
+  options: { onRefusal?: () => void } = {},
+): {
+    observe(health: SidecarHealth | undefined, where: SidecarLocation): void;
+    refusal(): string | undefined;
+    assertUsable(): void;
+  } {
+  let remembered: { health: SidecarHealth | undefined; where: SidecarLocation } | undefined;
+  const refusalOf = (): string | undefined =>
+    remembered ? sidecarRefusal(remembered.health, installedVersion, remembered.where) : undefined;
+  return {
+    observe(health, where) {
+      remembered = { health, where };
+    },
+    refusal: refusalOf,
+    assertUsable() {
+      const refusal = refusalOf();
+      if (refusal === undefined) return;
+      options.onRefusal?.();
+      throw new Error(refusal);
+    },
+  };
+}
+
 /**
  * WebChat drivers this deployment composes.
  *
@@ -265,22 +325,41 @@ export function apply(
   let spawnedPort: number | undefined;
   let startGeneration = 0;
   let reconfiguration = Promise.resolve();
+  let lastAgreementRefresh = 0;
+
+  const sidecarLocation = (targetPort: number): SidecarLocation => ({
+    url: `http://${host}:${targetPort}/v1`,
+    port: targetPort,
+  });
+
+  const agreement = createSidecarAgreement(VERSION, {
+    // Called from the turn path when it refuses: a daemon the operator has since replaced must be
+    // accepted again without requiring a DSH restart, and at most one re-inspection per second.
+    onRefusal: () => {
+      const now = Date.now();
+      if (now - lastAgreementRefresh < 1_000) return;
+      lastAgreementRefresh = now;
+      const targetPort = port;
+      void inspectSidecar(host, targetPort).then(
+        health => agreement.observe(health, sidecarLocation(targetPort)),
+        () => undefined,
+      );
+    },
+  });
 
   const startDaemon = async () => {
     const generation = ++startGeneration;
     const targetPort = port;
     const existing = await inspectSidecar(host, targetPort);
+    // Recorded even when there is no healthy sidecar: a free port clears a stale refusal.
+    agreement.observe(existing, sidecarLocation(targetPort));
     if (existing) {
-      if (existing.service === "dsh-chatgpt-web" && existing.version === VERSION) {
+      const refusal = agreement.refusal();
+      if (refusal === undefined) {
         logger.info(`[dsh-chatgpt-web] Sidecar already running and healthy at http://${host}:${targetPort}/v1 (version ${VERSION})`);
-      } else if (existing.service === "dsh-chatgpt-web") {
-        logger.error(
-          `[dsh-chatgpt-web] Outdated sidecar at http://${host}:${targetPort}/v1: running version ${String(existing.version ?? "unknown")} (pid ${String(existing.pid ?? "unknown")}), but installed plugin is ${VERSION}. This plugin will not reuse or terminate a sidecar it does not own. Stop the old 'serve' process and restart DSH so the updated plugin can start the matching daemon.`,
-        );
       } else {
-        logger.error(
-          `[dsh-chatgpt-web] Port ${targetPort} is occupied by a healthy service (${String(existing.service ?? "unknown service")}, version ${String(existing.version ?? "unknown")}); refusing to reuse it as the ChatGPT Web sidecar.`,
-        );
+        // The same message the turn path throws, so the log and the failure cannot disagree.
+        logger.error(`[dsh-chatgpt-web] ${refusal}`);
       }
       return;
     }
@@ -420,6 +499,10 @@ export function apply(
       resolveNativeDshContext: (options, turnId, threadId) =>
         resolveNativeDshContext(ctx, options, turnId, threadId),
       resolveNativeDshTransport: () => {
+        // Fail closed on the turn path (issue #236 follow-up): an outdated or foreign daemon that
+        // the startup inspection refused must fail the turn with that same message rather than
+        // silently serving it. Throwing here becomes a terminal `finish` chunk carrying the text.
+        agreement.assertUsable();
         const appConfig = loadConfig();
         return {
           baseUrl: "http://" + host + ":" + port,
