@@ -357,9 +357,7 @@ function normalChatProjectHeader(): string | undefined {
   return `Project: "${metadata.name}"\ngithub: "${metadata.repositoryUrl}"`;
 }
 
-function currentChatUserMessage(messages: readonly CodexMessage[]): { text: string; images: ChatGptWebPromptImage[] } {
-  const message = messages.findLast(candidate => candidate.role === "user");
-  if (!message) return { text: "", images: [] };
+function chatUserMessageContent(message: CodexMessage): { text: string; images: ChatGptWebPromptImage[] } {
   const textParts: string[] = [];
   const images: ChatGptWebPromptImage[] = [];
   if (typeof message.content === "string") {
@@ -380,6 +378,24 @@ function currentChatUserMessage(messages: readonly CodexMessage[]): { text: stri
     text: textParts.map(part => sanitizeConversationText(part)).filter(Boolean).join("\n"),
     images: images.slice(0, CHATGPT_WEB_MAX_INPUT_IMAGES),
   };
+}
+
+/**
+ * The human turn that becomes the provider input.
+ *
+ * Only a message that still carries content after sanitization may be chosen: a message made of
+ * harness context alone (a skills catalogue, a runtime snapshot) sanitizes to nothing, and
+ * choosing it is what sent that context to the provider in place of the user's message. Later
+ * messages are preferred, so the newest human turn wins.
+ */
+function currentChatUserMessage(messages: readonly CodexMessage[]): { text: string; images: ChatGptWebPromptImage[] } {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role !== "user") continue;
+    const candidate = chatUserMessageContent(message);
+    if (candidate.text.length > 0 || candidate.images.length > 0) return candidate;
+  }
+  return { text: "", images: [] };
 }
 
 /**

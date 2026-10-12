@@ -124,19 +124,24 @@ describe("issue #180 — case 1: result associated to the correct turn", () => {
 
   test("record + select round-trips per turn and keeps the latest result per turn", () => {
     const storage = makeStorage();
-    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r1", route: "chatgpt-web/light", providerLabel: "ChatGPT Web", modelLabel: "Light", text: "primera" });
-    mod.__test.recordAdvisorResult(storage, { turn: 9, reviewId: "r2", route: "chatgpt-web/high", providerLabel: "ChatGPT Web", modelLabel: "High", text: "otra" });
-    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r3", route: "qwen-web/fast", providerLabel: "Qwen Chat", modelLabel: "Fast", text: "nueva" });
+    const SESSION = "sess-180";
+    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r1", route: "chatgpt-web/light", providerLabel: "ChatGPT Web", modelLabel: "Light", text: "primera", sessionId: SESSION });
+    mod.__test.recordAdvisorResult(storage, { turn: 9, reviewId: "r2", route: "chatgpt-web/high", providerLabel: "ChatGPT Web", modelLabel: "High", text: "otra", sessionId: SESSION });
+    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "r3", route: "qwen-web/fast", providerLabel: "Qwen Chat", modelLabel: "Fast", text: "nueva", sessionId: SESSION });
 
     const results = mod.__test.loadAdvisorResults(storage);
     expect(results).toHaveLength(2);
-    expect(mod.__test.selectResultForTurn(results, 7)?.text).toBe("nueva");
+    expect(mod.__test.selectResultForTurn(results, 7, SESSION)?.text).toBe("nueva");
     // Issue #224: the recorded provenance is the provider-qualified model identity.
-    expect(mod.__test.selectResultForTurn(results, 7)?.route).toBe("qwen-web/fast");
-    expect(mod.__test.selectResultForTurn(results, 7)?.providerLabel).toBe("Qwen Chat");
-    expect(mod.__test.selectResultForTurn(results, 9)?.reviewId).toBe("r2");
-    expect(mod.__test.selectResultForTurn(results, 8)).toBeNull();
-    expect(mod.__test.selectResultForTurn(results, "7" as unknown as number)).toBeNull();
+    expect(mod.__test.selectResultForTurn(results, 7, SESSION)?.route).toBe("qwen-web/fast");
+    expect(mod.__test.selectResultForTurn(results, 7, SESSION)?.providerLabel).toBe("Qwen Chat");
+    expect(mod.__test.selectResultForTurn(results, 9, SESSION)?.reviewId).toBe("r2");
+    expect(mod.__test.selectResultForTurn(results, 8, SESSION)).toBeNull();
+    expect(mod.__test.selectResultForTurn(results, "7" as unknown as number, SESSION)).toBeNull();
+    // The card is per session: the same turn number of another session is never selected here.
+    mod.__test.recordAdvisorResult(storage, { turn: 7, reviewId: "foreign", route: "chatgpt-web/light", providerLabel: "ChatGPT Web", modelLabel: "Light", text: "otra sesión", sessionId: "sess-otra" });
+    expect(mod.__test.selectResultForTurn(mod.__test.loadAdvisorResults(storage), 7, SESSION)?.text).toBe("nueva");
+    expect(mod.__test.selectResultForTurn(mod.__test.loadAdvisorResults(storage), 7, "sess-otra")?.text).toBe("otra sesión");
   });
 });
 

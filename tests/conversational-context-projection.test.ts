@@ -273,7 +273,7 @@ Objective:
       {
         role: "user",
         id: "internal-id",
-        source: { kind: "internal", secret: "must not survive" },
+        source: { kind: "user", secret: "must not survive" },
         content: [{ type: "text", text: "visible user content" }],
       } as unknown as RequestMessage,
       user("<hindsight_memory>secret</hindsight_memory>"),
@@ -285,6 +285,28 @@ Objective:
         content: [{ type: "text", text: "visible user content" }],
       },
     ]);
+  });
+
+  test("drops a user-role message whose provenance is not the human turn", () => {
+    // DSH delivers every injected block as a user-role message with its own `source.kind`. Only the
+    // human turn may cross, and an unrecognized kind is dropped by default rather than forwarded.
+    const projected = projectConversationalMessages([
+      {
+        role: "user",
+        id: "skill-catalog",
+        source: { kind: "skill-catalog" },
+        content: [{ type: "text", text: "<system-reminder>catalogue</system-reminder>" }],
+      } as unknown as RequestMessage,
+      {
+        role: "user",
+        id: "future-plugin",
+        source: { kind: "plugin:future" },
+        content: [{ type: "text", text: "not the human turn" }],
+      } as unknown as RequestMessage,
+      user("the human message"),
+    ]);
+
+    expect(projected).toEqual([{ role: "user", content: [{ type: "text", text: "the human message" }] }]);
   });
 
   test("rejects multiple canonical context envelopes instead of concatenating histories", () => {

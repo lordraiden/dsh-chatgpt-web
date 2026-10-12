@@ -1440,6 +1440,12 @@ A future provider becomes eligible for Advisor use when its WebChat driver is in
 
 **Result handoff (issue #225).** A finished review is presented in the Advisor result editor: the provider's original response stays immutable, the user edits a separate handoff draft, and **Inject into DSH** delivers exactly one ordinary user-authored message to the session the review belongs to through DSH's public session-addressed input API (`session/prompt`). The Advisor never appends to the Session log, never fabricates events, never writes into an unrelated composer draft, and never delivers anything without an explicit user action; the delivery identity makes a retry idempotent, and an unconfirmed acceptance is reported instead of being resubmitted.
 
+**Advisor state is scoped to its session.** A finished review belongs to the DSH session that produced
+it: the activity list is requested from the sidecar with that session and persisted per session, the
+turn result card selects a result only for the session it is rendered in, and recording a result keeps
+"the latest per turn" per session. A session in which the Advisor was never invoked therefore shows no
+Advisor content at all, which is what keeps the ordinary chat and the Advisor independent.
+
 **Implementation status (issues #224, #236).** The provider-neutral Advisor host, the eligible-model catalogue, the tracked task lifecycle and the client surface are implemented (`src/advisor/**`, with `client.js` and the sidecar control API). A review turn now executes through the **shared exchange**: the provider composition opens a `WebChatTextTransport` plus the exchange identity and semantic turn (`src/web-chat/host/text-turn.ts`), and the host drives it with `createWebChatExchange` (`src/web-chat/host/text-exchange.ts`, `src/web-chat/transport`). ChatGPT implements that transport over its existing turn execution, exposing readiness, its proven submission phase and its physical settlement (`src/adapters/chatgpt-web/{text-turn,webchat-transport}.ts`); the earlier provider-local execution seam is retired, so no provider runs a parallel turn path for Advisor use.
 
 The shared WebChat contract remains text-only. This separation prevents both ChatGPT-specific compatibility features and the Advisor orchestration from becoming a generic agent runtime inside WebChat Core.
@@ -1457,7 +1463,12 @@ conversational transport to the provider:
   descriptions or memory content into the request;
 - the project header is generated programmatically from authoritative package metadata
   (`package.json`), never inferred from the user's message, the working directory or a model answer;
-  when that metadata cannot be resolved, the repository line is omitted rather than fabricated.
+  when that metadata cannot be resolved, the repository line is omitted rather than fabricated;
+- a message is eligible to become the user turn only when the DSH host marked it as the human turn
+  (`source.kind === "user"`). Every injected block — the skills catalogue, runtime context, the Aegis
+  bootstrap, Hindsight recall, the time snapshot — is dropped at the projection boundary by that
+  allowlist, so a new harness injection cannot reach the provider by default and, in particular,
+  cannot be mistaken for the user's message.
 
 Advisor Mode is a separate feature with its own context. It owns its reviewer system prompt, the
 project/preset label, the review instructions, the last human request and the last final DSH

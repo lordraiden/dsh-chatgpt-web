@@ -1033,14 +1033,14 @@ window.__ModuleLoader__.load({
             }
             saveLastInstructions(env.storage, state.instructions);
             saveLastSelection(env.storage, selection.route);
-            upsertAdvisorActivity(env.storage, advisorTaskEntry(data.task, { dshTurn: context.dshTurn }));
+            upsertAdvisorActivity(env.storage, advisorTaskEntry(data.task, { dshTurn: context.dshTurn }), env.sessionId);
             // Accepted: close the dialog and return focus to DSH. The tracked
             // status entry keeps the review reachable; nothing is cancelled here.
             setState({
               open: false,
               view: 'review',
               start: { status: 'idle', error: null },
-              activity: { status: 'ready', reviews: loadAdvisorActivity(env.storage), error: null },
+              activity: { status: 'ready', reviews: loadAdvisorActivity(env.storage, env.sessionId), error: null },
             });
           })
           .catch((error) => {
@@ -1070,7 +1070,7 @@ window.__ModuleLoader__.load({
         if (state.activity.status !== 'loading') {
           setState({ activity: { status: 'loading', reviews: state.activity.reviews, error: null } });
         }
-        const { url, options } = buildAdvisorListFetch({ base: env.base, token: env.token, limit: 50, signal: controller.signal });
+        const { url, options } = buildAdvisorListFetch({ base: env.base, token: env.token, sessionId: env.sessionId, limit: 50, signal: controller.signal });
         env.fetch(url, options)
           .then(async (res) => {
             let data = null;
@@ -1080,8 +1080,12 @@ window.__ModuleLoader__.load({
               setState({ activity: { status: 'error', reviews: state.activity.reviews, error: message } });
               return;
             }
-            const merged = reconcileAdvisorActivity(loadAdvisorActivity(env.storage), data.reviews);
-            saveAdvisorActivity(env.storage, merged);
+            // The list is scoped to this session on both sides: the request names its session, and a
+            // review whose session is not this one is never displayed here even if it is returned.
+            const scoped = (Array.isArray(data.reviews) ? data.reviews : [])
+              .filter((task) => task && task.sessionId === env.sessionId);
+            const merged = reconcileAdvisorActivity(loadAdvisorActivity(env.storage, env.sessionId), scoped);
+            saveAdvisorActivity(env.storage, merged, env.sessionId);
             recordAdvisorResultsForActivity(env.storage, merged, env.sessionId);
             setState({ activity: { status: 'ready', reviews: merged, error: null } });
           })
@@ -1095,10 +1099,10 @@ window.__ModuleLoader__.load({
         subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
         get inFlight() { return inFlight; },
         /** Show only what browser storage already knows, before the sidecar answers. */
-        hydrateActivity(storage) {
+        hydrateActivity(storage, sessionId) {
           // Re-running with the same storage is a no-op, so a host that re-runs a mount effect never
           // spins on an unchanged activity list.
-          const stored = loadAdvisorActivity(storage);
+          const stored = loadAdvisorActivity(storage, sessionId);
           if (JSON.stringify(stored) === JSON.stringify(state.activity.reviews)) return;
           setState({ activity: { status: state.activity.status, reviews: stored, error: state.activity.error } });
         },
@@ -1169,18 +1173,22 @@ window.__ModuleLoader__.load({
          * Only Advisor-owned browser state is removed: no DSH Session event is deleted
          * or rewritten, and a message already injected into the session stays there.
          */
-        discardResult(storage) {
+        discardResult(storage, sessionId) {
           const current = state.result;
           if (!current) return;
           removeAdvisorDraft(storage, current.reviewId);
           if (typeof current.turn === 'number') {
-            saveAdvisorResults(storage, loadAdvisorResults(storage).filter((entry) => entry.turn !== current.turn));
+            // Only this session's result for that turn is discarded; another session's result for the
+            // same turn number is not ours to remove.
+            const owner = current.sessionId || sessionId;
+            saveAdvisorResults(storage, loadAdvisorResults(storage).filter((entry) =>
+              !(entry && entry.turn === current.turn && entry.sessionId === owner)));
           }
           setState({
             view: 'activity',
             result: null,
             discard: { confirming: false },
-            activity: { status: state.activity.status, reviews: loadAdvisorActivity(storage), error: state.activity.error },
+            activity: { status: state.activity.status, reviews: loadAdvisorActivity(storage, sessionId), error: state.activity.error },
           });
         },
         /**
@@ -1407,15 +1415,22 @@ window.__ModuleLoader__.load({
         text: result.text,
         at: Date.now(),
       };
-      const next = [...loadAdvisorResults(storage).filter((item) => item.turn !== entry.turn), entry];
+      // "Latest per turn" is per SESSION: keying the replacement by turn number alone made recording
+      // a result in one session silently drop another session's result for the same turn.
+      const next = [...loadAdvisorResults(storage).filter((item) =>
+        !(item && item.turn === entry.turn && (item.sessionId || '') === entry.sessionId)), entry];
       saveAdvisorResults(storage, next);
       return entry;
     }
 
     /** The result associated with one DSH turn, or null. */
-    function selectResultForTurn(results, turn) {
+    function selectResultForTurn(results, turn, sessionId) {
       if (!Array.isArray(results) || typeof turn !== 'number') return null;
-      return results.find((entry) => entry && entry.turn === turn) || null;
+      // A result belongs to the session it was produced for. Selecting by turn number alone is what
+      // rendered another session's review inside this session's turn card, where the Advisor had
+      // never been invoked; a caller that cannot name its session cannot claim a result.
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+      return results.find((entry) => entry && entry.turn === turn && entry.sessionId === sessionId) || null;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1662,27 +1677,45 @@ window.__ModuleLoader__.load({
       return out;
     }
 
-    function loadAdvisorActivity(storage) {
+    /**
+     * The activity of one DSH session, keyed by that session.
+     *
+     * The sidecar keeps tracked tasks only for its own lifetime, so browser storage is the durable
+     * copy — and a review belongs to the session that produced it. Keying the list by session is what
+     * keeps one session's reviews out of another session's chat, where the Advisor was never invoked.
+     */
+    function activityStorageKey(sessionId) {
+      return `${ACTIVITY_KEY}:${sessionId}`;
+    }
+
+    function loadAdvisorActivity(storage, sessionId) {
+      if (!storage || typeof sessionId !== 'string' || sessionId.length === 0) return [];
       try {
-        return parseAdvisorActivity(storage ? storage.getItem(ACTIVITY_KEY) : null);
+        const own = storage.getItem(activityStorageKey(sessionId));
+        if (own !== null) return parseAdvisorActivity(own);
+        // Entries persisted before the activity was session-scoped carry their session id: adopt only
+        // this session's slice, never another session's review.
+        return parseAdvisorActivity(storage.getItem(ACTIVITY_KEY))
+          .filter((entry) => entry && entry.sessionId === sessionId);
       } catch {
         return [];
       }
     }
 
-    function saveAdvisorActivity(storage, entries) {
+    function saveAdvisorActivity(storage, entries, sessionId) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return;
       try {
-        if (storage) storage.setItem(ACTIVITY_KEY, JSON.stringify(entries.slice(0, 50)));
+        if (storage) storage.setItem(activityStorageKey(sessionId), JSON.stringify(entries.slice(0, 50)));
       } catch {
         // Browser storage may be unavailable; the activity stays session-local.
       }
     }
 
-    /** Insert or update one tracked task, newest first. */
-    function upsertAdvisorActivity(storage, entry) {
-      if (!entry) return loadAdvisorActivity(storage);
-      const next = [entry, ...loadAdvisorActivity(storage).filter((item) => item.reviewId !== entry.reviewId)].slice(0, 50);
-      saveAdvisorActivity(storage, next);
+    /** Insert or update one tracked task of this session, newest first. */
+    function upsertAdvisorActivity(storage, entry, sessionId) {
+      if (!entry) return loadAdvisorActivity(storage, sessionId);
+      const next = [entry, ...loadAdvisorActivity(storage, sessionId).filter((item) => item.reviewId !== entry.reviewId)].slice(0, 50);
+      saveAdvisorActivity(storage, next, sessionId);
       return next;
     }
 
@@ -1842,7 +1875,7 @@ window.__ModuleLoader__.load({
       const results = React.useMemo(() => loadAdvisorResults(window.localStorage), [snapshot]);
 
       if (turn === undefined) return null;
-      const result = selectResultForTurn(results, turn);
+      const result = selectResultForTurn(results, turn, props && props.sessionId);
       if (!result) return null;
       const draft = loadAdvisorDraft(window.localStorage, result.reviewId);
 
@@ -1995,7 +2028,7 @@ window.__ModuleLoader__.load({
       } : null);
 
       // Show what browser storage already knows, before the sidecar answers.
-      React.useEffect(() => { advisorStore.hydrateActivity(window.localStorage); }, []);
+      React.useEffect(() => { advisorStore.hydrateActivity(window.localStorage, sessionId); }, []);
 
       React.useEffect(() => {
         if (!open) return undefined;
@@ -2159,7 +2192,7 @@ window.__ModuleLoader__.load({
       }
 
       function onDiscard() { advisorStore.requestDiscard(); }
-      function onConfirmDiscard() { advisorStore.discardResult(window.localStorage); }
+      function onConfirmDiscard() { advisorStore.discardResult(window.localStorage, sessionId); }
       function onCancelDiscard() { advisorStore.cancelDiscard(); }
 
       /** Copy the current handoff text (useful when the session is gone). */

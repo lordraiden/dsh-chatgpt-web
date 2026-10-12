@@ -357,12 +357,28 @@ describe("issue #186 — case 7: the DSH turn number survives for the result car
       providerLabel: "ChatGPT Web",
       modelLabel: "Light",
       text: "review body",
+      sessionId: "sess-186",
     });
 
     const results = mod.__test.loadAdvisorResults(storage);
-    expect(mod.__test.selectResultForTurn(results, 2)?.text).toBe("review body");
+    expect(mod.__test.selectResultForTurn(results, 2, "sess-186")?.text).toBe("review body");
     // No result lands on the anchor seq of the reviewed node.
-    expect(mod.__test.selectResultForTurn(results, 12)).toBeNull();
+    expect(mod.__test.selectResultForTurn(results, 12, "sess-186")).toBeNull();
+    // A result belongs to its session: another session's review of the same turn is never shown.
+    mod.__test.recordAdvisorResult(storage, {
+      turn: 2,
+      reviewId: "r-foreign",
+      route: "chatgpt-web/light",
+      providerLabel: "ChatGPT Web",
+      modelLabel: "Light",
+      text: "otra sesión",
+      sessionId: "sess-otra",
+    });
+    const both = mod.__test.loadAdvisorResults(storage);
+    expect(mod.__test.selectResultForTurn(both, 2, "sess-186")?.text).toBe("review body");
+    expect(mod.__test.selectResultForTurn(both, 2, "sess-otra")?.text).toBe("otra sesión");
+    // A caller that cannot name its session claims no result at all.
+    expect(mod.__test.selectResultForTurn(both, 2, "")).toBeNull();
   });
 
   test("a reviewable turn without a resolvable turn number is still selectable but not recordable", () => {
@@ -382,6 +398,6 @@ describe("issue #186 — case 7: the DSH turn number survives for the result car
     expect(reviewable).not.toBeNull();
     expect(reviewable.dshTurn).toBeUndefined();
     // The start flow records nothing without a turn number: the card stays empty.
-    expect(mod.__test.selectResultForTurn(mod.__test.loadAdvisorResults(makeStorage()), reviewable.dshTurn)).toBeNull();
+    expect(mod.__test.selectResultForTurn(mod.__test.loadAdvisorResults(makeStorage()), reviewable.dshTurn, "sess-186")).toBeNull();
   });
 });
