@@ -313,33 +313,24 @@ jobs:
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           marker="## Verified release provenance"
 
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            body="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
-            if ! grep -Fq "$marker" <<< "$body"; then
-              {
-                printf '%s\n\n' "$body"
-                printf '%s\n\n' "$marker"
-                printf -- '- Package: `@lordraiden/dsh-chatgpt-web@%s`\n' "$RELEASE_VERSION"
-                printf -- '- Tag commit: `%s`\n' "$tag_commit"
-                printf -- '- CI run: %s\n' "$run_url"
-                printf -- '- SHA-256 of registry tarball verified by the clean-tarball smoke test: `%s`\n' "$PUBLISHED_SHA256"
-              } > "$RUNNER_TEMP/release-notes.md"
-              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
-            fi
-          else
-            gh release notes "$tag" --repo "$GITHUB_REPOSITORY" --generate-notes > "$RUNNER_TEMP/generated-notes.md"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$tag" \
+              --generate-notes \
+              --latest
+          fi
+
+          body="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+          if ! grep -Fq "$marker" <<< "$body"; then
             {
-              cat "$RUNNER_TEMP/generated-notes.md"
-              printf '\n\n%s\n\n' "$marker"
+              printf '%s\n\n' "$body"
+              printf '%s\n\n' "$marker"
               printf -- '- Package: `@lordraiden/dsh-chatgpt-web@%s`\n' "$RELEASE_VERSION"
               printf -- '- Tag commit: `%s`\n' "$tag_commit"
               printf -- '- CI run: %s\n' "$run_url"
               printf -- '- SHA-256 of registry tarball verified by the clean-tarball smoke test: `%s`\n' "$PUBLISHED_SHA256"
             } > "$RUNNER_TEMP/release-notes.md"
-            gh release create "$tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --title "$tag" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --latest
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
           fi
