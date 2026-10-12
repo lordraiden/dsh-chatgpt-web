@@ -35,7 +35,7 @@ import {
   type WebChatProviderHealth,
 } from "../../web-chat/core";
 import { chatGptWebAccountFingerprint, chatGptWebExecutionNamespace } from "./index";
-import { CHATGPT_WEB_PROVIDER_ID } from "./llm-adapter";
+import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/dsh-integration";
 import { chatGptTurnSessions, type ChatGptTurnSessions } from "./turn-execution";
 
 /** What the driver reads from the provider, all of it provider-local state. */
@@ -56,7 +56,7 @@ export interface ChatGptWebDriverOptions {
 /** The opaque handle this provider records for one physical conversation. */
 export function chatGptWebConversationHandle(conversationKey: string, generation: number): WebChatConversationHandle {
   // Opaque provider state: the core stores, compares and passes it, and never interprets it.
-  return `${CHATGPT_WEB_PROVIDER_ID}:${conversationKey}:${generation}` as WebChatConversationHandle;
+  return `${CHATGPT_WEB_DRIVER_ID}:${conversationKey}:${generation}` as WebChatConversationHandle;
 }
 
 /**
@@ -122,7 +122,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
     status: WebChatConversation["status"];
   }): WebChatConversation => ({
     key: input.key,
-    providerId: CHATGPT_WEB_PROVIDER_ID,
+    providerId: CHATGPT_WEB_DRIVER_ID,
     bindingId: bindingOf(input.binding),
     generation: input.generation,
     handle: chatGptWebConversationHandle(input.key, input.generation),
@@ -130,7 +130,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
   });
 
   return {
-    id: CHATGPT_WEB_PROVIDER_ID,
+    id: CHATGPT_WEB_DRIVER_ID,
 
     async inspectAccount(): Promise<WebChatAccountInspection> {
       const accountFingerprint = chatGptWebAccountFingerprint(provider);
