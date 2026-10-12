@@ -267,6 +267,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.version-bump.outputs.version }}
+          EXPECTED_SHA256: ${{ steps.package.outputs.artifact_sha256 }}
         run: |
           set -euo pipefail
           printf '%s\n' \
@@ -289,9 +290,13 @@ jobs:
           tarball="${tarballs[0]}"
           node scripts/smoke-tarball.mjs "$tarball"
           checksum="$(sha256sum "$tarball" | cut -d ' ' -f 1)"
+          if [ "$checksum" != "$EXPECTED_SHA256" ]; then
+            echo "Registry tarball SHA-256 ($checksum) does not match the validated build artifact ($EXPECTED_SHA256)" >&2
+            exit 1
+          fi
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           echo "sha256=$checksum" >> "$GITHUB_OUTPUT"
-          echo "Published package smoke-tested successfully; SHA-256: $checksum"
+          echo "Published package matches the validated build artifact and passed the clean-tarball smoke test; SHA-256: $checksum"
 
       - name: Publish GitHub Release with verified provenance
         if: ${{ steps.version-bump.outputs.publish == 'true' }}
