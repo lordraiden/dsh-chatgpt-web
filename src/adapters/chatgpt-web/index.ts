@@ -21,7 +21,7 @@ import {
 } from "../../launcher-browser-host";
 import { type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import { safeErrorDescriptor, toolCallDiagnosticSummary } from "../../lib/safe-diagnostics";
-import type { ProviderAdapter } from "../base";
+import type { IncomingMeta, ProviderAdapter } from "../base";
 import type { ProviderRecovery } from "./provider-core";
 import { parseDataUrl } from "../image";
 import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
@@ -54,6 +54,7 @@ import {
   chatGptConversationHandleForEpoch,
   createChatGptWebReplayTransport,
 } from "./replay-transport";
+import { awaitChatGptSubmissionPhase, createChatGptTurnEventQueue, type ChatGptTurnPhaseReporter, type ChatGptWebTextTurn } from "./text-turn";
 import { capabilityBindingIdForExecution } from "./provider-core";
 import {
   canonicalizeCompactionHandoff,
@@ -599,6 +600,18 @@ export interface ChatGptAnswerRecoveryOptions {
  */
 export interface ChatGptWebProviderAdapter extends ProviderAdapter {
   /**
+   * Run one turn, optionally reporting the provider's own phases to a shared exchange (issue #236).
+   *
+   * The native path calls this with three arguments and is unaffected; the phased opener passes the
+   * reporter that observes readiness, submission and settlement.
+   */
+  runTurn(
+    parsed: CodexParsedRequest,
+    incoming: IncomingMeta,
+    emit: (event: AdapterEvent) => void,
+    phases?: ChatGptTurnPhaseReporter,
+  ): Promise<void>;
+  /**
    * Read the finalized answer of the retained ChatGPT conversation described by one parsed
    * request (issue #214). Read-only: it resolves the conversationKey the same way the turn does,
    * never creates a conversation, never navigates and never submits.
@@ -611,6 +624,17 @@ export interface ChatGptWebProviderAdapter extends ProviderAdapter {
     parsed: CodexParsedRequest,
     options?: ChatGptAnswerRecoveryOptions,
   ): Promise<WebSurfaceRetainedAnswer>;
+  /**
+   * Open one turn as phases for a shared exchange (issue #236).
+   *
+   * The turn is the same execution the native path runs, exposed as readiness, submission phase,
+   * normalized events, physical settlement and cancellation. Optional because a harness-injected
+   * adapter need not expose the phased seam.
+   */
+  openTextTurn?(
+    parsed: CodexParsedRequest,
+    incoming: IncomingMeta,
+  ): Promise<ChatGptWebTextTurn>;
 }
 
 export function createChatGptWebAdapter(
@@ -693,6 +717,7 @@ export function createChatGptWebAdapter(
       conversationGeneration?: number;
       onSurfaceReady?: () => void | Promise<void>;
     },
+    phases?: ChatGptTurnPhaseReporter,
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -930,21 +955,28 @@ export function createChatGptWebAdapter(
       onSendActivated: () => {
         submission.phase = "send_activated" as const;
         providerTurn?.markSendActivated();
+        phases?.sendActivated();
       },
       onSubmitted: () => {
         submission.phase = "accepted" as const;
         providerTurn?.markSubmitted();
         providerTurn?.markRunning();
+        phases?.submitted();
       },
     };
     const providerTurnSurfaceHooks: {
-      onPhysicalSurfaceBound: (binding: WebSurfacePhysicalSurface) => void;
+      onPhysicalSurfaceBound?: (binding: WebSurfacePhysicalSurface) => void;
       onSurfaceReady: () => void | Promise<void>;
-    } | undefined = providerTurn
+    } | undefined = providerTurn || phases
       ? {
-        onPhysicalSurfaceBound: binding => providerTurn.bindPhysicalResource(binding),
+        ...(providerTurn
+          ? { onPhysicalSurfaceBound: (binding: WebSurfacePhysicalSurface) => providerTurn.bindPhysicalResource(binding) }
+          : {}),
         onSurfaceReady: async () => {
-          providerTurn.markSurfaceReady();
+          providerTurn?.markSurfaceReady();
+          // Readiness is the provider's own fact; a phased caller observes it here instead of the
+          // adapter reporting it twice (#236).
+          phases?.ready();
           await replayOptions?.onSurfaceReady?.();
         },
       }
@@ -1277,7 +1309,7 @@ export function createChatGptWebAdapter(
     };
   };
 
-  return {
+  const adapter: ChatGptWebProviderAdapter = {
     name: "chatgpt-web",
     shutdown: () => {
       if (shutdownPromise) return shutdownPromise;
@@ -1310,7 +1342,7 @@ export function createChatGptWebAdapter(
         ...(options.signal ? { signal: options.signal } : {}),
       });
     },
-    async runTurn(parsed, incoming, emit) {
+    async runTurn(parsed, incoming, emit, phases?: ChatGptTurnPhaseReporter) {
       console.info(`[chatgpt-web] runTurn model=${parsed.modelId} chatOnly=true`);
       if (shuttingDown) {
         throw new Error("ChatGPT Web provider is shutting down");
@@ -1713,6 +1745,7 @@ export function createChatGptWebAdapter(
               turnCapabilities,
               providerTurn,
               options,
+              phases,
             ),
             onSessionCreated: created => {
               replaySession = created;
@@ -1751,7 +1784,7 @@ export function createChatGptWebAdapter(
             session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
               executionKey,
               ownerKey,
-              () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn),
+              () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn, undefined, phases),
               traceId,
               incoming.abortSignal,
               nativeTurnId,
@@ -1765,6 +1798,15 @@ export function createChatGptWebAdapter(
           if (!providerTurn.snapshot().physicalSettlementAttached) {
             providerCore.bindPhysicalSettlement(executionKey, session.physicalSettlement);
           }
+        }
+        if (phases && providerTurn.snapshot().physicalSettlementAttached) {
+          // The provider's settlement is the only authority on whether the resource may be reused
+          // (architecture §9.3); a phased caller observes it rather than asking the transport. It is
+          // read only after the settlement is bound, so the reported outcome is the settled one.
+          void providerTurn.waitForPhysicalSettlement().then(
+            () => phases.settled(providerTurn.snapshot().physicalSettlementOutcome),
+            () => phases.settled("rejected"),
+          );
         }
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
@@ -2262,5 +2304,48 @@ export function createChatGptWebAdapter(
         activeRuns.delete(runPromise);
       }
     },
+
+    /**
+     * Open one ChatGPT turn as phases (issue #236).
+     *
+     * The turn runs through the same `runTurn` body as the native path — there is no second
+     * execution — with a reporter that observes the readiness, submission and settlement the
+     * provider already establishes, and an event queue that carries its normalized events to a
+     * shared exchange. `abort()` cancels this turn only.
+     */
+    async openTextTurn(parsed, incoming): Promise<ChatGptWebTextTurn> {
+      const abort = new AbortController();
+      const queue = createChatGptTurnEventQueue();
+      const phases: ChatGptTurnPhaseReporter = {
+        ready: () => { queue.markReady(); },
+        sendActivated: () => { queue.markSubmission("send_activated"); },
+        submitted: () => { queue.markSubmission("accepted"); },
+        settled: outcome => { queue.markSettled(outcome); },
+      };
+      const abortSignal = incoming.abortSignal
+        ? AbortSignal.any([incoming.abortSignal, abort.signal])
+        : abort.signal;
+      const finished = adapter.runTurn(parsed, { ...incoming, abortSignal }, event => queue.push(event), phases)
+        .catch(error => {
+          // A turn that rejects without a terminal event still owes its consumer one, so the
+          // exchange fails with the provider's own message instead of an open stream.
+          queue.push({
+            type: "error",
+            message: error instanceof Error ? error.message : String(error),
+            ...(error instanceof ChatGptWebAdapterError ? { code: error.code } : {}),
+          });
+        })
+        .finally(() => { queue.close(); });
+      return {
+        ready: queue.ready,
+        submissionPhase: () => queue.submission(),
+        awaitSubmission: () => awaitChatGptSubmissionPhase(queue, finished),
+        events: queue,
+        settled: () => queue.settled(),
+        abort: async reason => { abort.abort(reason); },
+        finished,
+      };
+    },
   };
+  return adapter;
 }
