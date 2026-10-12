@@ -251,16 +251,31 @@ try {
       flushRefs();
     };
 
+    // The dialog is rendered directly (not through createElement), so it gets its own persistent hook
+    // store: one render pass reuses the same slots and starts at the first one, exactly like React.
+    // Sharing the ambient store would collide with the composer control's slots, and appending new
+    // slots on every render would defeat `useEffect`'s deps comparison — an effect that updates state
+    // would then re-register forever (a runaway render loop).
+    const dialogHooks = [];
     function renderDialog() {
-      return mod.__test.AdvisorReviewDialog(
-        (key, fallback) => fallback,
-        {
-          sessionId: "sess-verify",
-          useProjection: (key) => (key === mod.__test.ADVISOR_PROJECTION_KEY ? { controlToken: "token" } : undefined),
-          useWorkspaces: (selector) => selector({ items: [] }),
-        },
-        { getSnapshot: () => ({ value: { port: 17841 } }) },
-      );
+      const previousHooks = current.hooks;
+      const previousIndex = current.index;
+      current.hooks = dialogHooks;
+      current.index = 0;
+      try {
+        return mod.__test.AdvisorReviewDialog(
+          (key, fallback) => fallback,
+          {
+            sessionId: "sess-verify",
+            useProjection: (key) => (key === mod.__test.ADVISOR_PROJECTION_KEY ? { controlToken: "token" } : undefined),
+            useWorkspaces: (selector) => selector({ items: [] }),
+          },
+          { getSnapshot: () => ({ value: { port: 17841 } }) },
+        );
+      } finally {
+        current.hooks = previousHooks;
+        current.index = previousIndex;
+      }
     }
 
     const rerender = () => mount(renderDialog());

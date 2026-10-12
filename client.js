@@ -1039,7 +1039,10 @@ window.__ModuleLoader__.load({
       const refreshActivity = (env) => {
         if (!env || !env.base || !env.token) return;
         const controller = new AbortController();
-        setState({ activity: { status: 'loading', reviews: state.activity.reviews, error: null } });
+        // A re-entrant poll must not re-render on a status it already shows.
+        if (state.activity.status !== 'loading') {
+          setState({ activity: { status: 'loading', reviews: state.activity.reviews, error: null } });
+        }
         const { url, options } = buildAdvisorListFetch({ base: env.base, token: env.token, limit: 50, signal: controller.signal });
         env.fetch(url, options)
           .then(async (res) => {
@@ -1066,7 +1069,11 @@ window.__ModuleLoader__.load({
         get inFlight() { return inFlight; },
         /** Show only what browser storage already knows, before the sidecar answers. */
         hydrateActivity(storage) {
-          setState({ activity: { status: state.activity.status, reviews: loadAdvisorActivity(storage), error: state.activity.error } });
+          // Re-running with the same storage is a no-op, so a host that re-runs a mount effect never
+          // spins on an unchanged activity list.
+          const stored = loadAdvisorActivity(storage);
+          if (JSON.stringify(stored) === JSON.stringify(state.activity.reviews)) return;
+          setState({ activity: { status: state.activity.status, reviews: stored, error: state.activity.error } });
         },
         openReview(context, instructions) {
           setState({
