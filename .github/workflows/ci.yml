@@ -77,6 +77,15 @@ jobs:
             publish=true
           fi
 
+          # Recover safely when an earlier push changed version metadata but CI failed
+          # before creating the corresponding tag. Existing tags remain immutable.
+          tag="v${version}"
+          git fetch origin "refs/tags/${tag}:refs/tags/${tag}" 2>/dev/null || true
+          if ! git show-ref --verify --quiet "refs/tags/${tag}"; then
+            echo "No published version tag exists for ${version}; scheduling verified publication"
+            publish=true
+          fi
+
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Release intent: publish=$publish; previous=$previous_version; current=$version"
