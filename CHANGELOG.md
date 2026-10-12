@@ -5,7 +5,6 @@
 - Fix the standalone CLI/sidecar dependency boundary: the CLI no longer imports the host-only `@deepseek-ai/dsh-llm` adapter peer (PR #230).
 - Resolve ChatGPT Web provider identity from the canonical WebChat host route while retaining the public native adapter alias.
 - Add a clean-tarball regression check that the CLI bundle does not import the host-only peer.
-- Release pipeline now derives release intent from a version bump on `main`, runs validation before tagging/publishing, smoke-tests the package downloaded from GitHub Packages, and records the tag commit and CI run in the GitHub Release.
 
 ## 1.0.16
 
