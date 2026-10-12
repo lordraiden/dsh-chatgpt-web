@@ -14,7 +14,6 @@ import {
 } from "../src/web-chat/core";
 import {
   createWebChatTransportLeaseRegistry,
-  type WebChatExchangeRunner,
   type WebChatTextTransport,
   type WebChatTextTransportContext,
 } from "../src/web-chat/transport";
@@ -265,6 +264,3 @@ describe("issue #236 — one text turn through the shared exchange", () => {
       .rejects.toThrow(/turn identity/);
   });
 });
-
-/** The runner type is part of the composition contract this driver replaces. */
-type _RunnerContract = WebChatExchangeRunner;

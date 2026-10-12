@@ -16,19 +16,21 @@ import {
   createChatGptWebRouteAuthorityFromProvider,
   requireChatGptWebRoute,
 } from "../../chatgpt-web-authority";
-import {
-  ADVISOR_RECOVERY_UNAVAILABLE_CODE,
-  ADVISOR_TURN_FAILED_CODE,
-} from "../../advisor/message";
-import type { ChatGptWebProviderAdapter } from "./index";
+import { ADVISOR_RECOVERY_UNAVAILABLE_CODE } from "../../advisor/message";
+import { chatGptWebChatBindingIdFor, chatGptWebExecutionNamespace, type ChatGptWebProviderAdapter } from "./index";
 import type {
   WebChatTextRecoveryRequest,
   WebChatTextTurnOutcome,
   WebChatTextTurnRequest,
   WebChatProviderRuntime,
 } from "../../web-chat/host/text-turn";
+import type { WebChatTextExchangeHandoff } from "../../web-chat/host/text-exchange";
 import type { WebChatProviderDriver } from "../../web-chat/core";
 import { createChatGptWebDriver } from "./chatgpt-driver";
+import { createChatGptWebTextTransport } from "./webchat-transport";
+import { chatGptConversationKey } from "./conversation-key";
+import { chatGptTurnSessions } from "./turn-execution";
+import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/dsh-integration";
 
 /** What the ChatGPT runtime needs to serve a text turn. */
 export interface ChatGptWebProviderRuntimeOptions {
@@ -50,6 +52,8 @@ export function createChatGptWebProviderRuntime(
 ): WebChatProviderRuntime {
   const { provider, adapter } = options;
   const authority = createChatGptWebRouteAuthorityFromProvider(provider);
+  // The provider's own continuity namespace, so the review addresses the deployment's conversations.
+  const namespace = chatGptWebExecutionNamespace(provider);
   const driver: WebChatProviderDriver = createChatGptWebDriver({ provider });
 
   /**
@@ -109,65 +113,49 @@ export function createChatGptWebProviderRuntime(
     driver,
     providerLabel: options.providerLabel ?? "ChatGPT Web",
 
-    async runTextTurn(request: WebChatTextTurnRequest): Promise<WebChatTextTurnOutcome> {
-      let parsed: CodexParsedRequest;
-      try {
-        parsed = toTurnRequest(request);
-      } catch (error) {
-        return {
-          ok: false,
-          code: ADVISOR_TURN_FAILED_CODE,
-          message: error instanceof Error ? error.message : String(error),
-        };
+    /**
+     * Open one exchange for the review.
+     *
+     * The provider resolves its own route, model, retained-conversation identity and generation, then
+     * hands the host a transport plus the semantic turn. Everything the review needs stays here; the
+     * exchange lifecycle and its retry authority live in the shared layer.
+     */
+    async openTextExchange(request: WebChatTextTurnRequest): Promise<WebChatTextExchangeHandoff> {
+      const parsed = toTurnRequest(request);
+      const open = adapter.openTextTurn;
+      if (typeof open !== "function") {
+        throw new Error("This ChatGPT Web adapter cannot expose a phased turn");
       }
-      let text = "";
-      let terminal: "done" | "incomplete" | "error" | undefined;
-      let failure: { code?: string; message?: string } | undefined;
-      try {
-        await adapter.runTurn(
-          parsed,
-          { headers: new Headers(), ...(request.signal ? { abortSignal: request.signal } : {}) },
-          event => {
-            switch (event.type) {
-              case "text_delta":
-                text += event.text;
-                break;
-              case "done":
-                terminal = "done";
-                break;
-              case "incomplete":
-                terminal = "incomplete";
-                failure = {
-                  code: ADVISOR_TURN_FAILED_CODE,
-                  message: event.reason ?? "The review turn ended incomplete",
-                };
-                break;
-              case "error":
-                terminal = "error";
-                failure = {
-                  code: event.code ?? ADVISOR_TURN_FAILED_CODE,
-                  message: event.message ?? "The review turn failed",
-                };
-                break;
-              default:
-                break;
-            }
-          },
-        );
-      } catch (error) {
-        terminal = "error";
-        failure = {
-          code: ADVISOR_TURN_FAILED_CODE,
-          message: error instanceof Error ? error.message : String(error),
-        };
+      const bindingId = chatGptWebChatBindingIdFor(provider);
+      const conversationKey = chatGptConversationKey(parsed, namespace, {
+        providerId: CHATGPT_WEB_DRIVER_ID,
+        bindingId,
+      });
+      if (!conversationKey) {
+        throw new Error("The retained ChatGPT Web conversation identity is unavailable for this review");
       }
-      if (terminal === "done" && text.trim().length > 0) {
-        return { ok: true, text: text.trim() };
-      }
+      const epoch = chatGptTurnSessions.conversationGeneration(conversationKey);
+      const turn = await open.call(adapter, parsed, {
+        headers: new Headers(),
+        ...(request.signal ? { abortSignal: request.signal } : {}),
+      });
       return {
-        ok: false,
-        code: failure?.code ?? ADVISOR_TURN_FAILED_CODE,
-        message: failure?.message ?? "The review turn produced no text",
+        transport: createChatGptWebTextTransport(turn),
+        identity: {
+          bindingId,
+          conversationKey,
+          turnId: request.turnId,
+          dshSessionId: request.dshSession.sessionId,
+        },
+        turn: {
+          userText: request.userText,
+          model: request.route,
+          ...(request.reasoningMode !== undefined ? { reasoningMode: request.reasoningMode } : {}),
+        },
+        epoch,
+        // The lease registry scopes exclusivity to this conversation and generation; the provider's
+        // own retained surface stays provider-private.
+        createResource: async () => ({ id: `${conversationKey}:${epoch}`, conversationKey, epoch }),
       };
     },
 

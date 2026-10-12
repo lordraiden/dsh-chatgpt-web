@@ -19,6 +19,7 @@ import {
 } from "../src/adapters/chatgpt-web/index";
 import { ADVISOR_REVIEWER_PERSONA, advisorConversationThread, composeAdvisorReviewText, validateAdvisorReviewSource } from "../src/advisor";
 import { createChatGptWebProviderRuntime } from "../src/adapters/chatgpt-web/provider-runtime";
+import { runWebChatTextExchange } from "../src/web-chat/host/text-exchange";
 import type { ChatGptWebSurfaceTransport, WebSurfaceTurn } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { defaultConfig, saveConfig } from "../src/config";
@@ -193,7 +194,7 @@ describe("Advisor Mode at the browser transport boundary", () => {
     turnId: string,
   ): Promise<{ ok: boolean; text?: string }> {
     const runtime = createChatGptWebProviderRuntime({ provider: PROVIDER, adapter });
-    const outcome = await runtime.runTextTurn({
+    const outcome = await runWebChatTextExchange(await runtime.openTextExchange({
       route: "chatgpt-web/light",
       model: "light",
       userText: composeAdvisorReviewText(ADVISOR_SOURCE),
@@ -204,7 +205,7 @@ describe("Advisor Mode at the browser transport boundary", () => {
         threadId: advisorConversationThread(SESSION),
       },
       turnId,
-    });
+    }));
     await new Promise(resolve => setTimeout(resolve, 0));
     return outcome;
   }

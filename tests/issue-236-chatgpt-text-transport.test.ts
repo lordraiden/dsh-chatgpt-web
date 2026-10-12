@@ -149,7 +149,7 @@ function recordingTransport(turn: ChatGptWebTextTurn) {
   return { transport, seen };
 }
 
-function handoffFor(turn: ChatGptWebTextTurn, transport: WebChatTextTransport, turnId: string) {
+function handoffFor(transport: WebChatTextTransport, turnId: string) {
   return {
     transport,
     identity: {
@@ -191,7 +191,7 @@ describe("issue #236 — the ChatGPT turn runs through the shared exchange", () 
     const turn = await openTurn(adapter, "turn-236-ok");
     const { transport, seen } = recordingTransport(turn);
 
-    const outcome = await runWebChatTextExchange(handoffFor(turn, transport, "turn-236-ok"));
+    const outcome = await runWebChatTextExchange(handoffFor(transport, "turn-236-ok"));
 
     expect(outcome.ok).toBe(true);
     expect(outcome.text).toBe("respuesta del turno 236");
@@ -213,7 +213,7 @@ describe("issue #236 — the ChatGPT turn runs through the shared exchange", () 
     const transport = createChatGptWebTextTransport(turn);
 
     // The phase is asked for directly as well: it is the same fact the transport reports.
-    const outcome = await runWebChatTextExchange(handoffFor(turn, transport, "turn-236-phase"));
+    const outcome = await runWebChatTextExchange(handoffFor(transport, "turn-236-phase"));
     expect(outcome.ok).toBe(true);
     expect(turn.submissionPhase()).toBe("accepted");
   });
@@ -225,7 +225,7 @@ describe("issue #236 — the ChatGPT turn runs through the shared exchange", () 
     const turn = await openTurn(adapter, "turn-236-fail");
     const { transport } = recordingTransport(turn);
 
-    const outcome = await runWebChatTextExchange(handoffFor(turn, transport, "turn-236-fail"));
+    const outcome = await runWebChatTextExchange(handoffFor(transport, "turn-236-fail"));
 
     expect(outcome.ok).toBe(false);
     // The provider's own post-submission failure shape reaches the exchange, and the failure is
@@ -248,7 +248,7 @@ describe("issue #236 — the ChatGPT turn runs through the shared exchange", () 
     const controller = new AbortController();
 
     const pending = runWebChatTextExchange(
-      { ...handoffFor(turn, transport, "turn-236-abort") },
+      { ...handoffFor(transport, "turn-236-abort") },
       { signal: controller.signal },
     );
     controller.abort(new Error("operator cancelled"));
@@ -265,7 +265,7 @@ describe("issue #236 — the ChatGPT turn runs through the shared exchange", () 
     const adapter = createChatGptWebAdapter(PROVIDER, { surfaceTransport: surface.transport });
     const turn = await openTurn(adapter, "turn-236-affinity");
     const transport = createChatGptWebTextTransport(turn);
-    const outcome = await runWebChatTextExchange(handoffFor(turn, transport, "turn-236-affinity"));
+    const outcome = await runWebChatTextExchange(handoffFor(transport, "turn-236-affinity"));
 
     expect(outcome.ok).toBe(true);
     // The affinity the Advisor asked for is the one the provider's conversation identity derives from.
@@ -286,7 +286,7 @@ describe("issue #236 — the ChatGPT turn runs through the shared exchange", () 
     const first = await openTurn(adapter, "turn-236-first");
     const firstTransport = createChatGptWebTextTransport(first);
     const firstOutcome = await runWebChatTextExchange({
-      ...handoffFor(first, firstTransport, "turn-236-first"),
+      ...handoffFor(firstTransport, "turn-236-first"),
       leases,
     });
     expect(firstOutcome.ok).toBe(true);
@@ -294,7 +294,7 @@ describe("issue #236 — the ChatGPT turn runs through the shared exchange", () 
     const second = await openTurn(adapter, "turn-236-second");
     const secondTransport = createChatGptWebTextTransport(second);
     const secondOutcome = await runWebChatTextExchange({
-      ...handoffFor(second, secondTransport, "turn-236-second"),
+      ...handoffFor(secondTransport, "turn-236-second"),
       leases,
     });
     expect(secondOutcome.ok).toBe(true);

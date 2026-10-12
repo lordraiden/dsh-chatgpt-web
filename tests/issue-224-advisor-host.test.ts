@@ -33,6 +33,12 @@ import {
   type WebChatProviderRuntime,
   type WebChatTextTurnRequest,
 } from "../src/web-chat/host/text-turn";
+import type { WebChatTextExchangeHandoff } from "../src/web-chat/host/text-exchange";
+import {
+  createWebChatTransportLeaseRegistry,
+  type WebChatTextTransport,
+} from "../src/web-chat/transport";
+import { webChatError } from "../src/web-chat/core";
 import type {
   WebChatAccountInspection,
   WebChatConversation,
@@ -110,10 +116,56 @@ function fixtureRuntime(options: FixtureOptions): FixtureRuntime {
     ...(options.label !== undefined ? { providerLabel: options.label } : {}),
     calls,
     recoveries,
-    async runTextTurn(request) {
+    /**
+     * Open one exchange over a scripted provider transport.
+     *
+     * The fixture is still provider-neutral: it satisfies the same exchange contract ChatGPT does,
+     * so the host suite exercises the production path rather than a bespoke seam.
+     */
+    async openTextExchange(request: WebChatTextTurnRequest): Promise<WebChatTextExchangeHandoff> {
       calls.push(request);
-      if (options.answer) return options.answer(request);
-      return { ok: true, text: "review from " + options.id };
+      const outcome = options.answer
+        ? await options.answer(request)
+        : { ok: true as const, text: "review from " + options.id };
+      const conversationKey = `fixture:${request.affinity.threadId}`;
+      const transport: WebChatTextTransport = {
+        id: `fixture-${options.id}`,
+        async ready() {},
+        async submit() {
+          return "accepted";
+        },
+        async *stream(context) {
+          if (outcome.ok) {
+            const text = typeof outcome.text === "string" ? outcome.text : "";
+            if (text.length > 0) yield { type: "text_delta", epoch: context.epoch, text };
+            yield { type: "completed", epoch: context.epoch, text };
+            return;
+          }
+          yield {
+            type: "error",
+            epoch: context.epoch,
+            // The provider's own code rides as detail; the shared category is the semantic failure.
+            error: webChatError("UPSTREAM_ERROR", outcome.message ?? "the provider failed", {
+              providerDetail: { code: outcome.code },
+            }),
+          };
+        },
+        async settle() {
+          return "fulfilled";
+        },
+      };
+      return {
+        transport,
+        identity: {
+          bindingId: request.affinity.bindingId,
+          conversationKey,
+          turnId: request.turnId,
+          dshSessionId: request.dshSession.sessionId,
+        },
+        turn: { userText: request.userText, model: request.route },
+        leases: createWebChatTransportLeaseRegistry(),
+        createResource: async () => ({ id: `${conversationKey}:1`, conversationKey, epoch: 1 }),
+      };
     },
     ...(options.recovery
       ? {
@@ -372,7 +424,7 @@ describe("issue #224 — Advisor host", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     const settled = host.status(started.task.reviewId);
     expect(settled?.state).toBe("failed");
-    expect(settled?.failure).toEqual({ code: ADVISOR_TURN_FAILED_CODE, message: "the provider gave up" });
+    expect(settled?.failure).toEqual({ code: "UPSTREAM_ERROR", message: "the provider gave up" });
     expect(settled?.text).toBeUndefined();
   });
 

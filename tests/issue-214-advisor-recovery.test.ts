@@ -8,9 +8,11 @@ import {
   createAdvisorHost,
 } from "../src/advisor";
 import { createChatGptWebProviderRuntime } from "../src/adapters/chatgpt-web/provider-runtime";
+import { runWebChatTextExchange } from "../src/web-chat/host/text-exchange";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 import type { ChatGptWebProviderAdapter } from "../src/adapters/chatgpt-web/index";
-import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
+import { awaitChatGptSubmissionPhase, createChatGptTurnEventQueue } from "../src/adapters/chatgpt-web/text-turn";
+import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
 import type { WebChatTextRecoveryRequest } from "../src/web-chat/host/text-turn";
 
 /**
@@ -52,11 +54,33 @@ function capturingAdapter(options: { text?: string; failWith?: string } = {}): C
   const recoveries: Array<{ parsed: CodexParsedRequest; timeoutMs?: number; signal?: AbortSignal }> = [];
   const adapter = {
     name: "chatgpt-web",
-    async runTurn(parsed: CodexParsedRequest, _incoming: unknown, emit: (event: AdapterEvent) => void) {
+    /**
+     * The provider's phased seam (issue #236): a review reaches the provider through the shared
+     * exchange, so the fixture reports the same phases a real adapter does.
+     */
+    async openTextTurn(parsed: CodexParsedRequest) {
       turns.push(parsed);
-      if (options.failWith) throw new Error(options.failWith);
-      emit({ type: "text_delta", text: options.text ?? "the review" });
-      emit({ type: "done" });
+      const queue = createChatGptTurnEventQueue();
+      queue.markReady();
+      queue.markSubmission("accepted");
+      queue.markSettled("fulfilled");
+      if (options.failWith) {
+        queue.push({ type: "error", message: options.failWith });
+      } else {
+        queue.push({ type: "text_delta", text: options.text ?? "the review" });
+        queue.push({ type: "done" });
+      }
+      queue.close();
+      const finished = Promise.resolve();
+      return {
+        ready: queue.ready,
+        submissionPhase: () => queue.submission(),
+        awaitSubmission: () => awaitChatGptSubmissionPhase(queue, finished),
+        events: queue,
+        settled: () => queue.settled(),
+        abort: async () => {},
+        finished,
+      };
     },
     async recoverRetainedAnswer(parsed: CodexParsedRequest, recoverOptions: { timeoutMs?: number; signal?: AbortSignal } = {}) {
       recoveries.push({
@@ -83,14 +107,14 @@ describe("issue #214 — one retained conversation for review and recovery", () 
     const captured = capturingAdapter();
     const runtime = runtimeWith(captured);
     const affinity = { providerId: "chatgpt-web", bindingId: "binding-1", threadId: advisorConversationThread(SESSION) };
-    await runtime.runTextTurn({
+    await runWebChatTextExchange(await runtime.openTextExchange({
       route: ROUTE,
       model: "light",
       userText: "review this",
       dshSession: { sessionId: SESSION },
       affinity,
       turnId: "review-1",
-    });
+    }));
     const recoveryRequest: WebChatTextRecoveryRequest = {
       route: ROUTE,
       model: "light",
@@ -147,14 +171,14 @@ describe("issue #214 — one retained conversation for review and recovery", () 
   test("the review turn submits one portable user message and never a system block", async () => {
     const captured = capturingAdapter();
     const runtime = runtimeWith(captured);
-    await runtime.runTextTurn({
+    await runWebChatTextExchange(await runtime.openTextExchange({
       route: ROUTE,
       model: "light",
       userText: "portable review text",
       dshSession: { sessionId: SESSION },
       affinity: { providerId: "chatgpt-web", bindingId: "b", threadId: advisorConversationThread(SESSION) },
       turnId: "review-1",
-    });
+    }));
     const parsed = captured.turns[0]!;
     expect(parsed.context.messages).toHaveLength(1);
     expect(parsed.context.messages[0]!.role).toBe("user");
