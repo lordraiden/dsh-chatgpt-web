@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fix **Inject into DSH** failing with `cannot get property "remote.session" without inject`: the client plugin now declares the nested `remote.session` service it already used, so the review reaches its DSH session from both the result editor and the card.
+- Deliver an Advisor review from the chat card itself: the result card offers **Inject into DSH** (and an explicit retry after an ambiguous delivery) with the same session-addressed admission and single-flight guard as the editor, so the review no longer has to be copied by hand.
+- Make the result card and the editor share one delivery state, and report a delivery that never reached the Host as a confirmed, retriable failure instead of an ambiguous "may already have been delivered".
+- Fix **Discard result** doing nothing on an unedited result: an unchanged handoff text is now discarded on the first activation, and only an edited text asks for confirmation.
+
 ## 1.0.28
 
 - Normal Chat Mode sends only the user's message — plus the deterministic `Project:`/`github:` header on the first message of a conversation. DSH host context (the skills catalogue, runtime context, the Aegis bootstrap, Hindsight recall and the time snapshot) can no longer reach ChatGPT Web, and can no longer be mistaken for the user's turn.

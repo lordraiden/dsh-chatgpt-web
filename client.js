@@ -111,8 +111,8 @@ window.__ModuleLoader__.load({
       'advisor.card.title': 'Advisor',
       'advisor.card.open': 'Open result',
       'advisor.card.injected': 'Injected into its DSH session.',
-      'advisor.card.injectUnknown': 'Delivery could not be confirmed — open the result to inspect it.',
-      'advisor.card.injectFailed': 'Not delivered — open the result to retry.',
+      'advisor.card.injectUnknown': 'Delivery could not be confirmed — check the session before delivering again.',
+      'advisor.card.injectFailed': 'Not delivered — try again.',
       'advisor.result.title': 'Advisor result',
       'advisor.result.review': 'Review',
       'advisor.result.origin': 'originating session',
@@ -204,7 +204,8 @@ window.__ModuleLoader__.load({
       .cwg-advisor-card-title { font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--dsw-alias-brand-primary); }
       .cwg-advisor-card-meta { font-size: 11px; color: var(--dsw-alias-label-secondary); }
       .cwg-advisor-card-body { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--dsw-alias-label-primary); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto; }
-      .cwg-advisor-card-foot { display: flex; align-items: center; gap: 8px; }
+      /* Actions stay right-aligned whether or not a delivery status is present. */
+      .cwg-advisor-card-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
       .cwg-advisor-card-status { font-size: 12px; margin-right: auto; }
       .cwg-advisor-card-status.cwg-ok { color: var(--dsw-alias-state-success-primary); }
       .cwg-advisor-card-status.cwg-err { color: var(--dsw-alias-state-error-primary); }
@@ -1094,6 +1095,78 @@ window.__ModuleLoader__.load({
           });
       };
 
+      /**
+       * Mirror one draft-record patch onto the open result editor, and always notify.
+       *
+       * The chat card renders its delivery state from the draft record, so an outcome must
+       * re-render it even when no editor is open (`state.result` is null).
+       */
+      const syncResultFromDraft = (reviewId, patch) => {
+        const latest = state.result;
+        const result = latest && latest.reviewId === reviewId ? { ...latest, ...patch } : latest;
+        setState({ result });
+      };
+
+      /**
+       * Remove the open Advisor result and its draft (issue #225).
+       *
+       * Only Advisor-owned browser state is removed: no DSH Session event is deleted or
+       * rewritten, and a message already injected into the session stays there.
+       */
+      const discardAdvisorResult = (storage, sessionId) => {
+        const current = state.result;
+        if (!current) return;
+        removeAdvisorDraft(storage, current.reviewId);
+        if (typeof current.turn === 'number') {
+          // Only this session's result for that turn is discarded; another session's result for the
+          // same turn number is not ours to remove.
+          const owner = current.sessionId || sessionId;
+          saveAdvisorResults(storage, loadAdvisorResults(storage).filter((entry) =>
+            !(entry && entry.turn === current.turn && entry.sessionId === owner)));
+        }
+        setState({
+          view: 'activity',
+          result: null,
+          discard: { confirming: false },
+          activity: { status: state.activity.status, reviews: loadAdvisorActivity(storage, sessionId), error: state.activity.error },
+        });
+      };
+
+      /**
+       * Deliver one Advisor draft record to the DSH session it belongs to (issue #225).
+       *
+       * One owner for the single-flight guard, the persisted delivery identity and the classified
+       * outcome, shared by the result editor and the chat card action so both surfaces can never
+       * disagree about whether a review was delivered.
+       */
+      const deliverAdvisorDraft = (entry, remote, storage) => {
+        if (!entry) return Promise.resolve();
+        const reviewId = entry.reviewId;
+        // The single-flight guard plus the persisted delivery identity mean a double activation
+        // cannot insert a second message, and an ambiguous acceptance is never retried automatically.
+        if (entry.injectState === 'injecting' || entry.injectState === 'injected') return Promise.resolve();
+        const requestId = entry.requestId || createInjectionRequestId();
+        const begin = { requestId, injectState: 'injecting', failureCode: undefined, failureMessage: undefined };
+        updateAdvisorDraft(storage, reviewId, begin);
+        syncResultFromDraft(reviewId, begin);
+        const finish = (status, code, message) => {
+          const patch = status === 'injected'
+            ? { injectState: 'injected', injectedAt: Date.now(), failureCode: undefined, failureMessage: undefined }
+            : { injectState: status, failureCode: code, failureMessage: message };
+          updateAdvisorDraft(storage, reviewId, patch);
+          syncResultFromDraft(reviewId, patch);
+        };
+        return deliverAdvisorReview(remote, {
+          requestId,
+          sessionId: entry.sessionId,
+          text: entry.draft,
+          clientTimeZone: advisorClientTimeZone(),
+        }).then(
+          (outcome) => finish(outcome.status, outcome.code, outcome.message),
+          (error) => finish('unknown', 'advisor_inject_unavailable', error instanceof Error ? error.message : String(error)),
+        );
+      };
+
       return {
         getSnapshot: () => state,
         subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
@@ -1161,10 +1234,21 @@ window.__ModuleLoader__.load({
           updateAdvisorDraft(storage, current.reviewId, { draft });
           setState({ result: { ...current, draft } });
         },
-        /** Ask for confirmation before discarding a draft that differs from the original. */
-        requestDiscard() {
-          if (!state.result) return;
-          setState({ discard: { confirming: state.result.draft !== state.result.original } });
+        /**
+         * The explicit Discard action (issue #225).
+         *
+         * A draft that still equals the immutable original has nothing to lose, so it is discarded
+         * at once; only an edited draft asks for confirmation first. The decision lives here, not
+         * in the caller, so every Discard control behaves the same.
+         */
+        requestDiscard(storage, sessionId) {
+          const current = state.result;
+          if (!current) return;
+          if (current.draft === current.original) {
+            discardAdvisorResult(storage, sessionId);
+            return;
+          }
+          setState({ discard: { confirming: true } });
         },
         cancelDiscard() { setState({ discard: { confirming: false } }); },
         /**
@@ -1174,61 +1258,23 @@ window.__ModuleLoader__.load({
          * or rewritten, and a message already injected into the session stays there.
          */
         discardResult(storage, sessionId) {
-          const current = state.result;
-          if (!current) return;
-          removeAdvisorDraft(storage, current.reviewId);
-          if (typeof current.turn === 'number') {
-            // Only this session's result for that turn is discarded; another session's result for the
-            // same turn number is not ours to remove.
-            const owner = current.sessionId || sessionId;
-            saveAdvisorResults(storage, loadAdvisorResults(storage).filter((entry) =>
-              !(entry && entry.turn === current.turn && entry.sessionId === owner)));
-          }
-          setState({
-            view: 'activity',
-            result: null,
-            discard: { confirming: false },
-            activity: { status: state.activity.status, reviews: loadAdvisorActivity(storage, sessionId), error: state.activity.error },
-          });
+          discardAdvisorResult(storage, sessionId);
         },
         /**
-         * Deliver the edited review to the DSH session it belongs to (issue #225).
-         *
-         * The single-flight guard plus the persisted delivery identity mean a double
-         * activation cannot insert a second message, and an ambiguous acceptance is
-         * never retried automatically.
+         * Deliver the edited review of the open result to the DSH session it belongs to (issue #225).
          */
         injectResult(remote, storage) {
           const current = state.result;
-          if (!current) return;
-          if (current.injectState === 'injecting' || current.injectState === 'injected') return;
-          const existing = loadAdvisorDraft(storage, current.reviewId);
-          const requestId = (existing && existing.requestId) || createInjectionRequestId();
-          updateAdvisorDraft(storage, current.reviewId, {
-            requestId,
-            injectState: 'injecting',
-            failureCode: undefined,
-            failureMessage: undefined,
-          });
-          setState({ result: { ...current, injectState: 'injecting', failureCode: undefined, failureMessage: undefined } });
-          const finish = (status, code, message) => {
-            const patch = status === 'injected'
-              ? { injectState: 'injected', injectedAt: Date.now(), failureCode: undefined, failureMessage: undefined }
-              : { injectState: status, failureCode: code, failureMessage: message };
-            updateAdvisorDraft(storage, current.reviewId, patch);
-            const latest = state.result;
-            if (!latest || latest.reviewId !== current.reviewId) return;
-            setState({ result: { ...latest, ...patch } });
-          };
-          return deliverAdvisorReview(remote, {
-            requestId,
-            sessionId: current.sessionId,
-            text: current.draft,
-            clientTimeZone: advisorClientTimeZone(),
-          }).then(
-            (outcome) => finish(outcome.status, outcome.code, outcome.message),
-            (error) => finish('unknown', 'advisor_inject_unavailable', error instanceof Error ? error.message : String(error)),
-          );
+          if (!current) return Promise.resolve();
+          return deliverAdvisorDraft(loadAdvisorDraft(storage, current.reviewId) || ensureAdvisorDraft(storage, current), remote, storage);
+        },
+        /**
+         * Deliver a recorded result straight from its chat card (issue #225), without opening the
+         * editor. The draft record is created on demand, so the card and the editor share one
+         * delivery state and one single-flight guard.
+         */
+        injectReviewResult(record, remote, storage) {
+          return deliverAdvisorDraft(ensureAdvisorDraft(storage, record), remote, storage);
         },
         closeDialog() {
           if (abortController) { try { abortController.abort(); } catch { /* already settled */ } }
@@ -1799,7 +1845,20 @@ window.__ModuleLoader__.load({
      * refusal, `unknown` = acceptance could not be established).
      */
     async function deliverAdvisorReview(remote, request) {
-      const session = remote && remote.session;
+      let session;
+      try {
+        session = remote && remote.session;
+      } catch (error) {
+        // Resolving the platform service is an assembly fault, not a delivery attempt: the call
+        // never reached the Host, so nothing was admitted and an explicit retry is safe. Reporting
+        // it as ambiguous ("may already have been delivered") would tell the user to distrust a
+        // message that was never sent.
+        return {
+          status: 'failed',
+          code: 'advisor_inject_unavailable',
+          message: error instanceof Error ? error.message : 'The DSH session prompt API is unavailable in this client.',
+        };
+      }
       if (!session || typeof session.prompt !== 'function') {
         return {
           status: 'failed',
@@ -1863,11 +1922,16 @@ window.__ModuleLoader__.load({
      * only when a recorded result is associated with this turn — a fresh slot
      * entry whose component returns null leaves the tail unchanged.
      *
-     * Issue #225: the card is an entry point to the result editor (inspect, edit,
-     * discard, inject). It never submits anything by itself, and it shows the
-     * delivery state the editor recorded.
+     * Issue #225: the card shows the delivery state and offers the two actions the
+     * user needs at the turn: deliver the review to its DSH session (the same
+     * admission the editor uses, one click away) and open the full editor
+     * (inspect, edit, discard, inject). The primary action only delivers through
+     * the platform's session-addressed prompt admission; it never submits a
+     * composer draft or writes to the session log.
+     *
+     * @param ctx - the client Cordis context, used only for the platform's public session remote.
      */
-    function AdvisorResultCard(t, props) {
+    function AdvisorResultCard(t, props, ctx) {
       const turn = props && props.turn && typeof props.turn.turn === 'number' ? props.turn.turn : undefined;
       // Re-render whenever a review completes or a result draft changes; results themselves come
       // from browser storage.
@@ -1878,18 +1942,27 @@ window.__ModuleLoader__.load({
       const result = selectResultForTurn(results, turn, props && props.sessionId);
       if (!result) return null;
       const draft = loadAdvisorDraft(window.localStorage, result.reviewId);
+      const injectState = draft && typeof draft.injectState === 'string' ? draft.injectState : 'ready';
+
+      /** The record the editor and the card action share; both target the same session. */
+      const record = {
+        reviewId: result.reviewId,
+        sessionId: result.sessionId || (props && props.sessionId) || '',
+        turn,
+        original: result.text,
+        route: result.route,
+        providerLabel: result.providerLabel,
+        modelLabel: result.modelLabel,
+        recovered: result.recovered,
+      };
 
       function onOpen() {
-        advisorStore.openResult({
-          reviewId: result.reviewId,
-          sessionId: result.sessionId || (props && props.sessionId) || '',
-          turn,
-          original: result.text,
-          route: result.route,
-          providerLabel: result.providerLabel,
-          modelLabel: result.modelLabel,
-          recovered: result.recovered,
-        }, window.localStorage);
+        advisorStore.openResult(record, window.localStorage);
+      }
+
+      /** Deliver this review to its session without opening the editor. */
+      function onInject() {
+        return advisorStore.injectReviewResult(record, ctx && ctx.remote ? ctx.remote : undefined, window.localStorage);
       }
 
       return h('div', { className: 'cwg-advisor-card', 'data-advisor-turn': String(turn) },
@@ -1901,16 +1974,30 @@ window.__ModuleLoader__.load({
         ),
         h('pre', { className: 'cwg-advisor-card-body' }, result.text),
         h('div', { className: 'cwg-advisor-card-foot' },
-          draft && draft.injectState === 'injected'
+          injectState === 'injected'
             ? h('span', { className: 'cwg-advisor-card-status cwg-ok' }, t('advisor.card.injected', 'Injected into its DSH session.'))
-            : draft && draft.injectState === 'unknown'
-              ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.injectUnknown', 'Delivery could not be confirmed — open the result to inspect it.'))
-              : draft && draft.injectState === 'failed'
-                ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.injectFailed', 'Not delivered — open the result to retry.'))
+            : injectState === 'unknown'
+              ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.injectUnknown', 'Delivery could not be confirmed — check the session before delivering again.'))
+              : injectState === 'failed'
+                ? h('span', { className: 'cwg-advisor-card-status cwg-err', role: 'alert' }, t('advisor.card.injectFailed', 'Not delivered — try again.'))
                 : null,
+          injectState === 'injected'
+            ? null
+            : h('button', {
+                type: 'button',
+                className: 'cwg-btn',
+                // A review with no text has nothing to deliver; an in-flight delivery must not be
+                // started twice (the store guards it too, this only avoids the dead click).
+                disabled: injectState === 'injecting' || !String(result.text || '').trim(),
+                onClick: onInject,
+              }, injectState === 'injecting'
+                ? t('advisor.result.injecting', 'Delivering…')
+                : injectState === 'unknown'
+                  ? t('advisor.result.deliverAgain', 'Deliver again')
+                  : t('advisor.result.inject', 'Inject into DSH')),
           h('button', {
             type: 'button',
-            className: 'cwg-btn',
+            className: 'cwg-btn cwg-secondary',
             onClick: onOpen,
           }, t('advisor.card.open', 'Open result')),
         ),
@@ -2188,10 +2275,10 @@ window.__ModuleLoader__.load({
 
       /** Deliver the edited review to the session the result belongs to. */
       function onInject() {
-        advisorStore.injectResult(advisorRemote(), window.localStorage);
+        return advisorStore.injectResult(advisorRemote(), window.localStorage);
       }
 
-      function onDiscard() { advisorStore.requestDiscard(); }
+      function onDiscard() { advisorStore.requestDiscard(window.localStorage, sessionId); }
       function onConfirmDiscard() { advisorStore.discardResult(window.localStorage, sessionId); }
       function onCancelDiscard() { advisorStore.cancelDiscard(); }
 
@@ -2624,10 +2711,13 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      // `remote` is the platform's typed Client Remote service; the result editor uses its
-      // session namespace to deliver one reviewed message to the session the review belongs to
-      // (issue #225). Official client plugins declare it the same way.
-      inject: ['slots', 'locale', 'configForms', 'remote'],
+      // `remote` is the platform's typed Client Remote service; the result editor and the chat
+      // card action deliver one reviewed message through its session namespace (issue #225). The
+      // nested `remote.session` namespace is a service of its own, so it must be declared too:
+      // Cordis refuses an access to an undeclared nested service with `cannot get property
+      // "remote.session" without inject`. Official client plugins that use the session admission
+      // (e.g. dsh-client-ui-chat) declare both.
+      inject: ['slots', 'locale', 'configForms', 'remote', 'remote.session'],
       apply(ctx) {
         ctx.effect(() => {
           try {
@@ -2677,7 +2767,7 @@ window.__ModuleLoader__.load({
           id: 'dsh-chatgpt-web-advisor-card',
           order: 1,
           locale: NS,
-        }, (props) => AdvisorResultCard(t, props))));
+        }, (props) => AdvisorResultCard(t, props, ctx))));
         return () => {
           for (const dispose of disposers) {
             try { dispose(); } catch { /* a seat may already be collapsed */ }
