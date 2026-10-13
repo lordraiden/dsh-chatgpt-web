@@ -42,6 +42,40 @@ function stubRemote(behaviour?: (request: any) => any) {
   return { remote, calls };
 }
 
+/**
+ * A Remote service whose `session` namespace cannot even be resolved: the shape Cordis produces
+ * when the client plugin has not declared the nested `remote.session` service.
+ */
+function unassembledRemote(message: string) {
+  const remote: Record<string, unknown> = {};
+  Object.defineProperty(remote, "session", {
+    get() {
+      throw new Error(message);
+    },
+  });
+  return remote as any;
+}
+
+/** Element-tree helpers for the React stub (`createElement` returns `[type, props, ...children]`). */
+function walk(node: any, visit: (element: any[]) => void): void {
+  if (!Array.isArray(node)) return;
+  if (typeof node[0] === "string") visit(node);
+  for (const child of node.slice(2)) walk(child, visit);
+}
+
+function buttonByText(tree: any, text: string): any[] | undefined {
+  let found: any[] | undefined;
+  walk(tree, (element) => {
+    if (element[0] !== "button") return;
+    if (JSON.stringify(element[2]) !== JSON.stringify(text)) return;
+    found = element;
+  });
+  return found;
+}
+
+/** The Advisor card's translate function: the English fallback is the assertion target. */
+const T = (key: string, fallback?: string) => (fallback === undefined ? key : fallback);
+
 const RESULT = {
   reviewId: "review-1",
   sessionId: "session-origin",
@@ -383,14 +417,24 @@ describe("issue #225 — discard", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("an unedited draft discards without a confirmation prompt", () => {
+  test("an unedited draft discards on the first activation, without a confirmation prompt", () => {
     const storage = makeStorage();
+    mod.__test.recordAdvisorResult(storage, {
+      turn: 4,
+      reviewId: "review-1",
+      sessionId: "session-origin",
+      text: RESULT.original,
+    });
     const store = mod.__test.createAdvisorStore();
     openResult(store, storage);
-    store.requestDiscard();
+    // Regression: the Discard control only calls `requestDiscard`, so a draft that still equals
+    // the original must be discarded by that one activation instead of leaving a `confirming:false`
+    // state and doing nothing.
+    store.requestDiscard(storage, "session-origin");
     expect(store.getSnapshot().discard.confirming).toBe(false);
-    store.discardResult(storage);
     expect(store.getSnapshot().result).toBeNull();
+    expect(mod.__test.loadAdvisorDraft(storage, "review-1")).toBeNull();
+    expect(mod.__test.loadAdvisorResults(storage)).toEqual([]);
   });
 
   test("cancelling a discard keeps the draft and the result", () => {
@@ -411,7 +455,7 @@ describe("issue #225 — discard", () => {
     openResult(store, storage);
     await store.injectResult(stubRemote().remote, storage);
     expect(store.getSnapshot().result.injectState).toBe("injected");
-    store.requestDiscard();
+    store.requestDiscard(storage, "session-origin");
     store.discardResult(storage);
     // The Advisor copy is gone; nothing about DSH history is touched or rewritten by this code.
     expect(mod.__test.loadAdvisorDraft(storage, "review-1")).toBeNull();
@@ -434,7 +478,10 @@ describe("issue #225 — discard", () => {
 describe("issue #225 — platform boundary", () => {
   test("the client declares the Client Remote service and uses the session-addressed admission", () => {
     const source = readFileSync(join(import.meta.dir, "..", "client.js"), "utf8");
-    expect(source).toContain("inject: ['slots', 'locale', 'configForms', 'remote']");
+    // `remote.session` is a nested service of its own: Cordis refuses an access to it unless the
+    // plugin declares it, so the declaration must name it exactly (regression guard for the
+    // `cannot get property "remote.session" without inject` failure observed in the live GUI).
+    expect(source).toContain("inject: ['slots', 'locale', 'configForms', 'remote', 'remote.session']");
     expect(source).toContain("remote.session");
     expect(source).toContain("session.prompt({");
     expect(source).toContain("mode: 'queue'");
@@ -449,6 +496,20 @@ describe("issue #225 — platform boundary", () => {
     expect(delivery).toContain("session.prompt");
   });
 
+  test("every nested Client Remote namespace the client uses is declared in inject", () => {
+    const source = readFileSync(join(import.meta.dir, "..", "client.js"), "utf8");
+    const declaration = source.match(/inject:\s*\[([^\]]*)\]/);
+    expect(declaration).not.toBeNull();
+    const declared = (declaration![1].match(/'[^']*'|"[^"]*"/g) || []).map((literal) => literal.slice(1, -1));
+    const used = new Set(
+      [...source.matchAll(/\bremote\.([A-Za-z_$][\w$]*)/g)].map((match) => `remote.${match[1]}`),
+    );
+    expect(used.size).toBeGreaterThan(0);
+    // Cordis resolves a nested namespace as a service in its own right, so an undeclared one throws
+    // `cannot get property "<service>" without inject` instead of reaching the platform admission.
+    for (const service of used) expect(declared).toContain(service);
+  });
+
   test("a delivery request never carries internal identifiers in the model text", async () => {
     const storage = makeStorage();
     const store = mod.__test.createAdvisorStore();
@@ -459,5 +520,81 @@ describe("issue #225 — platform boundary", () => {
     for (const leaked of ["review-1", "session-origin", "chatgpt-web/light", "dsh-turn", "reviewId"]) {
       expect(text).not.toContain(leaked);
     }
+  });
+});
+
+describe("issue #225 — delivery from the chat card", () => {
+  function recordCardResult(storage: any, overrides: Record<string, unknown> = {}) {
+    mod.__test.recordAdvisorResult(storage, {
+      turn: 4,
+      reviewId: "review-1",
+      sessionId: "session-origin",
+      route: "chatgpt-web/light",
+      providerLabel: "ChatGPT Web",
+      modelLabel: "Light",
+      text: "**Verdict: request changes.**",
+      ...overrides,
+    });
+    (globalThis as any).window.localStorage = storage;
+  }
+
+  const cardProps = { turn: { turn: 4 }, sessionId: "session-origin" };
+
+  test("the card delivers the review to its session in one activation", async () => {
+    const storage = makeStorage();
+    recordCardResult(storage);
+    const { remote, calls } = stubRemote();
+
+    const tree = mod.__test.AdvisorResultCard(T, cardProps, { remote });
+    const button = buttonByText(tree, "Inject into DSH");
+    expect(button).toBeDefined();
+    await button![1].onClick();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].sessionId).toBe("session-origin");
+    expect(calls[0].mode).toBe("queue");
+    expect(calls[0].content[0].text).toContain("request changes");
+
+    // The card and the editor share one delivery state: the record is authoritative.
+    expect(mod.__test.loadAdvisorDraft(storage, "review-1").injectState).toBe("injected");
+    const after = mod.__test.AdvisorResultCard(T, cardProps, { remote });
+    expect(JSON.stringify(after)).toContain("Injected into its DSH session.");
+  });
+
+  test("the card action and the editor share one single-flight guard", async () => {
+    const storage = makeStorage();
+    recordCardResult(storage);
+    const { remote, calls } = stubRemote();
+
+    await buttonByText(mod.__test.AdvisorResultCard(T, cardProps, { remote }), "Inject into DSH")![1].onClick();
+    // Opening the editor afterwards must not deliver a second message.
+    const store = mod.__test.createAdvisorStore();
+    store.openResult({ ...RESULT, original: "**Verdict: request changes.**" }, storage);
+    await store.injectResult(remote, storage);
+    expect(calls).toHaveLength(1);
+    expect(store.getSnapshot().result.injectState).toBe("injected");
+  });
+
+  test("an ambiguous delivery offers an explicit retry on the card", () => {
+    const storage = makeStorage();
+    recordCardResult(storage);
+    mod.__test.ensureAdvisorDraft(storage, { reviewId: "review-1", sessionId: "session-origin", original: "**Verdict: request changes.**" });
+    mod.__test.updateAdvisorDraft(storage, "review-1", { injectState: "unknown", failureMessage: "carrier lost" });
+    const tree = mod.__test.AdvisorResultCard(T, cardProps, { remote: stubRemote().remote });
+    expect(buttonByText(tree, "Deliver again")).toBeDefined();
+    expect(JSON.stringify(tree)).toContain("Delivery could not be confirmed");
+  });
+
+  test("an assembly fault is a confirmed failure, never an ambiguous delivery", async () => {
+    const storage = makeStorage();
+    const store = mod.__test.createAdvisorStore();
+    openResult(store, storage);
+    await store.injectResult(unassembledRemote('cannot get property "remote.session" without inject'), storage);
+    const result = store.getSnapshot().result;
+    // Nothing reached the Host, so the user is told the delivery failed and may retry, instead of
+    // being told the review may already be in the session.
+    expect(result.injectState).toBe("failed");
+    expect(result.failureCode).toBe("advisor_inject_unavailable");
+    expect(result.failureMessage).toContain("without inject");
   });
 });
