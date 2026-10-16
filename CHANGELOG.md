@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Headless provider sign-in via noVNC (issues #249/#259): `Dockerfile.login` layers Xvfb, x11vnc and
+  noVNC/websockify on top of the production image, and the `login` compose profile now serves the
+  sign-in on `127.0.0.1:6080` so a host with no display can complete it in one command. The display
+  stack stays out of the production artifact (no x11vnc, no websockify, no noVNC web root in it), and
+  the port is published on loopback only because it grants control of an authenticated session.
 - Per-provider credentials and a guided login path (issue #249): the session now lives in
   `providers/<providerId>/` inside the data volume, with the legacy single-provider path kept as a
   read alias so nothing is migrated and `config.json` is never rewritten. `auth import` adopts a
