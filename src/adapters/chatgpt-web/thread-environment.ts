@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { atomicWriteFile } from "../../config";
 import { getCodexHome } from "../../codex-integration-shared";
+import { absolutePaths, contains, pathIdentity, record, type AbsolutePathPolicy } from "../../path-identity";
 import type { CodexParsedRequest } from "../../types";
 import {
   extractChatGptTurnEnvironment,
@@ -30,32 +31,10 @@ interface StoredThreadEnvironmentFile {
 const MAX_THREAD_ENVIRONMENTS = 256;
 const THREAD_ENVIRONMENT_TTL_MS = 30 * 24 * 60 * 60_000;
 
-function record(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function pathIdentity(value: string): string {
-  const normalized = resolve(value);
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
-function contains(root: string, path: string): boolean {
-  const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function absolutePaths(value: unknown, field: string): string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.some(path => typeof path !== "string" || !isAbsolute(path))) {
-    throw new Error(`Invalid persisted ChatGPT thread ${field}`);
-  }
-  const unique = new Map<string, string>();
-  for (const path of value.map(path => resolve(path as string))) {
-    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
-  }
-  return [...unique.values()];
-}
+const PERSISTED_THREAD_PATH_POLICY: AbsolutePathPolicy = {
+  invalid: field => new Error(`Invalid persisted ChatGPT thread ${field}`),
+  empty: field => new Error(`Invalid persisted ChatGPT thread ${field}`),
+};
 
 function sandboxPolicy(value: unknown, roots: string[], writableRoots: string[]): ChatGptSandboxPolicy {
   const parsed = record(value);
@@ -87,10 +66,10 @@ function validateStoredEnvironment(value: unknown): StoredThreadEnvironment {
     throw new Error("Invalid persisted ChatGPT thread environment");
   }
   const cwd = resolve(parsed.cwd);
-  const roots = absolutePaths(parsed.roots, "roots");
+  const roots = absolutePaths(parsed.roots, "roots", PERSISTED_THREAD_PATH_POLICY);
   const writableRoots = Array.isArray(parsed.writableRoots) && parsed.writableRoots.length === 0
     ? []
-    : absolutePaths(parsed.writableRoots, "writable roots");
+    : absolutePaths(parsed.writableRoots, "writable roots", PERSISTED_THREAD_PATH_POLICY);
   if (!roots.some(root => contains(root, cwd))) throw new Error("Persisted ChatGPT cwd is outside its roots");
   return {
     cwd,

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../lib/compaction";
+import { absolutePaths, contains, pathIdentity, record, type AbsolutePathPolicy } from "../../path-identity";
 import type { CodexContentPart, CodexParsedRequest, CodexTool, DshNativeTurnContext } from "../../types";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
 import type { CapabilitySnapshot } from "./capability-projector";
@@ -63,17 +64,6 @@ function contentText(content: string | CodexContentPart[]): string {
 
 function nativeDshContext(parsed: CodexParsedRequest): DshNativeTurnContext | undefined {
   return parsed._dshContext;
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function pathIdentity(value: string): string {
-  const normalized = resolve(value);
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function clientTurnMetadataFromBody(value: unknown): Record<string, unknown> | undefined {
@@ -317,15 +307,15 @@ function environmentMatchesCanonicalMetadata(
   const declaredRoots = [...new Set(declaredRootValues.map(pathIdentity))];
   const cwd = pathIdentity(cwdMatches[0]!);
   if (normalizedMetadataRoots.length > 0
-    && !normalizedMetadataRoots.some(root => matchesPath(root, cwd))) return false;
+    && !normalizedMetadataRoots.some(root => contains(root, cwd))) return false;
   if (requireMetadataBoundRoots && (
     normalizedMetadataRoots.length === 0
     || declaredRoots.some(root => (
-      !normalizedMetadataRoots.some(metadataRoot => matchesPath(metadataRoot, root))
+      !normalizedMetadataRoots.some(metadataRoot => contains(metadataRoot, root))
       && !isCurrentThreadVisualizationRoot(root, metadata)
     ))
   )) return false;
-  if (!declaredRoots.some(root => matchesPath(root, cwd))) return false;
+  if (!declaredRoots.some(root => contains(root, cwd))) return false;
   return sandboxMetadataMatchesEnvironment(metadataSandboxValue, environmentText);
 }
 
@@ -561,25 +551,15 @@ function environmentCwdMatches(text: string, preferredRoots: string[] = []): str
     .some(root => pathIdentity(root) === pathIdentity(candidate)));
   if (exact.length === 1) return exact;
   const contained = candidates.filter(candidate => preferredRoots
-    .some(root => matchesPath(root, candidate)));
+    .some(root => contains(root, candidate)));
   return contained.length === 1 ? contained : [];
 }
 
-function uniqueAbsolutePaths(values: string[], field: string): string[] {
-  const decoded = values.map(value => decodeXmlText(value.trim()));
-  if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
-  if (decoded.some(path => !isAbsolute(path))) throw new Error(`ChatGPT web ${field} must contain absolute paths`);
-  const unique = new Map<string, string>();
-  for (const path of decoded.map(value => resolve(value))) {
-    if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
-  }
-  return [...unique.values()];
-}
-
-function matchesPath(root: string, path: string): boolean {
-  const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
+const TRUSTED_CODEX_PATH_POLICY: AbsolutePathPolicy = {
+  invalid: field => new Error(`ChatGPT web ${field} must contain absolute paths`),
+  empty: field => new MissingTrustedCodexEnvironmentError(field),
+  decode: value => decodeXmlText(value.trim()),
+};
 
 export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
   const native = nativeDshContext(parsed);
@@ -605,14 +585,14 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
   }
   const text = trustedEnvironmentText(parsed);
   const cwdMatches = environmentCwdMatches(text, clientMetadataWorkspaceRoots(parsed));
-  const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
+  const cwdCandidates = absolutePaths(cwdMatches, "cwd", TRUSTED_CODEX_PATH_POLICY);
   if (cwdCandidates.length !== 1) throw new Error("ChatGPT web turn has conflicting trusted Codex cwd values");
   const cwd = cwdCandidates[0]!;
 
   const rootMatches = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
     .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => match[1] ?? ""));
-  const roots = rootMatches.length > 0 ? uniqueAbsolutePaths(rootMatches, "workspace_roots") : [cwd];
-  if (!roots.some(root => matchesPath(root, cwd))) {
+  const roots = rootMatches.length > 0 ? absolutePaths(rootMatches, "workspace_roots", TRUSTED_CODEX_PATH_POLICY) : [cwd];
+  if (!roots.some(root => contains(root, cwd))) {
     throw new Error("ChatGPT web cwd is outside the trusted Codex workspace roots");
   }
 

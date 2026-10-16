@@ -9,10 +9,11 @@ import {
   readdirSync,
   realpathSync,
 } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { expandUserPath } from "../../config";
 import { findTopLevelAssignment } from "../../codex-integration-document";
+import { absolutePaths, contains, pathIdentity, record, type AbsolutePathPolicy } from "../../path-identity";
 import type { CodexTool } from "../../types";
 import type {
   ChatGptThreadSpawnLineage,
@@ -67,22 +68,6 @@ type IndexedRollout =
   | { kind: "unavailable" }
   | { kind: "absent" }
   | { kind: "found"; path: string };
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function pathIdentity(value: string): string {
-  const normalized = resolve(value);
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
-function contains(root: string, path: string): boolean {
-  const rel = relative(pathIdentity(root), pathIdentity(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
 
 function canonicalRolloutName(name: string, threadId: string): boolean {
   const escapedThreadId = threadId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -281,17 +266,9 @@ function validateSessionMeta(
   }
 }
 
-function absolutePaths(value: unknown, field: string): string[] {
-  if (!Array.isArray(value) || value.some(path => typeof path !== "string" || !isAbsolute(path))) {
-    throw new Error(`Codex rollout ${field} is invalid`);
-  }
-  const unique = new Map<string, string>();
-  for (const path of value as string[]) {
-    const normalized = resolve(path);
-    if (!unique.has(pathIdentity(normalized))) unique.set(pathIdentity(normalized), normalized);
-  }
-  return [...unique.values()];
-}
+const ROLLOUT_PATH_POLICY: AbsolutePathPolicy = {
+  invalid: field => new Error(`Codex rollout ${field} is invalid`),
+};
 
 function validGlobScanMaxDepth(value: unknown): boolean {
   return value === undefined || (Number.isSafeInteger(value) && (value as number) > 0);
@@ -482,7 +459,7 @@ function environmentFromTurnContext(
   const cwd = resolve(payload.cwd);
   const declaredRoots = payload.workspace_roots === undefined
     ? []
-    : absolutePaths(payload.workspace_roots, "workspace_roots");
+    : absolutePaths(payload.workspace_roots, "workspace_roots", ROLLOUT_PATH_POLICY);
   const roots = declaredRoots.length > 0 ? declaredRoots : [cwd];
   if (!roots.some(root => contains(root, cwd))) {
     throw new Error("Codex rollout cwd is outside its workspace roots");
