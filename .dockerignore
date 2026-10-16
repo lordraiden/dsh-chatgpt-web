@@ -1,0 +1,17 @@
+# Build context for the production image (issue #246).
+# Keep the context small: the build stage does `COPY . .`, so anything not needed by `bun run build`
+# (or by the runtime COPY steps) only slows the build and risks leaking local state into the image.
+node_modules
+.git
+.github
+.agents
+.tmp
+.bun-cache
+.bun-tmp
+.bun-install
+.npm-cache
+*.tgz
+*.log
+artifacts
+data
+docs

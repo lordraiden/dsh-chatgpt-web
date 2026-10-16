@@ -2130,6 +2130,14 @@ DSH.
 Text-only is the contract: tools, attachments and non-text content are refused explicitly rather than
 silently dropped (§1.2, §8.3, §16).
 
+**Message-only is part of that contract.** The API transmits the conversation's messages and nothing
+else: session context a harness injects at the start of a session (its own instructions, environment
+blocks, file trees, timestamps) must not become part of the provider turn. A generic client carries no
+provenance metadata, so this cannot be a per-harness rule: it has to be structural, in the shape the DSH
+distribution already uses (§20.1 — only the current user message crosses, and the provider conversation
+is the history). The rule, its provable limits and any escape hatch are decided in issue #253 and
+implemented on this surface.
+
 ### 32.3 Runtime and credentials
 
 - The service runs headless Chromium, supplied by a pinned Playwright base image whose browser build

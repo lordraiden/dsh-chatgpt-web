@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# docker/spike-evidence.sh — collect the container evidence issue #245 needs.
+# docker/verify-container.sh — end-to-end verification of the containerised service.
+#
+# Originally the phase-1 (#245) evidence collector; it now builds and drives the PRODUCTION image
+# (`Dockerfile`) and re-checks the whole chain: build, the chromium the app will use, a prepared
+# volume, /healthz, /v1/models, the no-login turn boundary and the in-container browser launch.
+# `docker compose up -d --wait` (docker-compose.yml) is the supported deployment path; this script is
+# the deeper, operator-facing check.
 #
 # NOT EXECUTED on the authoring host (no container runtime there): only `bash -n` was run.
 # Run it on the Docker host and paste the full output into issue #245 / PR #252.
@@ -7,8 +13,8 @@
 # Usage:
 #   docker/spike-evidence.sh                                  # auto-detect docker, then podman
 #   CONTAINER_ENGINE=podman docker/spike-evidence.sh          # force rootless podman
-#   DATA=/srv/dsh-data docker/spike-evidence.sh               # reuse a volume you already prepared
-#   IMAGE=dsh-chatgpt-web:spike PORT=17841 docker/spike-evidence.sh
+#   DATA=/srv/dsh-data ./docker/verify-container.sh            # bind path (runs as root: see below)
+#   IMAGE=dsh-chatgpt-web:local PORT=17841 ./docker/verify-container.sh
 #
 # Loopback note: the sidecar rejects every non-loopback --host (doc/container.md finding F1), so the
 # container runs with --network host and no published port.
@@ -41,9 +47,9 @@ HINT
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${IMAGE:-dsh-chatgpt-web:spike}"
+IMAGE="${IMAGE:-dsh-chatgpt-web:local}"
 PORT="${PORT:-17841}"
-DATA="${DATA:-}"
+DATA="${DATA:-dsh-verify-$$}"
 WORKDIR="$(mktemp -d)"
 CONTAINER="dsh-spike-$$"
 FAILURES=0
@@ -59,6 +65,9 @@ check() { # check <label> <expected-substring> <actual>
 }
 cleanup() {
   "${ENGINE[@]}" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  if [ "${CREATED_VOLUME:-0}" = "1" ]; then
+    "${ENGINE[@]}" volume rm -f "$DATA" >/dev/null 2>&1 || true
+  fi
   rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -75,56 +84,56 @@ echo "using: ${ENGINE[*]}"
 }
 
 say "1. build"
-"${ENGINE[@]}" build -f "$REPO_ROOT/docker/Dockerfile.spike" -t "$IMAGE" "$REPO_ROOT" 2>&1 || {
+"${ENGINE[@]}" build -f "$REPO_ROOT/Dockerfile" -t "$IMAGE" "$REPO_ROOT" 2>&1 || {
   echo "build failed"; exit 1; }
 
 say "2. image facts: the chromium the app will use, and the symlink that points at it"
-"${ENGINE[@]}" run --rm "$IMAGE" sh -lc '
+"${ENGINE[@]}" run --rm --entrypoint sh "$IMAGE" -lc '
   node -p "require(\"playwright-core\").chromium.executablePath()"
   ls -l /usr/bin/google-chrome
   ls -d /ms-playwright/*chromium* 2>/dev/null' 2>&1
 
 if [ -z "$DATA" ]; then
-  DATA="$WORKDIR/data"
-  say "3. prepare the data volume at $DATA"
+  say "3. data volume: $DATA"
 else
-  say "3. use the prepared data volume at $DATA"
+  say "3. data volume: $DATA"
 fi
-mkdir -p "$DATA"
+# A named volume is seeded from the image's /data, so the default non-root user (pwuser, uid 1001) can
+# write it. A bind path keeps the invoking user's ownership (uid 1000 here), which pwuser cannot write,
+# so that case runs the container as root instead (the bind/root variant in docker-compose.yml).
+USER_ARG=()
+case "$DATA" in
+  /*|./*|../*) USER_ARG=(--user 0:0); mkdir -p "$DATA" ;;
+  *) "${ENGINE[@]}" volume create "$DATA" >/dev/null; CREATED_VOLUME=1 ;;
+esac
 
-# Generate config.json with the application's own primitives (defaultConfig + saveConfig — the same
-# path `setup` uses before its login step). Two traps, both learned the hard way:
-#   - it must run from a FILE, not `bun -e` ("Cannot install a service from an evaluated Bun script");
-#   - that file must NOT live under /tmp, because defaultConfig() records a durable runtime command
-#     and rejects ephemeral paths ("Runtime command must not reference an ephemeral path: /tmp/...").
-# It is therefore mounted at /app/make-config.ts.
-cat > "$WORKDIR/make-config.ts" <<'TS'
-import { defaultConfig, saveConfig, getConfigPath } from "/app/src/config.ts";
-const config = defaultConfig("browser-only");
-config.releaseVersion = "spike-volume";
-config.port = Number(process.env.SPIKE_PORT ?? 17841);
-saveConfig(config);
-console.log("wrote " + getConfigPath());
-TS
-
-CONFIG_OUT="$("${ENGINE[@]}" run --rm --init --ipc=host --network host \
-  -v "$DATA:/data" -v "$WORKDIR/make-config.ts:/app/make-config.ts:ro" \
-  -e DSH_CHATGPT_WEB_HOME=/data -e "SPIKE_PORT=$PORT" "$IMAGE" \
-  bun /app/make-config.ts 2>&1)"
-printf '%s\n' "$CONFIG_OUT"
-check "config.json was written" "wrote /data/config.json" "$CONFIG_OUT"
+# The image's entrypoint bootstraps an empty data volume itself (docker/bootstrap-config.ts),
+# so a first `docker compose up` can become healthy. Step 4 asserts that it happened.
 
 say "4. start the sidecar (loopback inside the container, host networking: finding F1)"
 # The command is overridden explicitly so $PORT is the port that is actually served (the image's CMD
 # pins 17841; overriding also avoids a clash with a host-side sidecar already on that port).
-"${ENGINE[@]}" run -d --name "$CONTAINER" --init --ipc=host --network host \
+"${ENGINE[@]}" run -d --name "$CONTAINER" --init --ipc=host --network host "${USER_ARG[@]}" \
   -v "$DATA:/data" -e DSH_CHATGPT_WEB_HOME=/data "$IMAGE" \
-  node lib/cli.js serve --port "$PORT" >/dev/null
+  serve --port "$PORT" >/dev/null
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break
   sleep 1
 done
 "${ENGINE[@]}" logs "$CONTAINER" 2>&1 | tail -3
+
+# That bootstrap is a production behaviour, not a test fixture: it is what makes a clean-volume
+# `docker compose up -d` reach a healthy state without manual steps.
+BOOTSTRAP="$("${ENGINE[@]}" logs "$CONTAINER" 2>&1 | head -4)"
+check "the entrypoint bootstrapped the configuration" "wrote default configuration" "$BOOTSTRAP"
+
+# The production image is non-root by default; the bind/root variant is the exception.
+RUNNING_USER="$("${ENGINE[@]}" exec "$CONTAINER" id 2>&1)"
+if [ "${#USER_ARG[@]}" -eq 0 ]; then
+  check "the service runs non-root (pwuser)" "uid=1001(pwuser)" "$RUNNING_USER"
+else
+  printf 'INFO  bind path: running as root by design — %s\n' "$RUNNING_USER"
+fi
 
 say "5. /healthz"
 HEALTH="$(curl -fsS "http://127.0.0.1:$PORT/healthz" 2>&1)"
