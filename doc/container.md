@@ -305,6 +305,22 @@ Rules this deployment enforces:
 6. The caveats in §5 still apply: this is a personal, single-account bridge — not a public multi-tenant
    service — and the provider's terms of service are yours to honour.
 
+### 5.3 Transmitting only messages (issue #253)
+
+The API transmits the conversation's messages and nothing else. What that means in practice, and what
+it cannot mean:
+
+| | |
+| --- | --- |
+| **Client sends a stable session identity** (OpenAI's `user` field, or `session_id`) | only the **current user message** is transmitted; the provider conversation is the history, so context injected in earlier turns cannot cross |
+| **No identity** | the request is treated as **stateless**: the client's `user`/`assistant` messages are transmitted and every non-conversational role (`system`, `developer`, `tool`, unknown) is dropped |
+| **Guaranteed** | a harness cannot smuggle its own instructions or environment block into the turn as a separate message, and with an identity it cannot smuggle earlier turns either |
+| **Not guaranteed** | text the harness writes *inside* the current user message. Distinguishing that structurally is impossible — provenance is not in the OpenAI protocol — and content heuristics are per-harness and per-version, so they are not the mechanism. This is a documented limit, asserted by a test rather than implied |
+
+The rule lives in exactly one owner (`src/web-chat/host/api-projection.ts`). The DSH-side projection
+(`src/conversation-projection.ts`) is **not** reused or duplicated: it keys off DSH's `source.kind`,
+which no generic client sends, so it is a no-op on this surface.
+
 ## 6. Evidence collected on the authoring host
 
 Local paths are sanitised. The sidecar was exercised with Node 24.21.0 from the checked-in `lib/`.

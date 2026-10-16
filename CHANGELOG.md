@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Transmit only the conversation's messages on the API surface (issue #253): with a client session
+  identity (`user`/`session_id`) the API sends only the current user message and the provider
+  conversation holds the history; without one it is stateless and every non-conversational role is
+  dropped. One structural owner (`src/web-chat/host/api-projection.ts`), never per-harness, with the
+  residual limit (text inside the current user message) documented and asserted by a test.
 - Authenticate and safely expose the containerised API (issue #247): the public `/v1/*` surface now
   requires an API key (`DSH_CHATGPT_WEB_API_KEY` or `<data dir>/api-key`, `Authorization: Bearer` or
   `x-api-key`), a non-loopback bind refuses to start without one, a key too short to authenticate

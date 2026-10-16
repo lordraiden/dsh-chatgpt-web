@@ -2135,8 +2135,14 @@ else: session context a harness injects at the start of a session (its own instr
 blocks, file trees, timestamps) must not become part of the provider turn. A generic client carries no
 provenance metadata, so this cannot be a per-harness rule: it has to be structural, in the shape the DSH
 distribution already uses (§20.1 — only the current user message crosses, and the provider conversation
-is the history). The rule, its provable limits and any escape hatch are decided in issue #253 and
-implemented on this surface.
+is the history). The rule is implemented in `src/web-chat/host/api-projection.ts`, structural and never
+per-harness: a client-provided session identity (OpenAI's `user`, or the `session_id` extension) makes
+the API transmit **only the current user message** with the provider conversation as the history;
+without one the request is stateless and every non-conversational role (`system`, `developer`, `tool`,
+unknown) is dropped. That is universal in the only sense the protocol allows — a generic client carries
+no provenance — and its limit is explicit rather than papered over: harness text placed *inside* the
+current user message cannot be distinguished structurally and does cross. Content heuristics are
+deliberately **not** the mechanism, because they are per-harness and per-version (issue #253).
 
 ### 32.3 Runtime and credentials
 
