@@ -1,10 +1,10 @@
 # dsh-chatgpt-web Architecture
 
 **Status:** Target architecture for multi-provider text-only Web Chat  
-**Implementation status:** Partially implemented; the repository currently contains the ChatGPT Web implementation and the extraction path defined below  
+**Implementation status:** Core delivered — the provider-neutral core, durable continuation, exchange lifecycle, the ChatGPT migration, the DSH host integration and the provider conformance suite are implemented (issues #189–#194, closed); the ChatGPT-specific product layer and the Advisor are implemented; the containerised service distribution is a new independent track (§32, issues #245–#250); Qwen and DeepSeek remain roadmap providers (issues #195–#199)  
 **Document role:** Single architectural source of truth for the Web Chat provider architecture  
 **Repository:** lordraiden/dsh-chatgpt-web  
-**Last updated:** 2026-10-08
+**Last updated:** 2026-10-16
 
 > **Provider-neutral core, provider-owned conversation, transport-independent exchange.**
 
@@ -1181,6 +1181,8 @@ DSH's own adapter documentation also provides an important continuity seam: prov
 
 The adapter must also reject unsupported GenerateOptions content rather than silently discard it. In particular, a text-only WebChat route must not quietly strip tool definitions, file/image content, or other unsupported request features simply to make a call succeed. This preserves DSH's stable provider error semantics.
 
+The same core is driven by the containerised service distribution (§32) over HTTP instead of through `LlmAdapter`. DSH is absent there, so that distribution's local, config-driven route registry performs route selection in place of DSH; it is not a second public provider registry and reverts to resolution-only the moment the service is embedded in DSH.
+
 ---
 
 ## 17. Provider driver resolution
@@ -1335,28 +1337,40 @@ These ideas are architecturally sound:
 - cancellation;
 - provider-specific model metadata.
 
-### 19.2 Extract into the common core
+### 19.2 Extracted into the common core
 
-The following responsibilities should become provider-neutral:
+These responsibilities became provider-neutral and now live under `src/web-chat/`:
 
 ~~~text
 src/adapters/base.ts
     -> remains the lowest adapter seam
 
-chatgpt-web/conversation-key.ts
-    -> generic conversation-key / continuation core
-       with ChatGPT-specific rules removed
+src/web-chat/core/**                              (issue #189)
+    -> provider-neutral contracts: text exchange, conversation identity and
+       handle, model descriptor, normalized events, error taxonomy, driver
+       resolver and account binding
 
-chatgpt-web/retained-surface.ts
-    -> generic retained-resource/transport lease mechanism
-       with Page-specific typing removed from the core
+src/web-chat/core/conversation-store.ts
+src/web-chat/persistence/conversation-store-file.ts (issue #190)
+    -> generic conversation-key / continuation core and the durable continuity
+       record, with ChatGPT-specific rules removed
 
-ChatGPT turn state
-    -> generic exchange state machine
+src/web-chat/core/exchange-state.ts
+src/web-chat/core/retry-authority.ts
+src/web-chat/transport/**                          (issue #191)
+    -> generic exchange state machine, submission boundary and retry
+       authority, transport lease and the shared exchange runner
 
-ChatGPT adapter stream normalization
-    -> generic WebChat event normalization
+src/adapters/chatgpt-web/chatgpt-driver.ts
+src/adapters/chatgpt-web/chatgpt-continuity.ts
+src/adapters/chatgpt-web/text-turn.ts
+src/adapters/chatgpt-web/webchat-transport.ts      (issues #192, #236)
+    -> the ChatGPT driver/transport implementing those contracts
 ~~~
+
+`src/adapters/chatgpt-web/retained-surface.ts` still holds ChatGPT's physical
+retention; the generic lease and settlement semantics live in
+`src/web-chat/transport/transport-lease.ts`.
 
 ### 19.3 Keep provider-local
 
@@ -1379,15 +1393,13 @@ Some of these may later be retired or reduced, but they should not be generalize
 
 ### 19.4 WebSurfaceTransport change
 
-The existing WebSurfaceTransport concept is useful but too ChatGPT-shaped.
-
-It should become two layers:
+Delivered (issues #191–#192, #236). The previous ChatGPT-shaped WebSurfaceTransport was split into two layers:
 
 ~~~text
 WebChat core
     |
     v
-TextExchangeTransport
+TextExchangeTransport          (src/web-chat/transport/text-transport.ts)
     |
     +--> provider-specific Playwright UI driver
             |
@@ -1396,7 +1408,7 @@ TextExchangeTransport
             +--> DeepSeek website UI
 ~~~
 
-The shared interface remains semantic and provider-neutral. Every consumer-web driver uses Chrome/Playwright to operate its own website UI; that requirement does not make the core depend on DOM structure or Playwright types. The current ChatGPT surface transport becomes one implementation of the provider UI seam, not the universal provider implementation.
+The shared interface is semantic and provider-neutral. Every consumer-web driver uses Chrome/Playwright to operate its own website UI; that requirement does not make the core depend on DOM structure or Playwright types. The current ChatGPT surface transport (`src/adapters/chatgpt-web/webchat-transport.ts`) is one implementation of the provider UI seam, not the universal provider implementation.
 
 ---
 
@@ -1777,7 +1789,27 @@ Reason:
 
 ## 27. Implementation roadmap
 
-The migration should be delivered as small reviewable slices. The issue/PR numbering below refers to implementation order.
+The migration is delivered as small reviewable slices. The issue/PR numbering below refers to implementation order; status is current as of 2026-10-16.
+
+| Slice | Issue | Status |
+| --- | --- | --- |
+| 1 · WebChat contracts | #189 | Delivered |
+| 2 · Conversation affinity and durable continuation | #190 | Delivered |
+| 3 · Exchange state machine and transport ownership | #191 | Delivered |
+| 4 · ChatGPT migration to WebChat | #192 | Delivered |
+| 5 · DSH route integration and driver resolution | #193 | Delivered |
+| 6 · Provider conformance and architecture suite | #194 | Delivered |
+| 7 · Qwen Chat text provider | #195 | Open — next |
+| 8 · Qwen real-session validation and recovery hardening | #196 | Open |
+| 9 · DeepSeek Chat text provider | #197 | Open |
+| 10 · DeepSeek real-session validation and recovery hardening | #198 | Open |
+| 11 · Cross-provider integration validation | #199 | Open |
+
+The **containerised service distribution** is a second, independent track (§32), tracked as issues
+#245–#250. It does not consume a migration release number.
+
+The per-slice descriptions below record the original delivery intent of each slice; the status table
+above is authoritative for what is done.
 
 ### PR 1 — WebChat contracts
 
@@ -1876,43 +1908,47 @@ Validate all providers together and verify that the architecture remains one sha
  
 ## 28. Current repository mapping
 
-The existing repository already contains several useful architectural pieces.
+The extraction described in §19 is implemented. This section maps the target ownership onto the
+repository as it stands.
 
-### Existing generic seams
+### Provider-neutral layer (implemented)
 
-- src/adapters/base.ts
-  - already defines a provider-neutral internal adapter boundary.
-- src/types.ts
-  - already contains a normalized internal event vocabulary and provider-private context.
-- src/adapters/web-composer-resolver.ts
-  - already contains service-neutral web-composer selection logic.
-- src/adapters/chatgpt-web/retained-surface.ts
-  - already proves that physical retention can be isolated from transcript state.
-- src/adapters/chatgpt-web/conversation-key.ts
-  - already proves stable DSH-thread affinity can be separated from model/turn properties.
+- `src/web-chat/core/**` — the provider-neutral contracts and semantics: text exchange, conversation
+  identity and handle, model descriptor, normalized events and error taxonomy, driver resolver,
+  account binding, conversation store, continuation decisions, exchange state and retry authority
+  (issues #189–#191).
+- `src/web-chat/transport/**` — the provider-neutral transport seam (`text-transport.ts`), the
+  transport lease and the shared exchange runner.
+- `src/web-chat/persistence/conversation-store-file.ts` — the durable JSON backend for continuity
+  state.
+- `src/web-chat/host/**` — the DSH host boundary: driver resolution for already-selected routes,
+  provider-scoped configuration, health and the shared text turn (`dsh-integration.ts`,
+  `text-turn.ts`, `text-exchange.ts`) (issue #193).
+- `tests/issue-189..194-*.test.ts` and `tests/web-chat-provider-conformance.ts` — the executable
+  boundaries and the reusable provider conformance suite (issue #194).
 
-These are extraction candidates, not designs that need to be replaced wholesale.
+### ChatGPT-specific layer (provider-local)
 
-### Current ChatGPT-specific seams
+- `src/browser-login.ts`, `src/chatgpt-session.ts`, `src/chatgpt-web-authority.ts`,
+  `src/chatgpt-web-models.ts`, `src/chatgpt-web-provider-config.ts`, `src/model-catalog.ts`
+  (ChatGPT Web authority is still embedded here);
+- `src/adapters/chatgpt-web/**` — driver, continuity, `conversation-key.ts`, browser worker, prompt
+  compiler, turn execution, retained surface, compaction/checkpoint, MCP/capability, tool and
+  native-Codex modules;
+- `src/bridge.ts`, `src/native-passthrough.ts`, `src/codex-*.ts`, `src/responses/**` — ChatGPT/Codex
+  wire compatibility, which remains outside WebChat Core (§20).
 
-- src/browser-login.ts
-- src/chatgpt-session.ts
-- src/chatgpt-web-authority.ts
-- src/chatgpt-web-models.ts
-- src/model-catalog.ts where ChatGPT-specific authority is still embedded
-- src/adapters/chatgpt-web/browser-worker.ts
-- src/adapters/chatgpt-web/prompt.ts
-- src/adapters/chatgpt-web/turn-execution.ts
-- ChatGPT-specific compaction/checkpoint modules
-- ChatGPT-specific MCP/capability modules
+These remain provider-local until a second provider supplies concrete evidence for a smaller
+reusable seam (§19.3, §26.2).
 
-These remain provider-local until there is a concrete reason to extract a smaller reusable seam.
+### Entry points
 
-### Current plugin boundary
-
-src/plugin.ts currently registers the ChatGPT adapter and manages the local sidecar lifecycle.
-
-The target is to preserve the sidecar lifecycle responsibility while replacing single-provider registration with a provider-neutral WebChat adapter and driver resolver. The DSH LLM runtime remains the actual provider routing authority; WebChat does not create a competing public registry.
+- `lib/plugin.js` (`src/plugin.ts`) — the DSH Cordis plugin: registers the provider-neutral WebChat
+  adapter and routes through `src/web-chat/host/dsh-integration.ts`, and owns the sidecar lifecycle.
+  DSH remains the provider routing authority.
+- `lib/cli.js` (`src/cli.ts`) — the standalone sidecar service (`serve`), deliberately independent of
+  the host-only DSH LLM peer; CI asserts that in `scripts/smoke-tarball.mjs`. It is the entry point
+  the containerised service distribution wraps (§32).
 
 ---
 
@@ -2054,3 +2090,67 @@ A correct implementation therefore looks like:
 ~~~
 
 That is the architecture to implement. Everything else in the repository should be evaluated against these ownership boundaries.
+
+---
+
+## 32. Service distribution: the containerised HTTP surface
+
+The ownership model above is unchanged. This section applies it to the repository's **second
+distribution**.
+
+The repository ships two distributions over one core (§28 "Entry points"):
+
+- the **DSH distribution** — the Cordis plugin, where DSH selects the provider route;
+- the **service distribution** — the standalone sidecar (`dsh-chatgpt-web serve`), where no DSH
+  process exists and the process itself must decide which provider and model a request addresses.
+
+Both are text-only and share the same drivers, core semantics and conformance suite. The service
+distribution adds a wire-compatibility and operations layer; it does not create a second execution
+engine, a second retry authority or a second provider registry.
+
+### 32.1 Routing authority
+
+The invariant "DSH selects the provider; WebChat only resolves the already-selected route" (§4.1,
+§16, §17) applies to the DSH distribution. In the service distribution the caller selects the
+provider through the catalogue model identifier and the service resolves it through the **same**
+resolver. The service's route registry is local configuration for a distribution with no host; it
+must never become a public provider registry, and embedding the service in DSH reverts selection to
+DSH.
+
+### 32.2 API surface
+
+- `POST /v1/responses` — the Responses-compatible text endpoint with SSE.
+- `GET /v1/models` — the provider-qualified catalogue, carrying both the existing `models` array and
+  an additive OpenAI-compatible `data` array.
+- `POST /v1/chat/completions` — OpenAI-compatible text chat for arbitrary harnesses (issue #248).
+- `/v1/control/*` and `/admin/*` — operator routes with constant-time token authorization.
+- The public API surface requires its own authorization and fails closed on a non-loopback bind
+  without a configured key (issue #247).
+
+Text-only is the contract: tools, attachments and non-text content are refused explicitly rather than
+silently dropped (§1.2, §8.3, §16).
+
+### 32.3 Runtime and credentials
+
+- The service runs headless Chromium, supplied by a pinned Playwright base image whose browser build
+  matches the installed `playwright-core` version.
+- A provider session is a browser session, not an API key. The runtime requires both the Playwright
+  `storageState` and its verification marker; credentials live only in the mounted data volume
+  (`DSH_CHATGPT_WEB_HOME`), never in the image, the conversation store or logs (§13, §25).
+- Credentials are provider-scoped (`providers/<providerId>/…`), with one account per provider and the
+  legacy single-provider layout kept as a compatibility alias (§29).
+- One active exchange per provider conversation (§15.1); an account whose provider cannot isolate
+  sessions is serialised (§15.2).
+
+### 32.4 Non-goals
+
+- A public multi-tenant service. The consumer-web session is the binding constraint, so this is a
+  personal/local bridge: one account, one instance.
+- Re-exposing consumer-web output as a general-purpose model API with accounting guarantees: `usage`
+  is an estimate, not consumer-web accounting.
+- Weakening the UI-only rule (§3, §26.3): providers are still operated through their websites.
+
+**Track status.** Issues #245–#250 deliver this distribution in order: spike (base image, headless
+Chromium, health probe), production image and Compose stack, API authorization and safe exposure,
+OpenAI-compatible `/v1/chat/completions`, guided provider login and credential layout, and
+multi-provider routing. This track consumes no migration release number.

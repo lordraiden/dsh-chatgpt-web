@@ -406,9 +406,9 @@ Prefer verified behavior over stale memory.
 
 The numbered WebChat migration issues #189–#199 are released **one PR at a time**. Each completed migration PR produces exactly one stable patch release.
 
-The current `main` package version is `1.0.27` and it is released.
+The current `main` package version is `1.0.28` and it is released (`v1.0.28`, published 2026-10-12).
 
-**Release history as verified on 2026-10-12.** The private registry holds `1.0.6`–`1.0.17` (all but `1.0.12`), plus `1.0.25`, `1.0.26` and `1.0.27`. Only `v1.0.6`, `v1.0.17`, `v1.0.25`, `v1.0.26` and `v1.0.27` are tagged, and only `v1.0.17`, `v1.0.25`, `v1.0.26` and `v1.0.27` have GitHub Releases — most early versions were published without tag or Release, and `1.0.18`–`1.0.24` were never published at all. The table below is therefore the original migration **intent**, not a booking: a future numbered migration PR takes the next free patch version and states it in its own release preparation, and it must not renumber a version that has already been published.
+**Release history as verified on 2026-10-12, plus `v1.0.28` (tagged and released on the same date).** The private registry holds `1.0.6`–`1.0.17` (all but `1.0.12`), plus `1.0.25`, `1.0.26`, `1.0.27` and `1.0.28`. Only `v1.0.6`, `v1.0.17`, `v1.0.25`, `v1.0.26`, `v1.0.27` and `v1.0.28` are tagged, and only `v1.0.17`, `v1.0.25`, `v1.0.26`, `v1.0.27` and `v1.0.28` have GitHub Releases — most early versions were published without tag or Release, and `1.0.18`–`1.0.24` were never published at all. The table below is therefore the original migration **intent**, not a booking: a future numbered migration PR takes the next free patch version and states it in its own release preparation, and it must not renumber a version that has already been published.
 
 | Migration PR | Issue | Release |
 | --- | --- | --- |
@@ -434,6 +434,8 @@ For these PRs:
 - The next migration PR must start from the released version produced by the previous migration PR.
 - If a migration PR is intentionally abandoned or reordered, stop and reconcile the release sequence before merging a later numbered migration PR. Never silently renumber releases.
 - Non-migration fixes/docs PRs do not consume a reserved WebChat migration release number. They use the normal release policy only when a release is actually required.
+
+The **containerised service distribution** track (issues #245–#250, `doc/architecture.md` §32) is a non-migration track: it follows the line above and must not take a version reserved for the numbered WebChat migration steps.
 
 This release cadence is a delivery constraint for the migration, not a reason to bundle unrelated changes into a migration PR.
 

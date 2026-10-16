@@ -116,10 +116,12 @@ The common Core remains text-only and provider-neutral. It does not own provider
 | #190 (PR 2) | Stable affinity, opaque continuation state, and durable conversation-store semantics — merged. |
 | #191 (PR 3) | Exchange lifecycle, retry authority, physical settlement and transport leases — merged. |
 | #192 (PR 4) | ChatGPT driver/transport migration onto Core — merged. |
-| #193 (PR 5) | DSH host integration, provider-scoped configuration, health, registration and durable native continuity — in PR #220. |
-| #194 (PR 6) | Reusable provider conformance and architecture-contract suite — pending. |
+| #193 (PR 5) | DSH host integration, provider-scoped configuration, health, registration and durable native continuity — merged. |
+| #194 (PR 6) | Reusable provider conformance and architecture-contract suite — merged. |
 | #195 / #196 (PRs 7–8) | Qwen Web provider implementation and provider-specific continuity validation — pending. |
 | #197 / #198 (PRs 9–10) | DeepSeek Web provider implementation and provider-specific continuity validation — pending. |
 | #199 (PR 11) | Cross-provider isolation and end-to-end conformance — pending. |
 
 Qwen and DeepSeek are roadmap providers, not current routes. Their provider-specific session IDs, lineage, auth challenges and transport protocols must remain opaque to Core.
+
+The same Core is driven over HTTP by the repository's second distribution — the containerised service — which adds a wire-compatibility and operations layer without adding an execution path. See [architecture.md](./architecture.md) §32 and issues #245–#250.
