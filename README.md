@@ -49,18 +49,47 @@ See [`doc/architecture.md`](./doc/architecture.md) for the ownership model.
 Requirements: Docker Engine with the Compose plugin (or Podman), ~4 GB free disk for the image, and
 roughly 1 GB RAM per active turn.
 
+The first hour is five steps, and `scripts/quickstart.sh` walks them in order: **build** and **start**
+the default stack, wait for `/healthz`, **sign in** (either route below), run the container's own
+**`doctor`**, then make a **first API call**. The script does the first two and the last two itself —
+it makes one real request and ends with the exact command to copy next. When the volume has no
+provider session yet it exits non-zero and names the sign-in command, which is the expected first-run
+state.
+
 ```bash
 git clone https://github.com/lordraiden/dsh-chatgpt-web.git
 cd dsh-chatgpt-web
 
-# Build and start the supported stack. It creates its data volume and becomes healthy by itself.
+# build -> start -> /healthz -> doctor -> first API call; prints the next command at the end
+scripts/quickstart.sh
+```
+
+Use `sg docker -c 'scripts/quickstart.sh'` if your shell session predates the `docker` group change,
+and `scripts/quickstart.sh --build` after pulling new source so the image is rebuilt rather than
+reused.
+
+The same path by hand:
+
+```bash
+# 1-2. build and start: creates the data volume and becomes healthy by itself
 docker compose up -d --wait
 curl -fsS http://127.0.0.1:17841/healthz
+
+# 3. sign in — either route, see Sign in to ChatGPT
+docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture
+
+# 4. doctor: the container's own checks, ending in the next command when something fails
+docker compose exec chatgpt-web node lib/cli.js doctor
+
+# 5. first API call
+curl -fsS http://127.0.0.1:17841/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}]}'
 ```
 
 On an empty volume the entrypoint writes a default `config.json` and announces it on stderr, so the
-first `compose up` reaches `healthy` with no manual step. A real turn still needs a provider session
-— see [Sign in to ChatGPT](#sign-in-to-chatgpt).
+first `compose up` reaches `healthy` with no manual step. Step 3 is the only one that needs a human:
+a real turn still needs a provider session — see [Sign in to ChatGPT](#sign-in-to-chatgpt).
 
 The default stack uses host networking and binds the loopback port `17841`, so the service is reachable
 only from this machine. `--ipc=host` (the compose default) is recommended by Playwright for Chromium;
@@ -194,6 +223,21 @@ docker compose --profile login down
 The noVNC display stack lives only in `Dockerfile.login`, which layers on top of the production image,
 so the production artifact keeps no VNC surface. The port is published on the host's **loopback only**
 because it grants control of an authenticated browser session — never expose it on `0.0.0.0`.
+
+### Prove the browser surface (`browser check`)
+
+After either sign-in — and after any provider change — run `browser check`. It is the cheap step
+between "signed in" and "first API call": it launches the configured Chrome and exits **without**
+spending a provider turn, so a broken browser/Chrome path is not mistaken for a rejected session.
+
+```bash
+docker compose exec chatgpt-web node lib/cli.js browser check
+# Playwright can launch the configured Chrome executable.
+```
+
+In launcher mode the same subcommand checks the embedded launcher browser instead; under a Zero Risk
+(manual) profile it only proves the launcher browser is reachable, because DOM inspection is disabled
+by design there.
 
 When the session expires, `doctor --json` reports `login: error — ChatGPT login state is missing or
 unverified` with the resolved path; repeat the sign-in or the import. Back up and restore the data

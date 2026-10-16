@@ -299,6 +299,73 @@ export async function runDoctor(): Promise<DoctorReport> {
   };
 }
 
+/**
+ * The container CLI as an operator types it on the host (README.md, doc/container.md).
+ *
+ * The guidance below is written for the supported Compose deployment because that is what ships and
+ * what `doctor` diagnoses; an operator running a bare `docker run` can substitute its own invocation.
+ */
+const COMPOSE_EXEC = "docker compose exec chatgpt-web";
+
+/**
+ * The two documented sign-in routes (#249), in the order a first run should try them.
+ *
+ * `/capture` is the path `docker/verify-container.sh` and README.md already use: the operator mounts
+ * a directory holding a Playwright `storage-state.json` and adopts it. Nothing here prints a cookie,
+ * a token or a key — only the command that consumes the capture.
+ */
+function signInFixCommands(): string[] {
+  return [
+    `${COMPOSE_EXEC} node lib/cli.js auth import --provider chatgpt-web --from /capture`,
+    "docker compose --profile login up -d login   # then sign in at http://127.0.0.1:6080/vnc.html and run: docker compose --profile login down",
+  ];
+}
+
+/**
+ * The copy-pasteable command(s) that resolve one failing check.
+ *
+ * Deliberately a formatter concern, not a `DoctorCheck` field: the `doctor --json` shape is a stable
+ * interface, so the guidance lives only in the human-readable report (the login message already
+ * names its commands; every other failure now ends the report the same way).
+ */
+function doctorFixCommands(check: DoctorCheck): string[] {
+  // The per-provider check is downstream of the same session the `login` check owns, so a provider
+  // that is unhealthy or merely not authenticated is fixed by signing in again.
+  if (check.id.startsWith("webchat-")) return signInFixCommands();
+  switch (check.id) {
+    case "config":
+      // The entrypoint bootstraps the default configuration only when the volume has none, so an
+      // invalid file is moved aside (kept for diagnosis) and the container restarted; a missing file
+      // makes the `mv` a no-op and the restart writes it. `exit 0` keeps the no-op from looking like
+      // a failed repair.
+      return [
+        `${COMPOSE_EXEC} sh -c 'mv /data/config.json /data/config.json.invalid 2>/dev/null; exit 0'`,
+        "docker compose restart chatgpt-web   # the entrypoint writes a default config.json again",
+      ];
+    case "login":
+      return signInFixCommands();
+    case "chrome":
+    case "browser-host":
+      // Proves whether Playwright can launch the configured Chrome; a failure here means the image
+      // (or the configured path) is wrong, so rebuild: docker compose build && docker compose up -d --wait
+      return [`${COMPOSE_EXEC} node lib/cli.js browser check`];
+    case "proxy":
+      return ["docker compose up -d --wait"];
+    case "service":
+      return ["dsh-chatgpt-web service install"];
+    case "tunnel-binary":
+    case "tunnel-key":
+      return ["dsh-chatgpt-web setup --full --acknowledge-unofficial"];
+    case "tunnel-service":
+    case "tunnel-runtime":
+      return ["dsh-chatgpt-web tunnel start"];
+    case "connector":
+      return ["dsh-chatgpt-web open connectors"];
+    default:
+      return [];
+  }
+}
+
 export function formatDoctorReport(report: DoctorReport): string {
   const icon: Record<CheckStatus, string> = { ok: "✓", warning: "!", error: "✗" };
   const lines = report.checks.flatMap(check => [
@@ -306,5 +373,20 @@ export function formatDoctorReport(report: DoctorReport): string {
     ...(check.detail ? [`  ${check.detail}`] : []),
   ]);
   lines.push(report.ok ? "Doctor result: ready" : "Doctor result: not ready");
+
+  // End a failing report with the exact command that fixes it. Errors always qualify; a WebChat
+  // provider that is only a warning ("reachable but not authenticated") gets the sign-in route too,
+  // because it is the same missing session. Commands are de-duplicated and the last line printed is
+  // always one of them, so the report can be read and acted on from the bottom up.
+  const fixes: string[] = [];
+  for (const check of report.checks) {
+    const actionable = check.status === "error"
+      || (check.status === "warning" && check.id.startsWith("webchat-"));
+    if (!actionable) continue;
+    for (const command of doctorFixCommands(check)) {
+      if (!fixes.includes(command)) fixes.push(command);
+    }
+  }
+  if (fixes.length > 0) lines.push("", "Next step:", ...fixes.map(command => `  ${command}`));
   return `${lines.join("\n")}\n`;
 }
