@@ -4,6 +4,7 @@ import { startServer, type RunningServer } from "../src/server";
 import {
   buildOpenAiModelsData,
   ChatCompletionsRequestError,
+  chatUsage,
   responseFailure,
   responseText,
   toChatCompletion,
@@ -38,8 +39,13 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
   return { ...defaultConfig(), port: 0, host: "127.0.0.1", controlToken: CONTROL_TOKEN, ...overrides };
 }
 
-/** A stub provider that records exactly what it was asked to send, and answers with fixed text. */
-function stubAdapter() {
+/**
+ * A stub provider that records exactly what it was asked to send, and answers with fixed text.
+ *
+ * With no `usage` argument it reports none — the state of an adapter that cannot account for the turn
+ * — which is the case that used to surface as a fabricated `{0,0,0}` block.
+ */
+function stubAdapter(usage?: Record<string, unknown>) {
   const turns: Array<Record<string, unknown>> = [];
   return {
     turns,
@@ -48,7 +54,7 @@ function stubAdapter() {
       runTurn: async (parsed: { context?: { messages?: unknown[] } }, _incoming: unknown, emit: (event: unknown) => void) => {
         turns.push({ messages: parsed.context?.messages ?? [] });
         emit({ type: "text_delta", text: "Respuesta del proveedor", phase: "final_answer" });
-        emit({ type: "done", stopReason: "stop", endTurn: true });
+        emit({ type: "done", stopReason: "stop", endTurn: true, ...(usage ? { usage } : {}) });
       },
     }) as never,
   };
@@ -208,6 +214,24 @@ describe("issue #248 — the OpenAI shape", () => {
     expect(completion.usage).toEqual({ prompt_tokens: 11, completion_tokens: 5, total_tokens: 16 });
   });
 
+  test("an absent usage is omitted, and a reported zero is kept", () => {
+    // No usage at all: the field is absent from the body. A `{0,0,0}` block would claim an accounting
+    // the turn never produced, which a billing/logging client cannot tell apart from a real zero.
+    const noUsage = toChatCompletion({ id: "resp_2", output: [], usage: null }, "chatgpt-web/luna");
+    expect("usage" in noUsage).toBe(false);
+    expect(chatUsage(undefined)).toBeUndefined();
+    expect(chatUsage(null)).toBeUndefined();
+    expect(chatUsage({})).toBeUndefined();
+    expect(chatUsage({ input_tokens: 11 })).toBeUndefined();
+
+    // A reported zero is a number, not an unknown: the turn is kept as the provider described it.
+    expect(chatUsage({ input_tokens: 0, output_tokens: 0, total_tokens: 0 }))
+      .toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+    // The internal total is only trusted when present; otherwise the pair decides.
+    expect(chatUsage({ input_tokens: 11, output_tokens: 5 }))
+      .toEqual({ prompt_tokens: 11, completion_tokens: 5, total_tokens: 16 });
+  });
+
   test("an internal SSE stream is re-shaped into chat.completion.chunk events", async () => {
     const upstream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -258,7 +282,9 @@ describe("issue #248 — over the real listener", () => {
     const completion = await response.json() as Record<string, any>;
     expect(completion.object).toBe("chat.completion");
     expect(completion.choices[0].message.content).toBe("Respuesta del proveedor");
-    expect(completion.usage.total_tokens).toBeGreaterThanOrEqual(0);
+    // This adapter reports no usage, so the field is absent — not a fabricated zero block. The old
+    // `usage.total_tokens >= 0` assertion could not fail: every value satisfied it.
+    expect("usage" in completion).toBe(false);
 
     // The proof that matters: the harness's own instructions never reached the provider.
     expect(stub.turns).toHaveLength(1);
@@ -266,6 +292,16 @@ describe("issue #248 — over the real listener", () => {
     expect(sent).not.toContain("You are Cline");
     expect(sent).not.toContain("environment_details");
     expect(sent).toContain("Escribe un test");
+  });
+
+  test("the usage a provider reports is translated, never re-derived", async () => {
+    const stub = stubAdapter({ inputTokens: 321, outputTokens: 12, totalTokens: 333 });
+    const server = serve(stub.factory);
+
+    const response = await post(server, { model: "chatgpt-web/luna", messages: [USER_MESSAGE] });
+    expect(response.status).toBe(200);
+    const completion = await response.json() as Record<string, any>;
+    expect(completion.usage).toEqual({ prompt_tokens: 321, completion_tokens: 12, total_tokens: 333 });
   });
 
   test("streaming answers with chat.completion.chunk frames and a terminal [DONE]", async () => {
