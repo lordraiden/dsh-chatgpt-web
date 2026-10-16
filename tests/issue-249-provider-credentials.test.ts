@@ -150,9 +150,9 @@ describe("issue #249 — `auth import` fails closed", () => {
 
   test("a well-formed capture that cannot be verified is refused, writing nothing", () => {
     const home = freshHome();
-    // The default Chrome path does not exist here, so verification cannot succeed — which is exactly
-    // the fail-closed path: no browser proof, no stored session.
-    saveConfig(defaultConfig());
+    // A Chrome path that does not exist makes verification fail immediately and identically on every
+    // machine: this test asserts the fail-closed DECISION, not a browser's failure latency.
+    saveConfig({ ...defaultConfig(), chromeExecutablePath: join(home, "no-such-chrome") });
     const source = join(home, "capture.json");
     writeFileSync(source, JSON.stringify(STATE));
 
