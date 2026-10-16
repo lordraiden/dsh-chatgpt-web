@@ -127,15 +127,46 @@ docker exec <container> dsh-chatgpt-web doctor --json   # or: node lib/cli.js do
 `--ipc=host` (or `--shm-size=1g`) is recommended by Playwright for Chromium. `--init` avoids zombie
 processes. `--network host` is a spike workaround (F1), not the production answer.
 
-`docker/spike-evidence.sh` runs the whole sequence and prints a transcript to paste into the PR:
+`docker/spike-evidence.sh` does the whole sequence on a container host and prints a transcript to
+paste into the PR. It creates the data volume itself and accepts another engine:
 
 ```bash
-docker/spike-evidence.sh                       # fail-closed path (empty data dir)
-DATA=/srv/dsh-data docker/spike-evidence.sh    # full path against a prepared data volume
+docker/spike-evidence.sh                          # docker, fresh data volume
+CONTAINER_ENGINE=podman docker/spike-evidence.sh  # rootless podman
+DATA=/srv/dsh-data docker/spike-evidence.sh       # reuse a volume you already prepared
 ```
+
+Two traps it already avoids: the sidecar needs `--network host` (F1), and the configuration must be
+generated from a **file**, never with `bun -e` — `defaultConfig()` refuses an evaluated script
+(`Cannot install a service from an evaluated Bun script`).
 
 That script has only been syntax-checked (`bash -n`); no container runtime was available to execute
 it, so treat its output as the thing to verify, not as verified evidence.
+
+## 4.1 Prepared data volume — what a container needs
+
+`serve` starts with **only `config.json`** present: `/healthz` and `/v1/models` both answer without a
+browser or any login state (captured in §5). A real turn additionally needs the provider session,
+which is what phase 5 (#249) delivers.
+
+| Path (under `DSH_CHATGPT_WEB_HOME`) | Needed for | Notes |
+| --- | --- | --- |
+| `config.json` | everything | validated by `parseConfig()` (`src/config.ts`): `version: 3`, `host: "127.0.0.1"`, `mode`, `browserHost`, `port`, `headed`, `autoApproveToolCalls`, `appName`, `chromeExecutablePath`, `storageStatePath`, `brokerSocketPath`, and a 40+ character `controlToken` |
+| `browser/storage-state.json` **and** `browser/storage-state.json.verified.json` | a real turn | `browserLoginStateExists()` requires both; the marker must carry `version: 1`, `authenticated: true` and a `verifiedAt` string |
+| `runtime/turn-broker.sock` | `mode: "full"` only | created at runtime; `browser-only` does not use it |
+
+`config.json` can be produced non-interactively with the application's own primitives
+(`defaultConfig()` + `saveConfig()` — the same path `setup` uses before its login step), so a
+container entrypoint does not have to reimplement the schema. It must be run from a **file**
+(`bun /tmp/make-config.ts`), not with `bun -e`: `defaultConfig()` refuses an evaluated script
+(`Cannot install a service from an evaluated Bun script`). The generated record also carries a
+`runtimeCommand` that points at that fixture; `serve` and `doctor` do not use it in a container (the
+managed service is intentionally not used there). Its `controlToken` is a secret: it belongs in the
+volume, never in the image or the repository.
+
+`parseConfig()` also hard-forces `host === "127.0.0.1"` (`"The Responses proxy must bind to
+127.0.0.1"`), so **F1 cannot be worked around by configuration alone**: a non-loopback bind needs the
+code change owned by #247.
 
 ## 5. Evidence collected on the authoring host
 
@@ -167,21 +198,82 @@ docker-content-digest: sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d645
 # config blob sha256:2c1f4e0f… (6711 bytes): Env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright, no User
 ```
 
+### With a prepared volume (config.json only — no login, no browser)
+
+```text
+$ DSH_CHATGPT_WEB_HOME=<home> SPIKE_PORT=17899 bun run <fixture using defaultConfig/saveConfig>
+{ "wrote": "<home>/config.json", "mode": "browser-only", "browserHost": "managed-chrome",
+  "port": 17899, "storageStatePath": "<home>/browser/storage-state.json", "controlTokenLength": 43 }
+
+$ DSH_CHATGPT_WEB_HOME=<home> node lib/cli.js serve --port 17899
+$ curl -fsS http://127.0.0.1:17899/healthz
+{"status":"ok","service":"dsh-chatgpt-web","version":"1.0.28","mode":"browser-only","pid":6,
+ "port":17899,"uptime":0.531,"accepting_turns":true,"successful_model_catalog_requests":0,
+ "last_successful_model_catalog_request_at":null,"active_http_turns":0,"active_browser_turns":0}
+
+$ curl -fsS http://127.0.0.1:17899/v1/models
+{"object":"list","models":[{"slug":"chatgpt-web/luna","display_name":"ChatGPT Web — Luna",…},
+ {"slug":"chatgpt-web/think",…}]}          # catalogue ids: chatgpt-web/luna, chatgpt-web/think
+
+$ curl -sS -H 'content-type: application/json' \
+    -d '{"model":"chatgpt-web/luna","input":"ping"}' http://127.0.0.1:17899/v1/responses
+{"id":"resp_…","object":"response","status":"failed","model":"chatgpt-web/luna","output":[],
+ "error":{"message":"ChatGPT web requires the complete native Codex input for round replay",
+          "type":"server_error","code":"upstream_server_error"},
+ "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}
+# Fail-closed, typed, no hang — but NOT the login error: a wire ingress needs the complete native
+# Codex `input` array (`src/adapters/chatgpt-web/turn-execution.ts`), so the browser is never
+# reached by a partial wire body.
+
+$ DSH_CHATGPT_WEB_HOME=<home> node lib/cli.js doctor --json
+{ "ok": false, "mode": "browser-only", "checks": [
+    { "id": "config", "status": "ok",
+      "message": "Configuration is valid (<home>/config.json)" },
+    { "id": "chrome", "status": "error",
+      "message": "Chrome executable is missing: /usr/bin/google-chrome" },
+    { "id": "login", "status": "error",
+      "message": "ChatGPT login state is missing or unverified; run `dsh-chatgpt-web login`" },
+    { "id": "webchat-chatgpt-web", "status": "warning",
+      "message": "WebChat provider \"chatgpt-web\" is reachable but not authenticated",
+      "detail": "not authenticated; 2 models; 2 route(s) available" },
+    { "id": "proxy", "status": "error", "message": "Responses proxy is not reachable" } ] }
+```
+
+Consequences worth carrying into the later phases:
+
+- **`/healthz` and `/v1/models` do not need a session.** A container with a prepared `config.json`
+  can be probed (and health-checked) before any login exists — so #246's healthcheck does not depend
+  on #249.
+- The `chrome` check is exactly the guard the image's `/usr/bin/google-chrome` **symlink** satisfies;
+  the `login` check is the boundary phase 5 owns.
+- `doctor` reports the provider as *reachable but not authenticated, 2 models, 2 routes*, which is a
+  better readiness signal than "the process is up".
+
 ## 6. Not verified here (open)
 
-The authoring host has **no container runtime**: `docker`, `podman` and `nerdctl` are absent, there
-is no `/var/run/docker.sock`, and `sudo` is blocked by `no-new-privileges`. It also has **no
-Playwright browsers installed** (`~/.cache/ms-playwright` does not exist). Therefore:
+The authoring host has **no container runtime**: `docker`, `podman` and `nerdctl` are absent, there is
+no `/var/run/docker.sock`, and `sudo` is blocked by `no-new-privileges`. It also has **no Playwright
+browsers installed** (`~/.cache/ms-playwright` does not exist) and no Chrome at
+`/usr/bin/google-chrome`. Therefore:
 
 - [ ] `docker build -f docker/Dockerfile.spike .` — **not executed**.
-- [ ] container start + `/healthz` + `/v1/models` from inside the container — **not executed**.
-  (Both endpoints and their response shape are verified from `src/server.ts` only.)
-- [ ] a real Chromium launch inside the container — **not executed**. The computed path, the browsers
-  path and the revision are verified; the launch itself is not.
-- [ ] the "no login state" turn failure at runtime — **not executed**. It is verified in code
-  (`ensureManagedBrowser` in `src/adapters/chatgpt-web/browser-worker.ts` throws
-  `ChatGPT web login state is missing: …`), but reaching it needs a prepared config.
+- [ ] container start + `/healthz` + `/v1/models` from **inside** the container — **not executed**
+  (both are captured outside a container with a prepared volume, §5).
+- [ ] a real Chromium launch — **not executed**. `checkBrowserEngine()` genuinely launches
+  (`chromium.launch({ headless: true })` plus a page load); the executable path, the browsers
+  directory and the chromium revision are verified, but neither this host nor a container has run it.
+- [ ] the "no login state" **turn** failure at runtime — **not executed**. A wire ingress fails closed
+  earlier, on its input shape (§5); the login boundary itself is reported by `doctor`
+  (`login: error`) and enforced in `ensureManagedBrowser()`.
 
-The next person with a Docker-capable host should run section 4 and paste the output into the PR for
-issue #245; only then can the issue's acceptance criteria be closed. Issue #246 should not start
-until then.
+What a container run must still prove, in one command: `docker/spike-evidence.sh` (§4).
+
+### Requirements to run it
+
+- **A container runtime.** Rootless is enough where unprivileged user namespaces are available (this
+  host reports `unprivileged_userns_clone=1` and a large `max_user_namespaces`): `podman` is the
+  least invasive (no daemon, no root); Docker Engine with the user in the `docker` group, or rootless
+  Docker, also work. The evidence script accepts `CONTAINER_ENGINE=podman|docker`.
+- ~2 GB free disk, and egress to `mcr.microsoft.com`, the npm registry and `bun.sh`.
+- **No display and no provider login** are needed for this issue's criteria: every probe above runs
+  without a session.
