@@ -5,8 +5,8 @@
 # Run it on the Docker host and paste the full output into issue #245 / PR #252.
 #
 # Usage:
-#   docker/spike-evidence.sh                                  # docker, fresh data volume
-#   CONTAINER_ENGINE=podman docker/spike-evidence.sh          # rootless podman
+#   docker/spike-evidence.sh                                  # auto-detect docker, then podman
+#   CONTAINER_ENGINE=podman docker/spike-evidence.sh          # force rootless podman
 #   DATA=/srv/dsh-data docker/spike-evidence.sh               # reuse a volume you already prepared
 #   IMAGE=dsh-chatgpt-web:spike PORT=17841 docker/spike-evidence.sh
 #
@@ -14,7 +14,32 @@
 # container runs with --network host and no published port.
 set -uo pipefail
 
-ENGINE="${CONTAINER_ENGINE:-docker}"
+# CONTAINER_ENGINE wins (may be "podman" or "sudo docker"); otherwise docker, then podman. Rootless
+# podman needs no daemon, no group change and no re-login.
+if [ -n "${CONTAINER_ENGINE:-}" ]; then
+  read -r -a ENGINE <<< "$CONTAINER_ENGINE"
+elif command -v docker >/dev/null 2>&1; then
+  ENGINE=(docker)
+elif command -v podman >/dev/null 2>&1; then
+  ENGINE=(podman)
+else
+  cat <<'HINT'
+No container engine found on this host.
+
+Recommended (rootless: no daemon, no group change, no re-login):
+    sudo apt update && sudo apt install -y podman uidmap
+    CONTAINER_ENGINE=podman docker/spike-evidence.sh
+
+Alternative (Docker Engine; needs the group change and a re-login):
+    sudo apt install -y docker.io && sudo usermod -aG docker "$USER"
+    docker/spike-evidence.sh
+
+Installed somewhere else? Point the script at it:
+    CONTAINER_ENGINE="/path/to/docker" docker/spike-evidence.sh
+HINT
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${IMAGE:-dsh-chatgpt-web:spike}"
 PORT="${PORT:-17841}"
@@ -33,20 +58,28 @@ check() { # check <label> <expected-substring> <actual>
   fi
 }
 cleanup() {
-  "$ENGINE" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  "${ENGINE[@]}" rm -f "$CONTAINER" >/dev/null 2>&1 || true
   rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
 
 say "0. engine"
-"$ENGINE" version --format '{{.Server.Version}}' 2>&1 || { echo "'$ENGINE' is unavailable"; exit 1; }
+echo "using: ${ENGINE[*]}"
+"${ENGINE[@]}" version --format '{{.Server.Version}}' 2>&1 || {
+  if command -v "${ENGINE[0]}" >/dev/null 2>&1; then
+    echo "engine '${ENGINE[*]}' is present but not usable (is its daemon running?)"
+  else
+    echo "engine '${ENGINE[*]}' was not found on PATH"
+  fi
+  exit 1
+}
 
 say "1. build"
-"$ENGINE" build -f "$REPO_ROOT/docker/Dockerfile.spike" -t "$IMAGE" "$REPO_ROOT" 2>&1 || {
+"${ENGINE[@]}" build -f "$REPO_ROOT/docker/Dockerfile.spike" -t "$IMAGE" "$REPO_ROOT" 2>&1 || {
   echo "build failed"; exit 1; }
 
 say "2. image facts: the chromium the app will use, and the symlink that points at it"
-"$ENGINE" run --rm "$IMAGE" sh -lc '
+"${ENGINE[@]}" run --rm "$IMAGE" sh -lc '
   node -p "require(\"playwright-core\").chromium.executablePath()"
   ls -l /usr/bin/google-chrome
   ls -d /ms-playwright/*chromium* 2>/dev/null' 2>&1
@@ -71,20 +104,20 @@ saveConfig(config);
 console.log("wrote " + getConfigPath());
 TS
 
-"$ENGINE" run --rm --init --ipc=host --network host \
+"${ENGINE[@]}" run --rm --init --ipc=host --network host \
   -v "$DATA:/data" -v "$WORKDIR/make-config.ts:/tmp/make-config.ts:ro" \
   -e DSH_CHATGPT_WEB_HOME=/data -e "SPIKE_PORT=$PORT" "$IMAGE" \
   bun /tmp/make-config.ts 2>&1
 check "config.json was written" "wrote" "$(head -c 40 "$DATA/config.json" 2>/dev/null)"
 
 say "4. start the sidecar (loopback inside the container, host networking: finding F1)"
-"$ENGINE" run -d --name "$CONTAINER" --init --ipc=host --network host \
+"${ENGINE[@]}" run -d --name "$CONTAINER" --init --ipc=host --network host \
   -v "$DATA:/data" -e DSH_CHATGPT_WEB_HOME=/data "$IMAGE" >/dev/null
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break
   sleep 1
 done
-"$ENGINE" logs "$CONTAINER" 2>&1 | tail -3
+"${ENGINE[@]}" logs "$CONTAINER" 2>&1 | tail -3
 
 say "5. /healthz"
 HEALTH="$(curl -fsS "http://127.0.0.1:$PORT/healthz" 2>&1)"
@@ -113,7 +146,7 @@ else
 fi
 
 say "8. doctor --json inside the container"
-"$ENGINE" exec "$CONTAINER" node lib/cli.js doctor --json 2>&1 | head -40
+"${ENGINE[@]}" exec "$CONTAINER" node lib/cli.js doctor --json 2>&1 | head -40
 
 say "9. summary"
 if [ "$FAILURES" -eq 0 ]; then

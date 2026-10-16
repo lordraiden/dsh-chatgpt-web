@@ -250,11 +250,29 @@ $ curl -sS -H 'content-type: application/json' \
     -d '{"model":"chatgpt-web/luna","input":"ping"}' http://127.0.0.1:17899/v1/responses
 {"id":"resp_…","object":"response","status":"failed","model":"chatgpt-web/luna","output":[],
  "error":{"message":"ChatGPT web requires the complete native Codex input for round replay",
+          "type":"server_error","code":"upstream_server_error"}, …}
+# Fail-closed and typed, no hang: a wire ingress with a partial body never reaches the browser
+# (`src/adapters/chatgpt-web/turn-execution.ts` requires the complete native Codex `input` array).
+
+$ curl -sS -H 'content-type: application/json' -d '{
+    "model":"chatgpt-web/luna","instructions":"You are a helpful assistant.",
+    "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}]}' \
+    http://127.0.0.1:17899/v1/responses
+{"id":"resp_…","object":"response","status":"failed","model":"chatgpt-web/luna","output":[],
+ "error":{"message":"ChatGPT web login state is missing: <home>/browser/storage-state.json",
           "type":"server_error","code":"upstream_server_error"},
  "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}
-# Fail-closed, typed, no hang — but NOT the login error: a wire ingress needs the complete native
-# Codex `input` array (`src/adapters/chatgpt-web/turn-execution.ts`), so the browser is never
-# reached by a partial wire body.
+
+# server log for that turn — the browser stage is reached and fails there, in 2 ms:
+[chatgpt-web] runTurn model=gpt-5.6-luna chatOnly=true
+[chatgpt-web] browser turn 20bf0af24f85 stage=browser_page started
+[chatgpt-web] browser turn 20bf0af24f85 stage=browser_page failed durationMs=2 name=Error code=unknown
+```
+
+So the issue's **"a turn with no login state fails with the documented explicit error, not a hang or a
+crash"** is satisfied with a prepared volume, outside a container: a complete native input reaches the
+browser stage and fails there with `ChatGPT web login state is missing: …`, reported as a typed
+`status: "failed"` response (and the `usage` block is present).
 
 $ DSH_CHATGPT_WEB_HOME=<home> node lib/cli.js doctor --json
 { "ok": false, "mode": "browser-only", "checks": [
@@ -293,9 +311,10 @@ browsers installed** (`~/.cache/ms-playwright` does not exist) and no Chrome at
 - [ ] a real Chromium launch — **not executed**. `checkBrowserEngine()` genuinely launches
   (`chromium.launch({ headless: true })` plus a page load); the executable path, the browsers
   directory and the chromium revision are verified, but neither this host nor a container has run it.
-- [ ] the "no login state" **turn** failure at runtime — **not executed**. A wire ingress fails closed
-  earlier, on its input shape (§5); the login boundary itself is reported by `doctor`
-  (`login: error`) and enforced in `ensureManagedBrowser()`.
+- [x] the "no login state" **turn** failure at runtime — **executed outside a container** with a
+  prepared volume (§5): a complete native Codex `input` array reaches `stage=browser_page` and fails
+  there with `ChatGPT web login state is missing: <home>/browser/storage-state.json`, returned as a
+  typed `status: "failed"` response. Still to confirm from **inside** the container.
 
 What a container run must still prove, in one command: `docker/spike-evidence.sh` (§4).
 
