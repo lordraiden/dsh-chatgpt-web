@@ -24,9 +24,6 @@
     "assets",
     "LICENSE"
   ],
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  },
   "scripts": {
     "build": "bun build src/cli.ts --outdir lib --target node --format esm --packages external",
     "start": "node lib/cli.js serve",
