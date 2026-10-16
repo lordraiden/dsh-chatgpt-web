@@ -301,7 +301,7 @@ export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexPa
  * Logical retention decision for one normal turn.
  *
  * Continuity is a property of the DSH chat identity, not of a particular
- * browser surface: a retained Launcher is not required, so plugin-managed
+ * browser surface: a retained Launcher is not required, so service-managed
  * browsers keep the same affinity. Every normal automatic turn retains — the
  * provider conversation is the history, both for normal Chat Mode and for the
  * DSH tool-execution route — so local-tool capability no longer decides
@@ -563,7 +563,7 @@ function loadNativeContinuityConfig(): AppConfig {
 /**
  * Release the process-owned continuity stores.
  *
- * The durable backend owns an open file and a writer slot, so the sidecar/plugin shutdown path
+ * The durable backend owns an open file and a writer slot, so the sidecar shutdown path
  * releases them here. Taking the map first makes the release **idempotent**: a concurrent or repeated
  * shutdown sees an empty map and releases nothing twice.
  *

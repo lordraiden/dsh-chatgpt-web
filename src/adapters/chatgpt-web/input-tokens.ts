@@ -41,14 +41,12 @@ export function compiledChatGptWebMaxMessageChars(compiled: CompiledChatGptWebPr
 /** Tokens present in the one visible browser message, excluding hidden product/tool reserves. */
 export function estimateCompiledChatGptWebMessageTokens(
   compiled: CompiledChatGptWebPrompt,
-  modelId: string,
 ): number {
-  return Math.max(...compiledChatGptWebMessages(compiled).map(message => estimateTokens(message, modelId)));
+  return Math.max(...compiledChatGptWebMessages(compiled).map(message => estimateTokens(message)));
 }
 
 export function estimateCompiledChatGptWebInputTokens(
   compiled: CompiledChatGptWebPrompt,
-  modelId: string,
 ): number {
   const imageTokens = compiled.images.reduce(
     (total, image) => total + (image.detail === "original"
@@ -57,7 +55,7 @@ export function estimateCompiledChatGptWebInputTokens(
     0,
   );
   const messageTokens = compiledChatGptWebMessages(compiled)
-    .reduce((total, message) => total + estimateTokens(message, modelId), 0);
+    .reduce((total, message) => total + estimateTokens(message), 0);
   const acknowledgementTokens = compiled.multipart
     ? compiled.multipart.parts.slice(0, -1).reduce((total, payload, index) => total + estimateTokens(
       formatChatGptWebMultipartStage(
@@ -66,7 +64,6 @@ export function estimateCompiledChatGptWebInputTokens(
         index + 1,
         compiled.multipart!.parts.length,
       ).acknowledgement,
-      modelId,
     ), 0)
     : 0;
   return CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + messageTokens + acknowledgementTokens + imageTokens;

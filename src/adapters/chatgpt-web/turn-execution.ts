@@ -232,17 +232,6 @@ export function chatGptTurnRoundKey(parsed: CodexParsedRequest): string {
   });
 }
 
-/** Stable identity for limiting automatic retries of one native Codex turn. */
-export function chatGptTurnRetryKey(parsed: CodexParsedRequest): string {
-  const identity = extractChatGptTurnIdentity(parsed);
-  if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-turn retry budgeting");
-  return createHash("sha256").update(JSON.stringify({
-    threadId: identity.threadId,
-    turnId: identity.turnId,
-    purpose: parsed._compactionRequest ? "compaction" : "response",
-  })).digest("hex");
-}
-
 /** One native Codex thread may own at most one live ChatGPT browser surface. */
 export function chatGptThreadOwnershipKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);

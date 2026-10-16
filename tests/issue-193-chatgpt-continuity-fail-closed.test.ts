@@ -14,10 +14,15 @@
  * idempotent.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+  type SavedChatGptWebHome,
+} from "./support/chatgpt-web-home";
 import {
   ChatGptWebNativeContinuityConfigError,
   closeNativeChatGptContinuityStores,
@@ -47,24 +52,16 @@ function resolveOutcome(): { store?: unknown; error?: unknown } {
 }
 
 let home: string;
-let previousFreeHome: string | undefined;
-let previousWebHome: string | undefined;
+let savedHome: SavedChatGptWebHome;
 
 beforeEach(() => {
-  previousFreeHome = process.env.DSH_CHATGPT_FREE_HOME;
-  previousWebHome = process.env.DSH_CHATGPT_WEB_HOME;
-  home = mkdtempSync(join(tmpdir(), "issue-193-fail-closed-"));
-  delete process.env.DSH_CHATGPT_FREE_HOME;
-  process.env.DSH_CHATGPT_WEB_HOME = home;
+  savedHome = captureChatGptWebHome();
+  home = useTemporaryChatGptWebHome("issue-193-fail-closed-", { clearFreeHome: true });
 });
 
 afterEach(async () => {
   await closeNativeChatGptContinuityStores();
-  if (previousFreeHome === undefined) delete process.env.DSH_CHATGPT_FREE_HOME;
-  else process.env.DSH_CHATGPT_FREE_HOME = previousFreeHome;
-  if (previousWebHome === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
-  else process.env.DSH_CHATGPT_WEB_HOME = previousWebHome;
-  rmSync(home, { recursive: true, force: true });
+  restoreChatGptWebHome(savedHome, home);
 });
 
 function installConfig(conversationStorePath: string | undefined): void {

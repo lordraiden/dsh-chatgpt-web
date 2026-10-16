@@ -8,10 +8,12 @@
  * credential or a complete account fingerprint.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+} from "./support/chatgpt-web-home";
 import { runDoctor, webChatProviderChecks } from "../src/doctor";
 import { defaultConfig, saveConfig } from "../src/config";
 import {
@@ -120,12 +122,9 @@ describe("issue #193 — the doctor-facing provider check keeps identifiers shor
   });
 
   test("runDoctor includes the provider check in the report it prints", async () => {
-    const previousWebHome = process.env.DSH_CHATGPT_WEB_HOME;
-    const previousFreeHome = process.env.DSH_CHATGPT_FREE_HOME;
-    const home = mkdtempSync(join(tmpdir(), "issue-193-doctor-"));
+    const savedHome = captureChatGptWebHome();
+    const home = useTemporaryChatGptWebHome("issue-193-doctor-", { clearFreeHome: true });
     try {
-      delete process.env.DSH_CHATGPT_FREE_HOME;
-      process.env.DSH_CHATGPT_WEB_HOME = home;
       saveConfig(defaultConfig());
 
       const report = await runDoctor();
@@ -134,11 +133,7 @@ describe("issue #193 — the doctor-facing provider check keeps identifiers shor
       // The provider facts are in the report; the status itself depends on the account state.
       expect(provider[0]?.detail).toContain("model");
     } finally {
-      if (previousFreeHome === undefined) delete process.env.DSH_CHATGPT_FREE_HOME;
-      else process.env.DSH_CHATGPT_FREE_HOME = previousFreeHome;
-      if (previousWebHome === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
-      else process.env.DSH_CHATGPT_WEB_HOME = previousWebHome;
-      rmSync(home, { recursive: true, force: true });
+      restoreChatGptWebHome(savedHome, home);
     }
   });
 });

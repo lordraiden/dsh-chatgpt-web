@@ -2,7 +2,7 @@
  * Durable file backend for the WebChat conversation store (architecture §7.3).
  *
  * This is infrastructure, deliberately outside `src/web-chat/core`: the core owns the record, the
- * invariants and the port; this module owns bytes on disk. It reuses the plugin's existing atomic
+ * invariants and the port; this module owns bytes on disk. It reuses the project's existing atomic
  * write helper, so the durability machinery has one owner.
  *
  * Durability rules:
@@ -19,7 +19,7 @@
  * The provider handle is stored and returned verbatim: this module never parses it.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../../config";
 import {
   commitWebChatConversationDraft,
@@ -222,9 +222,4 @@ export function createFileConversationStore(
       });
     },
   };
-}
-
-/** The directory the durable store lives in, exposed for diagnostics. */
-export function webChatConversationStoreDirectory(file: string): string {
-  return dirname(file);
 }

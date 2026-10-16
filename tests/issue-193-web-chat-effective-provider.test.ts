@@ -12,9 +12,15 @@
  * refused with its location.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+  type SavedChatGptWebHome,
+} from "./support/chatgpt-web-home";
 
 import {
   createChatGptWebRouteAuthorityFromProvider,
@@ -35,23 +41,15 @@ import type { ProviderAdapter } from "../src/adapters/base";
 import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
 let home: string;
-let previousFreeHome: string | undefined;
-let previousWebHome: string | undefined;
+let savedHome: SavedChatGptWebHome;
 
 beforeEach(() => {
-  previousFreeHome = process.env.DSH_CHATGPT_FREE_HOME;
-  previousWebHome = process.env.DSH_CHATGPT_WEB_HOME;
-  home = mkdtempSync(join(tmpdir(), "issue-193-effective-"));
-  delete process.env.DSH_CHATGPT_FREE_HOME;
-  process.env.DSH_CHATGPT_WEB_HOME = home;
+  savedHome = captureChatGptWebHome();
+  home = useTemporaryChatGptWebHome("issue-193-effective-", { clearFreeHome: true });
 });
 
 afterEach(() => {
-  if (previousFreeHome === undefined) delete process.env.DSH_CHATGPT_FREE_HOME;
-  else process.env.DSH_CHATGPT_FREE_HOME = previousFreeHome;
-  if (previousWebHome === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
-  else process.env.DSH_CHATGPT_WEB_HOME = previousWebHome;
-  rmSync(home, { recursive: true, force: true });
+  restoreChatGptWebHome(savedHome, home);
 });
 
 function writeRaw(overrides: Record<string, unknown>): void {

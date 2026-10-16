@@ -1,4 +1,4 @@
-# Compose stack for the standalone sidecar (issue #246, phase 2 of the containerised-service track).
+# Compose stack for the standalone sidecar (issue #246, containerised-service track).
 #
 # Read doc/container.md first. Three variants, deliberately:
 #
@@ -12,15 +12,15 @@
 #                    because Compose cannot run it and the default service at once (same port) — see
 #                    doc/container.md §5.2. `docker compose -f docker-compose.exposed.yml up -d`.
 #
-#   `login` profile  the interactive provider login, over a noVNC display (Dockerfile.login, #259). It shares the default volume. The sign-in needs
-#                    a real display: phase 5 (#249) owns its content (noVNC/desktop-lite); until then
-#                    you can reuse a host X socket — see the comment on that service.
+#   `login` profile  the interactive provider login, over a noVNC display (Dockerfile.login, #259). It shares the default volume and ships its
+#                    own noVNC/desktop-lite display (#249), so a host with no display can still sign in.
 #
 # Only one of `chatgpt-web` / `chatgpt-web-bind` can run at a time: both use host networking and
 # therefore the same loopback port.
 #
 # Host networking is not a preference: the sidecar binds 127.0.0.1 inside its own namespace, so a
-# published port would not reach it (doc/container.md finding F1; relaxing the bind is #247).
+# published port would not reach it (doc/container.md finding F1). The `--host 0.0.0.0` variant that
+# can be port-published is the separate authenticated stack in docker-compose.exposed.yml (#247).
 
 x-build: &build
   context: .

@@ -228,21 +228,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
     },
 
     async shutdown(): Promise<void> {
-      // The provider owns its processes through the plugin lifecycle; nothing to release here.
+      // The provider owns its processes; nothing to release here.
     },
   };
-}
-
-/** The model slug a WebChat model descriptor must carry to be served by this driver. */
-export function chatGptWebDriverServesModel(
-  driver: WebChatProviderDriver,
-  provider: CodexProviderConfig,
-  model: string,
-): boolean {
-  try {
-    requireChatGptWebRoute(model, createChatGptWebRouteAuthorityFromProvider(provider));
-    return true;
-  } catch {
-    return false;
-  }
 }

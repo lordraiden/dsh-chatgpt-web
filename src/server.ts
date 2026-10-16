@@ -1088,7 +1088,7 @@ function advisorListRequest(host: AdvisorHost, url: URL): Response {
  * Read the finalized answer of one DSH session's retained Advisor conversation (issue #214).
  *
  * Read-only by construction: it never submits, navigates or creates a conversation, so a review the
- * plugin's own browser turn gave up on stays recoverable. Everything the read cannot deliver becomes
+ * browser turn gave up on stays recoverable. Everything the read cannot deliver becomes
  * a typed `ok: false` result carrying `advisor_recovery_unavailable`. The tracked execution signal
  * aborts a bounded read instead of leaving it polling the retained page.
  */

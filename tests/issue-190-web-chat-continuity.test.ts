@@ -498,7 +498,7 @@ describe("issue #190 — durable file backend", () => {
     });
   });
 
-  test("the default durable location is inside the plugin storage directory", () => {
+  test("the default durable location is inside the data directory", () => {
     expect(defaultWebChatConversationStorePath()).toContain("conversations.json");
     expect(defaultWebChatConversationStorePath()).toContain("web-chat");
   });

@@ -39,10 +39,6 @@ function responsesUsage(usage: CodexUsage | undefined): Record<string, unknown> 
   return out;
 }
 
-function responseError(status: number, type: string, message: string): CodexErrorPayload {
-  return classifyError(status, type, message);
-}
-
 function adapterFailureFromEvent(event: Extract<AdapterEvent, { type: "error" }>): { httpStatus: number; error: CodexErrorPayload } {
   if (event.status === undefined && event.errorType === undefined && event.code === undefined) {
     return adapterFailureFromMessage(event.message);
@@ -685,8 +681,8 @@ export function bridgeToResponsesSSE(
           emit("response.failed", {
             response: {
               ...responseSnapshot("failed", finishedItems),
-              error: responseError(500, "proxy_error", err instanceof Error ? err.message : String(err)),
-              last_error: responseError(500, "proxy_error", err instanceof Error ? err.message : String(err)),
+              error: classifyError(500, "proxy_error", err instanceof Error ? err.message : String(err)),
+              last_error: classifyError(500, "proxy_error", err instanceof Error ? err.message : String(err)),
             },
           });
           reportTerminal("failed");

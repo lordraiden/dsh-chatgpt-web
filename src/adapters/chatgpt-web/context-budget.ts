@@ -88,9 +88,6 @@ export interface ChatGptWebCapacityDecisionOptions {
 export function resolveChatGptWebContextBudget(
   modelId: string,
   effort: ChatGptWebAdapterEffort,
-  // Capability flags are retained for call-site compatibility; paid-account capability state is
-  // intentionally ignored because this provider's supported matrix is ChatGPT Free Web only.
-  _capabilities: Pick<{ solAvailable: boolean; proAvailable: boolean; experimentalBiggerContext?: boolean }, "solAvailable" | "proAvailable" | "experimentalBiggerContext">,
 ): ChatGptWebContextBudget {
   // #11-B is intentionally scoped to authenticated ChatGPT Free Web accounts. Paid-account
   // context windows and API model cards are not authoritative here. Current Free Web access is
@@ -254,9 +251,6 @@ export function selectCompactionMessagesDeterministically(
 }
 
 
-export const CONTEXT_EXHAUSTED_CODE = "context_exhausted";
 export const CONTEXT_BUDGET_EXCEEDED_CODE = "context_budget_exceeded";
 export const CONTEXT_COMPACTION_REQUIRED_CODE = "context_compaction_required";
-export const CONTEXT_UNSUPPORTED_CONTENT_CODE = "context_unsupported_content";
-export const CONTEXT_CANONICAL_STATE_MISSING_CODE = "context_canonical_state_missing";
 

@@ -112,8 +112,8 @@ try {
     fail(`doctor crashed (exit ${doctor.status}): ${doctorText.trim().slice(-400)}`);
   }
 
-  // The standalone CLI/sidecar must not import any DeepSeek Harness package: the Cordis plugin is
-  // fully retired, so the container product has to load on its own closure alone.
+  // The standalone CLI/sidecar must not import any DeepSeek Harness package: the container product
+  // has to load on its own module closure alone.
   const cliBundlePath = join(pkgDir, "lib", "cli.js");
   if (!existsSync(cliBundlePath)) {
     fail("standalone CLI bundle is unavailable for the DSH boundary check");

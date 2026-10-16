@@ -667,7 +667,7 @@ describe("issue #172 retained composer transport", () => {
 
   test("the new transport prompt never emits the legacy recovery marker", () => {
     // Issue #172 / recovery boundary: the legacy marker stays a recognized
-    // fail-closed input in conversation-projection, but neither the retained
+    // fail-closed input in the conversation sanitizer, but neither the retained
     // install nor the continuation may emit it.
     const legacyMarker = "Act as the model backend for the task encoded below.";
     const install = compileRetainedChatGptWebInstall(parsedWithSystem([user("hola")]), {}).text;

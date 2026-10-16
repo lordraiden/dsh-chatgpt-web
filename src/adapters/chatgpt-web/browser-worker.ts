@@ -835,25 +835,6 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   );
 }
 
-const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
-  .locator('[role="dialog"]')
-  .filter({ hasText: "Not in history" })
-  .filter({ hasText: "No model training" })
-  .filter({ hasText: "Memory off" })
-  .last();
-
-export async function dismissChatGptTemporaryChatOnboarding(page: Page): Promise<boolean> {
-  const dialog = chatGptTemporaryChatOnboardingDialog(page);
-  if (!await dialog.isVisible().catch(() => false)) return false;
-  const continueButton = dialog.getByRole("button", { name: "Continue", exact: true }).last();
-  if (!await continueButton.isVisible().catch(() => false)) {
-    throw new Error("ChatGPT Temporary Chat onboarding is visible without its Continue action");
-  }
-  await continueButton.click({ force: true });
-  await dialog.waitFor({ state: "hidden", timeout: 10_000 });
-  return true;
-}
-
 type ChatGptTextScope = Pick<Locator, "getByText">;
 
 const chatGptSubscriptionFailureAlert = (page: Page): Locator => page
@@ -998,7 +979,6 @@ export function assertChatGptWebInputWithinLimits(
   estimatedMessageTokens: number,
   modelId: string,
   effort: ChatGptWebModelMode["effort"],
-  capabilities: ChatGptWebCapabilities,
   promptChars?: number,
   composerCharLimitOverride?: number,
   serializedInputBytes?: number,
@@ -1008,7 +988,7 @@ export function assertChatGptWebInputWithinLimits(
   if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("ChatGPT web context limit is not defined for model: " + modelId);
   }
-  const baseBudget = resolveChatGptWebContextBudget(modelId, effort, capabilities);
+  const baseBudget = resolveChatGptWebContextBudget(modelId, effort);
   const budget = composerCharLimitOverride === undefined
     ? baseBudget
     : { ...baseBudget, browserComposerCharLimit: composerCharLimitOverride };
@@ -1059,7 +1039,6 @@ export function assertChatGptWebMultipartInputWithinLimits(
   estimatedMessageTokens: number,
   modelId: string,
   effort: ChatGptWebModelMode["effort"],
-  capabilities: ChatGptWebCapabilities,
   maxMessageChars: number,
   partCount: 2 | 3,
   transport?: {
@@ -1082,14 +1061,14 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error("ChatGPT Bigger Context limit is not defined for model: " + modelId);
   }
-  const budget = resolveChatGptWebContextBudget(modelId, effort, capabilities);
+  const budget = resolveChatGptWebContextBudget(modelId, effort);
   const assertMessageBoundary = (
     label: "stage" | "final part",
     messageTokens: number,
     messageChars: number,
     messageEffort: ChatGptWebModelMode["effort"],
   ): void => {
-    const messageBudget = resolveChatGptWebContextBudget(modelId, messageEffort, capabilities);
+    const messageBudget = resolveChatGptWebContextBudget(modelId, messageEffort);
     if (messageBudget.browserComposerCharLimit !== undefined && messageChars > messageBudget.browserComposerCharLimit) {
       throw new ChatGptWebAdapterError(
         `A Bigger Context ${label} contains ${messageChars.toLocaleString("en-US")} characters, which exceeds the measured ${messageBudget.browserComposerCharLimit.toLocaleString("en-US")}-character ChatGPT composer boundary. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
@@ -2288,7 +2267,7 @@ export class ChatGptBrowserWorker {
    * tombstoned key fails with its own continuity error instead of creating a conversation;
    * nothing is navigated, nothing is submitted, and the composer is never touched. The wait is
    * bounded and returns as soon as ChatGPT exposes a finalized assistant turn, which is what
-   * makes an answer recoverable after the plugin's own turn already gave up on it.
+   * makes an answer recoverable after the browser turn already gave up on it.
    *
    * @param conversationKey - the retained conversation to read.
    * @param options - bounded wait and cancellation.
@@ -4717,13 +4696,13 @@ export class ChatGptBrowserWorker {
       const multipartFinalPrompt = prepared.multipart && multipartTransactionId
         ? formatChatGptWebMultipartCommit(prepared.multipart, multipartTransactionId)
         : undefined;
-      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared, turn.modelId);
-      const estimatedMessageTokens = estimateCompiledChatGptWebMessageTokens(prepared, turn.modelId);
+      const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(prepared);
+      const estimatedMessageTokens = estimateCompiledChatGptWebMessageTokens(prepared);
       const compiledMessages = compiledChatGptWebMessages(prepared);
       const serializedInputBytes = compiledMessages.reduce((total, message) => total + Buffer.byteLength(message, "utf8"), 0);
       const maxMessageChars = compiledChatGptWebMaxMessageChars(prepared);
       const maxStageMessageTokens = multipartStages
-        ? Math.max(...multipartStages.map(stage => estimateTokens(stage.text, turn.modelId)))
+        ? Math.max(...multipartStages.map(stage => estimateTokens(stage.text)))
         : undefined;
       const maxStageChars = multipartStages
         ? Math.max(...multipartStages.map(stage => stage.text.length))
@@ -4743,7 +4722,6 @@ export class ChatGptBrowserWorker {
           estimatedMessageTokens,
           turn.modelId,
           requestedMode.effort,
-          browserCapabilities,
           maxMessageChars,
           prepared.multipart.parts.length,
           multipartStages
@@ -4753,7 +4731,7 @@ export class ChatGptBrowserWorker {
             stagingEffort: stagingMode.effort,
             maxStageMessageTokens,
             maxStageChars,
-            finalMessageTokens: estimateTokens(multipartFinalPrompt, turn.modelId),
+            finalMessageTokens: estimateTokens(multipartFinalPrompt),
             finalMessageChars: multipartFinalPrompt.length,
           } : undefined,
           serializedInputBytes,
@@ -4766,7 +4744,6 @@ export class ChatGptBrowserWorker {
           estimatedMessageTokens,
           turn.modelId,
           requestedMode.effort,
-          browserCapabilities,
           maxMessageChars,
           this.config.tuning.composerCharLimit,
           serializedInputBytes,

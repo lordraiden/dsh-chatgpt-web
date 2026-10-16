@@ -51,12 +51,6 @@ function findPartialTagPrefix(str: string, tag: string): number {
   return 0;
 }
 
-function findMaxPartialPrefix(str: string, tags: readonly string[]): number {
-  let max = 0;
-  for (const tag of tags) max = Math.max(max, findPartialTagPrefix(str, tag));
-  return max;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

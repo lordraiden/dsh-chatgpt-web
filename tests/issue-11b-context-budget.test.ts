@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
-  CONTEXT_EXHAUSTED_CODE,
   decideChatGptWebContextCapacity,
   resolveChatGptWebContextBudget,
   selectCompactionMessagesDeterministically,
 } from "../src/adapters/chatgpt-web/context-budget";
+import { CHATGPT_CONTEXT_EXHAUSTED_CODE } from "../src/adapters/chatgpt-web/adapter-error";
 import {
   CHATGPT_WEB_MAX_INPUT_IMAGES,
   applyChatGptWebImageBudget,
@@ -13,14 +13,8 @@ import {
 } from "../src/adapters/chatgpt-web/context-projection";
 import type { CodexMessage } from "../src/types";
 
-const capabilities = {
-  solAvailable: false,
-  proAvailable: false,
-  experimentalBiggerContext: false,
-};
-
 test("Free Web budget separates theoretical window from measured browser transport", () => {
-  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low", capabilities);
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low");
 
   expect(budget.theoreticalContextWindow).toBe(1_050_000);
   expect(budget.preCompactionInputBudget).toBe(128_000);
@@ -32,7 +26,7 @@ test("Free Web budget separates theoretical window from measured browser transpo
 });
 
 test("capacity decision is deterministic and prefers compaction before multipart", () => {
-  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low", capabilities);
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low");
   const input = {
     estimatedInputTokens: 140_000,
     estimatedMessageTokens: 20_000,
@@ -59,7 +53,7 @@ test("capacity decision is deterministic and prefers compaction before multipart
 });
 
 test("context exhaustion is independent of token overflow and exposes a stable semantic code", () => {
-  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low", capabilities);
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low");
   const decision = decideChatGptWebContextCapacity(
     budget,
     { estimatedInputTokens: 10, estimatedMessageTokens: 10 },
@@ -68,7 +62,7 @@ test("context exhaustion is independent of token overflow and exposes a stable s
 
   expect(decision.outcome).toBe("context_exhausted");
   expect(decision.nextAction).toBe("replay");
-  expect(CONTEXT_EXHAUSTED_CODE).toBe("context_exhausted");
+  expect(CHATGPT_CONTEXT_EXHAUSTED_CODE).toBe("context_exhausted");
 });
 
 test("unrecoverable compaction keeps developer instructions and settled tool results", () => {
@@ -155,7 +149,7 @@ test("canonical images survive intact until the explicit transport budget", () =
 
 
 test("atomic message overflow remains unrecoverable even when compaction is available", () => {
-  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low", capabilities);
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low");
   const decision = decideChatGptWebContextCapacity(
     budget,
     {
@@ -216,7 +210,7 @@ test("long-session reduction is oldest-first and leaves protected state intact",
 });
 
 test("budget diagnostics include serialized input bytes", () => {
-  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low", capabilities);
+  const budget = resolveChatGptWebContextBudget("gpt-5.6-luna", "low");
   const decision = decideChatGptWebContextCapacity(
     budget,
     {
