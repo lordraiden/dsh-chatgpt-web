@@ -1,0 +1,52 @@
+# Authenticated, port-published variant of the containerised service (issue #247).
+#
+# It is a *separate Compose project* on purpose. `docker-compose.yml` runs the loopback/host-network
+# default; Compose cannot start that service and this one at the same time (both end up on the host's
+# port 17841), so they are different projects rather than one file with profiles — the clash is then a
+# visible port error instead of a silent race. The data volume is shared by name, so a provider session
+# established once is usable by either variant.
+#
+#   export DSH_CHATGPT_WEB_API_KEY="$(openssl rand -base64 32)"
+#   docker compose -f docker-compose.exposed.yml up -d --wait
+#   curl -fsS -H "authorization: Bearer $DSH_CHATGPT_WEB_API_KEY" http://127.0.0.1:17841/v1/models
+#   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:17841/v1/models      # 401
+#
+# The service listens on 0.0.0.0 *inside* its own network namespace, which the server refuses unless a
+# key is configured; the port is published on the host's **loopback** only. To reach it from anywhere
+# else put a TLS-terminating reverse proxy in front — never publish 0.0.0.0:17841 raw.
+# Full rules and the Caddy sketch: doc/container.md §5.2.
+name: dsh-chatgpt-api
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PLAYWRIGHT_VERSION: "1.63.0"
+    image: dsh-chatgpt-web:local
+    init: true
+    ipc: host
+    restart: unless-stopped
+    environment:
+      DSH_CHATGPT_WEB_HOME: /data
+      # The server is the fail-closed authority: without a key it refuses to bind 0.0.0.0 and exits
+      # with an actionable message. Compose therefore does not force the variable to be set here, so
+      # `logs`, `ps` and `down` stay usable without the secret.
+      DSH_CHATGPT_WEB_API_KEY: "${DSH_CHATGPT_WEB_API_KEY:-}"
+    volumes:
+      - dsh-data:/data
+    command: ["serve", "--host", "0.0.0.0", "--port", "17841"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:17841/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    ports:
+      # Host loopback only: a reverse proxy terminates TLS and injects the Authorization header.
+      - "127.0.0.1:17841:17841"
+
+volumes:
+  dsh-data:
+    name: dsh-chatgpt-web-data

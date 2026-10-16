@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Authenticate and safely expose the containerised API (issue #247): the public `/v1/*` surface now
+  requires an API key (`DSH_CHATGPT_WEB_API_KEY` or `<data dir>/api-key`, `Authorization: Bearer` or
+  `x-api-key`), a non-loopback bind refuses to start without one, a key too short to authenticate
+  anything is refused, and the key is a separate authority from the operator control token. Oversized
+  bodies answer a typed 413 (`DSH_CHATGPT_WEB_MAX_REQUEST_BYTES`), an optional in-flight cap answers a
+  typed 429 (`DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS`, default off), and the new `exposed` Compose profile
+  publishes the port instead of using host networking.
 - Add the supported container distribution (issue #246): a multi-stage `Dockerfile` (Playwright base
   pinned to `playwright-core`, `--omit=peer` production install, a build-time assertion that the CLI
   loads without the DSH host peers, non-root by default), `.dockerignore` (build context 649 MB → 6 MB),

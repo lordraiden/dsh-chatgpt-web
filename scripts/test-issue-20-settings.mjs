@@ -8,6 +8,7 @@ const client = readFileSync(resolve(root, "client.js"), "utf8");
 const plugin = readFileSync(resolve(root, "src", "plugin.ts"), "utf8");
 const cli = readFileSync(resolve(root, "src", "cli.ts"), "utf8");
 const config = readFileSync(resolve(root, "src", "config.ts"), "utf8");
+const server = readFileSync(resolve(root, "src", "server.ts"), "utf8");
 
 assert(!client.includes("localStorage.getItem"), "client must not read a persisted control token");
 assert(!client.includes("localStorage.setItem"), "client must not write a persisted control token");
@@ -45,7 +46,13 @@ assert(config.includes("resolveChatGptWebContextLimits("), "provider config must
 assert(!config.includes("contextWindow: 256_000"), "default config must not invent a 256K user capacity");
 assert(cli.includes('takeOption(args, "--host")'), "serve must accept a host override");
 assert(cli.includes('takeOption(args, "--port")'), "serve must accept a port override");
-assert(cli.includes("--host must be 127.0.0.1; the sidecar is loopback-only"), "serve must preserve loopback-only access");
+// Issue #247 moved the loopback boundary: a non-loopback bind is allowed *only* with an API key, and
+// the fail-closed decision is taken when the listener starts, not by rejecting the argument outright.
+assert(!cli.includes("--host must be 127.0.0.1"), "serve must not blanket-reject a non-loopback host");
+assert(server.includes("Refusing to serve on"), "a non-loopback bind must fail closed without an API key");
+assert(server.includes("isLoopbackHost(config.host)"), "the fail-closed rule must judge the effective bind");
+assert(server.includes('req.headers.get("x-api-key")'), "the public API must accept x-api-key as well as Bearer");
+assert(!server.includes("controlAuthorized = apiAuthorized"), "the API key and the control token must stay separate authorities");
 
 async function exerciseClient(port) {
   const state = [];

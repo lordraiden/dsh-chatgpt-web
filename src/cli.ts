@@ -39,7 +39,7 @@ Usage:
   dsh-chatgpt-web setup [options]
   dsh-chatgpt-web login
   dsh-chatgpt-web doctor [--json]
-  dsh-chatgpt-web serve [--host 127.0.0.1] [--port PORT]
+  dsh-chatgpt-web serve [--host HOST] [--port PORT]
   dsh-chatgpt-web browser check
   dsh-chatgpt-web route status|connect|disconnect
   dsh-chatgpt-web subagents status|compatibility-v1|native
@@ -553,15 +553,17 @@ async function main(): Promise<void> {
     const hostOverride = takeOption(args, "--host");
     const portOverride = takeOption(args, "--port");
     assertNoArgs(args);
-    if (hostOverride !== undefined && hostOverride !== "127.0.0.1") {
-      throw new Error("--host must be 127.0.0.1; the sidecar is loopback-only");
+    if (hostOverride !== undefined && hostOverride.trim() === "") {
+      throw new Error("--host must be a non-empty host or address");
     }
     const config = loadConfig();
     const port = portOverride === undefined ? config.port : Number(portOverride);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       throw new Error("--port must be an integer between 1 and 65535");
     }
-    const activeHost = hostOverride === undefined ? config.host : "127.0.0.1";
+    // A non-loopback --host is allowed, but startServer refuses it without an API key (issue #247):
+    // the fail-closed decision lives in one place, not in this argument parser.
+    const activeHost = hostOverride === undefined ? config.host : hostOverride;
     const activeConfig = {
       ...config,
       host: activeHost,
