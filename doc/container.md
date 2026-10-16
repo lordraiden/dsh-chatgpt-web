@@ -38,6 +38,37 @@ Consequence for the image: install production dependencies, and create
 `/usr/bin/google-chrome` as a symlink to the **computed** Playwright path (never a hardcoded
 revision, which changes with every Playwright release).
 
+### 2.1 Build assumptions verified locally (no container needed)
+
+The image's risky assumptions were exercised on the authoring host in the exact shapes the Dockerfile
+uses:
+
+| Assumption | Result |
+| --- | --- |
+| The base image's Node satisfies `engines.node >= 22.19.0` | Holds: Playwright **v1.63.0**'s own `Dockerfile.noble` sets `NODE_VERSION=24` (ubuntu:noble + NodeSource) |
+| Runtime dependencies install from the public registry | Holds: `playwright-core`, `tiktoken`, `turndown`, `turndown-plugin-gfm`, `zod`, `ajv`, `ajv-formats`, `fflate`, `chromium-bidi`, `@modelcontextprotocol/sdk`, `@deepseek-ai/schemastery` all return HTTP 200 from the public registry |
+| Both **peer** dependencies are public (bun installs peers) | Holds: `@deepseek-ai/cordis`, `@deepseek-ai/dsh-llm` HTTP 200 |
+| `bun install --production --frozen-lockfile` works with only `package.json` + `bun.lock` and **no credentials** | Holds: clean directory plus isolated `HOME` (no `~/.npmrc`) → 112 packages, exit 0 |
+| `--omit=peer` drops the DSH host peers | Holds: 104 packages, with no `@deepseek-ai/cordis` and no `@deepseek-ai/dsh-llm` |
+| The sidecar runs on the production closure only | Holds: `node lib/cli.js --help` and `--version` exit 0, and `serve` answers `/healthz` + `/v1/models` (`chatgpt-web/luna`, `chatgpt-web/think`) with no peers installed |
+| Every reference to those peers is erased at build time | Holds: the only references are `import type` / `import("…").T` in `plugin.ts`, `llm-adapter.ts` and `conversation-projection.ts` |
+
+```bash
+mkdir install && cp package.json bun.lock install/ && cd install
+HOME=<empty dir> bun install --production --frozen-lockfile --omit=peer    # 104 packages, exit 0
+cp -r <repo>/lib ./lib && node lib/cli.js --help && node lib/cli.js --version
+DSH_CHATGPT_WEB_HOME=<prepared volume> node lib/cli.js serve --port 17902 &
+curl -fsS http://127.0.0.1:17902/healthz
+curl -fsS http://127.0.0.1:17902/v1/models
+```
+
+That is why the Dockerfile installs with `--omit=peer` and asserts `node lib/cli.js --help` at build
+time: the service image must not carry, and must not need, the DSH host peers (PR #230's isolation
+rule), and a future runtime dependency on them now fails the build instead of shipping.
+
+What this does **not** prove: that the same install survives the image's own base (its glibc, Node and
+Bun versions), and that Chromium plus `--ipc=host` work there. Those need the container run (§4).
+
 ## 3. Findings that change the plan
 
 ### F1 — the sidecar is loopback-only by construction (blocking for exposure)

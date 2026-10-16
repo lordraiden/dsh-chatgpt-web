@@ -29,7 +29,13 @@ ENV PATH="/root/.bun/bin:${PATH}"
 
 WORKDIR /app
 COPY package.json bun.lock ./
-RUN bun install --production --frozen-lockfile
+# --omit=peer: this image is the *service* distribution, so it must not carry the DSH host peers
+# (@deepseek-ai/cordis, @deepseek-ai/dsh-llm). Every reference to them in src/ is type-only
+# (`import type` / `import("…").T`), erased at build time, and the build assertion below proves the
+# bundle still loads without them. Verified locally: a credential-free install in a clean directory
+# succeeds from the public registry (all dependencies *and* both peers are public), and `--omit=peer`
+# leaves 104 packages with no `@deepseek-ai/cordis` or `@deepseek-ai/dsh-llm`.
+RUN bun install --production --frozen-lockfile --omit=peer
 
 # The checked-in lib/ is the runnable bundle (CI regenerates it on main); no build step is needed to
 # run the sidecar. src/ and assets/ are copied because the published package ships them and the
@@ -38,6 +44,12 @@ COPY lib ./lib
 COPY src ./src
 COPY assets ./assets
 COPY client.js cordis.patch.yml screenshots.json LICENSE ./
+
+# Build assertion: the whole CLI import graph loads with the production closure only, so a future
+# change that gives the sidecar a runtime dependency on a DSH host peer fails the build here.
+# (The base image ships Node 24 — Playwright v1.63.0's Dockerfile.noble sets NODE_VERSION=24 — which
+# satisfies this package's engines.node >= 22.19.0.)
+RUN node lib/cli.js --help > /dev/null && node lib/cli.js --version
 
 # defaultChromeExecutable() returns /usr/bin/google-chrome on Linux, which this image does not
 # create (it ships browsers under PLAYWRIGHT_BROWSERS_PATH=/ms-playwright). Compute the real path
