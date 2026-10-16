@@ -2153,4 +2153,6 @@ silently dropped (§1.2, §8.3, §16).
 **Track status.** Issues #245–#250 deliver this distribution in order: spike (base image, headless
 Chromium, health probe), production image and Compose stack, API authorization and safe exposure,
 OpenAI-compatible `/v1/chat/completions`, guided provider login and credential layout, and
-multi-provider routing. This track consumes no migration release number.
+multi-provider routing. This track consumes no migration release number. The spike's frozen
+base-image facts and its findings — including that the sidecar is loopback-only, so publishing a port
+does not expose it — are recorded in [container.md](./container.md).
