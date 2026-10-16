@@ -383,8 +383,27 @@ sign-in needs a real display, so today it is run against a host X server:
 docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY="$DISPLAY" login
 ```
 
-A self-contained headless path (Xvfb + VNC/noVNC inside its own image, so a server with no display can
-sign in too) is **not delivered yet**; until it is, `auth import` is the route for a headless host.
+A host with **no display** signs in through noVNC, in one command (issue #259):
+
+```bash
+docker build -t dsh-chatgpt-web:local . && docker compose --profile login build login
+docker compose --profile login up -d login
+# then open http://127.0.0.1:6080/vnc.html, sign in, and stop the service:
+docker compose --profile login down
+```
+
+The display stack (Xvfb, x11vnc, noVNC/websockify) lives **only** in `Dockerfile.login`, which layers on
+top of the production image, so the production artifact keeps no VNC surface. The checked facts:
+`/vnc.html` answers `200` on the published port, the published binding is `127.0.0.1:6080`, `DISPLAY=:99`
+inside the container, and the sign-in really is a headed browser on that display (11 Chrome processes
+observed). The session it captures is written to the provider credential layout above.
+
+`Xvfb` is the one exception worth naming: it is **already** present in the production image because the
+Playwright base image ships it for headed runs in CI. This change adds no display *server* to the
+production artifact; it adds the VNC/noVNC surface only to the sign-in image.
+
+> The noVNC port grants control of an authenticated browser session. It is published on the host's
+> **loopback only**; never expose it on `0.0.0.0`.
 
 **Session lifecycle**
 

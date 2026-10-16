@@ -102,3 +102,29 @@ jobs:
       - name: Tear down the exposed variant
         if: always()
         run: docker compose -f docker-compose.exposed.yml down -v
+
+      # Issues #249/#259: the headless sign-in path must be reachable without a display, from the image
+      # built on top of the production one.
+      - name: The headless sign-in image serves noVNC on loopback
+        run: |
+          docker build -f Dockerfile.login -t dsh-chatgpt-web-login:local .
+          docker run -d --name dsh-login-check -p 127.0.0.1:6080:6080 \
+            -e DSH_CHATGPT_WEB_HOME=/data dsh-chatgpt-web-login:local login
+          code=""
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:6080/vnc.html || true)
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          echo "noVNC /vnc.html -> $code"
+          docker logs dsh-login-check 2>&1 | tail -5
+          docker exec dsh-login-check sh -c 'test "$DISPLAY" = ":99"'
+          test "$code" = "200"
+
+      - name: Sign-in container logs
+        if: always()
+        run: docker logs dsh-login-check 2>&1 | tail -20
+
+      - name: Remove the sign-in container
+        if: always()
+        run: docker rm -f dsh-login-check
