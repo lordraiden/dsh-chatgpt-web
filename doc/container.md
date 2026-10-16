@@ -298,19 +298,56 @@ Consequences worth carrying into the later phases:
 - `doctor` reports the provider as *reachable but not authenticated, 2 models, 2 routes*, which is a
   better readiness signal than "the process is up".
 
+### Chromium launch with no display (the container's situation)
+
+The image supplies the browser this host lacks, so the same `playwright-core` was pointed at a
+browser installed **into the workspace** (no root, no system change) to exercise the launch itself.
+
+```text
+$ PLAYWRIGHT_BROWSERS_PATH=<ws>/.tmp/ms-playwright npm_config_cache=<ws>/.npm-cache \
+    npx --yes playwright@1.63.0 install chromium
+# -> chromium-1243 (the revision playwright-core 1.63.0 expects), i.e. the pinning rule, empirically
+$ PLAYWRIGHT_BROWSERS_PATH=<ws>/.tmp/ms-playwright \
+    node -p "require('playwright-core').chromium.executablePath()"
+<ws>/.tmp/ms-playwright/chromium-1243/chrome-linux64/chrome
+
+$ env -u DISPLAY DSH_CHATGPT_WEB_HOME=<volume> node lib/cli.js browser check
+Playwright can launch the configured Chrome executable.
+
+$ DSH_CHATGPT_WEB_HOME=<volume> node lib/cli.js doctor --json      # chrome check now
+{ "id": "chrome", "status": "ok",
+  "message": "Chrome executable found: <ws>/.tmp/ms-playwright/chromium-1243/chrome-linux64/chrome" }
+
+# The worker's *exact* launch mode — headless:false + an explicit --headless=new plus the Windows UA
+# (src/adapters/chatgpt-web/browser-worker.ts), run with no display and no Xvfb:
+$ env -u DISPLAY CHROME_PATH=<ws>/…/chromium-1243/chrome-linux64/chrome node docker/verify-headless-launch.mjs
+DISPLAY: (unset)
+version: 153.0.8010.12
+readyState: complete
+userAgent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36
+worker-mode launch: OK
+```
+
+Consequences: the app's engine check and the worker's launch mode both work headlessly **without a
+display and without Xvfb**, so the image needs neither — and the chromium revision the pinning rule
+predicts is confirmed by installing it. What is still unproven is the launch inside the image's own
+base (its glibc and Bun/Node), which is what the container run covers.
+
 ## 6. Not verified here (open)
 
-The authoring host has **no container runtime**: `docker`, `podman` and `nerdctl` are absent, there is
-no `/var/run/docker.sock`, and `sudo` is blocked by `no-new-privileges`. It also has **no Playwright
-browsers installed** (`~/.cache/ms-playwright` does not exist) and no Chrome at
-`/usr/bin/google-chrome`. Therefore:
+The authoring host is Ubuntu 26.04 and has **no container runtime**: `docker`, `podman`, `nerdctl`
+and `buildah` are absent, there is no `/var/run/docker.sock`, and `sudo` is blocked by
+`no-new-privileges`. A Playwright chromium was installed **into the workspace** for the launch probes
+above, so `~/.cache/ms-playwright` still does not exist and `/usr/bin/google-chrome` is still absent.
+Therefore:
 
 - [ ] `docker build -f docker/Dockerfile.spike .` — **not executed**.
 - [ ] container start + `/healthz` + `/v1/models` from **inside** the container — **not executed**
   (both are captured outside a container with a prepared volume, §5).
-- [ ] a real Chromium launch — **not executed**. `checkBrowserEngine()` genuinely launches
-  (`chromium.launch({ headless: true })` plus a page load); the executable path, the browsers
-  directory and the chromium revision are verified, but neither this host nor a container has run it.
+- [x] a real Chromium launch — **executed outside a container, with no display and no Xvfb**: the
+  app's own `browser check` succeeds and a probe of the worker's exact launch mode
+  (`headless:false` + `--headless=new` + the Windows UA) loads `about:blank` (§5). Still to confirm
+  from **inside** the image's own base.
 - [x] the "no login state" **turn** failure at runtime — **executed outside a container** with a
   prepared volume (§5): a complete native Codex `input` array reaches `stage=browser_page` and fails
   there with `ChatGPT web login state is missing: <home>/browser/storage-state.json`, returned as a
@@ -320,10 +357,12 @@ What a container run must still prove, in one command: `docker/spike-evidence.sh
 
 ### Requirements to run it
 
-- **A container runtime.** Rootless is enough where unprivileged user namespaces are available (this
-  host reports `unprivileged_userns_clone=1` and a large `max_user_namespaces`): `podman` is the
-  least invasive (no daemon, no root); Docker Engine with the user in the `docker` group, or rootless
-  Docker, also work. The evidence script accepts `CONTAINER_ENGINE=podman|docker`.
+- **A container runtime — the one thing missing here.** Rootless is enough where unprivileged user
+  namespaces are available (this host reports `unprivileged_userns_clone=1` and a large
+  `max_user_namespaces`), so on Ubuntu `sudo apt install -y podman uidmap` then
+  `CONTAINER_ENGINE=podman docker/spike-evidence.sh` is the least invasive path; Docker Engine
+  (`docker.io` plus the `docker` group) also works. The script auto-detects and prints these commands
+  when it finds no engine.
 - ~2 GB free disk, and egress to `mcr.microsoft.com`, the npm registry and `bun.sh`.
 - **No display and no provider login** are needed for this issue's criteria: every probe above runs
   without a session.
