@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Per-provider credentials and a guided login path (issue #249): the session now lives in
+  `providers/<providerId>/` inside the data volume, with the legacy single-provider path kept as a
+  read alias so nothing is migrated and `config.json` is never rewritten. `auth import` adopts a
+  Playwright capture **only after verifying it** against the provider's login surface and writes both
+  files atomically — an unverifiable capture writes nothing — and `doctor --json` reports the resolved
+  path per provider. The resolver has one owner (`src/config.ts`) and both resolution points (the CLI
+  and the browser worker) use it.
 - Add the OpenAI-compatible chat surface (issue #248): `POST /v1/chat/completions` (streaming and
   non-streaming) translated onto the **same** internal turn as `/v1/responses` — no second engine,
   ProviderCore or retry authority — and an additive OpenAI `data[]` array beside the existing

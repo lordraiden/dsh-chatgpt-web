@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } f
 import { dirname, join } from "node:path";
 import { chromium, type BrowserContext, type BrowserContextOptions, type Page } from "playwright-core";
 import type { AppConfig } from "./config";
-import { atomicWriteFile } from "./config";
+import { atomicWriteFile, providerCredentialsDir, providerStorageStatePath, storageStateMarkerPath } from "./config";
 import {
   assertAuthenticatedChatGptPage,
   assertChatGptPage,
@@ -136,7 +136,31 @@ export function sanitizeBrowserLoginStorageState(
 }
 
 export function loginVerificationMarkerPath(storageStatePath: string): string {
-  return `${storageStatePath}.verified.json`;
+  return storageStateMarkerPath(storageStatePath);
+}
+
+/**
+ * Write a *verified* session into the provider's credential layout (issue #249).
+ *
+ * One owner for "store a session": `login`, the system-browser capture and `auth import` all land here,
+ * so the two files can never be split across locations.
+ */
+export function storeProviderSession(
+  storageState: NonNullable<BrowserContextOptions["storageState"]>,
+  capabilities: ChatGptWebAccountCapabilities,
+): string {
+  const target = providerStorageStatePath();
+  atomicWriteFile(target, `${JSON.stringify(storageState)}\n`);
+  writeVerificationMarker(target, capabilities);
+  return target;
+}
+
+/** Verify a stored state against the provider's login surface before it is accepted (issue #249). */
+export async function verifyStoredSession(
+  config: AppConfig,
+  storageState: NonNullable<BrowserContextOptions["storageState"]>,
+): Promise<ChatGptWebAccountCapabilities & { url: string }> {
+  return inspectStoredState(config, storageState);
 }
 
 function writeVerificationMarker(
@@ -225,7 +249,7 @@ export async function captureSystemBrowserLogin(
     return remaining;
   };
 
-  const profileParent = dirname(config.storageStatePath);
+  const profileParent = providerCredentialsDir();
   mkdirSync(profileParent, { recursive: true, mode: 0o700 });
   try { chmodSync(profileParent, 0o700); } catch {}
   const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
@@ -365,9 +389,10 @@ export async function captureSystemBrowserLoginToFile(
   options: SystemBrowserLoginOptions,
 ): Promise<void> {
   const capture = await captureSystemBrowserLogin(config, options);
-  const markerPath = loginVerificationMarkerPath(config.storageStatePath);
+  const target = providerStorageStatePath();
+  const markerPath = loginVerificationMarkerPath(target);
   rmSync(markerPath, { force: true });
-  atomicWriteFile(config.storageStatePath, `${JSON.stringify(capture.storageState)}\n`);
+  atomicWriteFile(target, `${JSON.stringify(capture.storageState)}\n`);
   atomicWriteFile(markerPath, `${JSON.stringify(capture.marker)}\n`);
 }
 
@@ -418,7 +443,7 @@ export async function loginToChatGpt(
     }
   }
 
-  const profileParent = dirname(config.storageStatePath);
+  const profileParent = providerCredentialsDir();
   mkdirSync(profileParent, { recursive: true, mode: 0o700 });
   const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
   process.stdout.write(
@@ -483,10 +508,9 @@ export async function loginToChatGpt(
     capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
     const accountIdentity = await detectChatGptAuthenticatedAccountIdentity(activePage);
 
-    atomicWriteFile(config.storageStatePath, `${JSON.stringify(state)}\n`);
-    writeVerificationMarker(config.storageStatePath, capabilities);
+    const target = storeProviderSession(state, capabilities);
     return {
-      storageStatePath: config.storageStatePath,
+      storageStatePath: target,
       accountSurfaceUrl: activePage.url(),
       accountIdentityFingerprint: accountIdentity.fingerprint,
       solAvailable: capabilities.solAvailable,

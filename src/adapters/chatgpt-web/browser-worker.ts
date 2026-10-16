@@ -9,6 +9,7 @@ import {
   DEV_CHATGPT_CONNECTOR_NAME,
   expandUserPath,
   getConfigDir,
+  resolveProviderStorageStatePath,
   isLegacyChatGptConnectorName,
   legacyChatGptConnectorMigrationMessage,
   LEGACY_CHATGPT_CONNECTOR_NAMES,
@@ -2091,7 +2092,8 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
     ...(resolvedBrowserHelperScriptPath ? { browserHelperScriptPath: resolvedBrowserHelperScriptPath } : {}),
     browserDiagnosticsPath,
-    storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
+    // The provider-scoped session wins when it exists; the legacy path stays the alias (issue #249).
+    storageStatePath: resolveProviderStorageStatePath(configured.storageStatePath),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     tuning,
