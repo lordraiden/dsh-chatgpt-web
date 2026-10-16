@@ -500,6 +500,50 @@ function readApiKeyFile(home: string): string | undefined {
   }
 }
 
+/**
+ * The marker file that records a *verified* session beside its storage state.
+ *
+ * One owner for the convention (issue #249): `browser-login.ts` delegates here, and the credential
+ * resolver below needs it without importing the provider-local login module.
+ */
+export function storageStateMarkerPath(storageStatePath: string): string {
+  return `${storageStatePath}.verified.json`;
+}
+
+/**
+ * The only provider with a credential layout today. Mirrors `CHATGPT_WEB_DRIVER_ID`; kept as a plain
+ * string here to avoid a config -> provider import cycle.
+ */
+const CREDENTIAL_PROVIDER_ID = "chatgpt-web";
+
+/** The directory holding one provider's credentials inside the data home (issue #249). */
+export function providerCredentialsDir(providerId: string = CREDENTIAL_PROVIDER_ID, home = getConfigDir()): string {
+  return join(home, "providers", providerId);
+}
+
+/** Where a NEW session for this provider is written, by `login`, `setup` and `auth import`. */
+export function providerStorageStatePath(providerId: string = CREDENTIAL_PROVIDER_ID, home = getConfigDir()): string {
+  return join(providerCredentialsDir(providerId, home), "storage-state.json");
+}
+
+/**
+ * The path the runtime READS for a provider (issue #249).
+ *
+ * The provider-scoped session wins when it exists — that is where new sessions are written — and the
+ * configured (by default legacy) path stays the alias, so an existing installation keeps working with
+ * no migration and no rewritten `config.json`.
+ */
+export function resolveProviderStorageStatePath(
+  configuredPath?: string,
+  providerId: string = CREDENTIAL_PROVIDER_ID,
+  home = getConfigDir(),
+): string {
+  const scoped = providerStorageStatePath(providerId, home);
+  if (existsSync(scoped) || existsSync(storageStateMarkerPath(scoped))) return scoped;
+  const configured = (configuredPath ?? "").trim();
+  return resolve(expandUserPath(configured || join(home, "browser", "storage-state.json")));
+}
+
 export function getConfigPath(): string {
   return join(getConfigDir(), "config.json");
 }
@@ -761,7 +805,10 @@ function loadAndMigrateConfig(path: string, raw: unknown): AppConfig {
 export function loadConfig(): AppConfig {
   const path = getConfigPath();
   if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run dsh-chatgpt-web setup first.`);
-  return loadAndMigrateConfig(path, JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))));
+  const config = loadAndMigrateConfig(path, JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))));
+  // Resolve the per-provider credential layout for READS only (issue #249). Setup keeps the configured
+  // value, so a save never rewrites the persisted path.
+  return { ...config, storageStatePath: resolveProviderStorageStatePath(config.storageStatePath) };
 }
 
 export function loadConfigForSetup(): AppConfig {

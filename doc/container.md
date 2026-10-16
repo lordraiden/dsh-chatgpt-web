@@ -192,7 +192,8 @@ what phase 5 (#249) delivers.
 | Path (under `DSH_CHATGPT_WEB_HOME`) | Needed for | Notes |
 | --- | --- | --- |
 | `config.json` | everything | validated by `parseConfig()` (`src/config.ts`): `version: 3`, `host: "127.0.0.1"`, `mode`, `browserHost`, `port`, `headed`, `autoApproveToolCalls`, `appName`, `chromeExecutablePath`, `storageStatePath`, `brokerSocketPath`, and a 40+ character `controlToken` |
-| `browser/storage-state.json` **and** `browser/storage-state.json.verified.json` | a real turn | `browserLoginStateExists()` requires both; the marker must carry `version: 1`, `authenticated: true` and a `verifiedAt` string |
+| `providers/<providerId>/storage-state.json` **and** `…/storage-state.json.verified.json` | a real turn | the provider-scoped session (issue #249). `browserLoginStateExists()` requires both files; the marker must carry `version: 1`, `authenticated: true` and a `verifiedAt` string |
+| `browser/storage-state.json` (+ marker) | a real turn, legacy alias | still read when no provider-scoped session exists, so an existing installation keeps working with no migration and no rewritten `config.json`. New sessions are written **only** to the provider layout |
 | `runtime/turn-broker.sock` | `mode: "full"` only | created at runtime; `browser-only` does not use it |
 
 `config.json` can be produced non-interactively with the application's own primitives
@@ -349,6 +350,54 @@ curl -fsSN http://127.0.0.1:17841/v1/chat/completions -H 'content-type: applicat
   attachments and MCP are the **common layer's own** vocabulary (`assertTextOnlyWebChatTurn`), so the
   API does not maintain a second list.
 - Not offered: embeddings, audio, images, batch — the surface stays text-only.
+
+### 5.5 Provider login (issue #249)
+
+The runtime needs a **verified** browser session: `storage-state.json` plus its `.verified.json` marker,
+in `providers/<providerId>/` inside the data volume. Cookies alone are never enough, and the marker is
+what makes the difference between "a file exists" and "this session was proven against the provider".
+
+**Adopting a capture from anywhere (`auth import`)**
+
+```bash
+# on a machine where you can sign in (or from a browser profile you already trust):
+# the capture is a Playwright storageState JSON, or a directory containing storage-state.json
+docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture
+# or against a local install
+dsh-chatgpt-web auth import --provider chatgpt-web --from ~/Downloads/storage-state.json
+```
+
+It is **fail-closed by construction**: the capture is verified against the provider's login surface
+*first*, and both files are written atomically *afterwards* by the single session owner. A capture that
+cannot be verified — malformed, expired, or unverifiable without a browser — exits non-zero and writes
+**nothing**, so an unusable session can never masquerade as a working one. Cookie values are never
+printed. Unknown providers are refused (only `chatgpt-web` has a credential layout today; #250 owns the
+rest).
+
+**Signing in inside the container**
+
+The `login` service in `docker-compose.yml` shares the data volume and runs the interactive command. The
+sign-in needs a real display, so today it is run against a host X server:
+
+```bash
+docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY="$DISPLAY" login
+```
+
+A self-contained headless path (Xvfb + VNC/noVNC inside its own image, so a server with no display can
+sign in too) is **not delivered yet**; until it is, `auth import` is the route for a headless host.
+
+**Session lifecycle**
+
+| | |
+| --- | --- |
+| Expiry | `doctor --json` reports `login: error — ChatGPT login state is missing or unverified`, with the resolved path. Repeat the sign-in or `auth import`; nothing else needs to change |
+| Anti-bot / verification challenge | The provider may interrupt an automated session. Complete the challenge in the interactive sign-in path; a challenge does not corrupt the volume |
+| Backup | The volume holds credentials: `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data-$(date +%F).tgz -C /data .` — store it encrypted |
+| Restore | Untar it back into the volume; a restored session keeps working only while the provider still accepts it |
+| Never | commit the volume, paste a capture into an issue, or expect one provider's directory to satisfy another's check (the resolver keys on the provider id) |
+
+The caveats in §5 still apply: this is a personal, single-account bridge and the provider's terms of
+service are yours to honour.
 
 ## 6. Evidence collected on the authoring host
 

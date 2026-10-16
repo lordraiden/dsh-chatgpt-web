@@ -184,13 +184,18 @@ export async function runDoctor(): Promise<DoctorReport> {
       checks.push({ id: "chrome", status: "ok", message: `Chrome executable found: ${config.chromeExecutablePath}` });
     }
     if (!browserLoginStateExists(config)) {
-      checks.push({ id: "login", status: "error", message: "ChatGPT login state is missing or unverified; run `dsh-chatgpt-web login`" });
+      checks.push({
+        id: "login",
+        status: "error",
+        message: "ChatGPT login state is missing or unverified; run `dsh-chatgpt-web login` or `dsh-chatgpt-web auth import`",
+        detail: `provider chatgpt-web · ${config.storageStatePath}`,
+      });
     } else if (!secureFile(config.storageStatePath)) {
-      checks.push({ id: "login", status: "error", message: `ChatGPT login state is readable by other users: ${config.storageStatePath}` });
+      checks.push({ id: "login", status: "error", message: `ChatGPT login state is readable by other users: ${config.storageStatePath}`, detail: "provider chatgpt-web" });
     } else if (!secureFile(loginVerificationMarkerPath(config.storageStatePath))) {
       checks.push({ id: "login", status: "error", message: "ChatGPT login verification marker is readable by other users" });
     } else {
-      checks.push({ id: "login", status: "ok", message: "ChatGPT login state has authenticated browser evidence" });
+      checks.push({ id: "login", status: "ok", message: "ChatGPT login state has authenticated browser evidence", detail: `provider chatgpt-web · ${config.storageStatePath}` });
     }
   }
 
