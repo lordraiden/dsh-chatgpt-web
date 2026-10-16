@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+  type SavedChatGptWebHome,
+} from "./support/chatgpt-web-home";
 
 import {
   closeNativeChatGptContinuityStores,
@@ -165,12 +170,11 @@ function handoffFor(transport: WebChatTextTransport, turnId: string) {
 }
 
 let home: string;
-let previousWebHome: string | undefined;
+let savedHome: SavedChatGptWebHome;
 
 beforeEach(async () => {
-  previousWebHome = process.env.DSH_CHATGPT_WEB_HOME;
-  home = mkdtempSync(join(tmpdir(), "issue-236-"));
-  process.env.DSH_CHATGPT_WEB_HOME = home;
+  savedHome = captureChatGptWebHome();
+  home = useTemporaryChatGptWebHome("issue-236-");
   saveConfig({ ...defaultConfig(), webChat: { conversationStorePath: join(home, "conversations.json") } });
   chatGptTurnSessions.clear();
   await closeNativeChatGptContinuityStores();
@@ -179,9 +183,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await closeNativeChatGptContinuityStores();
   chatGptTurnSessions.clear();
-  if (previousWebHome === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
-  else process.env.DSH_CHATGPT_WEB_HOME = previousWebHome;
-  rmSync(home, { recursive: true, force: true });
+  restoreChatGptWebHome(savedHome, home);
 });
 
 describe("issue #236 — the ChatGPT turn runs through the shared exchange", () => {

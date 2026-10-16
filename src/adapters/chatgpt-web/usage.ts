@@ -25,8 +25,8 @@ export interface ChatGptWebRoundEvidence {
   toolRequests?: BrokerToolRequest[];
 }
 
-function conservativeTextTokens(text: string, modelId: string): number {
-  return estimateTokens(text, modelId);
+function conservativeTextTokens(text: string): number {
+  return estimateTokens(text);
 }
 
 export function estimateChatGptWebInputTokens(
@@ -49,7 +49,7 @@ export function estimateChatGptWebInputTokens(
         && Boolean(identity.threadId && identity.turnId),
     },
   );
-  return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
+  return estimateCompiledChatGptWebInputTokens(compiled);
 }
 
 /**
@@ -111,7 +111,7 @@ export function estimateChatGptWebUsage(
   capabilities: ChatGptWebCapabilities,
 ): CodexUsage {
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities);
-  const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
+  const outputTokens = conservativeTextTokens(roundEvidenceText(evidence));
   return {
     inputTokens,
     outputTokens,

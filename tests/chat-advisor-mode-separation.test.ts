@@ -9,9 +9,14 @@
  * What is simulated: only the browser I/O (`RecordingSurface`).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+  type SavedChatGptWebHome,
+} from "./support/chatgpt-web-home";
 
 import {
   closeNativeChatGptContinuityStores,
@@ -110,15 +115,11 @@ async function runTurn(
 }
 
 let home: string;
-let previousFreeHome: string | undefined;
-let previousWebHome: string | undefined;
+let savedHome: SavedChatGptWebHome;
 
 beforeEach(async () => {
-  previousFreeHome = process.env.DSH_CHATGPT_FREE_HOME;
-  previousWebHome = process.env.DSH_CHATGPT_WEB_HOME;
-  home = mkdtempSync(join(tmpdir(), "chat-advisor-separation-"));
-  delete process.env.DSH_CHATGPT_FREE_HOME;
-  process.env.DSH_CHATGPT_WEB_HOME = home;
+  savedHome = captureChatGptWebHome();
+  home = useTemporaryChatGptWebHome("chat-advisor-separation-", { clearFreeHome: true });
   saveConfig({ ...defaultConfig(), webChat: { conversationStorePath: join(home, "conversations.json") } });
   chatGptTurnSessions.clear();
   await closeNativeChatGptContinuityStores();
@@ -127,11 +128,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await closeNativeChatGptContinuityStores();
   chatGptTurnSessions.clear();
-  if (previousFreeHome === undefined) delete process.env.DSH_CHATGPT_FREE_HOME;
-  else process.env.DSH_CHATGPT_FREE_HOME = previousFreeHome;
-  if (previousWebHome === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
-  else process.env.DSH_CHATGPT_WEB_HOME = previousWebHome;
-  rmSync(home, { recursive: true, force: true });
+  restoreChatGptWebHome(savedHome, home);
 });
 
 const EXPECTED_HEADER =

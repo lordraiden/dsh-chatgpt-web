@@ -186,13 +186,6 @@ export function requireChatGptWebRoute(
   return route;
 }
 
-export function assertChatGptWebSelectionKnown(
-  authority: ChatGptWebRouteAuthority,
-): void {
-  if (authority.browserInteractionMode === "manual") return;
-  if (authority.capabilities.solAvailable === "unknown") failUnknown("Sol/model-selector");
-}
-
 export function routeAccountingDomain(route: ChatGptWebModelRoute): "chatgpt-web" {
   return route.accountingDomain;
 }

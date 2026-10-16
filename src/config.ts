@@ -767,11 +767,11 @@ function comparableReleaseVersion(value: string): [number, number, number] | und
 }
 
 /**
- * Synchronize the persisted config with the installed plugin release.
+ * Synchronize the persisted config with the installed release.
  *
  * Config files intentionally survive package upgrades, so releaseVersion is runtime metadata,
  * not user-owned configuration. Older persisted versions are promoted automatically. A config
- * from a newer plugin is refused rather than silently downgraded.
+ * from a newer release is refused rather than silently downgraded.
  */
 export function migrateReleaseVersion(config: AppConfig, installedVersion = VERSION): AppConfig {
   if (config.releaseVersion === installedVersion) return config;
@@ -784,7 +784,7 @@ export function migrateReleaseVersion(config: AppConfig, installedVersion = VERS
       || (stored[0] === installed[0] && stored[1] === installed[1] && stored[2] > installed[2]);
     if (newerConfig) {
       throw new Error(
-        `Configuration releaseVersion ${config.releaseVersion} is newer than installed plugin ${installedVersion}; refusing automatic downgrade`,
+        `Configuration releaseVersion ${config.releaseVersion} is newer than installed release ${installedVersion}; refusing automatic downgrade`,
       );
     }
   }

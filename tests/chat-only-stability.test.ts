@@ -11,7 +11,7 @@ const adapterSource = readFileSync(
   "utf8",
 );
 
-describe("chat-only 1.0.8 stability baseline", () => {
+describe("chat-only stability baseline", () => {
   test("common ChatGPT Web routes remain tool-disabled in stability mode", () => {
     const capabilities = {
       localToolsEnabled: false,

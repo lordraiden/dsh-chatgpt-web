@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   defaultConfig,
@@ -11,6 +10,11 @@ import {
   storageStateMarkerPath,
 } from "../src/config";
 import { browserLoginStateExists, loginVerificationMarkerPath, storeProviderSession } from "../src/browser-login";
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+} from "./support/chatgpt-web-home";
 
 /**
  * Issue #249 — guided provider login and credential layout.
@@ -21,12 +25,11 @@ import { browserLoginStateExists, loginVerificationMarkerPath, storeProviderSess
  * fail-closed behaviour of `auth import`.
  */
 const homes: string[] = [];
-const originalHome = process.env.DSH_CHATGPT_WEB_HOME;
+const savedHome = captureChatGptWebHome();
 
 function freshHome(): string {
-  const home = mkdtempSync(join(tmpdir(), "dsh-249-"));
+  const home = useTemporaryChatGptWebHome("dsh-249-");
   homes.push(home);
-  process.env.DSH_CHATGPT_WEB_HOME = home;
   return home;
 }
 
@@ -35,8 +38,7 @@ afterEach(() => {
     const home = homes.pop()!;
     try { rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
   }
-  if (originalHome === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
-  else process.env.DSH_CHATGPT_WEB_HOME = originalHome;
+  restoreChatGptWebHome(savedHome);
 });
 
 /** A complete Playwright storage state; the cookie value is the secret the CLI must never echo. */

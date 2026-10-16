@@ -1,6 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import {
   defaultConfig,
@@ -11,21 +9,19 @@ import {
   saveConfig,
 } from "../src/config";
 import { VERSION } from "../src/version";
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+} from "./support/chatgpt-web-home";
 
 function withTemporaryConfigHome(run: () => void): void {
-  const previousFreeHome = process.env.DSH_CHATGPT_FREE_HOME;
-  const previousWebHome = process.env.DSH_CHATGPT_WEB_HOME;
-  const home = mkdtempSync(join(tmpdir(), "dsh-chatgpt-web-release-migration-"));
+  const savedHome = captureChatGptWebHome();
+  const home = useTemporaryChatGptWebHome("dsh-chatgpt-web-release-migration-", { clearFreeHome: true });
   try {
-    delete process.env.DSH_CHATGPT_FREE_HOME;
-    process.env.DSH_CHATGPT_WEB_HOME = home;
     run();
   } finally {
-    if (previousFreeHome === undefined) delete process.env.DSH_CHATGPT_FREE_HOME;
-    else process.env.DSH_CHATGPT_FREE_HOME = previousFreeHome;
-    if (previousWebHome === undefined) delete process.env.DSH_CHATGPT_WEB_HOME;
-    else process.env.DSH_CHATGPT_WEB_HOME = previousWebHome;
-    rmSync(home, { recursive: true, force: true });
+    restoreChatGptWebHome(savedHome, home);
   }
 }
 

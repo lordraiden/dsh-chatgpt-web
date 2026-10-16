@@ -1,6 +1,6 @@
 # Production image for the standalone sidecar (issue #246, containerised-service track).
 #
-# This is the *service* distribution: it runs `lib/cli.js serve` and never loads the DSH plugin.
+# This is the *service* distribution: the container's single process runs `lib/cli.js serve`.
 # Operational documentation, including the verification record behind every number here:
 # doc/container.md.
 #

@@ -61,7 +61,7 @@ const RETIRED_TRANSPORT_HANDLE_KEYS = new Set([
 ]);
 
 /**
- * Remove only metadata keys that this plugin historically created as retired transport handles.
+ * Remove only metadata keys that earlier versions created as retired transport handles.
  * This is not a semantic normalization or repair pass.
  */
 function sanitizeRetiredTransportFields(value: unknown): unknown {
@@ -142,17 +142,6 @@ export function applyChatGptWebImageBudget(
     messages: Object.freeze(messages),
     images: Object.freeze(context.images.slice(context.images.length - maxImages)),
   });
-}
-
-export function countChatGptContextImages(messages: readonly CodexMessage[]): number {
-  let total = 0;
-  for (const message of messages) {
-    if (message.role === "assistant" || typeof message.content === "string") continue;
-    for (const part of message.content) {
-      if (part.type === "image" && !isOnePixelPngDataUrl(part.imageUrl)) total += 1;
-    }
-  }
-  return total;
 }
 
 function inputContent(

@@ -20,8 +20,7 @@ function chatGptTokenizer(): Tiktoken {
  * tokenizer call. Independent chunks can only lose cross-boundary merges, so their sum may
  * over-count slightly but cannot under-count because of a missed boundary token.
  */
-export function estimateTokens(text: string, modelId?: string): number {
-  void modelId;
+export function estimateTokens(text: string): number {
   if (!text) return 0;
 
   const encoding = chatGptTokenizer();

@@ -410,20 +410,6 @@ export class ChatGptMarkdownBuffer {
     return semanticMatches.length === 1 ? semanticMatches[0]!.index : undefined;
   }
 
-  private matchesLatestPending(segment: ChatGptMarkdownSegment): boolean {
-    const exact = this.latest.filter(candidate => (
-      segment.sourceStart !== undefined && candidate.sourceStart !== undefined
-        ? segment.sourceStart === candidate.sourceStart && segment.tag === candidate.tag
-        : segment.key === candidate.key
-    ));
-    if (exact.length === 1) return true;
-    if (segment.sourceStart !== undefined) return false;
-    if (!segment.tag) return false;
-    return this.latest.filter(candidate => (
-      candidate.tag === segment.tag && candidate.text === segment.text
-    )).length === 1;
-  }
-
   private candidateId(segment: ChatGptMarkdownSegment): string {
     return segment.sourceStart !== undefined
       ? `source:${segment.sourceStart}:${segment.tag ?? ""}`
@@ -438,12 +424,6 @@ export class ChatGptMarkdownBuffer {
       ...(segment.sourceStart !== undefined ? { sourceStart: segment.sourceStart } : {}),
       ...(segment.sourceEnd !== undefined ? { sourceEnd: segment.sourceEnd } : {}),
     };
-  }
-
-  private changedCommittedBlockError(): ChatGptMarkdownConsistencyError {
-    return new ChatGptMarkdownConsistencyError(
-      "ChatGPT changed a completed text block that was already streamed to Codex",
-    );
   }
 
   private commit(segment: ChatGptMarkdownSegment): string {

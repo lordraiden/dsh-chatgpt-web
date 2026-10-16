@@ -53,7 +53,7 @@ test("nested tool arguments remain exactly equal after canonical projection", ()
   expect(tool.arguments).toEqual(argumentsValue);
 });
 
-test("retired-handle scrubbing is limited to exact plugin-owned metadata keys", () => {
+test("retired-handle scrubbing is limited to exact bridge-owned metadata keys", () => {
   const raw = JSON.stringify({
     metadata: {
       handle: "__turn_handle",

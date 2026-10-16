@@ -366,25 +366,6 @@ export function chatGptWebModelRoute(modelId: string): ChatGptWebModelRoute | un
   return routesBySlug.get(modelId);
 }
 
-export function availableChatGptWebModelRoutes(
-  capabilities: ChatGptWebAccountCapabilities,
-): readonly ChatGptWebModelRoute[] {
-  if (capabilities.browserInteractionMode === "manual") {
-    if (capabilities.experimentalBiggerContext) {
-      throw new Error("Zero Risk does not support Bigger Context");
-    }
-    return capabilities.zeroRiskProEnabled
-      ? [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE, CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE]
-      : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
-  }
-  if (!capabilities.solAvailable) {
-    return CHATGPT_WEB_LUNA_MODEL_ROUTES;
-  }
-  return capabilities.proAvailable
-    ? CHATGPT_WEB_MODEL_ROUTES
-    : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
-}
-
 export function requireChatGptWebModelRoute(
   modelId: string,
   capabilities: ChatGptWebAccountCapabilities,
