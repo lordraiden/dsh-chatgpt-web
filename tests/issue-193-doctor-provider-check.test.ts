@@ -19,7 +19,7 @@ import {
   inspectWebChatProvider,
   redactWebChatFingerprint,
   webChatDoctorCheck,
-} from "../src/web-chat/host/dsh-integration";
+} from "../src/web-chat/host/provider-host";
 import type { WebChatModelDescriptor, WebChatProviderDriver } from "../src/web-chat/core";
 
 const FINGERPRINT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

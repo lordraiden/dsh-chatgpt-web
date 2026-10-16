@@ -30,7 +30,7 @@ import { createChatGptWebDriver } from "./chatgpt-driver";
 import { createChatGptWebTextTransport } from "./webchat-transport";
 import { chatGptConversationKey } from "./conversation-key";
 import { chatGptTurnSessions } from "./turn-execution";
-import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/dsh-integration";
+import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/provider-host";
 
 /** What the ChatGPT runtime needs to serve a text turn. */
 export interface ChatGptWebProviderRuntimeOptions {

@@ -2,7 +2,7 @@
 
 `src/web-chat/core` is the semantic layer every text-only web chat provider implements. It was
 introduced by issue #189 (`[PR 1/11] refactor(web-chat): introduce provider-neutral WebChat core`)
-and is the contract the rest of the WebChat migration builds on.
+and is the contract the rest of the codebase builds on.
 
 The target architecture is defined in [architecture.md](./architecture.md). This document is the
 index between that specification and the code that implements it today.
@@ -45,7 +45,7 @@ these is broken:
    core. Never a provider, a browser, a host wire shape or a store.
 2. **No provider, browser or routing knowledge.** No automation library, no DOM locator, no
    selector, no endpoint schema, no credential/session material, no provider name, and no
-   `ctx.llm`/adapter registration (the host runtime owns provider selection, model routing and
+   host-adapter registration (the host runtime owns provider selection, model routing and
    retry policy).
 3. **Not a store.** No filesystem, browser storage, `JSON.parse` over opaque handles, transcript
    owner or append API. `replayHistory` is an *input*; canonical history stays with the host.
@@ -96,32 +96,20 @@ ownership rule, and the exact conversation-key digests captured before the extra
 
 ## Consuming the core today (reference: ChatGPT)
 
-The ChatGPT implementation was migrated onto WebChat Core by issue #192 and connected to the DSH host by issue #193. The responsibilities are deliberately split:
+The ChatGPT implementation was migrated onto WebChat Core by issue #192 and exposed through the service host boundary by issue #193. The responsibilities are deliberately split:
 
-- `src/adapters/chatgpt-web/conversation-key.ts` owns the ChatGPT-specific interpretation of native DSH thread/session identity and delegates the stable affinity digest to `core/conversation-key.ts`. The digest remains a compatibility surface.
+- `src/adapters/chatgpt-web/conversation-key.ts` owns the ChatGPT-specific interpretation of host thread/session identity and delegates the stable affinity digest to `core/conversation-key.ts`. The digest remains a compatibility surface.
 - `src/adapters/chatgpt-web/chatgpt-driver.ts` implements the provider contract. It reports model availability, account binding, conversation assessment and provider-native continuation; Core applies the shared continuation rules.
-- `src/adapters/chatgpt-web/chatgpt-continuity.ts` expresses explicit new/resume/replay decisions through Core and confirms a durable record only after the turn settles successfully. Canonical transcript history remains owned by DSH.
+- `src/adapters/chatgpt-web/chatgpt-continuity.ts` expresses explicit new/resume/replay decisions through Core and confirms a durable record only after the turn settles successfully. Canonical transcript history remains owned by the host.
 - `src/adapters/chatgpt-web/index.ts` composes the native turn with the shared continuity/exchange semantics and ChatGPT's own browser transport. Physical browser settlement and logical turn completion remain distinct.
-- `src/web-chat/host/dsh-integration.ts`, `src/plugin.ts`, `src/server.ts` and `src/doctor.ts` form the host boundary. DSH remains the public routing authority; the host resolves only drivers that are actually implemented, projects provider-scoped model identity, reports health, and translates retry safety.
+- `src/web-chat/host/provider-host.ts`, `src/server.ts` and `src/doctor.ts` form the host boundary. The service resolves only drivers that are actually implemented, projects provider-scoped model identity, reports health, and translates retry safety.
 
 The provider-code boundary test still requires every ChatGPT-specific failure code to be classified or explicitly excluded with a reason. ChatGPT-specific DOM, browser resources, MCP/capability behavior and legacy compatibility remain outside `src/web-chat/core`.
 
 ## What is deliberately not here
 
-The common Core remains text-only and provider-neutral. It does not own provider implementations, browser transports, credentials, provider-private IDs, the DSH transcript or host route registration. Those remain with the provider, transport, host and DSH runtime respectively.
-
-| Owner | Work |
-| --- | --- |
-| #189 (PR 1) | Provider-neutral Core contracts and architectural boundary tests — merged. |
-| #190 (PR 2) | Stable affinity, opaque continuation state, and durable conversation-store semantics — merged. |
-| #191 (PR 3) | Exchange lifecycle, retry authority, physical settlement and transport leases — merged. |
-| #192 (PR 4) | ChatGPT driver/transport migration onto Core — merged. |
-| #193 (PR 5) | DSH host integration, provider-scoped configuration, health, registration and durable native continuity — merged. |
-| #194 (PR 6) | Reusable provider conformance and architecture-contract suite — merged. |
-| #195 / #196 (PRs 7–8) | Qwen Web provider implementation and provider-specific continuity validation — pending. |
-| #197 / #198 (PRs 9–10) | DeepSeek Web provider implementation and provider-specific continuity validation — pending. |
-| #199 (PR 11) | Cross-provider isolation and end-to-end conformance — pending. |
+The common Core remains text-only and provider-neutral. It does not own provider implementations, browser transports, credentials, provider-private IDs, the canonical transcript or host route registration. Those remain with the provider, transport, host and service runtime respectively.
 
 Qwen and DeepSeek are roadmap providers, not current routes. Their provider-specific session IDs, lineage, auth challenges and transport protocols must remain opaque to Core.
 
-The same Core is driven over HTTP by the repository's second distribution — the containerised service — which adds a wire-compatibility and operations layer without adding an execution path. See [architecture.md](./architecture.md) §32 and issues #245–#250.
+The containerised service drives the same Core over HTTP, adding a wire-compatibility and operations layer without adding an execution path. See [architecture.md](./architecture.md) §32 and issues #245–#250.

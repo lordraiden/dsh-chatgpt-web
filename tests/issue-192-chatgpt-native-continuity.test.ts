@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { createChatGptContinuity, chatGptReplayHistory } from "../src/adapters/chatgpt-web/chatgpt-continuity";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
-import { CHATGPT_WEB_PROVIDER_ID } from "../src/adapters/chatgpt-web/llm-adapter";
+import { CHATGPT_WEB_DRIVER_ID as CHATGPT_WEB_PROVIDER_ID } from "../src/web-chat/host/provider-host";
 import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { chatGptWebChatAccountBinding } from "../src/adapters/chatgpt-web/web-chat-bridge";
 import { createMemoryConversationStore, webChatAccountBindingId } from "../src/web-chat/core";

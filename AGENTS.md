@@ -2,31 +2,43 @@
 
 ## Project identity
 
-This repository implements `@lordraiden/dsh-chatgpt-web`, a DeepSeek Harness (DSH) Cordis plugin.
+This repository implements `@lordraiden/dsh-chatgpt-web`, a **container-only** product: a
+self-contained service distributed as a Docker image plus Compose stacks.
 
-**Current production implementation:** authenticated ChatGPT Web as a native DSH `ctx.llm` provider.
+**Product surface:**
 
-**Architectural direction:** the repository is being evolved toward a provider-neutral **WebChat Core** for authenticated, text-only consumer-web chat. ChatGPT is the existing provider being migrated to that architecture. Qwen Chat and DeepSeek Chat are planned providers; they are not current production routes.
+- the CLI (`dsh-chatgpt-web serve|doctor|login|auth import`, plus its other documented subcommands);
+- the HTTP API (`/v1/responses`, `/v1/chat/completions`, `/v1/models`, `/healthz`, `/admin/*`,
+  `/v1/control/*`), with API-key authentication through `DSH_CHATGPT_WEB_API_KEY`;
+- the ChatGPT-Web browser adapter;
+- the WebChat core contracts and the durable conversation store;
+- the container artifacts (`Dockerfile`, `Dockerfile.login`, the Compose stacks, `docker/**`).
 
-Do not confuse these two states:
+**The DeepSeek Harness Cordis plugin is abandoned.** There is no DSH plugin, no Cordis bundle, no
+`client.js`, no `cordis.patch.yml`, no `lib/plugin.js`, no `ctx.llm` provider, and no
+private-npm-registry or `dsh plugin update` release contract. Do not reintroduce any of them, and do
+not describe the product as a DSH plugin.
 
-- current behavior is established by the implementation and tests on `main`;
-- target architecture is established by `doc/architecture.md` and implementation issues #189–#199.
-
-When they differ, do not pretend the target is already implemented. Preserve current behavior unless the task is explicitly implementing the architectural migration.
+**Architectural direction:** a provider-neutral **WebChat Core** for authenticated, text-only
+consumer-web chat. ChatGPT Web is the current and only provider; Qwen Chat and DeepSeek Chat are
+planned providers and are not current routes.
 
 ## Source-of-truth hierarchy
 
 Use sources in this order:
 
 1. current implementation and tests for behavior that exists today;
-2. `doc/architecture.md` for the target WebChat ownership model;
-3. DSH upstream contracts and current provider/web evidence for external behavior;
-4. Hindsight/project memory for historical rationale only.
+2. `doc/architecture.md` for the ownership model and durable rationale;
+3. `doc/container.md` for the container's verified operational facts;
+4. current provider/web evidence for external behavior;
+5. Hindsight/project memory for historical rationale only.
 
-Hindsight is useful for decisions, constraints, and unresolved context when available, but it is not authoritative over verified current code. Re-check memory-derived claims against the repository before relying on them and correct stale conclusions rather than perpetuating them.
+Hindsight is useful for decisions, constraints, and unresolved context when available, but it is not
+authoritative over verified current code. Re-check memory-derived claims against the repository before
+relying on them and correct stale conclusions rather than perpetuating them.
 
-Never store credentials, cookies, browser storage, session tokens, API keys, runtime keys, or other secrets in Hindsight or repository instruction files.
+Never store credentials, cookies, browser storage, session tokens, API keys, control tokens, or other
+secrets in Hindsight or repository instruction files.
 
 ## Core engineering rules
 
@@ -35,7 +47,7 @@ Before changing code:
 1. Inspect the relevant implementation, tests, configuration, and documentation.
 2. Identify the current owner of the behavior.
 3. Check `doc/architecture.md` and the relevant issue/PR boundary.
-4. Check current DSH upstream contracts when the change depends on DSH behavior.
+4. For container behavior, check `doc/container.md` and the container workflow.
 5. For provider-specific web behavior, inspect the current web surface rather than assuming an old protocol still exists.
 6. Prefer a complete change that preserves ownership boundaries over a locally convenient patch.
 
@@ -53,27 +65,28 @@ When editing:
 
 The complete architecture is defined in `doc/architecture.md`. These invariants are mandatory.
 
-### DSH is the provider-routing authority
+### The service is the provider-routing authority
 
-The DSH LLM runtime owns public provider selection and route dispatch.
-
-WebChat may resolve an already-selected provider route to its internal driver, but WebChat must not become a second public provider registry or routing authority.
+The service's configured provider catalogue owns provider selection and route dispatch. The API caller
+selects a catalogue model identifier, and WebChat resolves that already-selected route to its internal
+driver.
 
 The rule is:
 
 ```text
-DSH selects provider
+caller selects a catalogue model
         ↓
 WebChat resolves driver
         ↓
 provider executes the selected turn
 ```
 
-Do not move provider selection, public model routing, or DSH retry policy into WebChat.
+WebChat must not become a second public provider registry. Do not move provider selection or public
+model routing into a provider driver, and do not create a second retry authority.
 
-### DSH session is canonical
+### Canonical history is owned by the caller
 
-The DSH session/history remains authoritative.
+Canonical transcript history belongs to the caller that keeps it.
 
 A provider conversation is continuity state only.
 
@@ -85,9 +98,9 @@ Never make:
 - a browser page;
 - a network session;
 
-the identity of the DSH conversation.
+the identity of the caller's conversation.
 
-The same DSH session may intentionally have separate provider conversations.
+One caller conversation may intentionally have separate provider conversations.
 
 ### Provider conversation is opaque
 
@@ -128,7 +141,7 @@ The system must distinguish, at minimum:
 - continuity lost/uncertain;
 - unsupported.
 
-Replay is a deliberate recovery mode derived from canonical DSH text state.
+Replay is a deliberate recovery mode derived from canonical text state.
 
 ### One active turn per logical conversation
 
@@ -136,9 +149,9 @@ A provider conversation is sequential by default.
 
 Do not allow two active turns to mutate the same logical provider conversation unless the provider protocol explicitly proves concurrency safety.
 
-Concurrency between different DSH sessions/conversations is a separate resource-ownership question.
+Concurrency between different caller conversations is a separate resource-ownership question.
 
-For ChatGPT specifically, the current `main` branch still contains an account-level lease limitation that can block a second DSH chat on the same authenticated account. This is a known implementation issue tracked by #201/#202. Do not generalize that current account-level exclusivity into the future WebChat Core.
+For ChatGPT specifically, the current `main` branch still contains an account-level lease limitation that can block a second chat on the same authenticated account. This is a known implementation issue tracked by #201/#202. Do not generalize that current account-level exclusivity into the future WebChat Core.
 
 The intended architecture scopes exclusivity to the logical conversation and the physical transport resource, while account-level fan-out remains bounded and provider-specific.
 
@@ -147,7 +160,7 @@ The intended architecture scopes exclusivity to the logical conversation and the
 There are two distinct retry layers:
 
 1. WebChat/transport retry inside one logical turn.
-2. DSH LLM retry around the adapter.
+2. The API client's retry around the service.
 
 They must never become competing execution authorities.
 
@@ -181,13 +194,14 @@ Do not add to the common core:
 - images;
 - audio/video;
 - MCP;
-- DSH tool execution;
+- host/agent tool execution;
 - computer-use;
 - provider-native agent loops;
 - sandbox execution;
 - generic autonomous-browser behavior.
 
-Unsupported request content must fail explicitly. Never silently discard files, images, tools, or other unsupported `GenerateOptions` content just to make a request succeed.
+Unsupported request content must fail explicitly. Never silently discard files, images, tools, or other
+unsupported request content just to make a request succeed.
 
 ### Provider-specific responsibilities
 
@@ -208,9 +222,9 @@ Do not assume API model IDs or API transport semantics describe the consumer-Web
 
 For Qwen and DeepSeek especially, the driver may require persistent browser state, interactive verification, browser-assisted network transport, or other provider-local session mechanisms.
 
-### DSH replay state
+### Opaque replay state
 
-DSH `replayState`, when used, is supplemental opaque metadata.
+Provider replay state, when used, is supplemental opaque metadata.
 
 It does not replace the durable WebChat conversation store.
 
@@ -233,19 +247,18 @@ Do not generalize ChatGPT MCP, Codex, Advisor, Responses, file/image, or tool se
 
 The separate native Codex passthrough must remain separate from ChatGPT Web and from the future WebChat Core.
 
-## Cordis and sidecar lifecycle
+## Service runtime behavior
 
-The Cordis plugin integrates the sidecar into the DSH lifecycle and owns cleanup **only for processes it spawned**.
-
-Preserve:
+The container runs one service process: the entrypoint bootstraps the data volume and then execs
+`node lib/cli.js "$@"`. Preserve:
 
 - health-check based startup;
-- explicit `autoStart` semantics;
 - bounded readiness waiting;
-- cleanup of spawned processes on shutdown;
-- actionable diagnostics when startup fails.
+- cleanup of processes the service itself spawned, and only those;
+- actionable diagnostics when startup fails;
+- the entrypoint's default-configuration bootstrap on an empty volume.
 
-Do not turn the plugin into a competing or unconditional process manager.
+Do not turn the entrypoint or the service into a competing or unconditional process manager.
 
 ## ChatGPT browser/runtime behavior
 
@@ -266,23 +279,16 @@ Do not reintroduce account-wide exclusivity as a generic WebChat rule.
 
 ## Provider migration discipline
 
-The multi-provider migration is intentionally staged.
+The multi-provider work is intentionally staged. The shared contracts, the ChatGPT migration, the
+service host integration and the conformance suite are delivered; the remaining order is:
 
-Implementation order:
+1. Qwen Web text provider.
+2. Qwen real-session validation/recovery hardening.
+3. DeepSeek Web text provider.
+4. DeepSeek real-session validation/recovery hardening.
+5. Cross-provider integration validation.
 
-1. WebChat contracts.
-2. Durable conversation affinity/continuation.
-3. Exchange lifecycle and transport ownership.
-4. ChatGPT migration.
-5. DSH route integration and driver resolution.
-6. Provider conformance and architecture tests.
-7. Qwen Web text provider.
-8. Qwen real-session validation/recovery hardening.
-9. DeepSeek Web text provider.
-10. DeepSeek real-session validation/recovery hardening.
-11. Cross-provider integration validation.
-
-The corresponding issues are #189–#199.
+Do not re-litigate the delivered stages while adding a provider.
 
 Do not skip the shared contracts and then implement Qwen/DeepSeek by copying ChatGPT code.
 
@@ -295,16 +301,21 @@ Never commit or publish:
 - ChatGPT cookies or browser storage state;
 - Qwen/DeepSeek browser/session credentials;
 - browser user-data directories;
-- API keys;
+- API keys (`DSH_CHATGPT_WEB_API_KEY`, `<data dir>/api-key`);
 - session tokens;
-- launcher credentials;
-- runtime keys;
-- access-bearing tunnel identifiers;
 - control tokens;
+- the private data volume;
 - raw private prompts or sensitive tool results;
 - private local filesystem paths in public diagnostics.
 
-Do not weaken authorization, path validation, or timing-sensitive comparisons.
+Do not weaken:
+
+- the API-key guard or the fail-closed non-loopback bind;
+- the operator control-token authority (`/v1/control/*`, `/admin/*`) or its separation from the API key;
+- path validation or timing-sensitive comparisons.
+
+The noVNC sign-in port grants control of an authenticated browser session: keep it on the host's
+loopback only.
 
 Use sanitized examples in issues and documentation.
 
@@ -312,17 +323,17 @@ Use sanitized examples in issues and documentation.
 
 Keep one authoritative home for important facts:
 
-- `README.md`: current user-facing behavior, setup and supported features;
-- `README.zh-CN.md`: synchronized Chinese user-facing documentation;
+- `README.md`: user-facing behavior, quick start, API surface and supported features;
 - `TROUBLESHOOTING.md`: operational diagnosis and current known limitations;
 - `SECURITY.md`: security policy;
-- `doc/architecture.md`: target architecture and durable ownership/rationale;
+- `doc/architecture.md`: architecture and durable ownership/rationale;
+- `doc/container.md`: the container operations manual (image, Compose, data volume, credentials, exposure);
 - source comments/JSDoc: local implementation contracts;
 - GitHub issues/PRs: implementation plans and review history.
 
 Do not turn `AGENTS.md` into a second README or changelog.
 
-When behavior changes, update the correct authoritative document. When current implementation differs from target architecture, document the distinction explicitly rather than silently rewriting history.
+When behavior changes, update the correct authoritative document. When the container's behavior differs from a stated intent, document the distinction explicitly rather than silently rewriting history.
 
 ## Verification
 
@@ -341,10 +352,25 @@ For packaging, installation, architecture, routing, persistence, or behavioral c
 bun run test
 ```
 
+`bun run test` is the gate CI runs. `bun test` alone is **not** that gate: it skips the container-pin
+check (`scripts/test-246-container-pin.mjs`), the authority check
+(`scripts/test-issue-75-authority.ts`) and the tarball smoke test that `bun run test` includes.
+
+For container changes:
+
+```bash
+docker build -t dsh-chatgpt-web:local .
+docker compose up -d --wait
+./docker/verify-container.sh
+```
+
+The `Container image` workflow (`.github/workflows/container.yml`) builds the image, runs the default
+and exposed stacks, checks both catalogue shapes and verifies the noVNC sign-in surface; keep it green.
+
 For browser/session changes, also use the relevant diagnostics:
 
 ```bash
-dsh-chatgpt-web doctor
+docker compose exec chatgpt-web node lib/cli.js doctor --json
 ```
 
 For provider/web integrations, add deterministic contract tests first and use real authenticated provider sessions only for provider-specific behavior that mocks cannot prove.
@@ -402,84 +428,31 @@ When evidence is incomplete:
 
 Prefer verified behavior over stale memory.
 
-## Release cadence for the WebChat migration
-
-The numbered WebChat migration issues #189–#199 are released **one PR at a time**. Each completed migration PR produces exactly one stable patch release.
-
-The current `main` package version is `1.0.28` and it is released (`v1.0.28`, published 2026-10-12).
-
-**Release history as verified on 2026-10-12, plus `v1.0.28` (tagged and released on the same date).** The private registry holds `1.0.6`–`1.0.17` (all but `1.0.12`), plus `1.0.25`, `1.0.26`, `1.0.27` and `1.0.28`. Only `v1.0.6`, `v1.0.17`, `v1.0.25`, `v1.0.26`, `v1.0.27` and `v1.0.28` are tagged, and only `v1.0.17`, `v1.0.25`, `v1.0.26`, `v1.0.27` and `v1.0.28` have GitHub Releases — most early versions were published without tag or Release, and `1.0.18`–`1.0.24` were never published at all. The table below is therefore the original migration **intent**, not a booking: a future numbered migration PR takes the next free patch version and states it in its own release preparation, and it must not renumber a version that has already been published.
-
-| Migration PR | Issue | Release |
-| --- | --- | --- |
-| PR 1/11 | #189 | `v1.0.18` |
-| PR 2/11 | #190 | `v1.0.19` |
-| PR 3/11 | #191 | `v1.0.20` |
-| PR 4/11 | #192 | `v1.0.21` |
-| PR 5/11 | #193 | `v1.0.22` |
-| PR 6/11 | #194 | `v1.0.24` |
-| PR 7/11 | #195 | `v1.0.25` |
-| PR 8/11 | #196 | `v1.0.26` |
-| PR 9/11 | #197 | `v1.0.27` |
-| PR 10/11 | #198 | `v1.0.28` |
-| PR 11/11 | #199 | `v1.0.29` |
-
-For these PRs:
-
-- The PR must include the corresponding `package.json` version bump.
-- The PR must not skip or consume another migration step's version.
-- The implementation PR is responsible for its own release preparation; do not create a separate release PR just for the version bump.
-- Before merge, run the required verification for that PR and ensure the version matches the planned release.
-- After merge, tag the exact merged `main` commit with the planned version.
-- The next migration PR must start from the released version produced by the previous migration PR.
-- If a migration PR is intentionally abandoned or reordered, stop and reconcile the release sequence before merging a later numbered migration PR. Never silently renumber releases.
-- Non-migration fixes/docs PRs do not consume a reserved WebChat migration release number. They use the normal release policy only when a release is actually required.
-
-The **containerised service distribution** track (issues #245–#250, `doc/architecture.md` §32) is a non-migration track: it follows the line above and must not take a version reserved for the numbered WebChat migration steps.
-
-This release cadence is a delivery constraint for the migration, not a reason to bundle unrelated changes into a migration PR.
-
-## Release and DSH update contract
+## Release and verification contract
 
 Releases are tag-based. A merge to `main` is not itself a release.
 
-- `package.json` `version` is the package version source of truth.
+- `package.json` `version` is the package version source of truth, and it must agree with `src/version.ts`.
 - Stable tags must be `vX.Y.Z` and must match `package.json` without the leading `v`.
 - A release tag must point to the exact commit already merged into `main`.
 - Do not release from feature, fix, archive, or release branches.
 
 ### Release sequence
 
-1. Bump `package.json` version in a normal PR.
+1. Bump `package.json` version (and `src/version.ts`) in a normal PR.
 2. Merge into `main` and wait for green CI/tarball smoke.
-3. The verify job detects the bump against `package.json` and `src/version.ts`, synchronizes the checked-in `lib`, and creates `vX.Y.Z` **itself** from the exact commit it just tested. Do not push release tags by hand: a hand-made tag skips the `lib` synchronization, so the package would be built and published from a tree with a stale bundle.
-4. The same job validates the version and publishes the package **only to the private GitHub Packages npm registry** at `https://npm.pkg.github.com`.
-5. It then waits until that exact version is available in GitHub Packages, downloads the *published* tarball, smoke-tests those exact bytes, and creates the published GitHub Release with a `## Verified release provenance` section naming the tag commit, the CI run and the tarball SHA-256.
-6. A stable version is complete only when the matching tag, private GitHub package, and GitHub Release exist. `verify` is the single owner of the tag, the package and the Release; there is no separate Release workflow, because a tag pushed by CI cannot trigger one (GitHub suppresses runs caused by `GITHUB_TOKEN`).
+3. The `verify` job (`.github/workflows/ci.yml`) detects the bump, regenerates the checked-in `lib` from
+   `src`, and creates `vX.Y.Z` **itself** from the exact commit it just tested. Do not push release tags
+   by hand: a hand-made tag skips the `lib` synchronization, so the artifact would be built from a stale
+   bundle.
+4. The same job packs the artifact, smoke-tests those exact bytes, and is the single owner of the tag and
+   the release. There is no separate Release workflow, because a tag pushed by CI cannot trigger one
+   (GitHub suppresses runs caused by `GITHUB_TOKEN`).
 
-There is **no npmjs.com publication**. Do not add an npmjs.com publish step, token, or registry entry.
-
-### DSH update contract
-
-For this private package, pnpm must resolve the `@lordraiden` scope through GitHub Packages:
-
-```ini
-@lordraiden:registry=https://npm.pkg.github.com
-```
-
-Authentication must be supplied outside the repository, for example through the user's `~/.npmrc` or environment:
-
-```ini
-//npm.pkg.github.com/:_authToken=\${GITHUB_PACKAGES_TOKEN}
-```
-
-Never commit a token to the repository or to a DSH profile file.
-
-DSH updates must use stable SemVer versions from the private registry. Do not follow `main`, feature branches, or moving Git refs for normal updates.
-
-The intended chain is:
-
-`main` merge → green CI → `vX.Y.Z` tag → private GitHub Packages publication → GitHub Release → `dsh plugin update`.
+The **container image is the shipping distribution**. `.github/workflows/container.yml` builds the
+production image and waits for health on every change to `Dockerfile`, `Dockerfile.login`, the Compose
+stacks, `docker/**`, `package.json`, `bun.lock` or `src/**`. Nothing is pushed to an image registry and
+there is no private-registry or plugin-update release contract to maintain; do not add one.
 
 Before any manual release operation:
 

@@ -5,10 +5,11 @@
  * start of a session — its own instructions, environment blocks, file trees, timestamps — must not
  * become part of the provider turn.
  *
- * Why this is a separate owner from `src/conversation-projection.ts`:
- * that one is DSH-specific. `carriesConversation()` allows every non-`user` role and, for a `user`
- * message, requires DSH's `source.kind`; a generic client sends neither, so it lets everything
- * through. It stays DSH-only and is deliberately not duplicated or reused here.
+ * Why this is a separate owner from `src/conversation-sanitizer.ts`: that one strips host-injected
+ * transport text out of a single piece of text, but it has no notion of message provenance — a
+ * generic API client carries no `source.kind`, so text-level sanitization alone cannot decide which
+ * messages are the conversation. This owner decides by message role and client session identity
+ * instead, and deliberately keeps no second copy of the transport marker list.
  *
  * The rule is structural, never per-harness (a generic client carries no provenance, so a
  * per-harness rule could not be universal):

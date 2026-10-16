@@ -5,7 +5,6 @@ import { dirname, join, relative, resolve } from "node:path";
 import { WebChatExchangeLifecycle } from "../src/web-chat/core";
 import { assertTextOnlyWebChatTurn } from "../src/web-chat/core/exchange";
 import { decideWebChatRetry, webChatRetrySafetyOf } from "../src/web-chat/core/retry-authority";
-import { dshFailureSemanticsForSubmission } from "../src/web-chat/host/dsh-integration";
 
 /** Issue #194 — mechanically detectable provider-neutral WebChat architecture contracts. */
 const ROOT = join(import.meta.dir, "..");
@@ -419,10 +418,10 @@ describe("issue #194 — provider and common-contract boundaries", () => {
       .toThrow(/unsupported request features: files/);
   });
 
-  test("DSH routing authority remains at the host boundary", () => {
-    const integration = codeOnly(readFileSync(join(SRC, "web-chat", "host", "dsh-integration.ts"), "utf8"));
-    expect(integration).toContain("createWebChatHostResolver");
-    expect(integration).toContain("createWebChatDriverResolver");
+  test("provider routing authority remains at the host boundary", () => {
+    const integration = codeOnly(readFileSync(join(SRC, "web-chat", "host", "provider-host.ts"), "utf8"));
+    expect(integration).toContain("resolveWebChatProviderConfig");
+    expect(integration).toContain("inspectWebChatProvider");
     expect(integration).not.toMatch(/registerAdapter|ctx\.llm\s*\.\s*register|publicProviderRegistry/i);
     for (const file of coreFiles) {
       const source = codeOnly(readFileSync(file, "utf8"));
@@ -432,7 +431,7 @@ describe("issue #194 — provider and common-contract boundaries", () => {
 });
 
 describe("issue #194 — one retry authority after submission", () => {
-  test("WebChat and DSH both refuse submitted, ambiguous, and partial turns", () => {
+  test("WebChat refuses submitted, ambiguous, and partial turns", () => {
     const cases = [
       { state: "SUBMISSION_AMBIGUOUS", partial: false },
       { state: "SUBMITTED", partial: false },
@@ -458,8 +457,6 @@ describe("issue #194 — one retry authority after submission", () => {
       const observation = { snapshot, partialOutputObserved: item.partial };
       expect(webChatRetrySafetyOf(observation)).not.toBe("retry_safe");
       expect(decideWebChatRetry(observation).allowed).toBe(false);
-      expect(dshFailureSemanticsForSubmission({ phase: snapshot.phase, partialOutputObserved: item.partial }).retryable)
-        .toBe(false);
     }
   });
 });

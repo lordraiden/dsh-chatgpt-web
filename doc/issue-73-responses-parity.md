@@ -1,11 +1,11 @@
 # Issue #73 parity and retirement audit
 
-The native DSH provider and `/v1/responses` are verified at the ProviderCore ingress boundary.
+The service API and `/v1/responses` are verified at the ProviderCore ingress boundary.
 
 ## Parity
 
 - Model resolution and route eligibility: both converge on `requireChatGptWebRoute()` and `routeChatGptWebRequest()`.
-- Canonical context: Responses parsing produces the same `CodexParsedRequest` consumed by the Web adapter; the adapter owns canonical DSH -> Web projection.
+- Canonical context: Responses parsing produces the same `CodexParsedRequest` consumed by the Web adapter; the adapter owns canonical host -> Web projection.
 - Capability binding: `ChatGptWebProviderCore` owns the immutable per-turn snapshot and its binding identity.
 - Turn identity: native turn/thread metadata is extracted before Web execution and is bound to the same ProviderCore execution key.
 - Streaming: Responses is only a wire bridge over the adapter event stream.

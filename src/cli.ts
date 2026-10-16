@@ -33,7 +33,7 @@ import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `dsh-chatgpt-web ${VERSION}
 
-DeepSeek Harness plugin that bridges an authenticated ChatGPT Web session into the native DSH ctx.llm runtime.
+Containerised ChatGPT Web sidecar: an authenticated ChatGPT Web session exposed as an OpenAI-compatible HTTP API.
 
 Usage:
   dsh-chatgpt-web setup [options]
@@ -375,11 +375,11 @@ async function setupCommand(args: string[]): Promise<void> {
   }
 
   const result = await setup(options);
-  stdout.write(`\n✓ DSH ChatGPT Web setup complete (${result.mode})!\n`);
+  stdout.write(`\n✓ ChatGPT Web sidecar setup complete (${result.mode})!\n`);
   stdout.write(`Config: ${result.configPath}\n`);
-  stdout.write("Native DSH usage: the plugin registers chatgpt-web through ctx.llm automatically.\n");
-  stdout.write("No OpenAI API key or openai-responses provider entry is required for native DSH calls.\n");
-  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your DSH default-model configuration.\n");
+  stdout.write("The service owns the chatgpt-web provider routes itself; no DSH plugin or ctx.llm runtime is involved.\n");
+  stdout.write("No OpenAI API key or openai-responses provider entry is required for native Web calls.\n");
+  stdout.write("Select an authenticated Web route such as chatgpt-web/light or chatgpt-web/luna in your client's model configuration.\n");
   stdout.write("See README.md -> Configuration Reference for all setup flags, storage settings, tuning, and model routes.\n");
 }
 

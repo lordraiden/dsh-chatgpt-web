@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { chatGptRetainedDeltaEmptyError } from "./adapter-error";
-import { sanitizeConversationText } from "../../conversation-projection";
+import { sanitizeConversationText } from "../../conversation-sanitizer";
 import { type CodexMessage, type CodexParsedRequest } from "../../types";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,

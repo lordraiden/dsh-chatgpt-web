@@ -616,13 +616,4 @@ describe("issue #224 — provider neutrality is enforced, not just intended", ()
       }
     }
   });
-
-  test("no provider-specific wording survives in the Advisor client surface", () => {
-    const client = readFileSync(join(import.meta.dir, "..", "client.js"), "utf8");
-    expect(client).not.toContain("Review with ChatGPT");
-    expect(client).not.toContain("advisor.dialog.modeNormal");
-    expect(client).not.toContain("advisor.dialog.modeThink");
-    expect(client).not.toContain("ChatGPT Advisor");
-    expect(client).not.toContain("/v1/control/advisor/review'");
-  });
 });

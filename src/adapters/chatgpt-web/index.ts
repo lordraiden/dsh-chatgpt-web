@@ -70,7 +70,7 @@ import {
   CHATGPT_WEB_DRIVER_ID,
   closeWebChatConversationStore,
   createWebChatConversationStore,
-} from "../../web-chat/host/dsh-integration";
+} from "../../web-chat/host/provider-host";
 import {
   chatGptWebChatAccountBinding,
 } from "./web-chat-bridge";

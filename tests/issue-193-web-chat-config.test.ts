@@ -13,14 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { defaultConfig, getConfigPath, loadConfig, providerConfig, type AppConfig } from "../src/config";
-import {
-  effectiveChatGptWebProviderConfig,
-} from "../src/adapters/chatgpt-web/llm-adapter";
+import { effectiveChatGptWebProviderConfig } from "../src/chatgpt-web-provider-config";
 import {
   CHATGPT_WEB_DRIVER_ID,
   resolveWebChatProviderConfig,
   type WebChatHostConfig,
-} from "../src/web-chat/host/dsh-integration";
+} from "../src/web-chat/host/provider-host";
 
 let home: string;
 let previousFreeHome: string | undefined;

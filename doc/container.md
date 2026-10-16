@@ -1,22 +1,21 @@
 # Containerised service — operations
 
-**Status:** supported deployment (issue #246, phase 2 of 6). The image, the Compose stack, the
-healthcheck and the CI build job are implemented and verified; §7 records that verification, and §6
-keeps the phase-1 (#245) findings that constrain the rest of the track.
+**Status:** the supported distribution. The container **is** the product: the image, the Compose
+stacks, the healthcheck, the authenticated API, the OpenAI-compatible surface and the guided provider
+login are implemented, verified and kept green by the container workflow (§7 records the in-container
+verification). Issues #245–#250 are merged and closed.
 
-Read [architecture.md](./architecture.md) §32 first. Still open in the track: #247 (API authorization
-and a safe bind), #248 (OpenAI-compatible `chat/completions`), #249 (guided provider login), #250
-(multi-provider routing).
+Read [architecture.md](./architecture.md) §32 first.
 
 ## 1. What this distribution is
 
-The repository has two entry points over one core:
+The service is one entry point over one core:
 
-- `lib/plugin.js` — the DSH Cordis plugin;
-- `lib/cli.js serve` — the standalone sidecar HTTP service, deliberately independent of the host-only
-  DSH LLM peer (asserted by `scripts/smoke-tarball.mjs`).
+- `lib/cli.js` (`src/cli.ts`) — the CLI (`serve`, `doctor`, `login`, `auth import`) and the HTTP
+  service it hosts, deliberately independent of any DeepSeek Harness package (asserted by
+  `scripts/smoke-tarball.mjs`).
 
-This track wraps the **sidecar** in a container. The plugin path is untouched.
+The container wraps that service, and running the image is the supported way to deploy it.
 
 ## 2. Frozen facts (verified 2026-10-16)
 
@@ -46,16 +45,14 @@ uses:
 | Assumption | Result |
 | --- | --- |
 | The base image's Node satisfies `engines.node >= 22.19.0` | Holds: Playwright **v1.63.0**'s own `Dockerfile.noble` sets `NODE_VERSION=24` (ubuntu:noble + NodeSource) |
-| Runtime dependencies install from the public registry | Holds: `playwright-core`, `tiktoken`, `turndown`, `turndown-plugin-gfm`, `zod`, `ajv`, `ajv-formats`, `fflate`, `chromium-bidi`, `@modelcontextprotocol/sdk`, `@deepseek-ai/schemastery` all return HTTP 200 from the public registry |
-| Both **peer** dependencies are public (bun installs peers) | Holds: `@deepseek-ai/cordis`, `@deepseek-ai/dsh-llm` HTTP 200 |
-| `bun install --production --frozen-lockfile` works with only `package.json` + `bun.lock` and **no credentials** | Holds: clean directory plus isolated `HOME` (no `~/.npmrc`) → 112 packages, exit 0 |
-| `--omit=peer` drops the DSH host peers | Holds: 104 packages, with no `@deepseek-ai/cordis` and no `@deepseek-ai/dsh-llm` |
-| The sidecar runs on the production closure only | Holds: `node lib/cli.js --help` and `--version` exit 0, and `serve` answers `/healthz` + `/v1/models` (`chatgpt-web/luna`, `chatgpt-web/think`) with no peers installed |
-| Every reference to those peers is erased at build time | Holds: the only references are `import type` / `import("…").T` in `plugin.ts`, `llm-adapter.ts` and `conversation-projection.ts` |
+| Runtime dependencies install from the public registry | Holds: `playwright-core`, `tiktoken`, `turndown`, `turndown-plugin-gfm`, `zod`, `ajv`, `ajv-formats`, `fflate`, `chromium-bidi` and `@modelcontextprotocol/sdk` all return HTTP 200 from the public registry |
+| `bun install --production --frozen-lockfile` works with only `package.json` + `bun.lock` and **no credentials** | Holds: clean directory plus isolated `HOME` (no `~/.npmrc`) → exit 0 |
+| `--omit=peer` keeps any declared optional peer out of the production install | Holds: the flag remains a guard; the package declares no peer dependencies |
+| The sidecar runs on the production closure only | Holds: `node lib/cli.js --help` and `--version` exit 0, and `serve` answers `/healthz` + `/v1/models` (`chatgpt-web/luna`, `chatgpt-web/think`) |
 
 ```bash
 mkdir install && cp package.json bun.lock install/ && cd install
-HOME=<empty dir> bun install --production --frozen-lockfile --omit=peer    # 104 packages, exit 0
+HOME=<empty dir> bun install --production --frozen-lockfile --omit=peer    # exit 0
 cp -r <repo>/lib ./lib && node lib/cli.js --help && node lib/cli.js --version
 DSH_CHATGPT_WEB_HOME=<prepared volume> node lib/cli.js serve --port 17902 &
 curl -fsS http://127.0.0.1:17902/healthz
@@ -63,8 +60,9 @@ curl -fsS http://127.0.0.1:17902/v1/models
 ```
 
 That is why the Dockerfile installs with `--omit=peer` and asserts `node lib/cli.js --help` at build
-time: the service image must not carry, and must not need, the DSH host peers (PR #230's isolation
-rule), and a future runtime dependency on them now fails the build instead of shipping.
+time: the service image runs from the CLI bundle alone, a declared optional peer can never enter the
+production closure, and a future runtime dependency outside that closure fails the build instead of
+shipping.
 
 What this does **not** prove: that the same install survives the image's own base (its glibc, Node and
 Bun versions), and that Chromium plus `--ipc=host` work there. Those need the container run (§4).
@@ -90,7 +88,8 @@ options are:
 2. A container-side forwarder bound to `0.0.0.0` that proxies to the sidecar's loopback (adds a
    process; keeps the app invariant).
 3. **Relax the bind together with the authorization guard (issue #247)** — the correct production
-   answer, and the reason #247 must not be reduced to "add an API key".
+   answer, and the reason #247 must not be reduced to "add an API key". #247 delivered this: the
+   `exposed` Compose stack binds `0.0.0.0` with the API key and fails closed without it (§5.2).
 
 ### F2 — a fresh data directory has no configuration, and `serve` refuses to start
 
@@ -153,7 +152,7 @@ docker compose down -v
 
 On an empty volume the entrypoint writes a default `config.json` (`docker/bootstrap-config.ts`) and
 announces it on stderr: a first `compose up` therefore reaches `healthy` without manual steps. Real
-turns still need a provider session (§4.1, and phase 5 #249).
+turns still need a provider session (§4.1, §5.5).
 
 Every CLI subcommand stays reachable through `docker run`, because the entrypoint execs
 `node lib/cli.js "$@"`:
@@ -186,8 +185,7 @@ Its full transcript is recorded in §7.
 ## 4.1 The data volume — what a container needs
 
 The entrypoint creates `config.json` when it is missing, so `/healthz` and `/v1/models` work on a
-fresh volume with no manual step. A **real turn** additionally needs the provider session, which is
-what phase 5 (#249) delivers.
+fresh volume with no manual step. A **real turn** additionally needs the provider session (§5.5).
 
 | Path (under `DSH_CHATGPT_WEB_HOME`) | Needed for | Notes |
 | --- | --- | --- |
@@ -222,7 +220,7 @@ code change owned by #247.
 | Restore | `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar xzf /backup/dsh-data-<date>.tgz -C /data` |
 | Upgrade | `git pull && docker compose build --pull && docker compose up -d` — the volume survives; the base tag is pinned, so `--pull` refreshes that tag only |
 | Bind-mount variant (data on the host) | `mkdir -p data && docker compose --profile bind up -d chatgpt-web-bind` |
-| Interactive login (needs a display) | `docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY login` (phase 5 #249 adds noVNC) |
+| Interactive login (needs a display) | `docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY login` (noVNC sign-in: §5.5) |
 
 Notes:
 
@@ -318,9 +316,10 @@ it cannot mean:
 | **Guaranteed** | a harness cannot smuggle its own instructions or environment block into the turn as a separate message, and with an identity it cannot smuggle earlier turns either |
 | **Not guaranteed** | text the harness writes *inside* the current user message. Distinguishing that structurally is impossible — provenance is not in the OpenAI protocol — and content heuristics are per-harness and per-version, so they are not the mechanism. This is a documented limit, asserted by a test rather than implied |
 
-The rule lives in exactly one owner (`src/web-chat/host/api-projection.ts`). The DSH-side projection
-(`src/conversation-projection.ts`) is **not** reused or duplicated: it keys off DSH's `source.kind`,
-which no generic client sends, so it is a no-op on this surface.
+The rule lives in exactly one owner (`src/web-chat/host/api-projection.ts`). The text-level sanitizer
+(`src/conversation-sanitizer.ts`) is **not** reused or duplicated: it strips host-injected transport
+text from a single piece of text but has no notion of message provenance, and a generic client sends no
+`source.kind`, so it cannot decide which messages are the conversation here.
 
 ### 5.4 OpenAI-compatible chat (`POST /v1/chat/completions`)
 
@@ -507,13 +506,13 @@ $ DSH_CHATGPT_WEB_HOME=<home> node lib/cli.js doctor --json
     { "id": "proxy", "status": "error", "message": "Responses proxy is not reachable" } ] }
 ```
 
-Consequences worth carrying into the later phases:
+Consequences worth carrying forward:
 
 - **`/healthz` and `/v1/models` do not need a session.** A container with a prepared `config.json`
   can be probed (and health-checked) before any login exists — so #246's healthcheck does not depend
   on #249.
 - The `chrome` check is exactly the guard the image's `/usr/bin/google-chrome` **symlink** satisfies;
-  the `login` check is the boundary phase 5 owns.
+  the `login` check is the credential boundary (§5.5).
 - `doctor` reports the provider as *reachable but not authenticated, 2 models, 2 routes*, which is a
   better readiness signal than "the process is up".
 
