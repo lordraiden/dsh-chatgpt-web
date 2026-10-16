@@ -64,6 +64,14 @@ jobs:
       - name: The model catalogue answers without authentication on loopback
         run: curl -fsS http://127.0.0.1:17841/v1/models | head -c 200
 
+      # Issue #248: both catalogue shapes, from inside the published artifact.
+      - name: The catalogue answers in both shapes
+        run: |
+          body=$(curl -fsS http://127.0.0.1:17841/v1/models)
+          printf '%s' "$body" | grep -q '"models"'
+          printf '%s' "$body" | grep -q '"data"'
+          printf '%s' "$body" | grep -q 'chatgpt-web/' 
+
       - name: Service logs
         if: always()
         run: docker compose logs --no-color

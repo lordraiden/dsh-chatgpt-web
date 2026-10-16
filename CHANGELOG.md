@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add the OpenAI-compatible chat surface (issue #248): `POST /v1/chat/completions` (streaming and
+  non-streaming) translated onto the **same** internal turn as `/v1/responses` — no second engine,
+  ProviderCore or retry authority — and an additive OpenAI `data[]` array beside the existing
+  `models[]` in `GET /v1/models`. Unsupported features are refused with a typed 400 through the common
+  layer's own text-only admission rather than silently dropped, an unknown model names the accepted
+  ids, and the phase-3 API key guard covers the new route.
 - Transmit only the conversation's messages on the API surface (issue #253): with a client session
   identity (`user`/`session_id`) the API sends only the current user message and the provider
   conversation holds the history; without one it is stateless and every non-conversational role is

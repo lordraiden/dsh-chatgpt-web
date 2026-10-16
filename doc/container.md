@@ -321,6 +321,35 @@ The rule lives in exactly one owner (`src/web-chat/host/api-projection.ts`). The
 (`src/conversation-projection.ts`) is **not** reused or duplicated: it keys off DSH's `source.kind`,
 which no generic client sends, so it is a no-op on this surface.
 
+### 5.4 OpenAI-compatible chat (`POST /v1/chat/completions`)
+
+Any OpenAI client can point at `http://<host>:17841/v1`:
+
+```bash
+curl -fsS http://127.0.0.1:17841/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}]}'
+
+curl -fsSN http://127.0.0.1:17841/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","stream":true,"messages":[{"role":"user","content":"hola"}]}'
+```
+
+- `GET /v1/models` answers in **both** shapes: `models[]` (the Codex/DSH catalogue, unchanged) and an
+  additive `data[]` (`{id, object:"model", owned_by}`) for OpenAI clients.
+- Model ids are the catalogue slugs (`chatgpt-web/luna`, `chatgpt-web/think`); an unknown id is a typed
+  400 that names the accepted ones.
+- Streaming returns `chat.completion.chunk` frames with `delta.content`, a terminal `finish_reason` and
+  then `data: [DONE]`.
+- `usage` is an **estimate** produced locally (tiktoken), not consumer-web accounting; some paths report
+  zeros. It is present because clients read it, not because it is authoritative.
+- Only messages are transmitted — see §5.3. Send a stable `user` (or `session_id`) to get the strict
+  rule; without one the request is stateless.
+- **Refused with a typed 400, never silently dropped:** `tools`, `tool_choice`, `functions`,
+  `function_call` (legacy), `n > 1`, `logprobs`/`top_logprobs`, `response_format` other than plain
+  text, and non-text content parts (`image_url`, `input_audio`, files). Tools, images, audio, video,
+  attachments and MCP are the **common layer's own** vocabulary (`assertTextOnlyWebChatTurn`), so the
+  API does not maintain a second list.
+- Not offered: embeddings, audio, images, batch — the surface stays text-only.
+
 ## 6. Evidence collected on the authoring host
 
 Local paths are sanitised. The sidecar was exercised with Node 24.21.0 from the checked-in `lib/`.

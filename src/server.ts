@@ -33,6 +33,13 @@ import {
   extractCodexTurnIdentityFromBody,
 } from "./adapters/chatgpt-web/environment";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
+import {
+  buildOpenAiModelsData,
+  responseFailure,
+  toChatCompletion,
+  toChatCompletionStream,
+  translateChatCompletionsRequest,
+} from "./responses/chat-completions";
 import type { AppConfig } from "./config";
 import {
   CHATGPT_WEB_TUNING_DEFAULTS,
@@ -78,7 +85,7 @@ import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
-type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "native-llm" | "unspecified";
+type HttpTrackedEndpoint = "models" | "responses" | "chat-completions" | "compact" | "search" | "native-llm" | "unspecified";
 
 export interface NativeCodexTurnIdentity {
   threadId: string;
@@ -465,6 +472,9 @@ export async function modelsRequest(
     }
   }
 
+  // Issue #248: the OpenAI `data` array is ADDITIVE. `models` and the top-level shape stay exactly as
+  // they are, so the Codex/DSH consumer needs no change.
+  catalog = { ...catalog, data: buildOpenAiModelsData(webCatalog) };
   const body = JSON.stringify(catalog);
   headers.set("content-type", "application/json");
   headers.set("etag", `W/"${createHash("sha256").update(body).digest("base64url")}"`);
@@ -1601,6 +1611,55 @@ export function startServer(
         process.platform,
         "responses",
       );
+    }
+    if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
+      if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
+      let translation;
+      try {
+        translation = translateChatCompletionsRequest(await readJsonRequestBody(req));
+      } catch (error) {
+        const tooLarge = requestBodyFailure(error);
+        if (tooLarge) return tooLarge;
+        return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Invalid request body");
+      }
+      // An unknown model names the accepted ids instead of falling through to the native passthrough.
+      const accepted = buildOpenAiModelsData(buildChatGptWebModelCatalog(config)).map((entry) => entry.id);
+      if (!accepted.includes(translation.model)) {
+        return formatErrorResponse(
+          400,
+          "invalid_request_error",
+          `Unknown model ${JSON.stringify(translation.model)}. Available models: ${accepted.join(", ")}.`,
+        );
+      }
+      // Exactly the same execution as /v1/responses: this route adds no engine, no ProviderCore and no
+      // retry authority, it only renames the wire shape (issues #248, architecture §18/§26).
+      const internalRequest = new Request(req.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(translation.body),
+      });
+      return httpTurns.track(async (signal, bindIdentity) => {
+        const upstream = await responseRequest(internalRequest, config, adapterFactory, { onTurnIdentity: bindIdentity });
+        if (translation.stream) {
+          return new Response(
+            toChatCompletionStream(upstream.body ?? new ReadableStream(), translation.model),
+            {
+              status: upstream.status,
+              headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
+            },
+          );
+        }
+        let payload: Record<string, unknown> = {};
+        try {
+          payload = await upstream.json() as Record<string, unknown>;
+        } catch {
+          payload = {};
+        }
+        // A provider failure must not look like an empty successful completion to an OpenAI client.
+        const failure = responseFailure(payload);
+        if (failure) return formatErrorResponse(502, "upstream_error", failure.message);
+        return Response.json(toChatCompletion(payload, translation.model), { status: upstream.ok ? 200 : upstream.status });
+      }, req.signal, process.platform, "chat-completions");
     }
     if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
       if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
