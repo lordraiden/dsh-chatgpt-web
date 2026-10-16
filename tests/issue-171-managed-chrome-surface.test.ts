@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import {
   RetainedSurfaceBusyError,
@@ -8,15 +7,6 @@ import {
   type RetainedSurfacePage,
 } from "../src/adapters/chatgpt-web/retained-surface";
 import { chatGptEffortSelectionRequired } from "../src/adapters/chatgpt-web/browser-worker";
-
-const adapterSource = readFileSync(
-  new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url),
-  "utf8",
-);
-const workerSource = readFileSync(
-  new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url),
-  "utf8",
-);
 
 /** Minimal stand-in for a Playwright Page: only the registry's two capabilities. */
 function fakePage(name: string): RetainedSurfacePage & { name: string; closeCount: number; markClosed: () => void } {
@@ -317,93 +307,8 @@ describe("issue #171 physical reuse vs configuration reuse", () => {
     expect(third.page).toBe(page);
     expect(page.closeCount).toBe(0);
   });
-
-  test("configurationReuse is derived from the Launcher lease only, never from managed-chrome retention", () => {
-    const configurationReuse = workerSource.match(/const configurationReuse = [\s\S]*?;/)?.[0] ?? "";
-    // Exactly the Launcher lease — a retained managed-chrome page is NOT a configuration reuse.
-    expect(configurationReuse).toContain("reuseConversation");
-    expect(configurationReuse).not.toContain("managedReuse");
-    const physicalReuse = workerSource.match(/const physicalReuse = [\s\S]*?;/)?.[0] ?? "";
-    expect(physicalReuse).toContain("reuseConversation || managedReuse");
-  });
-
-  test("effort selection is driven by configurationReuse, not by physical reuse", () => {
-    expect(workerSource).toContain("chatGptEffortSelectionRequired(\n        configurationReuse,");
-  });
-
-  test("root navigation and surface preparation are skipped for a physical continuation", () => {
-    expect(workerSource).toContain("if (!physicalReuse) {");
-    expect(workerSource).toContain("const prepare = physicalReuse ? turn.prepareResume : turn.prepare;");
-  });
-});
-
-describe("issue #171 send-boundary retention", () => {
-  test("a created surface is discarded only when the send never activated", () => {
-    // The finally block gates the discard on the send activation boundary, not on
-    // whole-turn completion: a post-completion housekeeping fault must not destroy it.
-    expect(workerSource).toContain("if (!sendActivated && retainedCreated && retainedPage && !retainedPage.isClosed()) {");
-    expect(workerSource).not.toContain("turnCompleted");
-  });
-
-  test("send activation and submission both mark the boundary", () => {
-    // The wrapped lifecycle records the boundary on both signals and forwards to the
-    // adapter's callbacks, reusing the existing submissionLifecycle architecture.
-    const lifecycle = workerSource.match(/const retainedSubmissionLifecycle = [\s\S]*?^\s{4}\};/m)?.[0] ?? "";
-    expect(lifecycle).toContain("onSendActivated");
-    expect(lifecycle).toContain("onSubmitted");
-    const activatedMarks = (lifecycle.match(/sendActivated = true;/g) ?? []).length;
-    expect(activatedMarks).toBeGreaterThanOrEqual(2);
-  });
-
-  test("both send paths route through the boundary-wrapping lifecycle", () => {
-    // Multipart stage sends and the final commit must both observe the boundary.
-    const sites = (workerSource.match(/retainedSubmissionLifecycle,/g) ?? []).length;
-    expect(sites).toBe(2);
-  });
-});
-
-describe("issue #171 worker and adapter wiring", () => {
-  test("the read-only adapter path carries the retention identity to the transport", () => {
-    // The normal (no-local-tools) path must pass the stable conversationKey and the
-    // continuation prompt, exactly like the tool-capable path.
-    expect(adapterSource).toContain("...(retainConversation ? { retainConversation: true, conversationKey } : {})");
-    expect(adapterSource).toContain("prepareResume");
-  });
-
-  test("managed-chrome retention is gated on the browser host and a stable conversationKey", () => {
-    expect(workerSource).toContain('this.config.browserHost === "managed-chrome"');
-    expect(workerSource).toContain("turn.conversationKey !== undefined");
-    expect(workerSource).toContain("this.retainedSurfaces.acquire");
-  });
-
-  test("the Launcher lease path is not routed through the managed-chrome registry", () => {
-    // managedRetained must exclude a launcher-leased surface.
-    const managedRetained = workerSource.match(/const managedRetained = [\s\S]*?;/)?.[0] ?? "";
-    expect(managedRetained).toContain("!launcherSurfaceId");
-    expect(managedRetained).toContain("!maintenancePage");
-  });
-
-  test("a retained surface is released at the end of a turn and kept open", () => {
-    expect(workerSource).toContain("this.retainedSurfaces.release(turn.conversationKey!);");
-  });
-
-  test("a retained surface is never tracked as a per-turn managedPage", () => {
-    expect(workerSource).toContain("!managedRetained) managedPage = page;");
-  });
-
-  test("a lost or busy retained surface surfaces an explicit continuity error", () => {
-    expect(workerSource).toContain("if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError();");
-    expect(workerSource).toContain("if (error instanceof RetainedSurfaceBusyError) throw chatGptRetainedSurfaceBusyError();");
-  });
-
-  test("worker shutdown releases all retained surfaces", () => {
-    expect(workerSource).toContain("await this.retainedSurfaces.closeAll();");
-  });
-
-  test("an aborted acquisition discards a created surface but keeps a reused one", () => {
-    // A created surface is invalidated (closed + removed) so no orphan/dead entry remains.
-    expect(workerSource).toContain("await this.retainedSurfaces.invalidate(turn.conversationKey!);");
-    // A reused surface only clears the busy flag, preserving the prior conversation.
-    expect(workerSource).toMatch(/if \(retained\.created\)[\s\S]*?invalidate[\s\S]*?else[\s\S]*?retainedSurfaces\.release/);
-  });
+  // The former `configurationReuse`/`physicalReuse`/send-boundary/wiring assertions read
+  // `browser-worker.ts` and `index.ts` and asserted on their text. The registry behaviour they
+  // guarded is asserted above and in `issue-192-retained-surface-settlement.test.ts`; the worker
+  // call sites themselves remain unverifiable without a browser worker (recorded in the report).
 });
