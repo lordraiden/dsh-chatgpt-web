@@ -233,17 +233,26 @@ export function responseFailure(payload: Record<string, unknown>): { message: st
   return { message, ...(typeof record.code === "string" ? { code: record.code } : {}) };
 }
 
-/** The OpenAI usage block from the internal one. The numbers are estimates (see doc/container.md). */
-export function chatUsage(usage: unknown): Record<string, number> {
+/**
+ * Rename the internal Responses `usage` to the OpenAI chat shape. The numbers are estimates (see
+ * doc/container.md); this function renames them and never invents one.
+ *
+ * A turn with no usage (the adapter reported none: a failure before the first measurable round, an
+ * adapter that does not account, the truncated `adapter_eof` path) yields `undefined`, and the caller
+ * omits the field. A turn that really reported `0` keeps `0`.
+ */
+export function chatUsage(usage: unknown): Record<string, number> | undefined {
   const record = usage && typeof usage === "object" && !Array.isArray(usage)
     ? usage as Record<string, unknown>
-    : {};
-  const prompt = typeof record.input_tokens === "number" ? record.input_tokens : 0;
-  const completion = typeof record.output_tokens === "number" ? record.output_tokens : 0;
+    : undefined;
+  const prompt = record?.input_tokens;
+  const completion = record?.output_tokens;
+  if (typeof prompt !== "number" || typeof completion !== "number") return undefined;
+  const total = record?.total_tokens;
   return {
     prompt_tokens: prompt,
     completion_tokens: completion,
-    total_tokens: typeof record.total_tokens === "number" ? record.total_tokens : prompt + completion,
+    total_tokens: typeof total === "number" ? total : prompt + completion,
   };
 }
 
@@ -252,6 +261,7 @@ export function toChatCompletion(payload: Record<string, unknown>, model: string
   const failure = responseFailure(payload);
   const created = typeof payload.created_at === "number" ? payload.created_at : Math.floor(Date.now() / 1000);
   const id = typeof payload.id === "string" && payload.id ? `chatcmpl-${payload.id}` : `chatcmpl-${created}`;
+  const usage = chatUsage(payload.usage);
   return {
     id,
     object: "chat.completion",
@@ -262,7 +272,8 @@ export function toChatCompletion(payload: Record<string, unknown>, model: string
       message: { role: "assistant", content: failure ? "" : responseText(payload) },
       finish_reason: failure ? "stop" : "stop",
     }],
-    usage: chatUsage(payload.usage),
+    // Absent usage means absent, not a zero block a billing client would read as a measurement.
+    ...(usage ? { usage } : {}),
     ...(failure ? { error: { message: failure.message, ...(failure.code ? { code: failure.code } : {}) } } : {}),
   };
 }

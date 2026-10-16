@@ -211,9 +211,13 @@ describe("/healthz — the shape every health check reads, with nothing sensitiv
     expect(body.version).toBe(VERSION);
     expect(body.mode).toBe("browser-only");
     expect(body.pid).toBe(process.pid);
-    // The document reports the configured port, which the compose health check verifies.
+    // The document reports the port the listener is actually bound to. The config asks for an
+    // ephemeral port (`port: 0`), so echoing the configured value would tell an operator or supervisor
+    // "0" and leave them unable to reach the service; the assigned port must be reported instead.
+    expect(config.port).toBe(0);
     expect(typeof body.port).toBe("number");
-    expect(body.port).toBe(config.port);
+    expect(body.port).toBeGreaterThan(0);
+    expect(body.port).toBe(server.port);
     expect(typeof body.uptime).toBe("number");
     expect(body.uptime as number).toBeGreaterThanOrEqual(0);
     expect(body.accepting_turns).toBe(true);

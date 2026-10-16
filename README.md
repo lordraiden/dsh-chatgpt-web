@@ -281,8 +281,13 @@ API does not maintain a second refusal list. Embeddings, audio, images and batch
 
 ## The `usage` block is an estimate
 
-`usage` is produced locally (tiktoken) for clients that read it. It is **not** consumer-web accounting,
-and some paths report zeros. Treat it as an estimate, not as billing or quota truth.
+`usage` is produced locally (tiktoken) for clients that read it. It is **not** consumer-web accounting.
+
+A turn that the provider could not account for does not get a fabricated `0`: a batch body
+(`/v1/responses`, `/v1/chat/completions`) **omits** the `usage` field, and the streaming
+`response.completed` / `response.incomplete` / `response.failed` envelope carries `"usage": null`.
+Handle both — absent and `null` both mean "not reported", and neither is a measurement. When the field
+is present its numbers are the local estimate; treat them as an estimate, not as billing or quota truth.
 
 ## Troubleshooting
 

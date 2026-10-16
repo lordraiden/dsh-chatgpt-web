@@ -13,8 +13,20 @@ function sseEvent(name: string, data: Record<string, unknown>): string {
   return `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function responsesUsage(usage: CodexUsage | undefined): Record<string, unknown> {
-  if (!usage) return { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+/**
+ * The single `usage` rule of the OpenAI-compatible surface: a usage block exists only when the turn
+ * actually produced one.
+ *
+ * `CodexUsage` is optional on the adapter's terminal events (`done`, `incomplete`, `error`): a turn
+ * that dies before its first measurable round, and any adapter that does not report consumption, have
+ * no number to report. This seam is adapter-agnostic and has no request/route input from which a
+ * provider estimate could be computed, so an absent usage is surfaced as an absent field (`null` in
+ * the SSE response envelope, which always carries the key the way OpenAI's stream shape does) — never
+ * as a fabricated `{0,0,0}`, which a client that bills, logs or compares reads as a real measurement.
+ * A real zero is different: when an adapter reports `0` tokens, that number passes through unchanged.
+ */
+function responsesUsage(usage: CodexUsage | undefined): Record<string, unknown> | undefined {
+  if (!usage) return undefined;
   // inputTokens is already inclusive of cache read/write (types.ts convention).
   const inputTokens = usage.inputTokens;
   const out: Record<string, unknown> = {
@@ -602,7 +614,8 @@ export function bridgeToResponsesSSE(
                 // client can distinguish a truncated/filtered turn from a finished one.
                 const response = {
                   ...responseSnapshot("incomplete", finishedItems, event.endTurn),
-                  usage: responsesUsage(event.usage),
+                  // No reported usage keeps the envelope's `null`; never a fabricated zero block.
+                  ...(event.usage ? { usage: responsesUsage(event.usage) } : {}),
                   incomplete_details: {
                     reason: event.stopReason === "max_tokens" ? "max_output_tokens" : "content_filter",
                   },
@@ -613,7 +626,10 @@ export function bridgeToResponsesSSE(
                 emit("response.incomplete", { response });
                 reportTerminal("incomplete");
               } else {
-                const response = { ...responseSnapshot("completed", finishedItems, event.endTurn), usage: responsesUsage(event.usage) };
+                const response = {
+                  ...responseSnapshot("completed", finishedItems, event.endTurn),
+                  ...(event.usage ? { usage: responsesUsage(event.usage) } : {}),
+                };
                 options?.onCompletedResponse?.(response, event.providerState);
                 emit("response.completed", {
                   response,
@@ -633,7 +649,7 @@ export function bridgeToResponsesSSE(
               emit("response.incomplete", {
                 response: {
                   ...responseSnapshot("incomplete", finishedItems, event.endTurn),
-                  usage: responsesUsage(event.usage),
+                  ...(event.usage ? { usage: responsesUsage(event.usage) } : {}),
                   incomplete_details: {
                     reason: event.reason,
                     ...(event.message ? { message: event.message } : {}),
@@ -709,8 +725,8 @@ export function bridgeToResponsesSSE(
         if (currentToolCall) closeCurrentToolCall();
         emit("response.incomplete", {
           response: {
+            // The adapter never settled consumption, so the envelope keeps its `usage: null`.
             ...responseSnapshot("incomplete", finishedItems),
-            usage: responsesUsage(undefined),
             incomplete_details: { reason: "adapter_eof" },
           },
         });
@@ -1046,6 +1062,7 @@ export function buildResponseJSON(
   }
 
   const failure = errorEvent ? adapterFailureFromEvent(errorEvent) : undefined;
+  const reportedUsage = incompleteEvent?.usage ?? usage;
   const status = errorEvent
     ? "failed"
     : incompleteEvent || stopReason === "max_tokens"
@@ -1068,7 +1085,8 @@ export function buildResponseJSON(
     } : stopReason === "max_tokens" ? {
       incomplete_details: { reason: "max_output_tokens" },
     } : {}),
-    usage: responsesUsage(incompleteEvent?.usage ?? usage),
+    // Batch shape: the key is omitted entirely when the turn produced no usage (see responsesUsage).
+    ...(reportedUsage ? { usage: responsesUsage(reportedUsage) } : {}),
   };
 }
 

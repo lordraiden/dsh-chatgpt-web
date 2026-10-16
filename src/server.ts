@@ -1201,6 +1201,21 @@ export function startServer(
     return [createChatGptWebProviderRuntime({ provider, adapter })];
   };
   const advisorHost: AdvisorHost = createAdvisorHost({ runtimes: advisorRuntimes });
+
+  /**
+   * The port the listening socket is actually bound to.
+   *
+   * `config.port` is the *requested* port and may be `0` (an ephemeral port, which the test suites and
+   * `--port 0` use), so reporting it directly would tell an operator or supervisor `0` instead of the
+   * port the service can be reached on. The listener is created after this closure, and the Node branch
+   * only learns its port once `listen()` completes, so it is resolved lazily per request.
+   */
+  let listenerPort: (() => number | undefined) | undefined;
+  const boundPort = (): number => {
+    const port = listenerPort?.();
+    return port !== undefined && port > 0 ? port : config.port;
+  };
+
   const handleFetch = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/healthz") {
@@ -1210,7 +1225,7 @@ export function startServer(
         version: VERSION,
         mode: config.mode,
         pid: process.pid,
-        port: config.port,
+        port: boundPort(),
         uptime: (Date.now() - startedAt) / 1_000,
         accepting_turns: !draining,
         successful_model_catalog_requests: successfulModelCatalogRequests,
@@ -1605,6 +1620,7 @@ export function startServer(
         await bunServer.stop(force);
       },
     };
+    listenerPort = () => bunServer.port;
   } else {
     const nodeServer = createServer(async (req, res) => {
       try {
@@ -1619,8 +1635,14 @@ export function startServer(
       }
     });
     nodeServer.listen(config.port, config.host);
+    listenerPort = () => {
+      const address = nodeServer.address();
+      return address !== null && typeof address === "object" ? address.port : undefined;
+    };
     server = {
-      port: config.port,
+      // Same lazy resolution as /healthz: with an ephemeral port the OS assigns the real one only
+      // once the socket is listening.
+      get port() { return boundPort(); },
       stop: () => new Promise<void>((resolve) => nodeServer.close(() => resolve())),
     };
   }

@@ -339,8 +339,11 @@ curl -fsSN http://127.0.0.1:17841/v1/chat/completions -H 'content-type: applicat
   400 that names the accepted ones.
 - Streaming returns `chat.completion.chunk` frames with `delta.content`, a terminal `finish_reason` and
   then `data: [DONE]`.
-- `usage` is an **estimate** produced locally (tiktoken), not consumer-web accounting; some paths report
-  zeros. It is present because clients read it, not because it is authoritative.
+- `usage` is an **estimate** produced locally (tiktoken), not consumer-web accounting. A turn the
+  provider could not account for does not get a fabricated `0`: the batch body **omits** the field, and
+  the streaming `response.completed` / `response.incomplete` / `response.failed` envelope carries
+  `"usage": null`. Absent and `null` both mean "not reported"; when the field is present its numbers are
+  the estimate. It is present because clients read it, not because it is authoritative.
 - Only messages are transmitted — see §5.3. Send a stable `user` (or `session_id`) to get the strict
   rule; without one the request is stateless.
 - **Refused with a typed 400, never silently dropped:** `tools`, `tool_choice`, `functions`,
@@ -478,8 +481,10 @@ $ curl -sS -H 'content-type: application/json' -d '{
     http://127.0.0.1:17899/v1/responses
 {"id":"resp_…","object":"response","status":"failed","model":"chatgpt-web/luna","output":[],
  "error":{"message":"ChatGPT web login state is missing: <home>/browser/storage-state.json",
-          "type":"server_error","code":"upstream_server_error"},
- "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}
+          "type":"server_error","code":"upstream_server_error"}}
+# The `"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}` block this capture originally
+# showed was a fabrication on a turn the adapter never accounted for. Unknown usage is now omitted
+# from the batch body (and `null` on the stream envelope) — see §5.4.
 
 # server log for that turn — the browser stage is reached and fails there, in 2 ms:
 [chatgpt-web] runTurn model=gpt-5.6-luna chatOnly=true
@@ -490,7 +495,8 @@ $ curl -sS -H 'content-type: application/json' -d '{
 So the issue's **"a turn with no login state fails with the documented explicit error, not a hang or a
 crash"** is satisfied with a prepared volume, outside a container: a complete native input reaches the
 browser stage and fails there with `ChatGPT web login state is missing: …`, reported as a typed
-`status: "failed"` response (and the `usage` block is present).
+`status: "failed"` response. That turn produced no measurable consumption, so the `usage` block is
+omitted rather than reported as zeros (§5.4).
 
 $ DSH_CHATGPT_WEB_HOME=<home> node lib/cli.js doctor --json
 { "ok": false, "mode": "browser-only", "checks": [
