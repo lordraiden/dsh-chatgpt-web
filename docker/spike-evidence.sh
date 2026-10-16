@@ -111,8 +111,11 @@ TS
 check "config.json was written" "wrote" "$(head -c 40 "$DATA/config.json" 2>/dev/null)"
 
 say "4. start the sidecar (loopback inside the container, host networking: finding F1)"
+# The command is overridden explicitly so $PORT is the port that is actually served (the image's CMD
+# pins 17841; overriding also avoids a clash with a host-side sidecar already on that port).
 "${ENGINE[@]}" run -d --name "$CONTAINER" --init --ipc=host --network host \
-  -v "$DATA:/data" -e DSH_CHATGPT_WEB_HOME=/data "$IMAGE" >/dev/null
+  -v "$DATA:/data" -e DSH_CHATGPT_WEB_HOME=/data "$IMAGE" \
+  node lib/cli.js serve --port "$PORT" >/dev/null
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break
   sleep 1
