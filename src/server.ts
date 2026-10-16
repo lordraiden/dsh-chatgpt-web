@@ -37,12 +37,14 @@ import type { AppConfig } from "./config";
 import {
   CHATGPT_WEB_TUNING_DEFAULTS,
   getConfigDir,
+  isLoopbackHost,
+  resolveApiKey,
   resolveChatGptWebTuning,
   saveConfig,
   validateChatGptWebTuning,
 } from "./config";
 import { AsyncEventQueue } from "./event-queue";
-import { readJsonRequestBody } from "./http-body";
+import { readJsonRequestBody, RequestBodyTooLargeError } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import { augmentNativeModelCatalog, buildChatGptWebModelCatalog } from "./model-catalog";
@@ -404,6 +406,29 @@ export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppCo
   return route;
 }
 
+/**
+ * An oversized body is a 413, not a generic 400 (issue #247). `readJsonRequestBody` throws the typed
+ * error; every handler that reads a body maps it through here.
+ */
+function requestBodyFailure(error: unknown): Response | undefined {
+  if (error instanceof RequestBodyTooLargeError) {
+    return formatErrorResponse(413, "request_too_large", error.message);
+  }
+  return undefined;
+}
+
+/**
+ * Optional per-process cap on concurrently tracked HTTP turns (issue #247). `0` (the default) keeps
+ * today's behaviour for the DSH/Codex consumer, which legitimately runs several turns at once;
+ * an exposed deployment can set `DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS` and get a typed 429 instead of
+ * unbounded queueing.
+ */
+export function resolveMaxInflightTurns(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS;
+  const configured = typeof raw === "string" && raw.trim() !== "" ? Number(raw.trim()) : Number.NaN;
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : 0;
+}
+
 export async function modelsRequest(
   req: Request,
   config: AppConfig,
@@ -484,6 +509,8 @@ export async function responseRequest(
   try {
     raw = await readJsonRequestBody(req);
   } catch (error) {
+    const tooLarge = requestBodyFailure(error);
+    if (tooLarge) return tooLarge;
     return formatErrorResponse(
       400,
       "invalid_request_error",
@@ -683,6 +710,8 @@ export async function compactRequest(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     raw = parsed as Record<string, unknown>;
   } catch (error) {
+    const tooLarge = requestBodyFailure(error);
+    if (tooLarge) return tooLarge;
     return formatErrorResponse(
       400,
       "invalid_request_error",
@@ -941,6 +970,8 @@ async function nativeDshTurnRequest(
   try {
     raw = await readJsonRequestBody(req);
   } catch (error) {
+    const tooLarge = requestBodyFailure(error);
+    if (tooLarge) return tooLarge;
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Native DSH request body must be valid JSON");
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -1062,6 +1093,8 @@ async function advisorStartRequest(req: Request, host: AdvisorHost): Promise<Res
   try {
     raw = await readJsonRequestBody(req);
   } catch (error) {
+    const tooLarge = requestBodyFailure(error);
+    if (tooLarge) return tooLarge;
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Advisor review body must be valid JSON");
   }
   let source: ReturnType<typeof validateAdvisorReviewSource>;
@@ -1144,6 +1177,8 @@ async function advisorRecoverRequest(
   try {
     raw = await readJsonRequestBody(req);
   } catch (error) {
+    const tooLarge = requestBodyFailure(error);
+    if (tooLarge) return tooLarge;
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Advisor recovery body must be valid JSON");
   }
   let input: ReturnType<typeof validateAdvisorRecoveryRequest>;
@@ -1172,6 +1207,16 @@ export function startServer(
 ): RunningServer {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
+  }
+  // Fail closed on an unsafe bind (issue #247): a non-loopback listener exposes a logged-in provider
+  // session, so it requires an API key before the socket is opened — never after.
+  const apiKey = resolveApiKey();
+  if (!isLoopbackHost(config.host) && apiKey === undefined) {
+    throw new Error(
+      `Refusing to serve on ${config.host}: a non-loopback bind exposes the provider session, so an `
+      + "API key is required. Set DSH_CHATGPT_WEB_API_KEY (or write it to <data dir>/api-key), or bind "
+      + "127.0.0.1.",
+    );
   }
   const startedAt = Date.now();
   // The sidecar is the single ChatGPT Web execution authority. Responses requests and
@@ -1203,6 +1248,21 @@ export function startServer(
     const actual = Buffer.from(header);
     return actual.length === expected.length && timingSafeEqual(actual, expected);
   };
+  /**
+   * The public API key guard (issue #247), the same constant-time shape as the control token above.
+   * With no key configured the surface is open, which the startup check above only allows on
+   * loopback.
+   */
+  const apiAuthorized = (req: Request): boolean => {
+    if (apiKey === undefined) return true;
+    const expected = Buffer.from(`Bearer ${apiKey}`);
+    const bearer = Buffer.from(req.headers.get("authorization") ?? "");
+    if (bearer.length === expected.length && timingSafeEqual(bearer, expected)) return true;
+    const wanted = Buffer.from(apiKey);
+    const header = Buffer.from(req.headers.get("x-api-key") ?? "");
+    return header.length === wanted.length && timingSafeEqual(header, wanted);
+  };
+  const maxInflightTurns = resolveMaxInflightTurns();
   /**
    * The provider composition the Advisor resolves routes against.
    *
@@ -1239,6 +1299,28 @@ export function startServer(
     }
     if (url.pathname.startsWith("/v1/control/") && !controlAuthorized(req)) {
       return new Response("Unauthorized", { status: 401, headers: controlCorsHeaders() });
+    }
+    // The public API surface (issue #247). `/v1/control/*` above keeps the operator's control token:
+    // the two are separate authorities and are never interchangeable.
+    if (url.pathname.startsWith("/v1/") && !url.pathname.startsWith("/v1/control/")) {
+      if (!apiAuthorized(req)) {
+        // The bridge owns the code vocabulary and derives it from the status: 401 becomes
+        // `invalid_api_key` / `authentication_error`.
+        const unauthorized = formatErrorResponse(
+          401,
+          "authentication_error",
+          "Missing or invalid API key. Send `Authorization: Bearer <key>` or `x-api-key: <key>`.",
+        );
+        unauthorized.headers.set("www-authenticate", "Bearer");
+        return unauthorized;
+      }
+      if (maxInflightTurns > 0 && req.method === "POST" && httpTurns.count() >= maxInflightTurns) {
+        return formatErrorResponse(
+          429,
+          "rate_limit_error",
+          `The service is at its configured limit of ${maxInflightTurns} concurrent turns.`,
+        );
+      }
     }
     if (req.method === "GET" && url.pathname === "/v1/control/status") {
       return Response.json({

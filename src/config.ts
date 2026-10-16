@@ -368,7 +368,12 @@ export interface AppConfig {
   releaseVersion: string;
   mode: RuntimeMode;
   subagentProtocol: SubagentProtocol;
-  host: "127.0.0.1";
+  /**
+   * Bind address. Loopback is the default and the only value that needs no API key; a non-loopback
+   * value is refused at startup unless a key is configured (issue #247), which is why this is not a
+   * literal type.
+   */
+  host: string;
   port: number;
   /**
    * Legacy serialized field kept only so older v3 config files remain readable.
@@ -453,6 +458,46 @@ export function getConfigDir(): string {
     if (existsSync(legacyStorage)) return resolve(legacyStorage);
   }
   return resolve(dshStorage);
+}
+
+/** An API key shorter than this cannot authenticate anything meaningfully; refuse it (issue #247). */
+export const MINIMUM_API_KEY_LENGTH = 16;
+
+/** Environment variable that may carry the public API key. */
+export const API_KEY_ENV = "DSH_CHATGPT_WEB_API_KEY";
+
+/** True only for bind values that cannot be reached from another host. */
+export function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return value === "127.0.0.1" || value === "::1" || value === "localhost" || value === "localhost.localdomain";
+}
+
+/**
+ * The public API key (issue #247), or `undefined` when none is configured.
+ *
+ * Resolution order: `DSH_CHATGPT_WEB_API_KEY`, then `<data dir>/api-key`. It is deliberately not part
+ * of the validated configuration: a key is a secret, not configuration, so it never enters
+ * `config.json`, a session projection, a log line or `/healthz`. A key that is too short is refused
+ * instead of silently accepted, because it would only give the illusion of protection.
+ */
+export function resolveApiKey(home = getConfigDir()): string | undefined {
+  const key = process.env[API_KEY_ENV]?.trim() || readApiKeyFile(home);
+  if (!key) return undefined;
+  if (key.length < MINIMUM_API_KEY_LENGTH) {
+    throw new Error(
+      `${API_KEY_ENV} (or <data dir>/api-key) must be at least ${MINIMUM_API_KEY_LENGTH} characters; `
+      + "refusing to start with a key that cannot authenticate anything",
+    );
+  }
+  return key;
+}
+
+function readApiKeyFile(home: string): string | undefined {
+  try {
+    return readFileSync(join(home, "api-key"), "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function getConfigPath(): string {
@@ -754,7 +799,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (subagentProtocol !== "compatibility-v1" && subagentProtocol !== "native") {
     throw new Error(`Invalid subagentProtocol in ${path}`);
   }
-  if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
+  // The bind is validated for *shape* here only. Whether a non-loopback bind is allowed depends on
+  // the API key, and that fail-closed decision is taken when the server starts (issue #247), so a
+  // configuration file alone can never expose the bridge.
+  if (typeof parsed.host !== "string" || !/^[A-Za-z0-9.:_-]{1,253}$/.test(parsed.host)) {
+    throw new Error(`Invalid host in ${path}`);
+  }
   if (parsed.browserHost !== "managed-chrome" && parsed.browserHost !== "launcher") {
     throw new Error(`Invalid browserHost in ${path}`);
   }

@@ -257,6 +257,54 @@ recorded here so it is not lost:
 3. a test asserting the flag reaches `chromium.launch({ chromiumSandbox: true })`;
 4. the seccomp profile wired into compose (`security_opt: ["seccomp:./docker/seccomp_profile.json"]`).
 
+### 5.2 Exposing the API (authentication and TLS)
+
+The authenticated surface is `/v1/*` **except** `/v1/control/*` and `/admin/*`, which keep the
+operator's control token. `/healthz` is deliberately open: Docker's healthcheck and any load balancer
+need it, and it reports liveness metadata only (no key, no session material).
+
+```bash
+export DSH_CHATGPT_WEB_API_KEY="$(openssl rand -base64 32)"   # >= 16 characters
+docker compose -f docker-compose.exposed.yml up -d --wait      # listens on 0.0.0.0 inside, publishes 127.0.0.1:17841
+curl -fsS -H "authorization: Bearer $DSH_CHATGPT_WEB_API_KEY" http://127.0.0.1:17841/v1/models
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:17841/v1/models     # 401 without it
+```
+
+The exposed variant is a **separate Compose project** (`docker-compose.exposed.yml`, project
+`dsh-chatgpt-api`) rather than a profile of the default file: Compose cannot run both at once — they
+end up on the same host port — and a separate project makes that a visible port error instead of a
+silent race. The data volume is shared by name, so one sign-in serves either variant.
+
+Rules this deployment enforces:
+
+1. **Fail closed.** A non-loopback bind (`--host 0.0.0.0`, or `host` in `config.json`) **refuses to
+   start** unless a key is configured, and a key shorter than 16 characters is refused too. The bind is
+   therefore never exposed by accident: `parseConfig()` validates the host's shape, and the startup
+   check decides whether that host may be served.
+2. **The key is a secret, not configuration.** It comes from `DSH_CHATGPT_WEB_API_KEY` or
+   `<data dir>/api-key`, never from `config.json`, and it is never logged, returned by `/healthz` or
+   written into the conversation store. `x-api-key: <key>` is accepted as well as
+   `Authorization: Bearer <key>`.
+3. **Separate authorities.** The API key does not open `/v1/control/*`/`/admin/*`, and the control
+   token does not open `/v1/*`; both are constant-time comparisons.
+4. **Reach it from elsewhere only through a TLS-terminating reverse proxy**, never by publishing
+   `0.0.0.0:17841`:
+
+   ```caddyfile
+   api.example.internal {
+     reverse_proxy 127.0.0.1:17841 {
+       header_up Authorization "Bearer {$DSH_CHATGPT_WEB_API_KEY}"
+     }
+   }
+   ```
+5. **Bounds.** `DSH_CHATGPT_WEB_MAX_REQUEST_BYTES` caps the request body (default 64 MiB encoded, the
+   decoded limit is twice it) and answers a typed `413 request_too_large`;
+   `DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS` (default `0` = unlimited, which keeps the DSH/Codex consumer
+   unchanged) answers a typed `429 rate_limit_exceeded`. One active turn per provider conversation
+   remains a typed `409 retained_surface_busy` (architecture §15.1).
+6. The caveats in §5 still apply: this is a personal, single-account bridge — not a public multi-tenant
+   service — and the provider's terms of service are yours to honour.
+
 ## 6. Evidence collected on the authoring host
 
 Local paths are sanitised. The sidecar was exercised with Node 24.21.0 from the checked-in `lib/`.

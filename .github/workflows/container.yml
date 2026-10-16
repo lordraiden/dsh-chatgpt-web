@@ -12,6 +12,7 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "docker-compose.yml"
+      - "docker-compose.exposed.yml"
       - "docker/**"
       - "package.json"
       - "bun.lock"
@@ -23,6 +24,7 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "docker-compose.yml"
+      - "docker-compose.exposed.yml"
       - "docker/**"
       - "package.json"
       - "bun.lock"
@@ -53,19 +55,42 @@ jobs:
       - name: Build the production image
         run: docker build -t dsh-chatgpt-web:local .
 
-      - name: Start the stack and wait for the healthcheck
+      - name: Start the default stack and wait for the healthcheck
         run: docker compose up -d --wait
 
       - name: The liveness probe answers
         run: curl -fsS http://127.0.0.1:17841/healthz
 
-      - name: The model catalogue answers
+      - name: The model catalogue answers without authentication on loopback
         run: curl -fsS http://127.0.0.1:17841/v1/models | head -c 200
 
       - name: Service logs
         if: always()
         run: docker compose logs --no-color
 
-      - name: Tear down (and drop the data volume)
+      # The loopback/host-network default and the published-port variant cannot run together: same port.
+      - name: Tear the default stack down
         if: always()
         run: docker compose down -v
+
+      # Issue #247: the authenticated, published-port path, end to end over the host's loopback.
+      - name: Authenticated variant refuses an unauthenticated request and accepts a keyed one
+        env:
+          DSH_CHATGPT_WEB_API_KEY: ci-test-key-0123456789
+        run: |
+          docker compose -f docker-compose.exposed.yml up -d --wait
+          code_no_key=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17841/v1/models)
+          code_keyed=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $DSH_CHATGPT_WEB_API_KEY" http://127.0.0.1:17841/v1/models)
+          code_health=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:17841/healthz)
+          echo "no key=$code_no_key keyed=$code_keyed healthz=$code_health"
+          test "$code_no_key" = "401"
+          test "$code_keyed" = "200"
+          test "$code_health" = "200"
+
+      - name: Exposed variant logs
+        if: always()
+        run: docker compose -f docker-compose.exposed.yml logs --no-color
+
+      - name: Tear down the exposed variant
+        if: always()
+        run: docker compose -f docker-compose.exposed.yml down -v
