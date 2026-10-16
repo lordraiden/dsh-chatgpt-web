@@ -1,0 +1,87 @@
+# Compose stack for the standalone sidecar (issue #246, phase 2 of the containerised-service track).
+#
+# Read doc/container.md first. Three variants, deliberately:
+#
+#   default          non-root (pwuser, uid 1001) + a NAMED volume. Docker seeds a named volume from
+#                    the image's /data, so the ownership set at build time is inherited and
+#                    `docker compose up -d` works on a clean checkout with no manual step.
+#   `bind` profile   root + a bind mount (./data:/data), for operators who want the data visible on
+#                    the host filesystem. Root is required because a bind mount keeps the host's
+#                    ownership (your uid) while pwuser is 1001.
+#   `login` profile  the interactive provider login. It shares the default volume. The sign-in needs
+#                    a real display: phase 5 (#249) owns its content (noVNC/desktop-lite); until then
+#                    you can reuse a host X socket — see the comment on that service.
+#
+# Only one of `chatgpt-web` / `chatgpt-web-bind` can run at a time: both use host networking and
+# therefore the same loopback port.
+#
+# Host networking is not a preference: the sidecar binds 127.0.0.1 inside its own namespace, so a
+# published port would not reach it (doc/container.md finding F1; relaxing the bind is #247).
+
+x-build: &build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    # Must match playwright-core in bun.lock; scripts/test-246-container-pin.mjs fails otherwise.
+    PLAYWRIGHT_VERSION: "1.63.0"
+
+x-healthcheck: &healthcheck
+  test: ["CMD", "curl", "-fsS", "http://127.0.0.1:17841/healthz"]
+  interval: 30s
+  timeout: 5s
+  start_period: 20s
+  retries: 3
+
+x-runtime: &runtime
+  image: dsh-chatgpt-web:local
+  init: true
+  ipc: host
+  network_mode: host
+  restart: unless-stopped
+  environment:
+    DSH_CHATGPT_WEB_HOME: /data
+
+services:
+  chatgpt-web:
+    <<: *runtime
+    build: *build
+    healthcheck: *healthcheck
+    volumes:
+      - dsh-data:/data
+
+  chatgpt-web-bind:
+    <<: *runtime
+    profiles: ["bind"]
+    build: *build
+    healthcheck: *healthcheck
+    # Root, because ./data is created and owned by the invoking user while pwuser is 1001.
+    user: "0:0"
+    volumes:
+      - ./data:/data
+
+  login:
+    profiles: ["login"]
+    image: dsh-chatgpt-web:local
+    build: *build
+    user: "0:0"
+    environment:
+      DSH_CHATGPT_WEB_HOME: /data
+    volumes:
+      - dsh-data:/data
+    entrypoint: ["node", "lib/cli.js"]
+    command: ["login"]
+    stdin_open: true
+    tty: true
+    # Phase 5 (#249) adds a display server + noVNC to this service. Until then, on a host with a
+    # running X server:
+    #   docker compose --profile login run --rm \
+    #     -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY="$DISPLAY" login
+    # The sign-in writes browser/storage-state.json and its .verified.json marker into the volume,
+    # which is exactly what the `chatgpt-web` service needs.
+
+volumes:
+  dsh-data:
+    # The data volume holds credentials (the provider session) and the durable conversation store.
+    # Back it up with `docker run --rm -v dsh-chatgpt-web_dsh-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data.tgz -C /data .`
+    # and never commit it.
+    name: dsh-chatgpt-web-data

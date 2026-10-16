@@ -1,12 +1,12 @@
-# Containerised service — spike notes
+# Containerised service — operations
 
-**Status:** spike. First version, produced by issue #245 (phase 1 of 6 in the containerised-service
-track). It records the facts the rest of the track depends on, the findings that change the plan, and
-exactly what could not be executed on the authoring host.
+**Status:** supported deployment (issue #246, phase 2 of 6). The image, the Compose stack, the
+healthcheck and the CI build job are implemented and verified; §7 records that verification, and §6
+keeps the phase-1 (#245) findings that constrain the rest of the track.
 
-**Not the supported deployment.** Issue #246 owns the production image, Compose stack, healthcheck
-and CI image build; issue #247 owns API authorization and a safe bind; issue #249 owns the login
-flow. Read [architecture.md](./architecture.md) §32 first.
+Read [architecture.md](./architecture.md) §32 first. Still open in the track: #247 (API authorization
+and a safe bind), #248 (OpenAI-compatible `chat/completions`), #249 (guided provider login), #250
+(multi-provider routing).
 
 ## 1. What this distribution is
 
@@ -138,47 +138,56 @@ view. Running as root with the Chromium sandbox disabled (F2 table above) is acc
 personal, single-account bridge; a hardened deployment would need a non-root user plus Playwright's
 seccomp profile, which requires exposing a launch option the code does not have today.
 
-## 4. Build and run (spike)
+## 4. Build and run
 
 ```bash
-# from the repository root
-docker build -f docker/Dockerfile.spike -t dsh-chatgpt-web:spike .
+# Build the production image. The build context is ~6 MB (.dockerignore) and the result is ~3.8 GB,
+# dominated by the Playwright base image.
+docker build -t dsh-chatgpt-web:local .
 
-# The spike image needs a prepared data volume (F2) and host networking (F1).
-docker run --rm --init --ipc=host --network host \
-  -v "$PWD/.data:/data" -e DSH_CHATGPT_WEB_HOME=/data \
-  dsh-chatgpt-web:spike
-
-# probes (from another shell, on the same host network)
+# Or run the supported stack: it creates its data volume and becomes healthy by itself.
+docker compose up -d --wait
 curl -fsS http://127.0.0.1:17841/healthz
-curl -fsS http://127.0.0.1:17841/v1/models
-docker exec <container> dsh-chatgpt-web doctor --json   # or: node lib/cli.js doctor --json
+docker compose down -v
+```
+
+On an empty volume the entrypoint writes a default `config.json` (`docker/bootstrap-config.ts`) and
+announces it on stderr: a first `compose up` therefore reaches `healthy` without manual steps. Real
+turns still need a provider session (§4.1, and phase 5 #249).
+
+Every CLI subcommand stays reachable through `docker run`, because the entrypoint execs
+`node lib/cli.js "$@"`:
+
+```bash
+docker run --rm -v dsh-data:/data dsh-chatgpt-web:local doctor --json
+docker run --rm -v dsh-data:/data dsh-chatgpt-web:local serve --port 17899
+docker run --rm --entrypoint sh dsh-chatgpt-web:local -lc 'ls -l /usr/bin/google-chrome'
 ```
 
 `--ipc=host` (or `--shm-size=1g`) is recommended by Playwright for Chromium. `--init` avoids zombie
 processes. `--network host` is a spike workaround (F1), not the production answer.
 
-`docker/spike-evidence.sh` does the whole sequence on a container host and prints a transcript to
-paste into the PR. It creates the data volume itself and accepts another engine:
+`docker/verify-container.sh` runs the whole chain against the production image and prints a
+PASS/FAIL transcript. It creates a fresh named volume per run (exercising the entrypoint bootstrap)
+and accepts another engine:
 
 ```bash
-docker/spike-evidence.sh                          # docker, fresh data volume
-CONTAINER_ENGINE=podman docker/spike-evidence.sh  # rootless podman
-DATA=/srv/dsh-data docker/spike-evidence.sh       # reuse a volume you already prepared
+./docker/verify-container.sh                          # docker, fresh named volume
+CONTAINER_ENGINE=podman ./docker/verify-container.sh  # rootless podman
+DATA=/srv/dsh-data ./docker/verify-container.sh       # bind path (runs as root: see §5.1)
 ```
 
 Two traps it already avoids: the sidecar needs `--network host` (F1), and the configuration must be
 generated from a **file**, never with `bun -e` — `defaultConfig()` refuses an evaluated script
 (`Cannot install a service from an evaluated Bun script`).
 
-That script has only been syntax-checked (`bash -n`); no container runtime was available to execute
-it, so treat its output as the thing to verify, not as verified evidence.
+Its full transcript is recorded in §7.
 
-## 4.1 Prepared data volume — what a container needs
+## 4.1 The data volume — what a container needs
 
-`serve` starts with **only `config.json`** present: `/healthz` and `/v1/models` both answer without a
-browser or any login state (captured in §5). A real turn additionally needs the provider session,
-which is what phase 5 (#249) delivers.
+The entrypoint creates `config.json` when it is missing, so `/healthz` and `/v1/models` work on a
+fresh volume with no manual step. A **real turn** additionally needs the provider session, which is
+what phase 5 (#249) delivers.
 
 | Path (under `DSH_CHATGPT_WEB_HOME`) | Needed for | Notes |
 | --- | --- | --- |
@@ -199,7 +208,56 @@ volume, never in the image or the repository.
 127.0.0.1"`), so **F1 cannot be worked around by configuration alone**: a non-loopback bind needs the
 code change owned by #247.
 
-## 5. Evidence collected on the authoring host
+## 5. Operations
+
+| Task | Command |
+| --- | --- |
+| Logs | `docker compose logs -f` |
+| Health | `curl -fsS http://127.0.0.1:17841/healthz` · `docker inspect --format '{{.State.Health.Status}}' repo-chatgpt-web-1` |
+| Diagnostics | `docker compose exec chatgpt-web node lib/cli.js doctor --json` |
+| Stop (keep the volume) | `docker compose down` |
+| Remove everything | `docker compose down -v` — this **drops the credentials volume** |
+| Backup the volume | `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data-$(date +%F).tgz -C /data .` |
+| Restore | `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar xzf /backup/dsh-data-<date>.tgz -C /data` |
+| Upgrade | `git pull && docker compose build --pull && docker compose up -d` — the volume survives; the base tag is pinned, so `--pull` refreshes that tag only |
+| Bind-mount variant (data on the host) | `mkdir -p data && docker compose --profile bind up -d chatgpt-web-bind` |
+| Interactive login (needs a display) | `docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY login` (phase 5 #249 adds noVNC) |
+
+Notes:
+
+- The data volume holds **credentials**. Back it up encrypted, never commit it, and treat `down -v` as
+  a credential wipe; a restored volume keeps working only while the provider session is valid.
+- Resource requirements: ~3.8 GB on disk for the image, and Chromium needs shared memory — `ipc: host`
+  (the compose default) or `--shm-size=1g`. Budget roughly 1 GB RAM per active turn.
+- Only one of `chatgpt-web` / `chatgpt-web-bind` can run at a time: both use host networking and
+  therefore the same loopback port.
+- The healthcheck is the image's own (`curl /healthz`, 30 s interval, 20 s start period, 3 retries);
+  compose inherits it.
+- The Playwright base image is documented by Microsoft as development/testing only and **not
+  recommended for visiting untrusted sites** (§3 F5): here the only site visited is the provider's,
+  which is a third party from the container's point of view. This is a personal, single-account
+  bridge; do not expose it as a public service.
+
+### 5.1 Privileges: three variants
+
+| Variant | How | Notes |
+| --- | --- | --- |
+| **default (non-root)** | the image's user is `pwuser` (uid/gid 1001) | requires a *named* volume, whose ownership is seeded from the image's `/data`; this is what `docker compose up -d` uses |
+| simple root | `user: "0:0"` (the `bind` profile) | needed for a bind mount, which keeps the invoking user's ownership (uid 1000 here) |
+| hardened (sandbox on) | `--user pwuser` **+** Playwright's seccomp profile **+** `chromiumSandbox: true` at launch | **deferred**, see below |
+
+The container runs with Chromium's sandbox **off**, because Playwright adds `--no-sandbox` unless
+`chromiumSandbox: true` is requested and the application never requests it. Enabling it is deliberately
+not part of this slice: it touches the security-sensitive launch path. The exact requirement is
+recorded here so it is not lost:
+
+1. a config field (for example `browserSandbox: boolean`) validated in `parseConfig()`;
+2. thread it into every launch site — `ensureManagedBrowser()` in
+   `src/adapters/chatgpt-web/browser-worker.ts`, plus `checkBrowserEngine()` and `loginToChatGpt()`;
+3. a test asserting the flag reaches `chromium.launch({ chromiumSandbox: true })`;
+4. the seccomp profile wired into compose (`security_opt: ["seccomp:./docker/seccomp_profile.json"]`).
+
+## 6. Evidence collected on the authoring host
 
 Local paths are sanitised. The sidecar was exercised with Node 24.21.0 from the checked-in `lib/`.
 
@@ -333,7 +391,7 @@ display and without Xvfb**, so the image needs neither — and the chromium revi
 predicts is confirmed by installing it. What is still unproven is the launch inside the image's own
 base (its glibc and Bun/Node), which is what the container run covers.
 
-## 6. Verification status
+## 7. Verification status
 
 Every acceptance criterion of issue #245 was executed **inside the container** on Ubuntu 26.04 with
 Docker Engine 29.1.3 (`Dockerfile.spike`, base image digest `sha256:eff16c30…`):
@@ -350,9 +408,14 @@ Docker Engine 29.1.3 (`Dockerfile.spike`, base image digest `sha256:eff16c30…`
 | `doctor --json` on a prepared volume | ✅ `config: ok`, `chrome: ok` (`/usr/bin/google-chrome`), `login: error`, provider reachable/not authenticated (2 models), `proxy: ok` on 127.0.0.1 |
 | no production-code change was needed | ✅ only the symlink; `src/` untouched |
 
-Reproduce it with `docker/spike-evidence.sh` (§4); it printed `all checks passed` (exit 0). On this
+Reproduce it with `docker/verify-container.sh` (§4); it printed `all checks passed` (exit 0). On this
 host the engine had to be reached through the `docker` group (`sg docker -c …`) because the harness
 process predated `usermod -aG docker`.
+
+Compose was verified separately and is what CI runs: `docker compose up -d --wait` on a fresh volume
+returned success with the container `(healthy)`, `/healthz` and `/v1/models` answered, the entrypoint
+announced `wrote default configuration: /data/config.json`, and `docker compose down -v` removed both
+the container and the volume. Build context: ~6 MB. Image: 3.8 GB.
 
 ### Deliberately outside this spike
 
