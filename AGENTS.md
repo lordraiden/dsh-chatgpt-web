@@ -151,9 +151,9 @@ Do not allow two active turns to mutate the same logical provider conversation u
 
 Concurrency between different caller conversations is a separate resource-ownership question.
 
-For ChatGPT specifically, the current `main` branch still contains an account-level lease limitation that can block a second chat on the same authenticated account. This is a known implementation issue tracked by #201/#202. Do not generalize that current account-level exclusivity into the future WebChat Core.
+For ChatGPT specifically, an account-level *exclusive* lease used to block a second chat on the same authenticated account. That limitation was tracked by #201 and its fix PR #202 and is now **resolved**: one authenticated account serves a bounded fan-out of `MAX_CHATGPT_BROWSER_TABS` simultaneous browser turns (`src/adapters/chatgpt-web/concurrency.ts`), enforced with one shared refusal by the provider core, the turn-session registry and the browser worker. Do not reintroduce account-level exclusivity, and do not generalize the provider-specific fan-out bound into the future WebChat Core.
 
-The intended architecture scopes exclusivity to the logical conversation and the physical transport resource, while account-level fan-out remains bounded and provider-specific.
+Exclusivity is scoped to the logical conversation and the physical transport resource: one active turn per logical provider conversation (the transport lease, and the retained ChatGPT surface for its `conversationKey`), one lease per physical browser resource id, and one active turn per native DSH thread. Account-level fan-out remains bounded and provider-specific.
 
 ### Retry boundary
 

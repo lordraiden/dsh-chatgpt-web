@@ -229,26 +229,30 @@ The authenticated account or selected product route has reached a product-specif
 
 Do not treat a provider rate limit as proof that changing WebChat retry logic is correct. The retry boundary must remain conservative around submitted turns.
 
-## 10. Second DSH chat cannot start while another chat is generating
+## 10. A second DSH chat is refused while a conversation or the account is busy
 
 ### Current status
 
-The current main implementation has an account-level ChatGPT browser lease that can reject a second DSH turn on the same authenticated account while another turn is active.
+Resolved. `main` no longer has an account-level *exclusive* ChatGPT browser lease, so a second DSH chat on the same authenticated account leases normally instead of being rejected out of hand. The limitation was real and was tracked by issue #201 and its fix PR #202.
 
-This is a **known implementation limitation**, not the target multi-provider architecture.
+Account fan-out is now **bounded**, not exclusive: one authenticated account serves up to `MAX_CHATGPT_BROWSER_TABS` (5) simultaneous browser turns. Past that bound every enforcement site (provider core, turn-session registry, browser worker) refuses with the same shared sentence:
 
-Tracked by:
+```text
+ChatGPT Web supports at most 5 simultaneous browser turns; close or finish a browser tab before starting another
+```
 
-- issue #201;
-- proposed fix PR #202.
+Exclusivity is per logical conversation and per physical transport resource:
 
-The intended ownership model is:
+- one active turn per logical provider conversation — the transport lease and the retained ChatGPT surface for its `conversationKey`;
+- one lease per physical browser resource id, so two turns never drive the same page;
+- one active turn per native DSH thread.
 
-- one active turn per logical provider conversation;
-- separate DSH conversations may use separate physical transport resources;
-- account-level fan-out remains bounded and provider-specific.
+Read the refusal to tell the two apart:
 
-Do not work around this by disabling the per-conversation safety guards or sharing one physical page between unrelated DSH conversations.
+- `retained_surface_busy` / `TRANSPORT_UNAVAILABLE` means the *same* provider conversation already has an active turn (the per-conversation guards above);
+- the bounded fan-out sentence means the authenticated account is at its 5-turn ceiling — wait for a browser turn to finish, then retry.
+
+Do not work around either refusal by disabling the per-conversation safety guards or sharing one physical page between unrelated DSH conversations.
 
 ## 11. A request was submitted but no response was observed
 
