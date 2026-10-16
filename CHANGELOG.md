@@ -7,6 +7,7 @@
 - Make the result card and the editor share one delivery state, and report a delivery that never reached the Host as a confirmed, retriable failure instead of an ambiguous "may already have been delivered".
 - Fix **Discard result** doing nothing on an unedited result: an unchanged handoff text is now discarded on the first activation, and only an edited text asks for confirmation.
 - Update `doc/architecture.md` to the delivered state (issues #189–#194 closed, #195–#199 open), replace the obsolete extraction-candidate mapping with the current repository ownership, and document the containerised service distribution as a second, independent track (§32, issues #245–#250). `doc/web-chat-core.md` status table corrected.
+- Add the containerised-service spike: `docker/Dockerfile.spike` plus `doc/container.md` freeze the base-image facts (Playwright `v1.63.0-noble` matches `playwright-core` 1.63.0; browsers at `/ms-playwright/chromium-1243`) and the findings that change the plan — the sidecar is loopback-only, so a published port does not expose it; a fresh data directory has no `config.json`; and `setup` needs an interactive sign-in while also configuring the host Codex route. Container execution is still pending a Docker-capable host (issue #245).
 
 ## 1.0.28
 
