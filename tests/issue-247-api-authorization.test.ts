@@ -57,7 +57,12 @@ const running: RunningServer[] = [];
 afterEach(async () => {
   while (running.length > 0) {
     const server = running.pop()!;
-    try { await server.stop(true); } catch { /* already stopped */ }
+    // Bounded: a test that deliberately keeps a turn in flight must never hang the suite's teardown
+    // (CI caught exactly that).
+    await Promise.race([
+      Promise.resolve(server.stop(true)).catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
   }
 });
 
@@ -219,10 +224,15 @@ describe("issue #247 — bounded resources", () => {
     const controller = new AbortController();
     const config = makeConfig();
     const server = startServer(config as never, {
-      // A turn that never settles keeps the single in-flight slot busy.
+      // A turn that stays in flight keeps the single slot busy; like the real adapter it settles when
+      // the caller's request is cancelled, so teardown cannot hang.
       adapterFactory: () => ({
-        name: "issue-247-never-settles",
-        runTurn: () => new Promise<void>(() => {}),
+        name: "issue-247-stays-in-flight",
+        runTurn: (_parsed: unknown, incoming: { abortSignal?: AbortSignal }) =>
+          new Promise<void>((resolve) => {
+            if (incoming.abortSignal?.aborted) { resolve(); return; }
+            incoming.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+          }),
       }) as never,
     });
     running.push(server);
