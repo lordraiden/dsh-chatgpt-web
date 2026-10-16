@@ -5,7 +5,10 @@ export const OPAQUE_COMPACTION_NOTE = "[earlier conversation was compacted; the 
 
 /** True when a user-visible message carries the readable Codex compaction summary envelope. */
 export function isReadableCompactionSummaryText(value: unknown): value is string {
-  return typeof value === "string" && value.startsWith(`${SUMMARY_PREFIX}\\n`);
+  // The newline is REAL, not an escape: the producer (`compactionItemToText`) writes
+  // `${SUMMARY_PREFIX}\n\n${decoded}`, so a doubled backslash here would make this guard unable to ever
+  // match (issue #262). The regression test pins the producer's shape against this predicate.
+  return typeof value === "string" && value.startsWith(`${SUMMARY_PREFIX}\n`);
 }
 
 
