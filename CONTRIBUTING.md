@@ -1,6 +1,6 @@
 # Contributing to dsh-chatgpt-web
 
-Contributions to `dsh-chatgpt-web` should preserve its role as a browser-backed ChatGPT Web provider for DeepSeek Harness. The native DSH provider boundary is `ctx.llm`; the browser sidecar and browser/DOM automation are implementation machinery behind that boundary.
+Contributions to `dsh-chatgpt-web` should preserve its role as a browser-backed ChatGPT Web service, distributed as a container image and Compose stack and surfaced through the CLI and the HTTP API. The browser sidecar and browser/DOM automation are implementation machinery behind that surface.
 
 ## Guidelines
 
@@ -10,7 +10,7 @@ Contributions to `dsh-chatgpt-web` should preserve its role as a browser-backed 
 
 ## Architecture & Scope
 
-Read [`doc/architecture.md`](./doc/architecture.md) before making architectural changes. It is the authoritative description of the native `ctx.llm` provider boundary, the ChatGPT Web ProviderCore and WebSurfaceTransport boundaries, DSH ownership of sessions/tools/skills/approvals/sandbox policy, the separate native Codex protocol, and the role of `/v1/responses` as compatibility ingress rather than execution authority.
+Read [`doc/architecture.md`](./doc/architecture.md) before making architectural changes. It is the authoritative description of the provider-neutral WebChat core, the ChatGPT Web provider and WebSurfaceTransport boundaries, the durable conversation store, the service's own routing authority over its configured provider catalogue, the separate native Codex protocol, and the role of `/v1/responses` and `/v1/chat/completions` as wire-compatible ingresses onto one shared internal turn.
 
 The supported product scope is authenticated normal ChatGPT Web usage on supported Free and paid accounts. Routes whose usage belongs to the Codex/Work allocation are outside this provider.
 
@@ -28,9 +28,9 @@ Runtime diagnostics intentionally use safe metadata at the public logging bounda
    ```bash
    bun install
    ```
-2. Run test suite:
+2. Run the full test suite (the gate CI runs):
    ```bash
-   bun test
+   bun run test
    ```
 3. Verify TypeScript types:
    ```bash

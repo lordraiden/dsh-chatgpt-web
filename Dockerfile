@@ -41,15 +41,14 @@ ENV PATH="/usr/local/bin:${PATH}"
 
 WORKDIR /app
 COPY package.json bun.lock ./
-# --omit=peer: the service distribution must not carry, nor need, the DSH host peers
-# (@deepseek-ai/cordis, @deepseek-ai/dsh-llm). Every reference to them in src/ is `import type`,
-# erased at build time; the assertion below proves the bundle still loads without them.
+# --omit=peer keeps the production closure free of any optional peer the package may declare; the
+# service distribution must run from the CLI bundle alone, and the assertion below proves it does.
 RUN bun install --production --frozen-lockfile --omit=peer
 
 COPY --from=build /app/lib ./lib
 COPY src ./src
 COPY assets ./assets
-COPY client.js cordis.patch.yml screenshots.json LICENSE ./
+COPY LICENSE ./
 # The entrypoint bootstraps an empty data volume so a first `compose up` can become healthy, and it
 # stays transparent for every other subcommand (see the ENTRYPOINT note below).
 COPY docker/entrypoint.sh /usr/local/bin/dsh-entrypoint
@@ -58,7 +57,7 @@ COPY docker/bootstrap-config.ts /app/docker/bootstrap-config.ts
 # Make the runtime tree readable/traversable by the non-root user explicitly.
 RUN chmod 0755 /usr/local/bin/dsh-entrypoint \
  && chmod -R a+rX /app/src /app/assets /app/lib /app/docker \
- && chmod a+r /app/client.js /app/cordis.patch.yml /app/screenshots.json /app/package.json /app/bun.lock
+ && chmod a+r /app/package.json /app/bun.lock
 
 # Build assertion: the whole CLI import graph loads on the production closure alone.
 RUN node lib/cli.js --help > /dev/null && node lib/cli.js --version

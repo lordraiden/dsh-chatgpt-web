@@ -85,7 +85,7 @@ import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
-type HttpTrackedEndpoint = "models" | "responses" | "chat-completions" | "compact" | "search" | "native-llm" | "unspecified";
+type HttpTrackedEndpoint = "models" | "responses" | "chat-completions" | "compact" | "search" | "unspecified";
 
 export interface NativeCodexTurnIdentity {
   threadId: string;
@@ -965,92 +965,6 @@ export interface RunningServer {
 }
 
 /**
- * Private local transport used by the native DSH LLM adapter.
- *
- * The native DSH process remains the authority for session/sandbox context. It sends that
- * already-resolved CodexParsedRequest to the sidecar over the authenticated control channel.
- * The sidecar executes the request through the same ProviderAdapter/ProviderCore instance used by /v1/responses.
- */
-async function nativeDshTurnRequest(
-  req: Request,
-  config: AppConfig,
-  adapterFactory: ChatGptWebAdapterFactory,
-): Promise<Response> {
-  let raw: unknown;
-  try {
-    raw = await readJsonRequestBody(req);
-  } catch (error) {
-    const tooLarge = requestBodyFailure(error);
-    if (tooLarge) return tooLarge;
-    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Native DSH request body must be valid JSON");
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return formatErrorResponse(400, "invalid_request_error", "Native DSH request must be an object");
-  }
-  const body = raw as Record<string, unknown>;
-  const publicModel = typeof body.model === "string" ? body.model : "";
-  const parsed = body.request as CodexParsedRequest | undefined;
-  if (!publicModel || !parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return formatErrorResponse(400, "invalid_request_error", "Native DSH request requires model and request");
-  }
-  if (!parsed._dshContext) {
-    return formatErrorResponse(400, "invalid_request_error", "Native DSH request is missing trusted DSH context");
-  }
-  let route: ChatGptWebModelRoute;
-  try {
-    route = requireChatGptWebRoute(publicModel, chatGptWebRouteAuthority(config));
-  } catch (error) {
-    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
-  }
-  if (parsed.modelId !== route.backendModel) {
-    return formatErrorResponse(400, "invalid_request_error", "Native DSH public model and routed backend model do not match");
-  }
-  const provider = effectiveChatGptWebProviderConfig(config);
-  const adapter = adapterFactory(provider);
-  const queue = new AsyncEventQueue<AdapterEvent>();
-  const queueIterator = queue[Symbol.asyncIterator]();
-  const encoder = new TextEncoder();
-  const abort = new AbortController();
-  if (req.signal.aborted) abort.abort(req.signal.reason);
-  else req.signal.addEventListener("abort", () => abort.abort(req.signal.reason), { once: true });
-  void (async () => {
-    try {
-      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => queue.push(event));
-    } catch (error) {
-      queue.push({
-        type: "error",
-        message: error instanceof Error ? error.message : String(error),
-        ...(error instanceof DOMException && error.name === "AbortError" ? { code: "aborted" } : {}),
-      });
-    } finally {
-      queue.close();
-    }
-  })();
-  const stream = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const result = await queueIterator.next();
-      if (result.done) {
-        controller.close();
-        return;
-      }
-      controller.enqueue(encoder.encode(JSON.stringify(result.value) + "\n"));
-    },
-    cancel(reason) {
-      abort.abort(reason);
-      void queueIterator.return?.();
-    },
-  });
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "content-type": "application/x-ndjson",
-      "cache-control": "no-cache",
-      "x-content-type-options": "nosniff",
-    },
-  });
-}
-
-/**
  * Advisor control API (issue #224).
  *
  * The Advisor is a provider-neutral feature above the WebChat host boundary: the sidecar's
@@ -1546,16 +1460,6 @@ export function startServer(
       }
       setTimeout(shutdown, 0);
       return Response.json({ status: "ok", accepting_turns: false, ...current });
-    }
-    if (req.method === "POST" && url.pathname === "/internal/native-llm") {
-      if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-      if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
-      return httpTurns.track(
-        signal => nativeDshTurnRequest(new Request(req, { signal }), config, adapterFactory),
-        req.signal,
-        process.platform,
-        "native-llm",
-      );
     }
     if (req.method === "GET" && url.pathname === "/v1/models") {
       if (draining) {

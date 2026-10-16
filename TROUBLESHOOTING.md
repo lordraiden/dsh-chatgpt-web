@@ -54,9 +54,9 @@ Then run:
 dsh-chatgpt-web doctor
 ~~~
 
-If the browser is managed by the DSH Launcher, authentication belongs to the Launcher-owned browser flow; do not create a second plugin-owned login state unless the selected mode requires it.
+Authentication belongs to the container's own sign-in flow (`login`, the noVNC sign-in image, or `auth import`); do not create a second session store outside the data volume.
 
-Treat the plugin storage tree as credential material.
+Treat the data volume (`DSH_CHATGPT_WEB_HOME`) as credential material.
 
 ## 3. Snap/Chromium cannot create its browser profile
 
@@ -70,27 +70,27 @@ Failed to create .../SingletonLock: Permission denied (13)
 
 ### Cause
 
-The snap browser may not be allowed to write the hidden default plugin directory under ~/.dsh/.
+The snap browser may not be allowed to write the hidden default data directory under ~/.dsh/.
 
 ### Resolution
 
-Use a non-hidden home for the plugin:
+Use a non-hidden data directory:
 
 ~~~bash
 DSH_CHATGPT_WEB_HOME="$HOME/dsh-chatgpt-web" \
   dsh-chatgpt-web setup --chrome /snap/bin/chromium
 ~~~
 
-Persist the same DSH_CHATGPT_WEB_HOME in the environment that starts DSH.
+Persist the same DSH_CHATGPT_WEB_HOME in the environment that starts the service. In the container the data directory is the mounted volume and its path is fixed by the Compose stack.
 
-The same effective plugin home must be visible to:
+The same effective data directory must be visible to:
 
 - setup;
 - login;
 - doctor;
-- the DSH process that starts the sidecar.
+- the process that starts the sidecar.
 
-A one-off VAR=value command does not change the environment of a later DSH process.
+A one-off VAR=value command does not change the environment of a later process.
 
 ## 4. Chrome executable is missing
 
@@ -132,49 +132,45 @@ If a manually launched sidecar is required, use another port:
 dsh-chatgpt-web serve --port 17842
 ~~~
 
-For the normal DSH-managed path, prefer changing the configured sidecar port rather than maintaining a second competing sidecar.
+For the normal deployment path, prefer changing the configured sidecar port rather than maintaining a second competing sidecar.
 
 Do not expose the sidecar beyond its intended loopback boundary.
 
-### An older daemon is still serving the port
+### An older container is still serving the port
 
 #### Symptom
 
-`doctor` reports `Daemon version is X; config requires Y` and `Doctor result: not ready`, and the plugin log says the sidecar is outdated, even though `dsh plugin ... list` shows the new version installed and you restarted DSH.
+`doctor` reports `Daemon version is X; config requires Y` and `Doctor result: not ready`, and the container log says the sidecar is outdated, even though you just rebuilt the image and started it again.
 
 #### Cause
 
-Updating the plugin replaces files on disk; it does not stop a `serve` process that the plugin did not start. On an OS without the managed service that process is long-lived and keeps the port, so the updated plugin finds a **healthy sidecar whose version differs from its own**. The plugin will not reuse or terminate a sidecar it does not own, and since `1.0.27` it also fails turns closed with that message instead of quietly serving the old daemon.
+Rebuilding the image replaces the files on disk; it does not stop a `serve` process that is already running in an older container. That process keeps the port, so the new one finds a **healthy sidecar whose version differs from its own**. The service will not reuse or terminate a sidecar it does not own, and since `1.0.27` it also fails turns closed with that message instead of quietly serving the old daemon.
 
 #### Resolution
 
-Stop the old daemon, then let DSH start the matching one:
+Stop the old container, then start the matching image:
 
 ~~~bash
 lsof -i :17841            # or: ss -ltnp | grep 17841
-kill <pid-from-doctor>    # the daemon doctor reported
-# restart DSH so the installed plugin starts its own daemon
-curl -s http://127.0.0.1:17841/healthz   # expect "version":"<installed version>"
+docker compose down       # keep the data volume
+docker compose build --pull && docker compose up -d
+curl -s http://127.0.0.1:17841/healthz   # expect "version":"<image version>"
 ~~~
 
-Never edit `releaseVersion` in the config to silence the mismatch: it is runtime metadata that the plugin rewrites to the installed version, and hiding the disagreement would leave the old daemon serving turns.
+Never edit `releaseVersion` in the config to silence the mismatch: it is runtime metadata that the service rewrites to the installed version, and hiding the disagreement would leave the old daemon serving turns.
 
-## 6. DSH starts but the native provider is unavailable
+## 6. The service starts but the model API is unavailable
 
-Confirm that the provider is configured through DSH's native ctx.llm route.
+Check that the container is healthy and that the requested model is in the catalogue:
 
-The native path does **not** require an OpenAI API key, an openai-responses provider entry, or a separate localhost Responses provider.
-
-Check:
-
-1. the provider is chatgpt-web;
-2. the selected model route is one actually exposed by the authenticated ChatGPT Web capability state;
-3. doctor is healthy;
-4. the sidecar is running in the same effective plugin home/profile.
+1. `curl -fsS http://127.0.0.1:17841/healthz` answers `"status":"ok"`;
+2. `curl -fsS http://127.0.0.1:17841/v1/models` lists the requested `chatgpt-web/...` route;
+3. `doctor` is healthy;
+4. the API key is supplied when the service is not reached over the container's own loopback (see doc/container.md §5.2).
 
 Do not configure backend model IDs directly. Use the public chatgpt-web/... routes documented in the README.
 
-The local /v1/responses endpoint is a compatibility ingress, not the native DSH provider boundary.
+`/v1/responses` and `/v1/chat/completions` are two wire-compatible ingresses onto the **same** internal turn; neither is a second execution path.
 
 ## 7. The selected model route is unavailable
 
@@ -214,7 +210,7 @@ A route that belongs to a Codex/Work allocation is not part of the ChatGPT Web p
 2. Check that the authenticated browser/session is still valid.
 3. Run dsh-chatgpt-web doctor.
 4. Inspect sidecar/service status.
-5. Restart the DSH-managed sidecar only if it is actually unhealthy.
+5. Restart the sidecar only if it is actually unhealthy.
 
 A logical cancellation/failure does not necessarily prove that the browser operation has physically stopped. Avoid immediately reusing a transport resource when late browser output may still arrive.
 
@@ -308,66 +304,20 @@ Do not reconstruct authoritative DSH state from browser-visible conversation tex
 
 This is expected on the current production release.
 
-Qwen Chat and DeepSeek Chat are architectural roadmap providers, not currently supported user-facing routes.
+Qwen Chat and DeepSeek Chat are architectural roadmap providers, not currently supported user-facing routes, and the container-only product advertises no route for them.
 
-Their implementation work is tracked separately under the WebChat migration:
-
-- #189–#199.
-
-Do not add ad-hoc Qwen/DeepSeek routes to ChatGPT-specific code. The provider migration requires the shared WebChat contracts to be implemented first.
-
-## 14. Updating the published plugin
-
-For the normal private package workflow, use the DSH plugin updater rather than pulling source and rebuilding:
-
-~~~bash
-dsh plugin --profile <profile> update @lordraiden/dsh-chatgpt-web
-~~~
-
-The @lordraiden scope must resolve through GitHub Packages:
-
-~~~ini
-@lordraiden:registry=https://npm.pkg.github.com
-~~~
-
-Authentication belongs outside the repository.
-
-For source development, use the repository's normal development commands:
-
-~~~bash
-bun install
-bun run typecheck
-bun run build
-bun run test
-~~~
-
-A source build is not a substitute for publishing/versioning the private package used by DSH.
-
-## 15. Removing the integration
-
-For package management, prefer the DSH plugin lifecycle rather than editing Cordis files manually unless the installation workflow specifically requires it.
-
-When removing local state manually, the important storage tree is:
-
-~~~text
-~/.dsh/storages/chatgpt-web/
-~~~
-
-or the path selected by --home / DSH_CHATGPT_WEB_HOME.
-
-Delete browser/session state only when you intend to invalidate the saved authentication.
+Do not add ad-hoc Qwen/DeepSeek routes to ChatGPT-specific code. A new provider requires the shared WebChat contracts to be implemented first.
 
 ## 16. Reporting a bug
 
 Include:
 
 - operating system and architecture;
-- DSH version;
-- plugin/package version;
+- container engine and image tag;
 - Node/Bun version;
 - browser name/version;
 - selected chatgpt-web/... route;
-- whether the browser is plugin-managed or Launcher-owned;
+- how the browser session was obtained (`login`, the noVNC sign-in image, or `auth import`);
 - relevant doctor --json output after redaction;
 - clear reproduction steps;
 - the exact failure state or error.
@@ -384,11 +334,10 @@ Before sharing logs or screenshots, remove:
 
 - cookies;
 - authentication/session tokens;
-- runtime keys;
-- control tokens;
+- the API key (`DSH_CHATGPT_WEB_API_KEY`);
+- the control token;
 - private prompts;
-- local filesystem secrets;
-- launcher authorization material.
+- local filesystem secrets.
 
 ## 17. Development versus user troubleshooting
 

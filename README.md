@@ -1,0 +1,256 @@
+# dsh-chatgpt-web
+
+[![license](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](./LICENSE)
+[![container image](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/container.yml?style=flat&label=container%20image)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/container.yml)
+[![tarball smoke](https://img.shields.io/github/actions/workflow/status/lordraiden/dsh-chatgpt-web/tarball-smoke.yml?style=flat&label=tarball%20smoke)](https://github.com/lordraiden/dsh-chatgpt-web/actions/workflows/tarball-smoke.yml)
+
+> **A container-only service that bridges an authenticated ChatGPT Web session to a text-only HTTP API.**
+
+`dsh-chatgpt-web` runs a headless Chromium in a Docker image, operates an authenticated
+[chatgpt.com](https://chatgpt.com) session through its normal web UI, and exposes that session as a
+text-only HTTP API. It is not the official OpenAI API and is not affiliated with or endorsed by OpenAI.
+
+---
+
+## Table of Contents
+
+- [What it is](#what-it-is)
+- [Quick start](#quick-start)
+- [API surface](#api-surface)
+- [Authentication and exposure](#authentication-and-exposure)
+- [Sign in to ChatGPT](#sign-in-to-chatgpt)
+- [Model catalogue](#model-catalogue)
+- [Text-only: what is refused](#text-only-what-is-refused)
+- [The `usage` block is an estimate](#the-usage-block-is-an-estimate)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
+---
+
+## What it is
+
+The product is the container: a self-contained image plus Compose stacks, with the CLI and the HTTP
+API as its surface.
+
+- **CLI:** `dsh-chatgpt-web serve|doctor|login|auth import`, plus `setup`, `browser check`, `service`
+  and `uninstall`. Every subcommand is reachable through the image.
+- **HTTP API:** `/v1/responses`, `/v1/chat/completions`, `/v1/models`, `/healthz`, `/admin/*` and
+  `/v1/control/*`.
+- **Provider:** ChatGPT Web, driven through the authenticated website UI in headless Chromium.
+- **Storage:** one data volume holds the configuration, the provider session (credentials) and the
+  durable conversation store.
+
+The shared semantics of the exchange live in a provider-neutral WebChat core; ChatGPT Web is the
+current provider. Qwen Chat and DeepSeek Chat are roadmap providers and are **not** current routes.
+See [`doc/architecture.md`](./doc/architecture.md) for the ownership model.
+
+## Quick start
+
+Requirements: Docker Engine with the Compose plugin (or Podman), ~4 GB free disk for the image, and
+roughly 1 GB RAM per active turn.
+
+```bash
+git clone https://github.com/lordraiden/dsh-chatgpt-web.git
+cd dsh-chatgpt-web
+
+# Build and start the supported stack. It creates its data volume and becomes healthy by itself.
+docker compose up -d --wait
+curl -fsS http://127.0.0.1:17841/healthz
+```
+
+On an empty volume the entrypoint writes a default `config.json` and announces it on stderr, so the
+first `compose up` reaches `healthy` with no manual step. A real turn still needs a provider session
+— see [Sign in to ChatGPT](#sign-in-to-chatgpt).
+
+The default stack uses host networking and binds the loopback port `17841`, so the service is reachable
+only from this machine. `--ipc=host` (the compose default) is recommended by Playwright for Chromium;
+`--init` avoids zombie processes.
+
+Common operations (full list in [`doc/container.md`](./doc/container.md)):
+
+```bash
+docker compose logs -f                     # logs
+docker compose exec chatgpt-web node lib/cli.js doctor --json   # diagnostics
+docker compose down                        # stop, keep the data volume
+docker compose down -v                     # stop and DROP the credentials volume
+```
+
+## API surface
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/responses` | Responses-compatible text endpoint with SSE streaming. |
+| `POST /v1/chat/completions` | OpenAI-compatible text chat, streaming and non-streaming. |
+| `GET /v1/models` | The provider-qualified catalogue (`models[]`, plus an additive OpenAI `data[]`). |
+| `GET /healthz` | Liveness metadata. Deliberately open: Docker's healthcheck and any load balancer need it. |
+| `/v1/control/*`, `/admin/*` | Operator routes, authorized with the control token. |
+
+```bash
+# OpenAI-compatible chat
+curl -fsS http://127.0.0.1:17841/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}]}'
+
+# The same request, streamed
+curl -fsSN http://127.0.0.1:17841/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","stream":true,"messages":[{"role":"user","content":"hola"}]}'
+
+# The Responses-compatible endpoint
+curl -fsS http://127.0.0.1:17841/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","instructions":"You are a helpful assistant.",\
+       "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hola"}]}]}'
+```
+
+`/v1/responses` and `/v1/chat/completions` are two wire-compatible ingresses onto the **same** internal
+turn — there is no second execution engine.
+
+**Only messages are transmitted.** With a stable session identity (OpenAI's `user` field, or
+`session_id`) the API transmits only the **current user message** and the provider conversation holds
+the history; without one the request is stateless and every non-conversational role (`system`,
+`developer`, `tool`, unknown) is dropped. Harness text written *inside* the current user message cannot
+be distinguished structurally and does cross — a documented, test-asserted limit.
+
+### Every CLI subcommand through the image
+
+The entrypoint execs `node lib/cli.js "$@"`, so any subcommand is reachable with `docker run`:
+
+```bash
+docker run --rm -v dsh-chatgpt-web-data:/data dsh-chatgpt-web:local doctor --json
+docker run --rm -v dsh-chatgpt-web-data:/data dsh-chatgpt-web:local serve --port 17899
+```
+
+## Authentication and exposure
+
+The default stack is loopback-only and needs no key. To publish the port you must configure an API key,
+and the server **fails closed**: a non-loopback bind refuses to start without one, and a key shorter
+than 16 characters is refused.
+
+```bash
+export DSH_CHATGPT_WEB_API_KEY="$(openssl rand -base64 32)"
+docker compose -f docker-compose.exposed.yml up -d --wait
+
+curl -fsS -H "authorization: Bearer $DSH_CHATGPT_WEB_API_KEY" http://127.0.0.1:17841/v1/models
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:17841/v1/models   # 401 without the key
+```
+
+Rules this deployment enforces:
+
+1. **The key is a secret, not configuration.** It comes from `DSH_CHATGPT_WEB_API_KEY` or
+   `<data dir>/api-key`, never from `config.json`, and it is never logged or returned by `/healthz`.
+   `x-api-key: <key>` is accepted as well as `Authorization: Bearer <key>`.
+2. **Separate authorities.** The API key does not open `/v1/control/*` or `/admin/*`, and the operator
+   control token does not open `/v1/*`; both are constant-time comparisons.
+3. **The exposed variant is a separate Compose project** (`docker-compose.exposed.yml`, project
+   `dsh-chatgpt-api`) because it and the default stack cannot run at once — they use the same host
+   port. It shares the data volume by name, so one sign-in serves either variant.
+4. **Reach it from elsewhere only through a TLS-terminating reverse proxy**, never by publishing
+   `0.0.0.0:17841` raw. See [`doc/container.md`](./doc/container.md) §5.2 for the Caddy sketch and the
+   request-size / in-flight bounds (`DSH_CHATGPT_WEB_MAX_REQUEST_BYTES`,
+   `DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS`).
+
+The [`SECURITY.md`](./SECURITY.md) policy applies: this is a personal, single-account bridge, not a
+public multi-tenant service, and the provider's terms of service are yours to honour.
+
+## Sign in to ChatGPT
+
+The runtime needs a **verified** browser session: `storage-state.json` plus its `.verified.json`
+marker, under `providers/<providerId>/` in the data volume. Cookies alone are never enough — the marker
+is what distinguishes "a file exists" from "this session was proven against the provider".
+
+### Adopt a capture (`auth import`)
+
+On a machine where you can sign in, capture a Playwright `storageState` JSON (or a directory
+containing `storage-state.json`), then:
+
+```bash
+docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture
+```
+
+`auth import` is **fail-closed by construction**: the capture is verified against the provider's login
+surface *first*, and both files are written atomically *afterwards*. A capture that cannot be verified
+exits non-zero and writes **nothing**. Cookie values are never printed.
+
+### Sign in inside the container
+
+The `login` service shares the data volume and runs the interactive sign-in.
+
+With a display:
+
+```bash
+docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY="$DISPLAY" login
+```
+
+With **no display**, sign in over noVNC in one command:
+
+```bash
+docker build -t dsh-chatgpt-web:local . && docker compose --profile login build login
+docker compose --profile login up -d login
+# open http://127.0.0.1:6080/vnc.html, sign in, then stop the service:
+docker compose --profile login down
+```
+
+The noVNC display stack lives only in `Dockerfile.login`, which layers on top of the production image,
+so the production artifact keeps no VNC surface. The port is published on the host's **loopback only**
+because it grants control of an authenticated browser session — never expose it on `0.0.0.0`.
+
+When the session expires, `doctor --json` reports `login: error — ChatGPT login state is missing or
+unverified` with the resolved path; repeat the sign-in or the import. Back up and restore the data
+volume encrypted, and never commit it.
+
+## Model catalogue
+
+`GET /v1/models` is the authority. Model ids are the catalogue slugs:
+
+```bash
+curl -fsS http://127.0.0.1:17841/v1/models
+```
+
+| Route | Product surface |
+| --- | --- |
+| `chatgpt-web/luna` | Luna-only accounts without the Sol model selector. |
+| `chatgpt-web/think` | Luna-only accounts using Luna's Think reasoning mode. |
+| `chatgpt-web/light` | Sol/Instant. |
+| `chatgpt-web/medium` | Sol/Medium. |
+| `chatgpt-web/high` | Sol/High. |
+| `chatgpt-web/extra-high` | Pro-gated. |
+| `chatgpt-web/pro` | Pro-gated. |
+
+The catalogue is resolved from the authenticated account's capability state, so it is not a promise
+that every account has every route: unknown or unverifiable capability state fails closed, and an
+unknown model id is a typed `400` that names the accepted ones. Do not configure backend model IDs
+such as `gpt-5.6-sol` or `gpt-5.6-luna`; users select the public `chatgpt-web/...` route.
+
+## Text-only: what is refused
+
+The common WebChat contract is text-only. Refused with a typed `400`, never silently dropped:
+
+- `tools`, `tool_choice`, `functions`, `function_call` (legacy);
+- `n > 1`;
+- `logprobs` / `top_logprobs`;
+- `response_format` other than plain text;
+- non-text content parts (`image_url`, `input_audio`, files).
+
+Tools, images, audio, video, attachments and MCP belong to the common layer's own vocabulary, so the
+API does not maintain a second refusal list. Embeddings, audio, images and batch are not offered at all.
+
+## The `usage` block is an estimate
+
+`usage` is produced locally (tiktoken) for clients that read it. It is **not** consumer-web accounting,
+and some paths report zeros. Treat it as an estimate, not as billing or quota truth.
+
+## Troubleshooting
+
+- [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) — login state, browser executable paths, port
+  conflicts, an older container still serving the port, rate limits, continuity loss, bug reports.
+- [`doc/container.md`](./doc/container.md) — the container operations manual: image and Compose,
+  the data volume layout, privileges, exposure and authentication rules, provider login, and the
+  verified container evidence.
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — development setup and the verification commands.
+- [`SECURITY.md`](./SECURITY.md) — what counts as sensitive and how to report a vulnerability.
+- [`doc/architecture.md`](./doc/architecture.md) — the architecture and ownership rules.
+
+## License
+
+[MIT](./LICENSE).

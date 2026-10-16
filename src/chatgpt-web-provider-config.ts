@@ -1,10 +1,10 @@
 /**
  * The single resolver of the effective ChatGPT Web provider configuration (issue #193).
  *
- * Every seam that needs ChatGPT Web **provider facts** — the DSH LLM adapter and its driver, the
- * model catalogue behind `/v1/models`, the Responses ingress (`/v1/responses`) and the private native
- * DSH loopback (`/internal/native-llm`) — resolves them here, so a provider-scoped block cannot reach
- * one seam and miss another.
+ * Every seam that needs ChatGPT Web **provider facts** — the provider driver, the model catalogue
+ * behind `/v1/models`, the Responses ingress (`/v1/responses`) and the chat-completions ingress
+ * (`/v1/chat/completions`) — resolves them here, so a provider-scoped block cannot reach one seam and
+ * miss another.
  *
  * What this module owns, and what it deliberately does not:
  *
@@ -14,8 +14,8 @@
  *   derived ones (the account identity fingerprint) — and the merged block, not the scoped payload
  *   alone, is what the shared validator checks. Without `webChat` the result is structurally
  *   `providerConfig(config)` unchanged;
- * - it is **not** a second routing authority. `ctx.llm` remains the public provider registry and route
- *   dispatch authority, and the sidecar remains the execution authority; callers derive their own
+ * - it is **not** a second routing authority. The configured provider catalogue remains the public
+ *   route-dispatch authority, and the sidecar remains the execution authority; callers derive their own
  *   provider-scoped views (routes, catalogue) from these facts exactly as they derived them from
  *   `providerConfig` before.
  *
@@ -29,7 +29,7 @@
  * block stays effective rather than an unusable provider being produced.
  */
 import { mergeChatGptWebProviderFacts, providerConfig, type AppConfig } from "./config";
-import { CHATGPT_WEB_DRIVER_ID, resolveWebChatProviderConfig } from "./web-chat/host/dsh-integration";
+import { CHATGPT_WEB_DRIVER_ID, resolveWebChatProviderConfig } from "./web-chat/host/provider-host";
 
 /** The configuration location named when a provider-scoped block is refused. */
 export const CHATGPT_WEB_SCOPED_CONFIG_PATH = `webChat.providers["${CHATGPT_WEB_DRIVER_ID}"]`;

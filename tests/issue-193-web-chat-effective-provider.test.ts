@@ -2,7 +2,7 @@
  * Issue #193 (corrections C1 + C4) — one effective provider configuration, validated in both blocks.
  *
  * Correction C1: the seams that decide ChatGPT Web provider facts (the route authority, the model
- * catalogue behind `/v1/models`, `/v1/responses` and `/internal/native-llm`) read the *flat* AppConfig
+ * catalogue behind `/v1/models` and `/v1/responses`) read the *flat* AppConfig
  * while the adapter and driver read `webChat.providers["chatgpt-web"]`. They now all read one resolver,
  * resolved per call, without `webChat` structurally identical to `providerConfig(config)`.
  *
@@ -21,7 +21,7 @@ import {
   availableChatGptWebRoutes,
 } from "../src/chatgpt-web-authority";
 import { effectiveChatGptWebProviderConfig } from "../src/chatgpt-web-provider-config";
-import { webChatModelCatalogueEntries } from "../src/web-chat/host/dsh-integration";
+import { webChatModelCatalogueEntries } from "../src/web-chat/host/provider-host";
 import {
   defaultConfig,
   getConfigPath,
@@ -148,7 +148,7 @@ describe("issue #193 — one effective provider configuration", () => {
     // ...and would be refused by the flat block alone, which serves only the Sol routes.
     expect(() => routeChatGptWebRequest(parsed(), flatSolConfig())).toThrow();
 
-    // 6. `/internal/native-llm`: the real listener, with the provider facts the handler built.
+    // 6. `/v1/responses`: the real listener, with the provider facts the handler built.
     const seen: CodexProviderConfig[] = [];
     const adapter: ProviderAdapter = {
       name: "issue-193-effective-test",
@@ -164,20 +164,13 @@ describe("issue #193 — one effective provider configuration", () => {
       },
     });
     try {
-      const nativeParsed = parsed();
-      routeChatGptWebRequest(nativeParsed, config);
-      nativeParsed._dshContext = {
-        dshSessionId: "issue-193-effective-session",
-        threadId: "issue-193-effective-thread",
-        turnId: "issue-193-effective-turn",
-      };
-      const response = await fetch(`http://127.0.0.1:${running.port}/internal/native-llm`, {
+      const response = await fetch(`http://127.0.0.1:${running.port}/v1/responses`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${config.controlToken}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ model: "chatgpt-web/luna", request: nativeParsed }),
+        body: JSON.stringify({ model: "chatgpt-web/luna", input: "efectivo", stream: false }),
       });
       expect(response.status).toBe(200);
       await response.text();

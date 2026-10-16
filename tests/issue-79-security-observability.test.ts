@@ -62,7 +62,6 @@ describe("issue #79 security and observability hardening", () => {
       source("src/adapters/chatgpt-web/index.ts"),
       source("src/adapters/chatgpt-web/browser-worker.ts"),
       source("src/adapters/chatgpt-web/turn-broker.ts"),
-      source("src/plugin.ts"),
       source("src/server.ts"),
     ].join("\n");
     const lines = runtime.split("\n");

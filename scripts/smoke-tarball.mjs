@@ -112,17 +112,18 @@ try {
     fail(`doctor crashed (exit ${doctor.status}): ${doctorText.trim().slice(-400)}`);
   }
 
-  // The profile host supplies this peer to the Cordis plugin, but the standalone CLI/sidecar must
-  // not import the host-only adapter class: the profile's isolated package tree does not own it.
+  // The standalone CLI/sidecar must not import any DeepSeek Harness package: the Cordis plugin is
+  // fully retired, so the container product has to load on its own closure alone.
   const cliBundlePath = join(pkgDir, "lib", "cli.js");
   if (!existsSync(cliBundlePath)) {
-    fail("standalone CLI bundle is unavailable for the host-peer boundary check");
+    fail("standalone CLI bundle is unavailable for the DSH boundary check");
   } else {
     const cliBundle = readFileSync(cliBundlePath, "utf8");
-    if (/from\s+["']@deepseek-ai\/dsh-llm["']/.test(cliBundle)) {
-      fail("standalone CLI imports the host-only @deepseek-ai/dsh-llm peer");
+    const dshImport = /\bfrom\s*["'](@deepseek-ai\/[^"']+)["']|\bimport\(\s*["'](@deepseek-ai\/[^"']+)["']/.exec(cliBundle);
+    if (dshImport) {
+      fail(`standalone CLI imports the retired DSH package ${dshImport[1] ?? dshImport[2]}`);
     } else {
-      ok("standalone CLI does not depend on the host-only DSH LLM peer");
+      ok("standalone CLI imports no DSH package");
     }
   }
 
@@ -161,7 +162,8 @@ try {
   }
   if (contaminated === 0) ok("no build-environment paths found in the tarball");
 
-  // 7. Runtime dependency resolution from the clean install.
+  // 7. Runtime dependency resolution from the clean install. Only the production closure the
+  // container actually needs is asserted here; the retired DSH packages are gone from the artifact.
   const depCheck = run(
     process.execPath,
     [
@@ -171,21 +173,19 @@ try {
         `const req = createRequire(process.cwd() + '/node_modules/${packageName}/lib/cli.js');`,
         "console.log(req.resolve('playwright-core/package.json'));",
         "console.log(req.resolve('tiktoken'));",
-        "console.log(req.resolve('@deepseek-ai/dsh-llm/package.json'));",
-        "console.log(req.resolve('@deepseek-ai/schemastery/package.json'));",
       ].join("\n"),
     ],
     { cwd: cleanDir },
   );
   const depLines = (depCheck.stdout || "").trim().split("\n").filter(Boolean);
-  if (depCheck.status !== 0 || depLines.length !== 4) {
+  if (depCheck.status !== 0 || depLines.length !== 2) {
     fail(`dependency resolution check failed: ${(depCheck.stderr || depCheck.stdout).trim().slice(-400)}`);
   } else {
-    const [pwPath, twPath, dshLlmPath, schemasteryPath] = depLines;
-    if (![pwPath, twPath, dshLlmPath, schemasteryPath].every(path => path.startsWith(cleanDir))) {
+    const [pwPath, twPath] = depLines;
+    if (![pwPath, twPath].every(path => path.startsWith(cleanDir))) {
       fail(`dependencies resolve outside the clean install: ${depLines.join(" | ")}`);
     } else {
-      ok("browser, tokenizer, DSH LLM, and schema runtime dependencies resolve from the clean install");
+      ok("browser and tokenizer runtime dependencies resolve from the clean install");
     }
   }
 

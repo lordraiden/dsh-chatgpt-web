@@ -40,12 +40,6 @@
   builds the image and waits for health, and `scripts/test-246-container-pin.mjs` keeps the base-image
   pin in step with `bun.lock`. `doc/container.md` is now the operations manual; it records the deferred
   Chromium-sandbox hardening and the API "transmit only messages" requirement tracked as #253.
-- Fix **Inject into DSH** failing with `cannot get property "remote.session" without inject`: the client plugin now declares the nested `remote.session` service it already used, so the review reaches its DSH session from both the result editor and the card.
-- Deliver an Advisor review from the chat card itself: the result card offers **Inject into DSH** (and an explicit retry after an ambiguous delivery) with the same session-addressed admission and single-flight guard as the editor, so the review no longer has to be copied by hand.
-- Make the result card and the editor share one delivery state, and report a delivery that never reached the Host as a confirmed, retriable failure instead of an ambiguous "may already have been delivered".
-- Fix **Discard result** doing nothing on an unedited result: an unchanged handoff text is now discarded on the first activation, and only an edited text asks for confirmation.
-- Update `doc/architecture.md` to the delivered state (issues #189–#194 closed, #195–#199 open), replace the obsolete extraction-candidate mapping with the current repository ownership, and document the containerised service distribution as a second, independent track (§32, issues #245–#250). `doc/web-chat-core.md` status table corrected.
-- Add the containerised-service spike: `docker/Dockerfile.spike` plus `doc/container.md` freeze the base-image facts (Playwright `v1.63.0-noble` matches `playwright-core` 1.63.0; browsers at `/ms-playwright/chromium-1243`) and the findings that change the plan — the sidecar is loopback-only, so a published port does not expose it; a fresh data directory has no `config.json`; and `setup` needs an interactive sign-in while also configuring the host Codex route. Container execution is still pending a Docker-capable host (issue #245).
 
 ## 1.0.28
 

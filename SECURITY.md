@@ -1,15 +1,18 @@
 # Security policy
 
 Do not open public issues containing ChatGPT cookies, browser storage, tunnel IDs, API keys,
-DeepSeek Harness prompts, tool results, or local filesystem paths. Redact diagnostic bundles before sharing.
+harness prompts, tool results, or local filesystem paths. Redact diagnostic bundles before sharing.
 
-The daemon's normal listener is bound to loopback. Treat the authenticated browser profile and plugin
-storage as sensitive local credentials: anyone who can access that storage or account session may be able
-to act as the authenticated ChatGPT user.
+The daemon's default listener is bound to loopback. Treat the authenticated browser profile and the
+data directory (`DSH_CHATGPT_WEB_HOME`) as sensitive local credentials: anyone who can access that
+storage or account session may be able to act as the authenticated ChatGPT user.
 
-The native DSH provider is the canonical provider boundary. Trusted DSH context and authorization state
-are carried through runtime state rather than reconstructed from model-visible text or browser state.
-`/v1/responses` is a compatibility ingress and must not become an independent authorization or execution authority.
+The containerised HTTP service is the product, and its API is the execution ingress. `/v1/responses`,
+`/v1/chat/completions` and `/v1/models` describe the service's own surface, not a compatibility shim,
+and the public `/v1/*` surface is gated by `DSH_CHATGPT_WEB_API_KEY` (or `<data dir>/api-key`): a
+non-loopback bind refuses to start without a configured key. That key is a separate authority from the
+operator control token used by `/v1/control/*` and `/admin/*`, and `/healthz` is deliberately open
+because it reports liveness metadata only.
 
 Keep dependency security fixes and lockfile overrides documented in the repository. Verify security-sensitive
 dependency changes with the repository's normal typecheck, build, regression, packaging, and smoke-test gates.

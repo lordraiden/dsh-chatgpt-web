@@ -8,7 +8,7 @@ import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import {
   inspectWebChatProvider,
   webChatDoctorCheck,
-} from "./web-chat/host/dsh-integration";
+} from "./web-chat/host/provider-host";
 import type { WebChatProviderDriver } from "./web-chat/core";
 import { inspectCodexIntegration } from "./codex-integration";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";

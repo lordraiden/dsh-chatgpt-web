@@ -18,7 +18,7 @@ import {
   type WebChatAccountBinding,
   type WebChatConversationStore,
 } from "../src/web-chat/core";
-import { CHATGPT_WEB_PROVIDER_ID } from "../src/adapters/chatgpt-web/llm-adapter";
+import { CHATGPT_WEB_DRIVER_ID as CHATGPT_WEB_PROVIDER_ID } from "../src/web-chat/host/provider-host";
 import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
 
 /**

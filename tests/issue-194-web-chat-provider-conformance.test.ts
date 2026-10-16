@@ -12,7 +12,7 @@ import {
 } from "../src/adapters/chatgpt-web/index";
 import { createChatGptWebDriver } from "../src/adapters/chatgpt-web/chatgpt-driver";
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { CHATGPT_WEB_PROVIDER_ID } from "../src/adapters/chatgpt-web/llm-adapter";
+import { CHATGPT_WEB_DRIVER_ID as CHATGPT_WEB_PROVIDER_ID } from "../src/web-chat/host/provider-host";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import type { ChatGptWebSurfaceTransport, WebSurfaceTurn } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { webChatAccountBindingId, webChatContinuationIdentity, type WebChatReplayMessage } from "../src/web-chat/core";

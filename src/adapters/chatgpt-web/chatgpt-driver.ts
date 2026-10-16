@@ -35,7 +35,7 @@ import {
   type WebChatProviderHealth,
 } from "../../web-chat/core";
 import { chatGptWebAccountFingerprint, chatGptWebExecutionNamespace } from "./index";
-import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/dsh-integration";
+import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/provider-host";
 import { chatGptTurnSessions, type ChatGptTurnSessions } from "./turn-execution";
 
 /** What the driver reads from the provider, all of it provider-local state. */
@@ -88,11 +88,11 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
   /**
    * The route this provider serves for a model identity.
    *
-   * The continuity decision is handed the request the native transport carries, whose `modelId` is the
-   * **backend** model the provider routes to (`toCodexParsedRequest` projects it), while the public,
-   * provider-scoped route identity is the slug the host selects. Both name the same served route, and
-   * the driver is the owner of that mapping: without resolving both, a real native turn would be
-   * assessed against a route this deployment does serve and still be refused as unsupported.
+   * The continuity decision is handed the request the provider transport carries, whose `modelId` is
+   * the **backend** model the provider routes to, while the public, provider-scoped route identity is
+   * the slug the service selects. Both name the same served route, and the driver is the owner of that
+   * mapping: without resolving both, a real turn would be assessed against a route this deployment does
+   * serve and still be refused as unsupported.
    */
   const servedRouteOf = (model: string): ChatGptWebModelRoute | undefined =>
     availableChatGptWebRoutes(authority).find(candidate => candidate.slug === model || candidate.backendModel === model);

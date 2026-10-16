@@ -7,10 +7,8 @@ import {
   requireChatGptWebRoute,
 } from "../src/chatgpt-web-authority";
 import type { IncomingMeta, ProviderAdapter } from "../src/adapters/base";
-import type { AdapterEvent, CodexParsedRequest, DshNativeTurnContext } from "../src/types";
-import { defaultConfig, providerConfig } from "../src/config";
-import { ChatGptWebLlmAdapter } from "../src/adapters/chatgpt-web/llm-adapter";
-import type { GenerateOptions, StreamChunk } from "@deepseek-ai/dsh-llm";
+import type { AdapterEvent, CodexParsedRequest } from "../src/types";
+import { defaultConfig } from "../src/config";
 import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import { startServer } from "../src/server";
 import { parseRequest } from "../src/responses/parser";
@@ -423,7 +421,7 @@ describe("issue #78 Responses compatibility seam audit", () => {
     expect(expanded).not.toHaveProperty("capabilities");
     expect(expanded).not.toHaveProperty("sandbox");
   });
-  test("native DSH and Responses converge on one runtime ProviderCore instance", async () => {
+  test("chat completions and Responses converge on one runtime ProviderCore instance", async () => {
     const config = {
       ...defaultConfig(),
       port: 0,
@@ -466,19 +464,7 @@ describe("issue #78 Responses compatibility seam audit", () => {
       expect(responses.status).toBe(200);
       expect((await responses.json() as { status?: string }).status).toBe("completed");
 
-      const nativeParsed = parseRequest({
-        model: "chatgpt-web/light",
-        input: "runtime native",
-        stream: false,
-      });
-      routeChatGptWebRequest(nativeParsed, config);
-      nativeParsed._dshContext = {
-        dshSessionId: "issue-78-session",
-        threadId: "issue-78-thread",
-        turnId: "issue-78-turn",
-      };
-
-      const native = await fetch(`${baseUrl}/internal/native-llm`, {
+      const chatCompletions = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: {
           authorization: "Bearer issue-78-runtime-test-token",
@@ -486,11 +472,12 @@ describe("issue #78 Responses compatibility seam audit", () => {
         },
         body: JSON.stringify({
           model: "chatgpt-web/light",
-          request: nativeParsed,
+          messages: [{ role: "user", content: "runtime native" }],
+          stream: false,
         }),
       });
-      expect(native.status).toBe(200);
-      await native.text();
+      expect(chatCompletions.status).toBe(200);
+      await chatCompletions.text();
 
       expect(seenCores).toHaveLength(2);
       expect(seenCores[0]).toBe(seenCores[1]);
@@ -499,91 +486,10 @@ describe("issue #78 Responses compatibility seam audit", () => {
     }
   });
 
-  test("real DSH LlmAdapter crosses the private native loopback and returns DSH chunks", async () => {
-    const config = {
-      ...defaultConfig(),
-      port: 0,
-      controlToken: "issue-78-native-adapter-test-token",
-      solAvailable: true,
-      proAvailable: false,
-      capabilityState: {
-        solAvailable: "supported" as const,
-        proAvailable: "unsupported" as const,
-      },
-    };
-    let seenParsed: CodexParsedRequest | undefined;
-    const seenCores: ChatGptWebProviderCore[] = [];
-
-    const running = startServer(config, {
-      adapterFactory: (_provider, providerCore) => {
-        seenCores.push(providerCore);
-        return {
-          name: "issue-78-native-adapter-test",
-          runTurn: async (parsed, _incoming, emit) => {
-            seenParsed = parsed;
-            emit({ type: "text_delta", text: "native adapter e2e", phase: "final_answer" });
-            emit({ type: "done", stopReason: "stop", endTurn: true });
-          },
-        };
-      },
-    });
-
-    try {
-      const nativeContext: DshNativeTurnContext = {
-        dshSessionId: "issue-78-native-session",
-        threadId: "issue-78-native-thread",
-        turnId: "issue-78-native-turn",
-      };
-      const adapter = new ChatGptWebLlmAdapter({
-        loadProvider: () => providerConfig(config),
-        resolveNativeDshContext: () => nativeContext,
-        resolveNativeDshTransport: () => ({
-          baseUrl: `http://127.0.0.1:${running.port}`,
-          controlToken: config.controlToken,
-        }),
-      });
-
-      const options = {
-        provider: "chatgpt-web",
-        model: "chatgpt-web/light",
-        messages: [{
-          role: "user",
-          content: [{ type: "text", text: "hello from native adapter" }],
-        }],
-      } as GenerateOptions;
-      const chunks: StreamChunk[] = [];
-      for await (const chunk of adapter.stream(options)) {
-        chunks.push(chunk);
-      }
-
-      expect(seenCores).toHaveLength(1);
-      expect(seenParsed?._dshContext).toEqual(nativeContext);
-      expect(seenParsed?._rawBody).not.toHaveProperty("client_metadata");
-      expect(chunks).toContainEqual({
-        type: "text-delta",
-        index: 0,
-        text: "native adapter e2e",
-      });
-      expect(chunks.at(-1)).toEqual({
-        type: "finish",
-        reason: { kind: "stop" },
-      });
-    } finally {
-      await running.stop(true);
-    }
-  });
-
   test("runtime ProviderCore convergence keeps the production shared-core wiring intact", () => {
     const server = read("src/server.ts");
-    const adapter = read("src/adapters/chatgpt-web/llm-adapter.ts");
-    const plugin = read("src/plugin.ts");
     expect(server).toContain("const sharedProviderCore = new ChatGptWebProviderCore();");
     expect(server).toContain("createChatGptWebAdapter(provider, { providerCore: sharedProviderCore })");
-    expect(server).toContain("/internal/native-llm");
-    expect(adapter).toContain("createNativeDshRemoteBackend(options.model, transport)");
-    expect(adapter).toContain("/internal/native-llm");
-    expect(plugin).toContain("resolveNativeDshTransport");
-    expect(plugin).toContain("controlToken: appConfig.controlToken");
   });
 
 });

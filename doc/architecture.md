@@ -1,14 +1,14 @@
 # dsh-chatgpt-web Architecture
 
-**Status:** Target architecture for multi-provider text-only Web Chat  
-**Implementation status:** Core delivered — the provider-neutral core, durable continuation, exchange lifecycle, the ChatGPT migration, the DSH host integration and the provider conformance suite are implemented (issues #189–#194, closed); the ChatGPT-specific product layer and the Advisor are implemented; the containerised service distribution is a new independent track (§32, issues #245–#250); Qwen and DeepSeek remain roadmap providers (issues #195–#199)  
+**Status:** Architecture of the container-only product  
+**Implementation status:** Delivered — the provider-neutral core, durable continuation, the exchange lifecycle, the ChatGPT-Web adapter and the provider conformance suite are implemented; the ChatGPT-specific product layer and the Advisor are implemented; the containerised service is the shipping distribution (§32; issues #245–#250 merged and closed); Qwen and DeepSeek remain roadmap providers  
 **Document role:** Single architectural source of truth for the Web Chat provider architecture  
 **Repository:** lordraiden/dsh-chatgpt-web  
 **Last updated:** 2026-10-16
 
 > **Provider-neutral core, provider-owned conversation, transport-independent exchange.**
 
-This project exposes authenticated consumer-web chat services to DeepSeek Harness (DSH) as native LLM providers.
+This project exposes authenticated consumer-web chat services through a containerised HTTP service as provider-qualified text routes.
 
 The architecture is being expanded from a single ChatGPT Web integration into a **text-only Web Chat provider layer** that can support ChatGPT, Qwen Chat, and DeepSeek Chat without duplicating the execution engine.
 
@@ -602,20 +602,20 @@ error
 
 Providers may internally have much richer events, but only the semantics needed by the shared core should be normalized.
 
-### 8.4 DSH routing and replay-state boundary
+### 8.4 Routing and replay-state boundary
 
-The DSH LLM runtime remains the public authority for provider routing and model dispatch.
+The service's provider runtime remains the authority for provider routing and model dispatch.
 
 The WebChat Core must not replace:
 
-- ctx.llm provider registration;
-- DSH provider selection;
-- DSH model catalog/discovery semantics;
-- DSH retry policy ownership.
+- service provider registration;
+- provider selection;
+- model catalog/discovery semantics;
+- retry policy ownership.
 
-A WebChat implementation may expose one multi-route adapter instance or provider-specific adapter instances. Both are valid, provided that provider selection remains owned by DSH and all routes converge on the same WebChat semantics.
+A WebChat implementation may expose one multi-route adapter instance or provider-specific adapter instances. Both are valid, provided that provider selection remains owned by the service's routing authority and all routes converge on the same WebChat semantics.
 
-DSH provider replay state is optional transport metadata, not the durable WebChat conversation store. If finish.replayState is used, it must always be tagged or validated with provider identity and may only be consumed when the WebChat ownership rules prove that the state belongs to the requested provider conversation. Cross-provider replay state must fail closed.
+Provider replay state is optional transport metadata, not the durable WebChat conversation store. If finish.replayState is used, it must always be tagged or validated with provider identity and may only be consumed when the WebChat ownership rules prove that the state belongs to the requested provider conversation. Cross-provider replay state must fail closed.
 
 ### 8.5 Error contract
 
@@ -1148,23 +1148,23 @@ It does not own:
 
 ---
 
-## 16. DSH integration
+## 16. Service integration
 
-DeepSeek Harness already provides a provider-neutral adapter contract:
+The service exposes the shared core over HTTP. The public contract is the OpenAI/Responses-compatible wire surface rather than an in-process host adapter:
 
 ~~~text
-LlmAdapter
-  stream(GenerateOptions)
-      -> AsyncIterable<StreamChunk>
+POST /v1/responses
+POST /v1/chat/completions
+GET  /v1/models
 ~~~
 
-The Web Chat integration should follow that contract rather than create another public LLM protocol.
+The Web Chat integration should follow those wire contracts rather than create another public LLM protocol.
 
-The DSH adapter is responsible for:
+The HTTP boundary is responsible for:
 
-- provider route registration;
-- translating DSH request fields into the shared Web Chat request;
-- translating normalized text stream events into DSH StreamChunk;
+- resolving the caller's catalogue model identifier to a provider route;
+- translating wire request fields into the shared Web Chat request;
+- translating normalized text stream events into SSE frames;
 - resolving model metadata;
 - forwarding cancellation;
 - exposing unsupported-option errors.
@@ -1177,22 +1177,22 @@ It must not know:
 - conversation cursors;
 - browser worker internals.
 
-DSH's own adapter documentation also provides an important continuity seam: provider-specific follow-up metadata can be retained as opaque replay state when the adapter owns that continuation. The Web Chat architecture may use this mechanism where useful, but long-lived conversation affinity remains a Web Chat responsibility rather than a caller-visible provider ID.
+Opaque provider continuation metadata may be retained as replay state when the adapter owns that continuation. The Web Chat architecture may use this mechanism where useful, but long-lived conversation affinity remains a Web Chat responsibility rather than a caller-visible provider ID.
 
-The adapter must also reject unsupported GenerateOptions content rather than silently discard it. In particular, a text-only WebChat route must not quietly strip tool definitions, file/image content, or other unsupported request features simply to make a call succeed. This preserves DSH's stable provider error semantics.
+The adapter must also reject unsupported request content rather than silently discard it. In particular, a text-only WebChat route must not quietly strip tool definitions, file/image content, or other unsupported request features simply to make a call succeed. This preserves the service's stable provider error semantics.
 
-The same core is driven by the containerised service distribution (§32) over HTTP instead of through `LlmAdapter`. DSH is absent there, so that distribution's local, config-driven route registry performs route selection in place of DSH; it is not a second public provider registry and reverts to resolution-only the moment the service is embedded in DSH.
+The service's local, config-driven route registry performs route selection for a distribution with no separate host. It is not a second public provider registry: it still runs the shared driver resolver, which only maps an already-selected catalogue route to the implementation that owns it (see §17 and §32).
 
 ---
 
 ## 17. Provider driver resolution
 
-The plugin must move from a ChatGPT-only adapter boundary to a WebChat adapter capable of resolving multiple provider drivers.
+The service must move from a ChatGPT-only adapter boundary to a WebChat adapter capable of resolving multiple provider drivers.
 
 Conceptually:
 
 ~~~text
-DSH provider route
+catalogue model route
        |
        v
 WebChatLlmAdapter
@@ -1205,7 +1205,7 @@ Driver Resolver
        +--> deepseek-web
 ~~~
 
-The DSH LLM runtime remains the authority that selects the provider route. The internal driver resolver only maps that already-selected route to an implementation.
+The service's configured catalogue remains the authority that selects the provider route. The internal driver resolver only maps that already-selected route to an implementation.
 
 It must not become a second public provider registry, routing policy, or model authority.
 
@@ -1221,7 +1221,7 @@ webChat:
     deepseek-web: ...
 ~~~
 
-Configuration namespacing is not provider routing. The selected DSH route remains authoritative.
+Configuration namespacing is not provider routing. The selected catalogue route remains authoritative.
 
 The repository package name remains dsh-chatgpt-web during this architectural migration to avoid breaking existing installation/configuration. A future package rename is optional and is not required for the architecture to be correct.
 
@@ -1458,7 +1458,7 @@ turn result card selects a result only for the session it is rendered in, and re
 "the latest per turn" per session. A session in which the Advisor was never invoked therefore shows no
 Advisor content at all, which is what keeps the ordinary chat and the Advisor independent.
 
-**Implementation status (issues #224, #236).** The provider-neutral Advisor host, the eligible-model catalogue, the tracked task lifecycle and the client surface are implemented (`src/advisor/**`, with `client.js` and the sidecar control API). A review turn now executes through the **shared exchange**: the provider composition opens a `WebChatTextTransport` plus the exchange identity and semantic turn (`src/web-chat/host/text-turn.ts`), and the host drives it with `createWebChatExchange` (`src/web-chat/host/text-exchange.ts`, `src/web-chat/transport`). ChatGPT implements that transport over its existing turn execution, exposing readiness, its proven submission phase and its physical settlement (`src/adapters/chatgpt-web/{text-turn,webchat-transport}.ts`); the earlier provider-local execution seam is retired, so no provider runs a parallel turn path for Advisor use.
+**Implementation status (issues #224, #236).** The provider-neutral Advisor host, the eligible-model catalogue, the tracked task lifecycle and the client surface are implemented (`src/advisor/**` and the sidecar control API). A review turn now executes through the **shared exchange**: the provider composition opens a `WebChatTextTransport` plus the exchange identity and semantic turn (`src/web-chat/host/text-turn.ts`), and the host drives it with `createWebChatExchange` (`src/web-chat/host/text-exchange.ts`, `src/web-chat/transport`). ChatGPT implements that transport over its existing turn execution, exposing readiness, its proven submission phase and its physical settlement (`src/adapters/chatgpt-web/{text-turn,webchat-transport}.ts`); the earlier provider-local execution seam is retired, so no provider runs a parallel turn path for Advisor use.
 
 The shared WebChat contract remains text-only. This separation prevents both ChatGPT-specific compatibility features and the Advisor orchestration from becoming a generic agent runtime inside WebChat Core.
 
@@ -1805,8 +1805,7 @@ The migration is delivered as small reviewable slices. The issue/PR numbering be
 | 10 · DeepSeek real-session validation and recovery hardening | #198 | Open |
 | 11 · Cross-provider integration validation | #199 | Open |
 
-The **containerised service distribution** is a second, independent track (§32), tracked as issues
-#245–#250. It does not consume a migration release number.
+The **containerised service** is the shipping distribution (§32), delivered as issues #245–#250. It does not consume a migration release number.
 
 The per-slice descriptions below record the original delivery intent of each slice; the status table
 above is authoritative for what is done.
@@ -1921,9 +1920,9 @@ repository as it stands.
   transport lease and the shared exchange runner.
 - `src/web-chat/persistence/conversation-store-file.ts` — the durable JSON backend for continuity
   state.
-- `src/web-chat/host/**` — the DSH host boundary: driver resolution for already-selected routes,
-  provider-scoped configuration, health and the shared text turn (`dsh-integration.ts`,
-  `text-turn.ts`, `text-exchange.ts`) (issue #193).
+- `src/web-chat/host/**` — the service host boundary: driver resolution for already-selected routes,
+  provider-scoped configuration, the API message projection, health and the shared text turn
+  (`provider-host.ts`, `api-projection.ts`, `text-turn.ts`, `text-exchange.ts`) (issue #193).
 - `tests/issue-189..194-*.test.ts` and `tests/web-chat-provider-conformance.ts` — the executable
   boundaries and the reusable provider conformance suite (issue #194).
 
@@ -1941,14 +1940,11 @@ repository as it stands.
 These remain provider-local until a second provider supplies concrete evidence for a smaller
 reusable seam (§19.3, §26.2).
 
-### Entry points
+### Entry point
 
-- `lib/plugin.js` (`src/plugin.ts`) — the DSH Cordis plugin: registers the provider-neutral WebChat
-  adapter and routes through `src/web-chat/host/dsh-integration.ts`, and owns the sidecar lifecycle.
-  DSH remains the provider routing authority.
-- `lib/cli.js` (`src/cli.ts`) — the standalone sidecar service (`serve`), deliberately independent of
-  the host-only DSH LLM peer; CI asserts that in `scripts/smoke-tarball.mjs`. It is the entry point
-  the containerised service distribution wraps (§32).
+- `lib/cli.js` (`src/cli.ts`) — the CLI and the HTTP service it hosts (`serve`, plus `doctor`,
+  `login` and `auth import`), deliberately independent of any DeepSeek Harness package; CI asserts
+  that in `scripts/smoke-tarball.mjs`. It is the entry point the container image runs (§32).
 
 ---
 
@@ -2095,27 +2091,25 @@ That is the architecture to implement. Everything else in the repository should 
 
 ## 32. Service distribution: the containerised HTTP surface
 
-The ownership model above is unchanged. This section applies it to the repository's **second
-distribution**.
+The ownership model above is unchanged. This section applies it to the repository's shipping
+distribution.
 
-The repository ships two distributions over one core (§28 "Entry points"):
+The product ships as one distribution over one core (§28 "Entry point"):
 
-- the **DSH distribution** — the Cordis plugin, where DSH selects the provider route;
-- the **service distribution** — the standalone sidecar (`dsh-chatgpt-web serve`), where no DSH
-  process exists and the process itself must decide which provider and model a request addresses.
+- the **containerised service** — the image and Compose stacks that run `lib/cli.js serve`, where no
+  separate host process exists and the service itself decides which provider and model a request
+  addresses.
 
-Both are text-only and share the same drivers, core semantics and conformance suite. The service
-distribution adds a wire-compatibility and operations layer; it does not create a second execution
-engine, a second retry authority or a second provider registry.
+It is text-only and runs the same drivers, core semantics and conformance suite. The service adds a
+wire-compatibility and operations layer; it does not create a second execution engine, a second retry
+authority or a second provider registry.
 
 ### 32.1 Routing authority
 
-The invariant "DSH selects the provider; WebChat only resolves the already-selected route" (§4.1,
-§16, §17) applies to the DSH distribution. In the service distribution the caller selects the
-provider through the catalogue model identifier and the service resolves it through the **same**
-resolver. The service's route registry is local configuration for a distribution with no host; it
-must never become a public provider registry, and embedding the service in DSH reverts selection to
-DSH.
+The invariant "the caller selects the provider; WebChat only resolves the already-selected route"
+(§4.1, §16, §17) holds here directly: the caller selects the provider through the catalogue model
+identifier and the service resolves it through the **same** resolver. The service's route registry is
+local configuration; it must never become a public provider registry.
 
 ### 32.2 API surface
 
@@ -2133,8 +2127,8 @@ silently dropped (§1.2, §8.3, §16).
 **Message-only is part of that contract.** The API transmits the conversation's messages and nothing
 else: session context a harness injects at the start of a session (its own instructions, environment
 blocks, file trees, timestamps) must not become part of the provider turn. A generic client carries no
-provenance metadata, so this cannot be a per-harness rule: it has to be structural, in the shape the DSH
-distribution already uses (§20.1 — only the current user message crosses, and the provider conversation
+provenance metadata, so this cannot be a per-harness rule: it has to be structural, in the shape the service
+already uses (§20.1 — only the current user message crosses, and the provider conversation
 is the history). The rule is implemented in `src/web-chat/host/api-projection.ts`, structural and never
 per-harness: a client-provided session identity (OpenAI's `user`, or the `session_id` extension) makes
 the API transmit **only the current user message** with the provider conversation as the history;
@@ -2164,9 +2158,9 @@ deliberately **not** the mechanism, because they are per-harness and per-version
   is an estimate, not consumer-web accounting.
 - Weakening the UI-only rule (§3, §26.3): providers are still operated through their websites.
 
-**Track status.** Issues #245–#250 deliver this distribution in order: spike (base image, headless
+**Status.** Issues #245–#250 delivered this distribution in order: spike (base image, headless
 Chromium, health probe), production image and Compose stack, API authorization and safe exposure,
 OpenAI-compatible `/v1/chat/completions`, guided provider login and credential layout, and
-multi-provider routing. This track consumes no migration release number. The spike's frozen
-base-image facts and its findings — including that the sidecar is loopback-only, so publishing a port
-does not expose it — are recorded in [container.md](./container.md).
+multi-provider routing. All are merged and closed; the container is the product. The frozen
+base-image facts and the findings recorded during delivery — including that the default sidecar is
+loopback-only unless the authenticated exposed stack is used — are in [container.md](./container.md).
