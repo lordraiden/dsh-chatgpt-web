@@ -333,36 +333,39 @@ display and without Xvfb**, so the image needs neither — and the chromium revi
 predicts is confirmed by installing it. What is still unproven is the launch inside the image's own
 base (its glibc and Bun/Node), which is what the container run covers.
 
-## 6. Not verified here (open)
+## 6. Verification status
 
-The authoring host is Ubuntu 26.04 and has **no container runtime**: `docker`, `podman`, `nerdctl`
-and `buildah` are absent, there is no `/var/run/docker.sock`, and `sudo` is blocked by
-`no-new-privileges`. A Playwright chromium was installed **into the workspace** for the launch probes
-above, so `~/.cache/ms-playwright` still does not exist and `/usr/bin/google-chrome` is still absent.
-Therefore:
+Every acceptance criterion of issue #245 was executed **inside the container** on Ubuntu 26.04 with
+Docker Engine 29.1.3 (`Dockerfile.spike`, base image digest `sha256:eff16c30…`):
 
-- [ ] `docker build -f docker/Dockerfile.spike .` — **not executed**.
-- [ ] container start + `/healthz` + `/v1/models` from **inside** the container — **not executed**
-  (both are captured outside a container with a prepared volume, §5).
-- [x] a real Chromium launch — **executed outside a container, with no display and no Xvfb**: the
-  app's own `browser check` succeeds and a probe of the worker's exact launch mode
-  (`headless:false` + `--headless=new` + the Windows UA) loads `about:blank` (§5). Still to confirm
-  from **inside** the image's own base.
-- [x] the "no login state" **turn** failure at runtime — **executed outside a container** with a
-  prepared volume (§5): a complete native Codex `input` array reaches `stage=browser_page` and fails
-  there with `ChatGPT web login state is missing: <home>/browser/storage-state.json`, returned as a
-  typed `status: "failed"` response. Still to confirm from **inside** the container.
+| Criterion | Result (in-container) |
+| --- | --- |
+| `docker build` succeeds | ✅ `Successfully tagged dsh-chatgpt-web:spike` (16 steps; base image pulled and digest matched) |
+| the image installs without the DSH host peers | ✅ `bun install --production --frozen-lockfile --omit=peer` → 104 packages, and the build-time assertion `node lib/cli.js --help/--version` → `1.0.28` |
+| the symlink points where the pinning rule predicts | ✅ `/usr/bin/google-chrome -> /ms-playwright/chromium-1243/chrome-linux64/chrome` |
+| the container starts and `/healthz` answers | ✅ `{"status":"ok","service":"dsh-chatgpt-web","version":"1.0.28","mode":"browser-only","accepting_turns":true,…}` |
+| `/v1/models` answers with the Codex-shaped catalogue | ✅ `{"object":"list","models":[…]}` — `chatgpt-web/luna`, `chatgpt-web/think` |
+| a turn with no login state fails explicitly, no hang | ✅ `status:"failed"`, `error.message` = `ChatGPT web login state is missing: /data/browser/storage-state.json` |
+| Chromium actually launches | ✅ `node lib/cli.js browser check` **inside the container** (no display, no Xvfb): *"Playwright can launch the configured Chrome executable."* |
+| `doctor --json` on a prepared volume | ✅ `config: ok`, `chrome: ok` (`/usr/bin/google-chrome`), `login: error`, provider reachable/not authenticated (2 models), `proxy: ok` on 127.0.0.1 |
+| no production-code change was needed | ✅ only the symlink; `src/` untouched |
 
-What a container run must still prove, in one command: `docker/spike-evidence.sh` (§4).
+Reproduce it with `docker/spike-evidence.sh` (§4); it printed `all checks passed` (exit 0). On this
+host the engine had to be reached through the `docker` group (`sg docker -c …`) because the harness
+process predated `usermod -aG docker`.
 
-### Requirements to run it
+### Deliberately outside this spike
 
-- **A container runtime — the one thing missing here.** Rootless is enough where unprivileged user
-  namespaces are available (this host reports `unprivileged_userns_clone=1` and a large
-  `max_user_namespaces`), so on Ubuntu `sudo apt install -y podman uidmap` then
-  `CONTAINER_ENGINE=podman docker/spike-evidence.sh` is the least invasive path; Docker Engine
-  (`docker.io` plus the `docker` group) also works. The script auto-detects and prints these commands
-  when it finds no engine.
-- ~2 GB free disk, and egress to `mcr.microsoft.com`, the npm registry and `bun.sh`.
-- **No display and no provider login** are needed for this issue's criteria: every probe above runs
-  without a session.
+- **A real authenticated turn.** The spike proves the login boundary fails explicitly; making a turn
+  *succeed* needs a provider session, which is phase 5 (#249).
+- **The supported image, Compose stack, healthcheck and CI build** — phase 2 (#246). `docker/` here is
+  explicitly a throwaway spike.
+- **Exposing the service.** The sidecar is loopback-only (§3 F1) and `parseConfig()` enforces that, so
+  a published port does not reach it; relaxing the bind belongs with the authorization work in #247.
+
+### Environment notes
+
+The authoring host needed Docker installed (`docker.io` 29.1.3 + `usermod -aG docker`), and a Playwright
+chromium was installed **into the workspace** for the pre-container launch probes, so
+`~/.cache/ms-playwright` does not exist and `/usr/bin/google-chrome` is still absent on the host.
+~2 GB free disk and egress to `mcr.microsoft.com`, the npm registry and `bun.sh` are required.

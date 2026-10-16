@@ -93,8 +93,11 @@ fi
 mkdir -p "$DATA"
 
 # Generate config.json with the application's own primitives (defaultConfig + saveConfig — the same
-# path `setup` uses before its login step). It must run from a FILE: defaultConfig() refuses an
-# evaluated Bun script ("Cannot install a service from an evaluated Bun script").
+# path `setup` uses before its login step). Two traps, both learned the hard way:
+#   - it must run from a FILE, not `bun -e` ("Cannot install a service from an evaluated Bun script");
+#   - that file must NOT live under /tmp, because defaultConfig() records a durable runtime command
+#     and rejects ephemeral paths ("Runtime command must not reference an ephemeral path: /tmp/...").
+# It is therefore mounted at /app/make-config.ts.
 cat > "$WORKDIR/make-config.ts" <<'TS'
 import { defaultConfig, saveConfig, getConfigPath } from "/app/src/config.ts";
 const config = defaultConfig("browser-only");
@@ -104,11 +107,12 @@ saveConfig(config);
 console.log("wrote " + getConfigPath());
 TS
 
-"${ENGINE[@]}" run --rm --init --ipc=host --network host \
-  -v "$DATA:/data" -v "$WORKDIR/make-config.ts:/tmp/make-config.ts:ro" \
+CONFIG_OUT="$("${ENGINE[@]}" run --rm --init --ipc=host --network host \
+  -v "$DATA:/data" -v "$WORKDIR/make-config.ts:/app/make-config.ts:ro" \
   -e DSH_CHATGPT_WEB_HOME=/data -e "SPIKE_PORT=$PORT" "$IMAGE" \
-  bun /tmp/make-config.ts 2>&1
-check "config.json was written" "wrote" "$(head -c 40 "$DATA/config.json" 2>/dev/null)"
+  bun /app/make-config.ts 2>&1)"
+printf '%s\n' "$CONFIG_OUT"
+check "config.json was written" "wrote /data/config.json" "$CONFIG_OUT"
 
 say "4. start the sidecar (loopback inside the container, host networking: finding F1)"
 # The command is overridden explicitly so $PORT is the port that is actually served (the image's CMD
@@ -136,22 +140,25 @@ check "models is a list object" '"object":"list"' "$MODELS"
 check "models carries models[]" '"models"'        "$MODELS"
 
 say "7. a turn with no login state must fail explicitly (no hang, no crash)"
-TURN="$(curl -sS -m 90 -H 'content-type: application/json' \
-  -d '{"model":"chatgpt-web/luna","input":"ping"}' \
+# A complete native Codex `input` ARRAY is required to reach the browser stage: with a partial body the
+# ingress fails closed earlier, on its input shape (also documented in doc/container.md §5).
+TURN="$(curl -sS -m 120 -H 'content-type: application/json' -d '{
+  "model":"chatgpt-web/luna","instructions":"You are a helpful assistant.",
+  "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}]}' \
   "http://127.0.0.1:$PORT/v1/responses" 2>&1)"
 printf '%s\n' "$TURN" | head -c 600; echo
-# A partial wire body is refused before the browser (documented fail-closed). A complete native
-# Codex input would reach the login boundary instead; either way nothing may hang.
-if printf '%s' "$TURN" | grep -q '"status":"failed"'; then
-  printf 'PASS  the turn failed closed with a typed error\n'
-else
-  printf 'INFO  unexpected turn response — paste it into the issue\n'
-fi
+check "the turn is a typed failure"            '"status":"failed"'      "$TURN"
+check "it fails on the login boundary"         'login state is missing' "$TURN"
 
-say "8. doctor --json inside the container"
+say "8. Chromium launch inside the container (no display, no Xvfb)"
+BROWSER_CHECK="$("${ENGINE[@]}" exec "$CONTAINER" node lib/cli.js browser check 2>&1)"
+printf '%s\n' "$BROWSER_CHECK"
+check "Playwright launches the configured Chrome" "can launch" "$BROWSER_CHECK"
+
+say "9. doctor --json inside the container"
 "${ENGINE[@]}" exec "$CONTAINER" node lib/cli.js doctor --json 2>&1 | head -40
 
-say "9. summary"
+say "10. summary"
 if [ "$FAILURES" -eq 0 ]; then
   echo "all checks passed — paste this whole transcript into issue #245"
 else
