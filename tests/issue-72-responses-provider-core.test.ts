@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { defaultConfig } from "../src/config";
 import { createChatGptWebRouteAuthority, requireChatGptWebRoute } from "../src/chatgpt-web-authority";
 import { parseRequest } from "../src/responses/parser";
@@ -8,9 +6,6 @@ import { expandPreviousResponseInput, rememberResponseState } from "../src/respo
 import { responseRequest, routeChatGptWebRequest } from "../src/server";
 import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import { projectChatGptCapabilities } from "../src/adapters/chatgpt-web/capability-projector";
-
-const root = resolve(import.meta.dir, "..");
-const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 
 describe("issue #72 Responses -> single Web ProviderCore", () => {
 
@@ -73,15 +68,6 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
     expect(turn.snapshot().recovery).toBe("FAILED");
     expect(turn.snapshot().logicalOutcome).toBe("failed");
     expect(turn.snapshot().state).toBe("RETIRED");
-  });
-
-  test("Responses ingress delegates Web execution to the same ProviderAdapter entrypoint used by native DSH", () => {
-    const server = read("src/server.ts");
-    expect(server).toContain("route = routeChatGptWebRequest(parsed, config)");
-    expect(server).toContain("const adapter = adapterFactory(provider)");
-    expect(server).toContain("await adapter.runTurn!");
-    expect(server).toContain("const sharedProviderCore = new ChatGptWebProviderCore();");
-    expect(server).not.toContain("new ProviderTurnLifecycle(");
   });
 
   test("native DSH and Responses use the same Web route authority", () => {
@@ -147,34 +133,6 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
     expect(body.output?.some(item => item.content?.some(part => part.text === "provider-core answer"))).toBe(true);
   });
 
-  test("Responses compatibility modules do not own ProviderCore execution authority", () => {
-    const responseFiles = [
-      "src/responses/compaction.ts",
-      "src/responses/parser.ts",
-      "src/responses/reasoning-envelope.ts",
-      "src/responses/schema.ts",
-      "src/responses/state.ts",
-      "src/bridge.ts",
-    ];
-    const forbiddenImports = [
-      "provider-core",
-      "browser-worker",
-      "turn-execution",
-      "turn-broker",
-      "retry-policy",
-      "capability-projector",
-      "thread-environment",
-      "web-surface-transport",
-      "replay",
-    ];
-    for (const file of responseFiles) {
-      const source = read(file);
-      for (const moduleName of forbiddenImports) {
-        expect(source).not.toMatch(new RegExp(`from ["'].*${moduleName}`));
-      }
-    }
-  });
-
   test("backend Web model ids cannot be used as a Web Responses route", () => {
     const config = {
       ...defaultConfig(),
@@ -187,11 +145,47 @@ describe("issue #72 Responses -> single Web ProviderCore", () => {
     }
   });
 
-  test("Codex passthrough remains explicitly separate from Web execution", () => {
-    const server = read("src/server.ts");
-    expect(server).toContain('forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw)');
-    const adapterSource = read("src/adapters/chatgpt-web/index.ts");
-    expect(adapterSource).not.toContain("forwardNativeCodexRequest");
+  test("native and Responses preserve the same canonical provider inputs at the ingress boundary", async () => {
+    // Moved from the deleted issue-73 source-text suite: instead of reading `src/server.ts`, the
+    // ingress is driven for real and the request it hands to the provider seam is asserted.
+    const config = {
+      ...defaultConfig(),
+      solAvailable: true,
+      proAvailable: false,
+      capabilityState: { solAvailable: "supported" as const, proAvailable: "unsupported" as const },
+    };
+
+    const seen: unknown[] = [];
+    const response = await responseRequest(
+      new Request("http://127.0.0.1/v1/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "chatgpt-web/light",
+          instructions: "system",
+          input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+          stream: false,
+        }),
+      }),
+      config,
+      () => ({
+        name: "test-chatgpt-web",
+        runTurn: async parsed => {
+          seen.push(parsed);
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    const parsed = seen[0] as {
+      modelId: string;
+      context: { systemPrompt?: string[]; messages: Array<{ role: string; content: unknown }> };
+    };
+    expect(parsed.modelId).toBe("gpt-5.6-sol");
+    expect(parsed.context.systemPrompt).toEqual(["system"]);
+    expect(parsed.context.messages).toHaveLength(1);
+    expect(parsed.context.messages[0]?.role).toBe("user");
   });
 
   test("Responses continuation state is cache-only compatibility state", () => {

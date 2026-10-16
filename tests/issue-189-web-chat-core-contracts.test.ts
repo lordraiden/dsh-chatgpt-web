@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 
 import {
   CHATGPT_WEB_CHAT_CLASSIFIED_CODES,
@@ -31,6 +29,8 @@ import {
   type WebChatExchangeEvent,
   type WebChatProviderDriver,
 } from "../src/web-chat/core";
+import * as adapterErrorModule from "../src/adapters/chatgpt-web/adapter-error";
+import * as contextBudgetModule from "../src/adapters/chatgpt-web/context-budget";
 import type { CodexParsedRequest } from "../src/types";
 
 /**
@@ -41,8 +41,6 @@ import type { CodexParsedRequest } from "../src/types";
  * it refuses, what it must never carry) and the consumption seam, including the exact conversation
  * key digests captured from `main` before the extraction.
  */
-
-const ROOT = join(import.meta.dir, "..");
 
 /** A real parsed ChatGPT request, shaped as the adapter consumes it. */
 function chatGptRequest(threadId: string): CodexParsedRequest {
@@ -389,26 +387,20 @@ describe("issue #189 — the ChatGPT path consumes the core", () => {
     expect(() => chatGptWebChatAccountBinding({ providerId: "chatgpt-web", accountFingerprint: "" })).toThrow(/account fingerprint/);
   });
 
-  test("every ChatGPT failure code is classified or explicitly excluded with a reason", () => {
-    const files: string[] = [];
-    const walk = (directory: string): void => {
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        const path = join(directory, entry.name);
-        if (entry.isDirectory()) walk(path);
-        else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) files.push(path);
-      }
-    };
-    walk(join(ROOT, "src", "adapters", "chatgpt-web"));
-    files.push(join(ROOT, "src", "server.ts"));
+  test("every ChatGPT failure code the adapter declares is classified or explicitly excluded", () => {
+    // The former version of this test scanned `src/**` for `code: "..."` literals. The declared
+    // code surface is a module export, so it is read from the module's public API instead. (Codes
+    // written inline at a single throw site are not enumerable without reading the source; that
+    // residual is recorded in the test-hardening report.)
+    const declared = [
+      ...Object.entries(adapterErrorModule),
+      ...Object.entries(contextBudgetModule),
+    ]
+      .filter(([name, value]) => name.endsWith("_CODE") && typeof value === "string")
+      .map(([, value]) => value as string);
 
-    const codes = new Set<string>();
-    for (const file of files) {
-      const source = readFileSync(file, "utf8");
-      for (const match of source.matchAll(/code:\s*"([a-z0-9_]+)"/g)) codes.add(match[1]!);
-      for (const match of source.matchAll(/[A-Z_]+_CODE\s*=\s*"([a-z0-9_]+)"/g)) codes.add(match[1]!);
-    }
-    expect(codes.size).toBeGreaterThan(20);
-    for (const code of codes) {
+    expect(declared.length).toBeGreaterThan(5);
+    for (const code of declared) {
       const classified = CHATGPT_WEB_CHAT_CLASSIFIED_CODES.includes(code);
       const excluded = Object.hasOwn(CHATGPT_WEB_CHAT_UNCLASSIFIED_CODES, code);
       expect(

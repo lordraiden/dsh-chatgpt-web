@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import {
   CHATGPT_WEB_FIXED_TRANSPORT_OVERHEAD_BUDGET,
@@ -26,11 +25,6 @@ import type { ChatGptWebCapabilities } from "../src/adapters/chatgpt-web/model";
 import { ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { CHATGPT_LUNA_CHECKPOINT_MARKER } from "../src/adapters/chatgpt-web/rolling-checkpoint";
 import type { CodexMessage, CodexParsedRequest } from "../src/types";
-
-const adapterSource = readFileSync(
-  new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url),
-  "utf8",
-);
 
 const READ_ONLY_CAPS: ChatGptWebCapabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
 const FULL_CAPS: ChatGptWebCapabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
@@ -300,12 +294,9 @@ describe("issue #172 minimal functional contract", () => {
   });
 
   test("Luna retained does not request a private rolling checkpoint", () => {
-    // The adapter gates checkpoint capture on NOT retaining the conversation: a retained
-    // Luna turn sends only the continuation delta and gets no private checkpoint tail.
-    const guard = adapterSource.match(/const captureLunaCheckpoint = [\s\S]*?;/)?.[0] ?? "";
-    expect(guard).toContain("CHATGPT_WEB_LUNA_MODEL_ID");
-    expect(guard).toContain("!retainConversationForTurn");
     // At the prompt level: without captureLunaCheckpoint the private marker contract is absent.
+    // (The adapter's retained-vs-rolling gate is exercised behaviourally by
+    // "Luna respects retained-vs-rolling-checkpoint" below.)
     const text = compileChatGptWebPrompt(parsed([user("hola")]), READ_ONLY_CAPS).text;
     expect(text).not.toContain("CODEXLUNAPRIVATECHECKPOINT");
   });
@@ -661,8 +652,8 @@ describe("issue #172 retained composer transport", () => {
       expect((error as ChatGptWebAdapterError).code).toBe(CHATGPT_RETAINED_DELTA_EMPTY_CODE);
       expect(error instanceof Error ? error.message : String(error)).not.toMatch(/codex_context_json|dsh_transport_resume/);
     }
-    // The adapter no longer contains the legacy fallback path at all.
-    expect(adapterSource).not.toContain("falling back to the full envelope");
+    // The absence of the legacy fallback is observable above: the only outcome of such a delta is
+    // the explicit empty-delta error, never a silent full-envelope resend.
   });
 
   test("the new transport prompt never emits the legacy recovery marker", () => {
@@ -701,8 +692,8 @@ describe("issue #172 retained composer transport", () => {
   test("a read-only run emits no synthetic Pure Chat commentary", () => {
     // Issue #172 / final experience: the synthetic "Pure Chat Mode" banner was
     // provider commentary the user never asked for; the adapter no longer emits it.
-    expect(adapterSource).not.toContain("emitReadOnlyContextWarning");
-    expect(adapterSource).not.toContain("Pure Chat Mode");
+    // The runtime proof — capture the console of a real read-only run — lives in
+    // `chat-only-stability.test.ts`; here the compiled prompt is asserted directly.
     const text = compileChatGptWebPrompt(parsed([user("hola")]), READ_ONLY_CAPS).text;
     expect(text).not.toContain("Pure Chat");
   });
