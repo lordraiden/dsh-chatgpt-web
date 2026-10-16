@@ -127,6 +127,16 @@ docker exec <container> dsh-chatgpt-web doctor --json   # or: node lib/cli.js do
 `--ipc=host` (or `--shm-size=1g`) is recommended by Playwright for Chromium. `--init` avoids zombie
 processes. `--network host` is a spike workaround (F1), not the production answer.
 
+`docker/spike-evidence.sh` runs the whole sequence and prints a transcript to paste into the PR:
+
+```bash
+docker/spike-evidence.sh                       # fail-closed path (empty data dir)
+DATA=/srv/dsh-data docker/spike-evidence.sh    # full path against a prepared data volume
+```
+
+That script has only been syntax-checked (`bash -n`); no container runtime was available to execute
+it, so treat its output as the thing to verify, not as verified evidence.
+
 ## 5. Evidence collected on the authoring host
 
 Local paths are sanitised. The sidecar was exercised with Node 24.21.0 from the checked-in `lib/`.
