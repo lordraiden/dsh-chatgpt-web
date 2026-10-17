@@ -12,6 +12,8 @@ import {
   translateChatCompletionsRequest,
 } from "../src/responses/chat-completions";
 import { buildChatGptWebModelCatalog } from "../src/model-catalog";
+import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
+import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
 
 /**
  * Issue #248 — the OpenAI-compatible surface.
@@ -45,17 +47,36 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
  * It keeps the whole parsed request, not only the messages: the proof that a dropped capability was
  * never forwarded has to look at everything the adapter could have seen, not just the transcript.
  *
+ * It also records the identity the adapter resolves for the turn (`threadId`, and the conversation
+ * key derived from it through the provider's own owner) so the isolation/continuity proofs assert
+ * what the adapter really resolved, not what the surface claims it sent.
+ *
  * With no `usage` argument it reports none — the state of an adapter that cannot account for the turn
  * — which is the case that used to surface as a fabricated `{0,0,0}` block.
  */
+const TEST_NAMESPACE = "issue-248-namespace";
+const TEST_AFFINITY = { providerId: "chatgpt-web", bindingId: "issue-248-binding" } as const;
+
+interface StubTurn {
+  messages: unknown[];
+  request: unknown;
+  identity: ReturnType<typeof extractChatGptTurnIdentity>;
+  conversationKey: string | undefined;
+}
+
 function stubAdapter(usage?: Record<string, unknown>) {
-  const turns: Array<Record<string, unknown>> = [];
+  const turns: StubTurn[] = [];
   return {
     turns,
     factory: () => ({
       name: "issue-248-stub",
       runTurn: async (parsed: { context?: { messages?: unknown[] } }, _incoming: unknown, emit: (event: unknown) => void) => {
-        turns.push({ messages: parsed.context?.messages ?? [], request: parsed });
+        turns.push({
+          messages: parsed.context?.messages ?? [],
+          request: parsed,
+          identity: extractChatGptTurnIdentity(parsed as never),
+          conversationKey: chatGptConversationKey(parsed as never, TEST_NAMESPACE, TEST_AFFINITY),
+        });
         emit({ type: "text_delta", text: "Respuesta del proveedor", phase: "final_answer" });
         emit({ type: "done", stopReason: "stop", endTurn: true, ...(usage ? { usage } : {}) });
       },
@@ -95,12 +116,18 @@ describe("issue #248 — the OpenAI request is translated, never re-executed", (
     expect(translation.stream).toBe(false);
     expect(translation.mode).toBe("stateless");
     expect(translation.droppedRoles).toEqual(["system"]);
+    // A stateless caller's conversation identity is derived from the message content, never from the
+    // request: it is stable for identical content and distinct for different content (see below).
+    expect(translation.conversationIdentity).toMatch(/^dsh-chat-[0-9a-f]{16}$/);
     expect(translation.body).toEqual({
       model: "chatgpt-web/luna",
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hola" }] }],
       stream: false,
       temperature: 0.4,
       max_output_tokens: 256,
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: translation.conversationIdentity }),
+      },
     });
   });
 
@@ -117,6 +144,12 @@ describe("issue #248 — the OpenAI request is translated, never re-executed", (
     });
 
     expect(translation.mode).toBe("session");
+    // The caller's own identity is the conversation identity, verbatim: it is what isolates it from
+    // every other caller and what gives it continuity across turns.
+    expect(translation.conversationIdentity).toBe("harness-session-1");
+    expect(translation.body.client_metadata).toEqual({
+      "x-codex-turn-metadata": JSON.stringify({ thread_id: "harness-session-1" }),
+    });
     expect(translation.body.input).toEqual([
       { type: "message", role: "user", content: [{ type: "input_text", text: "pregunta real" }] },
     ]);
@@ -198,6 +231,9 @@ describe("issue #248 — the OpenAI request is translated, never re-executed", (
       model: "chatgpt-web/luna",
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hola" }] }],
       stream: false,
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: translation.conversationIdentity }),
+      },
     });
     expect(JSON.stringify(translation.body)).not.toContain("read_file");
   });
@@ -491,5 +527,128 @@ describe("issue #248 — over the real listener", () => {
       body: JSON.stringify({ model: "chatgpt-web/luna", messages: [USER_MESSAGE] }),
     });
     expect(authorized.status).toBe(200);
+  });
+});
+
+/**
+ * Slice 1 of the pre-vendor hardening programme — the caller's identity must reach the turn.
+ *
+ * The defect these tests pin: the surface computed the mode and the resolved session id and then built
+ * the internal body from the messages only, so every caller without turn metadata collapsed onto the
+ * constant `dsh-session` and shared ONE provider conversation. Two unrelated clients continued each
+ * other's ChatGPT thread, and a dead surface answered `retained_surface_lost` for a client that never
+ * had one.
+ *
+ * The proofs are behavioural, over the REAL listener with the stub adapter: what the adapter resolves
+ * for the turn is the only thing that matters, not what the surface says it sent.
+ */
+describe("issue #248 — the caller's identity reaches the turn", () => {
+  const say = (server: RunningServer, body: Record<string, unknown>) => post(server, body);
+
+  test("no identity: different content is isolated, identical content is one continuous conversation", async () => {
+    const stub = stubAdapter();
+    const server = serve(stub.factory);
+
+    await say(server, { model: "chatgpt-web/luna", messages: [{ role: "user", content: "alpha" }] });
+    await say(server, { model: "chatgpt-web/luna", messages: [{ role: "user", content: "beta" }] });
+    // The same request again — a resending client, or a retry the client chose to make.
+    await say(server, { model: "chatgpt-web/luna", messages: [{ role: "user", content: "alpha" }] });
+    // A second, unrelated caller that happens to send content identical to the first one.
+    await say(server, { model: "chatgpt-web/luna", messages: [{ role: "user", content: "alpha" }] });
+
+    expect(stub.turns).toHaveLength(4);
+    const [alpha, beta, alphaAgain, otherCaller] = stub.turns;
+
+    // ISOLATION: different content, no identity → different conversations at the adapter.
+    expect(alpha!.identity.threadId).not.toBe(beta!.identity.threadId);
+    expect(alpha!.conversationKey).not.toBe(beta!.conversationKey);
+    // NO PER-REQUEST MINTING: the identical request resolves to the SAME conversation, so a resending
+    // client keeps continuity instead of forking a new provider conversation on every turn.
+    expect(alphaAgain!.identity.threadId).toBe(alpha!.identity.threadId);
+    expect(alphaAgain!.conversationKey).toBe(alpha!.conversationKey);
+    // DOCUMENTED LIMIT, asserted rather than implied: with no identity and identical content the two
+    // callers are indistinguishable, so they deliberately share one conversation. Nothing in the
+    // request can tell them apart; a caller that must be distinct has to send `user`/`session_id`.
+    expect(otherCaller!.identity.threadId).toBe(alpha!.identity.threadId);
+    expect(otherCaller!.conversationKey).toBe(alpha!.conversationKey);
+
+    // The constant that fused everyone is gone from this surface entirely.
+    for (const turn of stub.turns) {
+      expect(turn.identity.threadId).not.toBe("dsh-session");
+      expect(turn.identity.threadId).toMatch(/^dsh-chat-[0-9a-f]{16}$/);
+      expect(turn.conversationKey).toBeTruthy();
+    }
+  });
+
+  test("an explicit identity is the caller's own conversation, stable across changed history", async () => {
+    const stub = stubAdapter();
+    const server = serve(stub.factory);
+
+    // First turn of a session.
+    await say(server, {
+      model: "chatgpt-web/luna",
+      user: "harness-session-1",
+      messages: [{ role: "user", content: "one" }],
+    });
+    // Second turn of the SAME session: the client resends a revolved history.
+    await say(server, {
+      model: "chatgpt-web/luna",
+      user: "harness-session-1",
+      messages: [
+        { role: "user", content: "one" },
+        { role: "assistant", content: "uno" },
+        { role: "user", content: "two" },
+      ],
+    });
+    // A different caller, and the `session_id` extension spelling of the same field.
+    await say(server, {
+      model: "chatgpt-web/luna",
+      session_id: "harness-session-2",
+      messages: [{ role: "user", content: "one" }],
+    });
+
+    expect(stub.turns).toHaveLength(3);
+    const [first, second, other] = stub.turns;
+
+    // CONTINUITY: the caller's own identity is the conversation, across changed history.
+    expect(first!.identity.threadId).toBe("harness-session-1");
+    expect(second!.identity.threadId).toBe("harness-session-1");
+    expect(second!.conversationKey).toBe(first!.conversationKey);
+    // ISOLATION: a second caller with identical content is still a different conversation, because it
+    // sent its own identity.
+    expect(other!.identity.threadId).toBe("harness-session-2");
+    expect(other!.conversationKey).not.toBe(first!.conversationKey);
+    // An explicit identity is never the content-derived namespace.
+    expect(first!.identity.threadId).not.toMatch(/^dsh-chat-/);
+  });
+
+  test("the identity never becomes provider-visible message text", async () => {
+    const stub = stubAdapter();
+    const server = serve(stub.factory);
+
+    await say(server, {
+      model: "chatgpt-web/luna",
+      user: "harness-session-1",
+      messages: [{ role: "user", content: "hola" }],
+    });
+    await say(server, {
+      model: "chatgpt-web/luna",
+      messages: [{ role: "user", content: "sin identidad" }],
+    });
+
+    expect(stub.turns).toHaveLength(2);
+    const [identified, stateless] = stub.turns;
+
+    // The message-only contract still holds: the identity travels as request metadata, never as text
+    // the model could read. Neither the caller's id nor the metadata field appears in a message.
+    const identifiedText = JSON.stringify(identified!.messages);
+    expect(identifiedText).not.toContain("harness-session-1");
+    expect(identifiedText).not.toContain("x-codex-turn-metadata");
+    expect(identifiedText).toContain("hola");
+
+    const statelessText = JSON.stringify(stateless!.messages);
+    expect(statelessText).not.toContain(stateless!.identity.threadId!);
+    expect(statelessText).not.toContain("x-codex-turn-metadata");
+    expect(statelessText).toContain("sin identidad");
   });
 });

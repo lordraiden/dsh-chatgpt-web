@@ -142,6 +142,15 @@ the history; without one the request is stateless and every non-conversational r
 `developer`, `tool`, unknown) is dropped. Harness text written *inside* the current user message cannot
 be distinguished structurally and does cross — a documented, test-asserted limit.
 
+**That identity also selects the provider conversation.** A caller that sends `user`/`session_id` gets
+exactly that conversation: stable across its turns and distinct from every other caller. A caller that
+sends none gets an identity derived from the content of the messages it sent (`dsh-chat-<hash>`), never
+a fresh one per request — so a client that resends the same history keeps continuity and a retry does
+not fork a second conversation, while different content is isolated. The documented limit: two callers
+with **no identity** and **identical message content** are indistinguishable and share one conversation;
+a caller that must be distinct has to send `user`/`session_id`, and a stateless caller that wants
+continuity has to resend its history (a one-message request is its own conversation).
+
 ### Every CLI subcommand through the image
 
 The entrypoint execs `node lib/cli.js "$@"`, so any subcommand is reachable with `docker run`:

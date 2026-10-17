@@ -2163,6 +2163,23 @@ no provenance — and its limit is explicit rather than papered over: harness te
 current user message cannot be distinguished structurally and does cross. Content heuristics are
 deliberately **not** the mechanism, because they are per-harness and per-version (issue #253).
 
+**The same projection decides the provider conversation identity.** An API caller is not a DSH thread and
+carries no native turn metadata, so the surface must choose the conversation key itself instead of
+collapsing every caller onto a constant. A client-provided session identity (`user`/`session_id`) **is**
+that key, verbatim: stable across the caller's turns and distinct from every other caller. With none,
+the key is derived from the **content** of the transmitted messages (`dsh-chat-<hash>`) and never from
+the request — the same content keeps the same conversation (a resending client keeps continuity; a retry
+does not fork a second conversation) and different content is isolated. The rule is deliberately
+content-derived and **never per-request**: minting an identity per call would fork every turn of a client
+that resends its history. The identity travels to the turn on the channel the turn identity extractor
+already reads (`client_metadata["x-codex-turn-metadata"].thread_id`), so the surface adds no second
+identity channel and the identity is never provider-visible message text. Its documented limit is
+explicit: two callers with **no identity** and **identical message content** are indistinguishable and
+share one provider conversation, because nothing in the request can tell them apart; a caller that must
+be distinct has to send `user`/`session_id`, and a stateless caller that wants continuity has to resend
+its history. The core still only stores and passes the resulting key: the provider conversation itself
+stays opaque provider state (§7.3, §26.5).
+
 ### 32.3 Runtime and credentials
 
 - The service runs headless Chromium, supplied by a pinned Playwright base image whose browser build
