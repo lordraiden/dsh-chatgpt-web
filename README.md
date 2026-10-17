@@ -151,6 +151,12 @@ with **no identity** and **identical message content** are indistinguishable and
 a caller that must be distinct has to send `user`/`session_id`, and a stateless caller that wants
 continuity has to resend its history (a one-message request is its own conversation).
 
+The rule is the same on **both** ingresses. `/v1/chat/completions` carries it in `client_metadata`; a
+`/v1/responses` caller that sends no turn metadata has no surface translation to carry it, so the
+adapter's own fallback calls the same identity owner instead of inventing a second derivation. A caller
+that provides a native Codex/DSH thread keeps that thread exactly as before — only the metadata-less
+fallback changed.
+
 ### Every CLI subcommand through the image
 
 The entrypoint execs `node lib/cli.js "$@"`, so any subcommand is reachable with `docker run`:

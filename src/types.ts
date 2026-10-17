@@ -370,6 +370,20 @@ export interface CodexProviderConfig {
     };
     /** Fingerprint of the authenticated browser session; never a filesystem/profile identifier. */
     accountIdentityFingerprint?: string;
+    /**
+     * Whether `accountIdentityFingerprint` was **recorded** (a completed sign-in or a fingerprint a
+     * provider-scoped block states itself) or is `providerConfig`'s **derived** fallback over the
+     * storage-state file, which is not an account identity at all
+     * (`accountIdentityFromStorageState`).
+     *
+     * Produced by the config resolver, never authored: `providerConfig` sets it where it substitutes
+     * the fallback, and the scoped-overlay merge drops a declared value and recomputes it from the
+     * fingerprint the overlay states. It exists so the lease's account-binding check can name the real
+     * cause — no identity was ever recorded — instead of comparing an unrelated hash and reporting a
+     * mismatch. Absent means recorded, the honest default for a provider config that states a
+     * fingerprint itself.
+     */
+    accountIdentityRecorded?: boolean;
     /** Whether Zero Risk exposes the explicit Pro-sized manual route. */
     zeroRiskProEnabled?: boolean;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */

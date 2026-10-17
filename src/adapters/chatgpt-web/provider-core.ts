@@ -110,11 +110,36 @@ function normalizeError(error: unknown): Error {
 export interface BrowserAccountLeaseDescriptor {
   serviceId: string;
   accountIdentity: string;
+  /**
+   * Whether `accountIdentity` was recorded by a completed sign-in. Absent means recorded: a caller
+   * that states a logical account identity explicitly is claiming it, and only a caller that knows the
+   * value is `providerConfig`'s derived fallback says so. The binding check uses this to distinguish
+   * "no identity was ever recorded" from "two recorded identities disagree" — it never relaxes the
+   * refusal itself.
+   */
+  accountIdentityRecorded?: boolean;
   browserProfile: string;
   browserContext: string;
   pageIdentity: string;
   turnId: string;
 }
+
+/** The refusal for a browser account that disagrees with a **recorded** logical identity. */
+export const CHATGPT_WEB_ACCOUNT_IDENTITY_MISMATCH_MESSAGE =
+  "Browser lease physical account does not match its logical account identity";
+
+/**
+ * The refusal for a deployment that never recorded an account identity at all.
+ *
+ * `providerConfig` substitutes a fallback derived from the storage-state file when
+ * `accountIdentityFingerprint` is absent, and that fallback is not an account identity
+ * (`accountIdentityFromStorageState`), so it can never match the account the signed-in page exposes.
+ * Reporting that as a "mismatch" is true but useless: the operator needs the cause and the action.
+ * The check still refuses — a guess never binds.
+ */
+export const CHATGPT_WEB_ACCOUNT_IDENTITY_MISSING_MESSAGE =
+  "ChatGPT Web has no recorded account identity for this deployment, so the browser account cannot be "
+  + "verified against one: sign in again at the operator sign-in surface (/v1/control/auth/) to record it";
 
 export class BrowserAccountLease {
   readonly leaseId: string;
@@ -151,10 +176,16 @@ export class BrowserAccountLease {
     }
     const expectedAccountId = `chatgpt-account:${this.descriptor.accountIdentity}`;
     if (binding.accountId !== expectedAccountId) {
+      // One owner of the distinction: this is the only place the two sides are compared. A derived
+      // fallback means no identity was ever recorded, which is a different failure from two recorded
+      // identities disagreeing — and the operator can act on the first one. Both refuse; neither binds.
+      if (this.descriptor.accountIdentityRecorded === false) {
+        throw new Error(CHATGPT_WEB_ACCOUNT_IDENTITY_MISSING_MESSAGE);
+      }
       // Both sides, fingerprinted: the operator needs to see *which* physical account refused, but a
       // raw account identifier never travels. `fingerprint` is this file's own sanitizer.
       throw new Error(
-        `Browser lease physical account does not match its logical account identity: `
+        `${CHATGPT_WEB_ACCOUNT_IDENTITY_MISMATCH_MESSAGE}: `
         + `expected ${fingerprint(expectedAccountId)}, actual ${fingerprint(binding.accountId)}`,
       );
     }
@@ -723,6 +754,8 @@ export interface ChatGptWebProviderCoreTurnInput {
   nativeTurnId?: string;
   nativeThreadId?: string;
   accountIdentity: string;
+  /** Provenance of `accountIdentity`; absent means recorded (see `BrowserAccountLeaseDescriptor`). */
+  accountIdentityRecorded?: boolean;
   browserProfile: string;
   browserContext: string;
   pageIdentity: string;
@@ -922,6 +955,9 @@ export class ChatGptWebProviderCore {
     const lease = this.leases.acquire({
       serviceId: this.serviceId,
       accountIdentity: input.accountIdentity,
+      ...(input.accountIdentityRecorded !== undefined
+        ? { accountIdentityRecorded: input.accountIdentityRecorded }
+        : {}),
       browserProfile: input.browserProfile,
       browserContext: input.browserContext,
       pageIdentity: input.pageIdentity,

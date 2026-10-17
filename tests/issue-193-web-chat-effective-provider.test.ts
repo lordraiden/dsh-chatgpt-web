@@ -12,6 +12,7 @@
  * refused with its location.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -36,6 +37,7 @@ import {
   type AppConfig,
 } from "../src/config";
 import { buildChatGptWebModelCatalog } from "../src/model-catalog";
+import { browserAccountLeaseInput, chatGptWebExecutionNamespace } from "../src/adapters/chatgpt-web/index";
 import { modelsRequest, routeChatGptWebRequest, startServer } from "../src/server";
 import type { ProviderAdapter } from "../src/adapters/base";
 import type { CodexParsedRequest, CodexProviderConfig } from "../src/types";
@@ -395,5 +397,90 @@ describe("issue #193 — catalogue qualifies provider-local descriptor ids", () 
     expect(entries.map(entry => entry.id)).toEqual(["chatgpt-web/luna", "chatgpt-web/think"]);
     expect(entries.map(entry => entry.modelId)).toEqual(["luna", "think"]);
     expect(entries.every(entry => !entry.id.startsWith("chatgpt-web/chatgpt-web/"))).toBe(true);
+  });
+});
+
+/**
+ * Slice 2: a missing account identity must be distinguishable from a genuine mismatch.
+ *
+ * `providerConfig` substitutes a storage-state-derived fallback when `accountIdentityFingerprint` was
+ * never recorded. That fallback is not an account identity, so the lease's account-binding check can
+ * never match it — and reporting the resulting disagreement as a "mismatch" told the operator nothing
+ * actionable. The provenance of the fingerprint is decided here, at the one place the fallback is
+ * substituted: `accountIdentityRecorded` is true only for a fingerprint a sign-in persisted, or one a
+ * provider-scoped block states itself. It describes the identity, so it must not re-key conversations.
+ */
+describe("issue #193 — the account identity's provenance is decided where the fallback is", () => {
+  test("an unrecorded identity is marked derived, a persisted one recorded", () => {
+    const unrecorded = providerConfig({ ...flatSolConfig(), accountIdentityFingerprint: undefined });
+    // No storage state in this home, so the fallback is the unknown-session placeholder — which is
+    // what a deployment that never signed in through the interactive surface looks like.
+    expect(unrecorded.chatgptWeb?.accountIdentityFingerprint).toBe("unknown");
+    expect(unrecorded.chatgptWeb?.accountIdentityRecorded).toBe(false);
+
+    const recorded = providerConfig({ ...flatSolConfig(), accountIdentityFingerprint: "recorded-fingerprint" });
+    expect(recorded.chatgptWeb?.accountIdentityFingerprint).toBe("recorded-fingerprint");
+    expect(recorded.chatgptWeb?.accountIdentityRecorded).toBe(true);
+  });
+
+  test("a scoped block that states the fingerprint is recorded, whatever the flat block carried", () => {
+    const config = scopedLunaConfig({ accountIdentityFingerprint: "scoped-fingerprint" });
+    const effective = effectiveChatGptWebProviderConfig(config).chatgptWeb;
+    expect(effective?.accountIdentityFingerprint).toBe("scoped-fingerprint");
+    expect(effective?.accountIdentityRecorded).toBe(true);
+
+    // A scoped block that states no fingerprint keeps the derived provenance it inherited.
+    const inherited = effectiveChatGptWebProviderConfig(scopedLunaConfig()).chatgptWeb;
+    expect(inherited?.accountIdentityFingerprint).toBe("unknown");
+    expect(inherited?.accountIdentityRecorded).toBe(false);
+  });
+
+  test("the provenance is never taken from a block that merely declares it", () => {
+    // It describes the effective fingerprint, so a declared value can neither claim a recorded
+    // identity a deployment never had, nor deny one it does have.
+    const claimed = effectiveChatGptWebProviderConfig(scopedLunaConfig({ accountIdentityRecorded: true })).chatgptWeb;
+    expect(claimed?.accountIdentityFingerprint).toBe("unknown");
+    expect(claimed?.accountIdentityRecorded).toBe(false);
+
+    const denied = effectiveChatGptWebProviderConfig(scopedLunaConfig({
+      accountIdentityFingerprint: "scoped-fingerprint",
+      accountIdentityRecorded: false,
+    })).chatgptWeb;
+    expect(denied?.accountIdentityRecorded).toBe(true);
+  });
+
+  test("the lease input carries the resolver's decision, all the way from the effective block", () => {
+    // The production hop: the effective provider block decides the provenance, and the adapter's lease
+    // input reads it there. The refusal that consumes it is pinned in the concurrency contract suite.
+    const derived = browserAccountLeaseInput(
+      effectiveChatGptWebProviderConfig({ ...flatSolConfig(), accountIdentityFingerprint: undefined }),
+      "trace-1",
+    );
+    expect(derived.accountIdentity).toBe("unknown");
+    expect(derived.accountIdentityRecorded).toBe(false);
+
+    const recorded = browserAccountLeaseInput(
+      effectiveChatGptWebProviderConfig({ ...flatSolConfig(), accountIdentityFingerprint: "recorded-fingerprint" }),
+      "trace-1",
+    );
+    expect(recorded.accountIdentity).toBe("recorded-fingerprint");
+    expect(recorded.accountIdentityRecorded).toBe(true);
+  });
+
+  test("the provenance fact never re-keys an existing conversation", () => {
+    // Every conversation key and execution key is derived from this namespace, so a fact that merely
+    // *describes* the fingerprint next to it must hash as if it were not there. This is the historical
+    // formula, over the block with the fact removed: the namespace of a deployment is byte-identical to
+    // what it was before slice 2, so no existing ChatGPT conversation is abandoned on upgrade.
+    const provider = providerConfig({ ...flatSolConfig(), accountIdentityFingerprint: "recorded-fingerprint" });
+    const { accountIdentityRecorded: provenance, ...blockBefore } = provider.chatgptWeb!;
+    expect(provenance).toBe(true);
+
+    const historical = createHash("sha256")
+      .update(JSON.stringify({ baseUrl: provider.baseUrl, chatgptWeb: blockBefore }))
+      .digest("hex");
+    expect(chatGptWebExecutionNamespace(provider)).toBe(historical);
+    expect(chatGptWebExecutionNamespace(provider))
+      .toBe(chatGptWebExecutionNamespace({ ...provider, chatgptWeb: blockBefore }));
   });
 });

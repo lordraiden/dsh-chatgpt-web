@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   BrowserAccountLeaseRegistry,
+  CHATGPT_WEB_ACCOUNT_IDENTITY_MISSING_MESSAGE,
   ChatGptWebProviderCore,
   type BrowserAccountLeaseDescriptor,
 } from "../src/adapters/chatgpt-web/provider-core";
@@ -239,9 +240,9 @@ describe("issue #201 — ChatGPT account fan-out is bounded, exclusivity is per 
   });
 
   test("3b: a genuine account mismatch is still refused, and names both sides fingerprinted", () => {
-    // The refusal that a production sign-in hit when the stored account fingerprint was the constant
-    // "unknown session" fallback. The check must keep refusing, and the diagnostic must name *which*
-    // physical account disagreed without ever printing a raw account identifier.
+    // A fingerprint a sign-in recorded genuinely disagrees with the account the page exposes. The
+    // check must keep refusing, and the diagnostic must name *which* physical account disagreed
+    // without ever printing a raw account identifier.
     const registry = new BrowserAccountLeaseRegistry();
     const lease = registry.acquire(leaseDescriptor("turn-one", "logical-account-276"));
 
@@ -257,6 +258,65 @@ describe("issue #201 — ChatGPT account fan-out is bounded, exclusivity is per 
     // And it is a real refusal: the lease stays unbound and owns no physical resource.
     expect(lease.provenance().physicalResourceBound).toBe(false);
     expect(lease.physicalResourceBinding()).toBeUndefined();
+  });
+
+  test("3b(ii): a refusal only says 'no identity recorded' when the identity really was a derived fallback", () => {
+    // The same genuine mismatch, but the logical identity is marked as `providerConfig`'s derived
+    // storage-state fallback: that is NOT a recorded account identity, so the operator must be told
+    // the real cause — and the refusal must still refuse. It never reports the mismatch sentence,
+    // which would be true but useless. Both cases are the same check, distinguished once, in
+    // `BrowserAccountLease.bindPhysicalResource`.
+    const registry = new BrowserAccountLeaseRegistry();
+    const lease = registry.acquire({
+      ...leaseDescriptor("turn-one", "storage-state-derived-fallback"),
+      accountIdentityRecorded: false,
+    });
+
+    const refusal = refusalOf(() => registry.bindPhysicalResource(
+      lease,
+      physicalResource("turn-one", "physical-account-276"),
+    ));
+    expect(refusal.message).toBe(CHATGPT_WEB_ACCOUNT_IDENTITY_MISSING_MESSAGE);
+    // It names the missing identity and the action, not just the disagreement.
+    expect(refusal.message).toContain("no recorded account identity");
+    expect(refusal.message).toContain("sign in again");
+    expect(refusal.message).toContain("/v1/control/auth/");
+    expect(refusal.message).not.toContain("does not match its logical account identity");
+    // Never bind on a guess.
+    expect(lease.provenance().physicalResourceBound).toBe(false);
+    expect(lease.physicalResourceBinding()).toBeUndefined();
+  });
+
+  test("3b(iii): the provenance travels with the turn into the lease, and a matching account still binds", () => {
+    // The end-to-end hop a production turn takes: `browserAccountLeaseInput` carries the fact
+    // `providerConfig` decided into `begin()`, and `begin()` into the descriptor the check reads.
+    const leases = new BrowserAccountLeaseRegistry();
+    const core = new ChatGptWebProviderCore("chatgpt-web", leases);
+    const turn = core.begin({
+      ...leaseInput("derived-account"),
+      accountIdentity: "storage-state-derived-fallback",
+      accountIdentityRecorded: false,
+    });
+
+    const refusal = refusalOf(() => turn.bindPhysicalResource(physicalResource(
+      "derived-account",
+      "physical-account-276",
+    )));
+    expect(refusal.message).toBe(CHATGPT_WEB_ACCOUNT_IDENTITY_MISSING_MESSAGE);
+
+    // The check is not weakened in the other direction: the account the logical identity does name
+    // still binds, and the derived provenance never becomes a reason to refuse a matching account.
+    const matching = core.begin({
+      ...leaseInput("matching-account"),
+      accountIdentity: "storage-state-derived-fallback",
+      accountIdentityRecorded: false,
+      nativeThreadId: "thread-matching",
+    });
+    matching.bindPhysicalResource(physicalResource("matching-account", "storage-state-derived-fallback"));
+    // A bound surface can become ready; an unbound one cannot, so this is the proof it really bound.
+    matching.markSurfaceReady();
+    expect(matching.snapshot().state).toBe("SURFACE_READY");
+    expect(leases.activeCount()).toBe(2);
   });
 
   test("3c: the matching physical account still binds, so the check is not weakened", () => {

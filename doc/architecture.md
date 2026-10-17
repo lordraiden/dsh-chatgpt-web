@@ -2180,6 +2180,18 @@ be distinct has to send `user`/`session_id`, and a stateless caller that wants c
 its history. The core still only stores and passes the resulting key: the provider conversation itself
 stays opaque provider state (§7.3, §26.5).
 
+**Both ingresses obey that rule, and they share one derivation owner.** `/v1/chat/completions` carries
+the key it decided in `client_metadata`. A `/v1/responses` caller is not translated by a surface that
+could decide it, so the adapter's turn-identity extractor resolves the key for the turn it is about to
+run — and its metadata-less fallback calls the **same** content-identity function
+(`contentConversationIdentity`, the owner of both the canonical encoding and the conversational-role
+filter) rather than deriving a second one. That fallback was the constant `dsh-session`, so every
+metadata-less Responses caller shared one provider conversation: the same defect slice 1 fixed on the
+chat surface, reached through the other door. A caller that *does* provide a thread — the native
+Codex/DSH path, or a client that sends `client_metadata` — keeps it verbatim; only the fallback changed.
+The documented limit is the same and applies identically: two callers with no identity and identical
+content are indistinguishable and share one conversation.
+
 ### 32.3 Runtime and credentials
 
 - The service runs headless Chromium, supplied by a pinned Playwright base image whose browser build

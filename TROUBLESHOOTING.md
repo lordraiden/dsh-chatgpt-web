@@ -76,6 +76,7 @@ The failures seen so far, and what each one means:
 - **Chrome is missing.** Opening a session fails closed with `The interactive sign-in browser could not start: Chrome was not found at <path>` (the provider's own `CHROME_EXECUTABLE_MISSING` diagnostic). Fix the configured `chromeExecutablePath` (see §4) before retrying.
 - **The provider rejects the automated surface (anti-bot / verification wall).** The page's browser never reaches the authenticated surface, so the session stays `awaiting_input`/`verifying` and eventually reports `failed`. Set `authBrowserMode: "display"` in `config.json` and supply a display the service can reach — the container provides none, and the former noVNC sign-in image is retired (doc/container.md §5.5). `headless` is the default and the supported path on a headless host, so this is opt-in.
 - **A session for that provider is already active.** A second sign-in is refused (409, `A sign-in session for provider chatgpt-web is already active`) until the first reaches a terminal state; cancel it from the page and reopen.
+- **Turns fail with `ChatGPT Web has no recorded account identity for this deployment`.** The browser session was stored but no account identity was ever recorded with it, so the lease's account-binding check cannot verify the signed-in account and refuses rather than binding on a guess. This is the actionable form of a failure that used to surface only as `Browser lease physical account does not match its logical account identity` — a genuine *mismatch* between two recorded identities keeps that original sentence. Sign in again at the operator sign-in surface (`/v1/control/auth/`, or the CLI `login`), which records the fingerprint of the account it signs in; then re-run `doctor`.
 - **The session was captured but turns still fail.** The page reported the session stored, yet the running service still sees none: it resolved the credentials path at startup. Restart it (`docker compose restart chatgpt-web`), then re-run `doctor`.
 
 A click outside the viewport the relay reports is refused rather than clamped, and currently is refused with HTTP 400 `UNSUPPORTED_OPTION`; that is the intended answer, not a credential problem.
@@ -274,7 +275,9 @@ Exclusivity is per logical conversation and per physical transport resource:
 Read the refusal to tell the two apart:
 
 - `retained_surface_busy` / `TRANSPORT_UNAVAILABLE` means the *same* provider conversation already has an active turn (the per-conversation guards above);
-- the bounded fan-out sentence means the authenticated account is at its 5-turn ceiling — wait for a browser turn to finish, then retry.
+- the bounded fan-out sentence means the authenticated account is at its 5-turn ceiling — wait for a browser turn to finish, then retry;
+- `ChatGPT Web has no recorded account identity for this deployment, ... sign in again at the operator sign-in surface (/v1/control/auth/)` means nothing recorded *which* account this deployment signed in as, so no physical account could be verified against it. Sign in again (or run `login`) to record it;
+- `Browser lease physical account does not match its logical account identity: expected <fingerprint>, actual <fingerprint>` means two *recorded* identities genuinely disagree — the browser session belongs to a different account than the one this deployment recorded. Re-authenticate that account, or point the deployment at the browser session it recorded.
 
 Do not work around either refusal by disabling the per-conversation safety guards or sharing one physical page between unrelated DSH conversations.
 
@@ -302,6 +305,10 @@ First determine whether the provider conversation can be safely resumed or wheth
 ### 11.0 After updating to 1.0.21, a ChatGPT chat starts a new conversation
 
 Expected once. Until 1.0.21 the conversation key was derived from the deployment namespace and the DSH chat identity only; it now includes the provider and the authenticated account binding, so the same DSH chat cannot reuse another account's conversation. The first turn of each chat after the update therefore physically installs a fresh ChatGPT conversation from the canonical DSH context. The DSH history is untouched, and the affinity stays stable from then on.
+
+### 11.0b A `/v1/responses` client that sends no turn metadata starts a new conversation
+
+Expected once. Every metadata-less `/v1/responses` caller used to resolve to the same constant conversation key, so unrelated clients shared one ChatGPT conversation. Each such client now gets its own content-derived key (the same rule `/v1/chat/completions` already used), and its first turn after the update physically installs a fresh conversation. Two callers with no metadata and byte-identical content are still deliberately indistinguishable and share one conversation — to be addressed as a distinct caller, send `client_metadata["x-codex-turn-metadata"]` with a `thread_id` on `/v1/responses` (or `user`/`session_id` on the chat surface). A caller that already sends native Codex/DSH turn metadata is unaffected: its thread is used verbatim.
 
 ### 11.1 `ChatGPT stopped responding after the task started` while ChatGPT is still working
 
