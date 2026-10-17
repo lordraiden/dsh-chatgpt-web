@@ -220,7 +220,7 @@ code change owned by #247.
 | Restore | `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar xzf /backup/dsh-data-<date>.tgz -C /data` |
 | Upgrade | `git pull && docker compose build --pull && docker compose up -d` — the volume survives; the base tag is pinned, so `--pull` refreshes that tag only |
 | Bind-mount variant (data on the host) | `mkdir -p data && docker compose --profile bind up -d chatgpt-web-bind` |
-| Interactive sign-in (no display needed) | open `http://127.0.0.1:17841/v1/control/auth/` in a browser, then `docker compose restart chatgpt-web` (§5.5) |
+| Interactive sign-in (no display needed) | open `http://127.0.0.1:17841/v1/control/auth/` in a browser and sign in; the running service uses the session on the next turn, no restart (§5.5) |
 | Interactive login (CLI `login`, needs a display you supply) | `dsh-chatgpt-web login`, or `docker compose run --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix chatgpt-web login` (§5.5) |
 
 Notes:
@@ -408,12 +408,13 @@ detects the authenticated surface with the same checks `login` already uses, and
 through the single session owner, verifying it *first* — into `providers/chatgpt-web/`, the layout
 above.
 
-**Restart the service after a successful capture.** It resolved the credentials path at startup, so the
-running process keeps serving the old picture until it restarts:
+**Nothing is restarted after a successful capture.** The running service re-derives the account
+identity and the resolved credentials path from the sign-in's own completion, so the next turn uses the
+new session. Before that fix the process kept serving the picture it resolved at startup, which is why
+this section used to say `docker compose restart chatgpt-web`.
 
-```bash
-docker compose restart chatgpt-web
-```
+`auth import` is the exception: it runs in its own short-lived process, so its write is not the running
+service's to observe — restart after adopting a capture that way.
 
 **Adopting a capture from anywhere (`auth import`) — scripted / offline**
 
@@ -468,7 +469,7 @@ docker compose run --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix chatgpt-web 
 | --- | --- |
 | Expiry | `doctor --json` reports `login: error — ChatGPT login state is missing or unverified`, with the resolved path. Repeat the sign-in or `auth import`; nothing else needs to change |
 | Anti-bot / verification challenge | The provider may interrupt an automated session. Complete the challenge in the interactive sign-in path; a challenge does not corrupt the volume. When the page's headless flow is rejected, set `authBrowserMode: "display"` and supply a display yourself — the container provides none (§5.5) |
-| Captured, but turns still fail | The page reported the session stored, yet the running service still saw none: it resolved the credentials path at startup. Restart it (`docker compose restart chatgpt-web`) and re-run `doctor` |
+| Captured, but turns still fail | The running service picks an interactive sign-in up on the next turn, so a restart is not the fix. Read the capture's `detail` (an account identity the sign-in could not read leaves every turn failing closed), then re-run `doctor`; `auth import` is the route that still needs `docker compose restart chatgpt-web` |
 | Click outside the frame | A click outside the viewport the relay reports is refused, not clamped. It currently is refused with HTTP 400 `UNSUPPORTED_OPTION` — a known blemish |
 | Backup | The volume holds credentials: `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data-$(date +%F).tgz -C /data .` — store it encrypted |
 | Restore | Untar it back into the volume; a restored session keeps working only while the provider still accepts it |

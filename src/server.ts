@@ -2,6 +2,7 @@ import { chatGptWebTraceId, createChatGptWebAdapter, type ChatGptWebProviderAdap
 import {
   CHATGPT_WEB_AUTH_PROVIDER_LABEL,
   createChatGptWebAuthController,
+  type ChatGptWebAuthStoredIdentity,
 } from "./adapters/chatgpt-web/auth-controller";
 import { CHATGPT_WEB_DRIVER_ID } from "./web-chat/host/provider-host";
 import { createChatGptWebProviderRuntime } from "./adapters/chatgpt-web/provider-runtime";
@@ -61,6 +62,7 @@ import {
   isLoopbackHost,
   resolveApiKey,
   resolveChatGptWebTuning,
+  resolveProviderStorageStatePath,
   saveConfig,
   validateChatGptWebTuning,
 } from "./config";
@@ -1376,6 +1378,68 @@ function authPageResponse(): Response {
   });
 }
 
+/**
+ * The one live-configuration refresh primitive (issue #287, slice 4b).
+ *
+ * A successful remote sign-in writes to the data volume, but the running process resolved its
+ * provider facts once, when it loaded the configuration, and every seam reads those facts from
+ * `config` per call (`effectiveChatGptWebProviderConfig` is deliberately never cached). So the fix is
+ * to re-derive exactly the two facts the sign-in changes and swap them into the live configuration:
+ *
+ * - `accountIdentityFingerprint`, the deployment's logical account identity. Without it
+ *   `providerConfig` substitutes the storage-state-derived fallback, `accountIdentityRecorded` is
+ *   false, and every turn fails closed on the lease's account-binding check.
+ * - `storageStatePath`, **resolved for reads** through the same `resolveProviderStorageStatePath`
+ *   owner `loadConfig` uses. On a fresh volume the startup resolution pointed at the legacy location
+ *   because `providers/<id>/storage-state.json` did not exist yet; once the sign-in writes it, the
+ *   provider-scoped session wins and the reported and read locations must be the same one.
+ *
+ * This function is the **only** place the live provider facts are mutated. `startServer` wires it to
+ * the sign-in controller's single `afterSessionStored` completion signal and nothing else calls it,
+ * so a successful sign-in has one trigger and one owner.
+ *
+ * **In-flight turns are unaffected by construction.** A turn's provider facts are captured into a
+ * plain `CodexProviderConfig` before the turn starts (the ingress resolves them; the adapter factory
+ * and `ChatGptBrowserWorker.forProvider` derive their own copies from that value), and no part of a
+ * running turn reads `config` again. This function therefore swaps a *future* turn's facts; a turn
+ * already in flight keeps the reference it started with, whether it then succeeds or fails on the
+ * facts it began with. Never "fix up" a running turn from here.
+ *
+ * The writes are deliberately ordered path-first/fingerprint-last on a best-effort path: a
+ * fingerprint swap matters far more than a reporting path, so losing the cheap one must never cost
+ * the important one. Re-deriving a value that did not change is a no-op, because both are compared
+ * before they are written.
+ *
+ * @param config - the live configuration this listener serves from, mutated in place.
+ * @param identity - the account binding the sign-in persisted, read from its own write's answer.
+ * @returns whether the credential path the deployment resolves actually changed.
+ */
+export function refreshChatGptWebProviderFacts(
+  config: AppConfig,
+  identity: ChatGptWebAuthStoredIdentity,
+): boolean {
+  const previousPath = config.storageStatePath;
+  if (!identity.restored && config.accountIdentityFingerprint === identity.fingerprint) return false;
+  // A path that cannot be resolved must not take the account identity down with it: the turn itself
+  // re-resolves the credential path from the configured value per turn (see `resolveBrowserConfig`),
+  // so only the reported path would stay stale, while a missing fingerprint fails every turn closed.
+  try {
+    config.storageStatePath = resolveProviderStorageStatePath(config.storageStatePath);
+  } catch (error) {
+    console.warn(
+      `[dsh-chatgpt-web] sign_in_credential_path_refresh_failed ${safeErrorDescriptor(error)}`,
+    );
+  }
+  config.accountIdentityFingerprint = identity.fingerprint;
+  console.info(
+    `[dsh-chatgpt-web] sign_in_provider_facts_refreshed ${JSON.stringify({
+      accountIdentityRecorded: true,
+      credentialPathChanged: config.storageStatePath !== previousPath,
+    })}`,
+  );
+  return config.storageStatePath !== previousPath;
+}
+
 export function startServer(
   config: AppConfig,
   dependencies: {
@@ -1478,6 +1542,11 @@ export function startServer(
    * Registration is the production default and is deliberately lazy: composing the controller starts
    * nothing, and a missing Chrome surfaces as a typed `startAuth()` failure on the request that needs
    * it rather than at startup.
+   *
+   * The controller's one-shot `afterSessionStored` is wired to {@link refreshChatGptWebProviderFacts}
+   * (issue #287, slice 4b), the single place the live provider facts are mutated, so a successful
+   * sign-in takes effect on the very next turn here — no restart, no second process, and no other call
+   * site that touches those facts.
    */
   const authSurface: WebChatAuthSurface = createWebChatAuthSurface(dependencies.auth ?? {
     providers: [{
@@ -1487,6 +1556,9 @@ export function startServer(
         config: {
           chromeExecutablePath: config.chromeExecutablePath,
           authBrowserMode: config.authBrowserMode,
+        },
+        afterSessionStored: (_stored, identity) => {
+          refreshChatGptWebProviderFacts(config, identity);
         },
       }),
     }],

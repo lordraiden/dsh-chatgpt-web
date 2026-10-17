@@ -27,6 +27,10 @@
  * - **The provider id is the catalogue id.** `CHATGPT_WEB_AUTH_PROVIDER_ID` mirrors
  *   `CHATGPT_WEB_DRIVER_ID` and is asserted equal in the contract tests, so the surface can never
  *   list a provider the catalogue does not have.
+ * - **The sign-in's completion is one signal, not a callback per concern.** Once the session and its
+ *   account binding are on disk, `afterSessionStored` is called exactly once with the persisted facts
+ *   (issue #287, slice 4b). A host that holds live provider facts re-derives them there, which is what
+ *   makes the very next turn work without a restart. The provider itself owns nothing live.
  * - **Nothing here is a second execution path for turns.** This module signs in and stops.
  *
  * Anti-automation flags follow the two launch sites already in the repository (`ensureManagedBrowser`
@@ -60,6 +64,31 @@ import {
   type ProviderAuthStoreResult,
   type ProviderAuthView,
 } from "../../web-chat/core";
+
+/**
+ * What `storeCapture` could make durable about the account binding (issue #287, slice 4b).
+ *
+ * `restored` is the writer's own answer: a deployment that already recorded this fingerprint has
+ * nothing to re-derive, and a failed write must not be mistaken for a recorded identity.
+ */
+export interface ChatGptWebAuthStoredIdentity {
+  /** The authenticated account's non-secret fingerprint, read from the signed-in page. */
+  readonly fingerprint: string;
+  /** Whether the writer found a different value stored and persisted it. */
+  readonly restored: boolean;
+}
+
+/**
+ * One-shot completion seam: a session and its account binding are on disk.
+ *
+ * The provider signs in and stops — it never holds the deployment's live provider facts — so this is
+ * the only point at which a host can learn that the deployment's credential facts changed under it.
+ * It is handed the stored capture's own result and the account binding it persisted, and it runs
+ * **after both writes**: a host that re-derives from this signal can never observe a session without
+ * its binding. The callback is the host's; this module neither imports it nor assumes what it does.
+ */
+export type ChatGptWebAuthSessionStored =
+  (stored: ProviderAuthStoreResult, identity: ChatGptWebAuthStoredIdentity) => void;
 
 /**
  * The provider id this controller is served under.
@@ -167,8 +196,11 @@ export type ChatGptWebAuthIdentityDetector = (page: Page) => Promise<string>;
  *
  * The default is the config module's own read-modify-write; a test injects a spy so "written exactly
  * once" and "not written at all" are provable without touching a real data home.
+ *
+ * @returns whether the stored value changed, or `void` for a writer that cannot answer (it is then
+ *   treated as a write that changed the deployment).
  */
-export type ChatGptWebAuthIdentityWriter = (fingerprint: string) => void;
+export type ChatGptWebAuthIdentityWriter = (fingerprint: string) => boolean | void;
 
 /** Construction options for {@link createChatGptWebAuthController}. */
 export interface ChatGptWebAuthControllerOptions {
@@ -209,6 +241,16 @@ export interface ChatGptWebAuthControllerOptions {
    * module's read-modify-write, so the captured session and the account binding land together.
    */
   readonly persistIdentity?: ChatGptWebAuthIdentityWriter;
+  /**
+   * The one-shot completion hook (issue #287, slice 4b), called once both the session and the account
+   * binding are on disk. The default is a no-op.
+   *
+   * This is where a host re-derives the provider facts it uses for subsequent requests: a successful
+   * remote sign-in writes to the data volume, and the running process must observe that without a
+   * restart. The callback receives the persisted facts rather than re-reading them, so it cannot race
+   * a second sign-in for its own inputs.
+   */
+  readonly afterSessionStored?: ChatGptWebAuthSessionStored;
 }
 
 /**
@@ -702,6 +744,11 @@ export function createChatGptWebAuthController(
   const detectIdentity = options.detectIdentity ?? (async (page: Page) =>
     (await detectChatGptAuthenticatedAccountIdentity(page)).fingerprint);
   const writeIdentity = options.persistIdentity ?? persistAccountIdentityFingerprint;
+  /**
+   * The host's one-shot completion signal. Defaults to nothing: a caller that owns no live provider
+   * facts (a test, or a host whose session path is read from disk per request) has nothing to re-derive.
+   */
+  const afterSessionStored = options.afterSessionStored;
   const headless = (config.authBrowserMode ?? "headless") === "headless";
 
   /**
@@ -716,6 +763,17 @@ export function createChatGptWebAuthController(
   }>();
 
   /**
+   * The captures whose completion signal has already been delivered.
+   *
+   * A surface may legitimately hand the same capture to `storeCapture` more than once (a status poll
+   * racing the relay both read the same handoff), so "the sign-in completed" is sealed per capture:
+   * the host's refresh primitive is a one-shot per sign-in, never one per read. A capture whose
+   * account binding did not land is deliberately left unsealed, so a later read of the same capture
+   * still reports the binding failure instead of looking like a silent success.
+   */
+  const signalled = new WeakSet<object>();
+
+  /**
    * Persist the fingerprint a capture detected and report — never throw — why it was skipped.
    *
    * The session is already stored when this runs, so a sign-in is never discarded for a missing
@@ -723,22 +781,35 @@ export function createChatGptWebAuthController(
    * (`providerConfig` substitutes the storage-state-derived value when the field is absent), and the
    * next turn fails closed on the account-binding check. That is exactly what the operator has to be
    * told, in non-secret terms, through the reported detail.
+   *
+   * @returns the non-secret detail when the binding did not land, otherwise the persisted identity.
    */
   const persistIdentity = (capture: {
     readonly accountIdentityFingerprint: string | undefined;
     readonly accountIdentityDetail: string | undefined;
-  }): string | undefined => {
+  }): { detail?: string; identity?: ChatGptWebAuthStoredIdentity } => {
     if (capture.accountIdentityFingerprint === undefined) {
-      return "The signed-in ChatGPT account identity could not be read, so no account fingerprint "
-        + `was written${capture.accountIdentityDetail ? ` (${capture.accountIdentityDetail})` : ""}; `
-        + "every turn will fail closed until a sign-in records it.";
+      return {
+        detail: "The signed-in ChatGPT account identity could not be read, so no account fingerprint "
+          + `was written${capture.accountIdentityDetail ? ` (${capture.accountIdentityDetail})` : ""}; `
+          + "every turn will fail closed until a sign-in records it.",
+      };
     }
     try {
-      writeIdentity(capture.accountIdentityFingerprint);
-      return undefined;
+      const changed = writeIdentity(capture.accountIdentityFingerprint);
+      // A writer that cannot answer is treated as having changed the deployment: re-deriving an
+      // unchanged value is free, and assuming "unchanged" could leave stale facts in place.
+      return {
+        identity: {
+          fingerprint: capture.accountIdentityFingerprint,
+          restored: changed !== false,
+        },
+      };
     } catch (error) {
-      return `The ChatGPT account fingerprint could not be written to the deployment configuration: `
-        + `${nonSecretAuthDetail(error)}. Every turn will fail closed until a sign-in records it.`;
+      return {
+        detail: `The ChatGPT account fingerprint could not be written to the deployment configuration: `
+          + `${nonSecretAuthDetail(error)}. Every turn will fail closed until a sign-in records it.`,
+      };
     }
   };
 
@@ -834,8 +905,31 @@ export function createChatGptWebAuthController(
       // The fingerprint is provider-side account binding, not captured material, so it is persisted
       // here — the controller already owns the write — rather than widened into the neutral
       // `AuthCapture` the host relays. `AuthCapture` stays exactly as it is.
-      const detail = persistIdentity(record);
-      return { stored: true, location, ...(detail !== undefined ? { detail } : {}) };
+      const signalCompletion = !signalled.has(capture.storageState as object);
+      const persisted = persistIdentity(record);
+      const result: ProviderAuthStoreResult = {
+        stored: true,
+        location,
+        ...(persisted.detail !== undefined ? { detail: persisted.detail } : {}),
+      };
+      // The deployment changed under the running process. The host's one refresh primitive runs here
+      // and only here, after BOTH writes, with the persisted facts rather than a re-read of them.
+      if (signalCompletion && persisted.identity !== undefined) {
+        signalled.add(capture.storageState as object);
+        try {
+          afterSessionStored?.(result, persisted.identity);
+        } catch (error) {
+          // A host hook must never turn a stored sign-in into a failed one: the session and its
+          // binding are already durable, and the session view is the wrong place to report a host
+          // internal. It is a real problem anyway — the running process may be serving stale facts —
+          // so it is named here rather than swallowed.
+          console.warn(
+            `[chatgpt-web] sign-in completion hook failed for ${CHATGPT_WEB_AUTH_PROVIDER_ID}`
+            + ` (${nonSecretAuthDetail(error)}); the stored session is unaffected`,
+          );
+        }
+      }
+      return result;
     },
   };
 }

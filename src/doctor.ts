@@ -187,7 +187,8 @@ export async function runDoctor(): Promise<DoctorReport> {
       checks.push({
         id: "login",
         status: "error",
-        message: "ChatGPT login state is missing or unverified; run `dsh-chatgpt-web login` or `dsh-chatgpt-web auth import`",
+        message: "ChatGPT login state is missing or unverified; run `dsh-chatgpt-web login` or `dsh-chatgpt-web auth import`, "
+          + "or sign in at the operator sign-in surface /v1/control/auth/ (the running service picks that up on the next turn, no restart)",
         detail: `provider chatgpt-web · ${config.storageStatePath}`,
       });
     } else if (!secureFile(config.storageStatePath)) {
@@ -311,15 +312,22 @@ const COMPOSE_EXEC = "docker compose exec chatgpt-web";
  * The two documented sign-in routes (#249, #276), in the order a first run should try them.
  *
  * The first is the service's own page, which needs no display and is what the sign-in was verified
- * with against a real account. The second is the `/capture` path `docker/verify-container.sh` and
- * README.md already use: the operator mounts a directory holding a Playwright `storage-state.json`
- * and adopts it. Nothing here prints a cookie, a token or a key — only the command that consumes the
- * capture.
+ * with against a real account. A successful capture there is picked **live** by the running service
+ * (issue #287, slice 4b), so it deliberately carries no restart: telling an operator to restart for
+ * the half that is already fixed is exactly the misleading guidance this must not print. The second
+ * is the `/capture` path `docker/verify-container.sh` and README.md already use: the operator mounts
+ * a directory holding a Playwright `storage-state.json` and adopts it. `auth import` runs in its own
+ * short-lived process, so it is the route that still needs the running service restarted before that
+ * process's write is visible to it.
+ *
+ * Nothing here prints a cookie, a token or a key — only the command that consumes the capture.
  */
 function signInFixCommands(): string[] {
   return [
-    "sign in at http://127.0.0.1:17841/v1/control/auth/ (no display needed), then: docker compose restart chatgpt-web",
-    `${COMPOSE_EXEC} node lib/cli.js auth import --provider chatgpt-web --from /capture`,
+    `sign in at http://127.0.0.1:17841/v1/control/auth/ (no display needed; the running service `
+      + `picks the session up on the next turn, no restart)`,
+    `${COMPOSE_EXEC} node lib/cli.js auth import --provider chatgpt-web --from /capture`
+      + `   # then: docker compose restart chatgpt-web`,
   ];
 }
 
