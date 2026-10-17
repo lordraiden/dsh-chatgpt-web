@@ -347,11 +347,20 @@ curl -fsSN http://127.0.0.1:17841/v1/chat/completions -H 'content-type: applicat
   the estimate. It is present because clients read it, not because it is authoritative.
 - Only messages are transmitted — see §5.3. Send a stable `user` (or `session_id`) to get the strict
   rule; without one the request is stateless.
-- **Refused with a typed 400, never silently dropped:** `tools`, `tool_choice`, `functions`,
-  `function_call` (legacy), `n > 1`, `logprobs`/`top_logprobs`, `response_format` other than plain
-  text, and non-text content parts (`image_url`, `input_audio`, files). Tools, images, audio, video,
-  attachments and MCP are the **common layer's own** vocabulary (`assertTextOnlyWebChatTurn`), so the
-  API does not maintain a second list.
+- **Capability declarations are discarded, not refused.** `tools`, `tool_choice`, `mcp` and the legacy
+  `functions`/`function_call` are accepted, **never executed and never forwarded**: this bridge is a text
+  chat over the provider's web product, so there is no execution path and no return channel to your
+  harness. A tool-sending agent gets plain chat and no tool calls. Nothing is silent about it: any
+  response that dropped something carries `x-dsh-chatgpt-web-ignored-features` (canonical names, e.g.
+  `tools,toolChoice`; JSON and SSE alike) and the service writes one log line per request.
+- **Content is still refused with a typed 400, never silently dropped:** `files`, `images`, `audio`,
+  `video`, `attachments`, non-text content parts (`image_url`, `input_audio`, `input_file`), `n > 1`,
+  `logprobs`/`top_logprobs`, and `response_format` other than plain text. Attached content is data the
+  caller meant the model to see, so it can never be dropped — that distinction is what stops "drop
+  capability declarations" from sliding into "drop attachments".
+- The capability/content split is the **common layer's own** vocabulary
+  (`WEB_CHAT_CAPABILITY_FEATURES` / `WEB_CHAT_CONTENT_FEATURES`, `src/web-chat/core/exchange.ts`), so the
+  API keeps no second list.
 - Not offered: embeddings, audio, images, batch — the surface stays text-only.
 
 ### 5.5 Provider login (issue #249)

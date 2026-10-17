@@ -42,6 +42,9 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
 /**
  * A stub provider that records exactly what it was asked to send, and answers with fixed text.
  *
+ * It keeps the whole parsed request, not only the messages: the proof that a dropped capability was
+ * never forwarded has to look at everything the adapter could have seen, not just the transcript.
+ *
  * With no `usage` argument it reports none — the state of an adapter that cannot account for the turn
  * — which is the case that used to surface as a fabricated `{0,0,0}` block.
  */
@@ -52,7 +55,7 @@ function stubAdapter(usage?: Record<string, unknown>) {
     factory: () => ({
       name: "issue-248-stub",
       runTurn: async (parsed: { context?: { messages?: unknown[] } }, _incoming: unknown, emit: (event: unknown) => void) => {
-        turns.push({ messages: parsed.context?.messages ?? [] });
+        turns.push({ messages: parsed.context?.messages ?? [], request: parsed });
         emit({ type: "text_delta", text: "Respuesta del proveedor", phase: "final_answer" });
         emit({ type: "done", stopReason: "stop", endTurn: true, ...(usage ? { usage } : {}) });
       },
@@ -137,13 +140,9 @@ describe("issue #248 — the OpenAI request is translated, never re-executed", (
     })).toThrow(ChatCompletionsRequestError);
   });
 
-  test("every unsupported feature is refused through the common layer's own vocabulary", () => {
+  test("content features are refused through the common layer's own vocabulary", () => {
     const base = { model: "chatgpt-web/luna", messages: [USER_MESSAGE] };
     const cases: Array<[string, Record<string, unknown>, RegExp]> = [
-      ["tools", { tools: [{ type: "function", function: { name: "f" } }] }, /tools/],
-      ["tool_choice", { tool_choice: "auto" }, /toolChoice/],
-      ["legacy functions", { functions: [{ name: "f" }] }, /tools/],
-      ["legacy function_call", { function_call: "auto" }, /toolChoice/],
       ["n > 1", { n: 2 }, /`n` greater than 1/],
       ["logprobs", { logprobs: true }, /logprobs/],
       ["response_format json", { response_format: { type: "json_object" } }, /plain text/],
@@ -151,6 +150,19 @@ describe("issue #248 — the OpenAI request is translated, never re-executed", (
     for (const [label, extra, pattern] of cases) {
       expect(() => translateChatCompletionsRequest({ ...base, ...extra })).toThrow(pattern);
       void label;
+    }
+
+    // Attached content is data the model was meant to see: dropping it would be silent content loss,
+    // so the refusal is the guard that stops "drop capability declarations" from becoming "drop
+    // attachments". It is unchanged and unconditional.
+    for (const [extra, pattern] of [
+      [{ files: [{ id: "f" }] }, /files/],
+      [{ images: [{ url: "x" }] }, /images/],
+      [{ audio: { data: "x" } }, /audio/],
+      [{ video: { url: "x" } }, /video/],
+      [{ attachments: [{ id: "a" }] }, /attachments/],
+    ] as const) {
+      expect(() => translateChatCompletionsRequest({ ...base, ...extra })).toThrow(pattern);
     }
 
     for (const [part, pattern] of [
@@ -162,6 +174,41 @@ describe("issue #248 — the OpenAI request is translated, never re-executed", (
         model: "chatgpt-web/luna",
         messages: [{ role: "user", content: [part] }],
       })).toThrow(pattern);
+    }
+  });
+
+  test("capability declarations are dropped and declared, never refused and never forwarded", () => {
+    const base = { model: "chatgpt-web/luna", messages: [USER_MESSAGE] };
+    const tools = [{ type: "function", function: { name: "read_file" } }];
+
+    // The canonical vocabulary is named back to the caller; the legacy aliases fold into it.
+    expect(translateChatCompletionsRequest({ ...base, tools }).droppedCapabilities).toEqual(["tools"]);
+    expect(translateChatCompletionsRequest({ ...base, tools, tool_choice: "auto" }).droppedCapabilities)
+      .toEqual(["tools", "toolChoice"]);
+    expect(translateChatCompletionsRequest({ ...base, mcp: { servers: ["s"] } }).droppedCapabilities).toEqual(["mcp"]);
+    expect(translateChatCompletionsRequest({ ...base, functions: [{ name: "f" }] }).droppedCapabilities).toEqual(["tools"]);
+    expect(translateChatCompletionsRequest({ ...base, function_call: "auto" }).droppedCapabilities).toEqual(["toolChoice"]);
+    // An empty slot carries nothing, so nothing is declared as dropped.
+    expect(translateChatCompletionsRequest({ ...base, tools: [], mcp: {} }).droppedCapabilities).toEqual([]);
+
+    // The internal turn is built from the projected messages only: no capability field is read, so
+    // the declaration cannot travel to the provider even by accident.
+    const translation = translateChatCompletionsRequest({ ...base, tools, tool_choice: "auto" });
+    expect(translation.body).toEqual({
+      model: "chatgpt-web/luna",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hola" }] }],
+      stream: false,
+    });
+    expect(JSON.stringify(translation.body)).not.toContain("read_file");
+  });
+
+  test("a tools-shaped content part stays a refusal: a capability policy never reaches message content", () => {
+    // An unknown part type is not a capability declaration, it is content the layer cannot read.
+    for (const part of [{ type: "tool_use", id: "t" }, { type: "tools", tools: [] }, { type: "mcp", server: "s" }]) {
+      expect(() => translateChatCompletionsRequest({
+        model: "chatgpt-web/luna",
+        messages: [{ role: "user", content: [part] }],
+      })).toThrow(ChatCompletionsRequestError);
     }
   });
 
@@ -354,17 +401,80 @@ describe("issue #248 — over the real listener", () => {
     expect(await response.text()).toContain("browser session lost");
   });
 
-  test("a refused feature is a typed 400 and submits nothing", async () => {
+  test("a capability declaration is dropped and declared, and the provider never sees it", async () => {
+    const stub = stubAdapter();
+    const server = serve(stub.factory);
+
+    const response = await post(server, {
+      model: "chatgpt-web/luna",
+      messages: [
+        { role: "user", content: "hola" },
+        // A harness replays its tool round: an assistant turn whose tool_calls are protocol state,
+        // and the tool result the harness already used.
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "file contents" },
+        { role: "user", content: "y ahora?" },
+      ],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+      tool_choice: "auto",
+    });
+
+    // Dropping a capability is not a refusal: the turn runs as plain chat and says what it dropped.
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-dsh-chatgpt-web-ignored-features")).toBe("tools,toolChoice");
+    const completion = await response.json() as Record<string, any>;
+    expect(completion.choices[0].message.content).toBe("Respuesta del proveedor");
+
+    // The proof that matters: nothing capability-shaped crossed to the provider — not the tool
+    // declaration, not the assistant tool_calls, and not the role:"tool" message the projection drops.
+    expect(stub.turns).toHaveLength(1);
+    const sent = JSON.stringify(stub.turns[0]);
+    expect(sent).not.toContain("read_file");
+    expect(sent).not.toContain("tool_calls");
+    expect(sent).not.toContain("file contents");
+    expect(sent).toContain("y ahora?");
+
+    // Nothing dropped means no declaration to make.
+    const plain = await post(server, { model: "chatgpt-web/luna", messages: [USER_MESSAGE] });
+    expect(plain.status).toBe(200);
+    expect(plain.headers.get("x-dsh-chatgpt-web-ignored-features")).toBeNull();
+  });
+
+  test("streaming declares the dropped capabilities on the SSE response too", async () => {
     const stub = stubAdapter();
     const server = serve(stub.factory);
 
     const response = await post(server, {
       model: "chatgpt-web/luna",
       messages: [USER_MESSAGE],
+      stream: true,
       tools: [{ type: "function", function: { name: "read_file" } }],
     });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("x-dsh-chatgpt-web-ignored-features")).toBe("tools");
+    await response.text();
+    expect(stub.turns).toHaveLength(1);
+    expect(JSON.stringify(stub.turns[0])).not.toContain("read_file");
+  });
+
+  test("a content feature is still a typed 400 with the exact message, and submits nothing", async () => {
+    const stub = stubAdapter();
+    const server = serve(stub.factory);
+
+    const response = await post(server, {
+      model: "chatgpt-web/luna",
+      messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "http://x/y.png" } }] }],
+    });
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain("tools");
+    const body = await response.json() as { error?: { message?: string; type?: string } };
+    expect(body.error?.type).toBe("invalid_request_error");
+    expect(body.error?.message).toBe("The WebChat common layer is text-only; unsupported request features: images.");
+    expect(response.headers.get("x-dsh-chatgpt-web-ignored-features")).toBeNull();
     expect(stub.turns).toHaveLength(0);
   });
 

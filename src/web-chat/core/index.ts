@@ -61,6 +61,10 @@ export {
 export {
   assertTextOnlyWebChatTurn,
   rejectUnsupportedWebChatFeatures,
+  WEB_CHAT_CAPABILITY_FEATURES,
+  WEB_CHAT_CONTENT_FEATURES,
+  type WebChatCapabilityFeature,
+  type WebChatContentFeature,
   type WebChatExchange,
   type WebChatReplayMessage,
   type WebChatTurnCandidate,

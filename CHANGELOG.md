@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Stop refusing capability declarations on the OpenAI-compatible surface. `tools`, `tool_choice`, `mcp`
+  and the legacy `functions`/`function_call` are now accepted and **discarded by design** — never
+  executed, never forwarded — because the provider is a consumer web chat reached as text, with no
+  execution path and no return channel to the caller's harness; a tool-sending harness gets plain chat
+  instead of a 400 on every turn (the previous refusal was the bug). Nothing is silent: an affected
+  response declares it in `x-dsh-chatgpt-web-ignored-features` (JSON and SSE) and the service logs one
+  line per request naming what it dropped. Attached **content** is unchanged and still refused with a
+  typed 400 — files, images, audio, video, attachments and non-text content parts are data the model was
+  meant to see, so dropping them would be content loss. The capability/content split is owned once by the
+  common layer (`WEB_CHAT_CAPABILITY_FEATURES` / `WEB_CHAT_CONTENT_FEATURES` in
+  `src/web-chat/core/exchange.ts`) and recorded in `AGENTS.md` and `doc/architecture.md` so the old
+  refusal is not "restored" later.
 - Retire the noVNC sign-in image (issue #276 slice 3b). The remote sign-in was verified against a real
   account end to end (`/v1/control/auth/` → session stored in `providers/chatgpt-web/` → a streamed
   turn with `finish_reason: "stop"`), so the `display` fallback's noVNC image is dead weight and is

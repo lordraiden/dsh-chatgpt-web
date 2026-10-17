@@ -53,10 +53,11 @@ these is broken:
    own state or provider policy — so the core cannot grow silently.
 
 `tests/issue-189-web-chat-core-contracts.test.ts` pins the vocabulary and the behaviour: the
-category list, the event list, the text-only admission (with the explicit refusal of
-files/images/audio/video/attachments/tools/toolChoice/MCP), the opaque handle, the resolver's
-resolution-only semantics, a driver implemented with no browser page, the fail-closed replay-state
-ownership rule, and the exact conversation-key digests captured before the extraction.
+category list, the event list, the text-only admission (content — files/images/audio/video/attachments —
+refused by name, capability declarations — tools/toolChoice/mcp — discarded and reported), the opaque
+handle, the resolver's resolution-only semantics, a driver implemented with no browser page, the
+fail-closed replay-state ownership rule, and the exact conversation-key digests captured before the
+extraction.
 
 ## Continuity: the two keys, the record and the decisions
 

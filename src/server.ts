@@ -1894,16 +1894,29 @@ export function startServer(
         headers: { "content-type": "application/json" },
         body: JSON.stringify(translation.body),
       });
+      // Capability declarations are discarded by design (this bridge is a text chat with no execution
+      // or return channel), but never silently: they never enter the internal request above and are
+      // declared here, once, on every response shape this route returns.
+      const dropped = translation.droppedCapabilities;
+      if (dropped.length > 0) {
+        console.warn(
+          `[dsh-chatgpt-web] web_chat_dropped_capabilities ${JSON.stringify({ endpoint: "chat-completions", dropped })}`,
+        );
+      }
+      const declareDropped = (response: Response): Response => {
+        if (dropped.length > 0) response.headers.set("x-dsh-chatgpt-web-ignored-features", dropped.join(","));
+        return response;
+      };
       return httpTurns.track(async (signal, bindIdentity) => {
         const upstream = await responseRequest(internalRequest, config, adapterFactory, { onTurnIdentity: bindIdentity });
         if (translation.stream) {
-          return new Response(
+          return declareDropped(new Response(
             toChatCompletionStream(upstream.body ?? new ReadableStream(), translation.model),
             {
               status: upstream.status,
               headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
             },
-          );
+          ));
         }
         let payload: Record<string, unknown> = {};
         try {
@@ -1913,8 +1926,10 @@ export function startServer(
         }
         // A provider failure must not look like an empty successful completion to an OpenAI client.
         const failure = responseFailure(payload);
-        if (failure) return formatErrorResponse(502, "upstream_error", failure.message);
-        return Response.json(toChatCompletion(payload, translation.model), { status: upstream.ok ? 200 : upstream.status });
+        if (failure) return declareDropped(formatErrorResponse(502, "upstream_error", failure.message));
+        return declareDropped(
+          Response.json(toChatCompletion(payload, translation.model), { status: upstream.ok ? 200 : upstream.status }),
+        );
       }, req.signal, process.platform, "chat-completions");
     }
     if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
