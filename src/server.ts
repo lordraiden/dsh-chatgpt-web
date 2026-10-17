@@ -24,7 +24,7 @@ import {
   type WebChatAuthSurface,
   type WebChatAuthSurfaceOptions,
 } from "./web-chat/host/auth-surface";
-import { isAuthInput, isWebChatError, type AuthInput } from "./web-chat/core";
+import { isAuthInput, isWebChatError, type AuthInput, type WebChatErrorCategory } from "./web-chat/core";
 import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeNativeChatGptContinuityStores } from "./adapters/chatgpt-web/index";
@@ -1158,6 +1158,48 @@ function authProviderListResponse(surface: WebChatAuthSurface): Response {
   return Response.json({ ok: true, providers: surface.providers() }, { headers: controlCorsHeaders() });
 }
 
+/**
+ * The refusal categories that are the *caller's* own mistake on the sign-in surface.
+ *
+ * One owner for the classification: the honest status and the actionable message both derive from
+ * here. `UNSUPPORTED_OPTION` is an intent this provider does not serve, such as a click outside the
+ * frame it reported. It is keyed on the category, never on a provider code: the host knows the
+ * semantic vocabulary, not the provider's, and the same category covers any provider's refused
+ * intent.
+ */
+const AUTH_CLIENT_REFUSAL_CATEGORIES: ReadonlySet<WebChatErrorCategory> = new Set([
+  "UNSUPPORTED_OPTION",
+]);
+
+/** What a client should do about a refusal of its own making; appended to the provider's message. */
+const AUTH_CLIENT_REFUSAL_GUIDANCE =
+  "Relay one of the supported sign-in intents (click, type, key, scroll, navigate) with a click "
+  + "inside the viewport the stream reported.";
+
+/**
+ * The honest HTTP status of one sign-in refusal category.
+ *
+ * A client-side refusal is a bad request (400), never a 502. Everything unlisted is a genuine
+ * upstream failure: the provider could not serve the sign-in it was asked for.
+ */
+function authFailureStatus(category: WebChatErrorCategory): number {
+  if (AUTH_CLIENT_REFUSAL_CATEGORIES.has(category)) return 400;
+  switch (category) {
+    case "MODEL_UNAVAILABLE":
+      // The host refusing an unknown provider id (the message names the valid ones).
+      return 404;
+    case "SHUTDOWN":
+      return 503;
+    case "TRANSPORT_UNAVAILABLE":
+    case "CONVERSATION_STATE_MISMATCH":
+    case "AUTH_EXPIRED":
+      // The sign-in lifecycle refusing the request: busy, already captured, or no longer alive.
+      return 409;
+    default:
+      return 502;
+  }
+}
+
 /** Map a malformed body or a surface refusal to the control API's HTTP answer. */
 function authFailureResponse(error: unknown): Response {
   if (error instanceof TypeError) {
@@ -1167,16 +1209,14 @@ function authFailureResponse(error: unknown): Response {
     );
   }
   if (isWebChatError(error)) {
-    // `MODEL_UNAVAILABLE` here is the host refusing an unknown provider id (the message names the
-    // valid ones); the transport/state categories are the sign-in lifecycle refusing the request.
-    const status = error.category === "MODEL_UNAVAILABLE" ? 404
-      : error.category === "SHUTDOWN" ? 503
-        : error.category === "TRANSPORT_UNAVAILABLE"
-          || error.category === "CONVERSATION_STATE_MISMATCH"
-          || error.category === "AUTH_EXPIRED" ? 409
-          : 502;
+    const status = authFailureStatus(error.category);
+    // A client-side refusal still carries the typed category code and the provider's own message,
+    // plus the one thing the provider's message does not say: what to do instead.
+    const message = AUTH_CLIENT_REFUSAL_CATEGORIES.has(error.category)
+      ? `${error.message} ${AUTH_CLIENT_REFUSAL_GUIDANCE}`
+      : error.message;
     return Response.json(
-      { ok: false, code: error.category, message: error.message },
+      { ok: false, code: error.category, message },
       { status, headers: controlCorsHeaders() },
     );
   }

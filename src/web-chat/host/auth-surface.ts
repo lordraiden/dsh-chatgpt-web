@@ -17,6 +17,10 @@
  * - **Frames arrive when something changed.** The relay is a per-session wake signal plus a slow
  *   tick, not a busy poll: an operator input wakes the stream immediately and `invalidate()`s the
  *   manager's frame cache, so the frame after an input is freshly produced rather than replayed.
+ * - **A terminal session is eventually collected.** The manager collects it after its grace period
+ *   (never before its capture handoff was released); this surface forgets its own reference in the
+ *   same step, so a collected id answers exactly like an unknown one instead of being served from a
+ *   stale closure.
  *
  * It orchestrates a sign-in; it is not an execution path for turns.
  */
@@ -51,7 +55,7 @@ export interface WebChatAuthProviderRegistration {
 export interface WebChatAuthSurfaceOptions {
   /** The providers this deployment offers; omit (or empty) for a surface that lists none. */
   readonly providers?: readonly WebChatAuthProviderRegistration[];
-  /** TTL, clock and sweep seams, forwarded to the session manager; tests inject them. */
+  /** TTL, clock, sweep and terminal-grace seams, forwarded to the session manager; tests inject them. */
   readonly session?: WebChatAuthSessionManagerOptions;
   /** Frame cadence of the relay in milliseconds. Default 400 (2-3 fps). */
   readonly frameIntervalMs?: number;
@@ -124,7 +128,7 @@ export interface WebChatAuthSurface {
    * @throws {WebChatError} `TRANSPORT_UNAVAILABLE` when another session for that provider is active.
    */
   open(providerId: string): Promise<WebChatAuthSessionView>;
-  /** One session by id, refreshing TTL and the capture handoff. `undefined` when unknown. */
+  /** One session by id, refreshing TTL and the capture handoff. `undefined` when unknown *or* collected. */
   view(id: string): Promise<WebChatAuthSessionView | undefined>;
   /** Relay one input, invalidate the frame cache and wake the relay. Throws on a state refusal. */
   input(id: string, event: AuthInput): Promise<WebChatAuthSessionView | undefined>;
@@ -240,9 +244,16 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
       label: registration.label,
     }));
 
-  /** Expire every session past its TTL through the manager, so a read never shows a live-expired one. */
+  /** Sweep expired sessions, and forget the ones the manager has collected. */
   const sweepExpired = async (): Promise<void> => {
     await manager.sweep();
+    // The manager is the authority on which sessions still exist. This map is a second reference (the
+    // handle's closure is a third), so a session the manager collected must be forgotten here too —
+    // otherwise the surface would keep serving an id the manager no longer knows. A collected id then
+    // answers exactly like an unknown one.
+    for (const id of [...entries.keys()]) {
+      if (manager.get(id) === undefined) entries.delete(id);
+    }
   };
 
   /**
@@ -252,6 +263,11 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
    * poll) share one `storeCapture` call rather than racing two. A capture or store failure is
    * recorded as the session's non-secret `error` — never thrown, so a provider defect cannot turn a
    * readable session into an unreadable one.
+   *
+   * When the run settles, the handoff is released: the material was read through `capturedSession`
+   * and stored (or its failure recorded), so the manager may collect the session once its grace
+   * period passes. Releasing any earlier would risk the sweep collecting captured material the caller
+   * had not read yet.
    */
   const storeOnce = (entry: SurfaceEntry): Promise<void> => {
     if (entry.storeRun) return entry.storeRun;
@@ -282,6 +298,8 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
         };
       } catch (error) {
         entry.storeError = error instanceof Error ? error.message : String(error);
+      } finally {
+        entry.handle.releaseCapture();
       }
     })();
     return entry.storeRun;
@@ -338,6 +356,9 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
     },
 
     async view(id) {
+      // Sweep *before* the lookup: a session the manager has collected must answer like an unknown
+      // id, and an entry still in this map is not proof the manager still knows it.
+      await sweepExpired();
       const entry = entries.get(id);
       if (!entry) return undefined;
       return sessionView(entry);

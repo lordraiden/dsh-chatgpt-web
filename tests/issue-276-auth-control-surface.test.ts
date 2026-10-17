@@ -619,6 +619,88 @@ describe("issue #276 slice 2a — the capture handoff happens once", () => {
   });
 });
 
+describe("issue #276 slice 2c — a collected session answers like an unknown id", () => {
+  test("a terminal session is kept for the grace period, then every verb is the same 404", async () => {
+    const fake = fakeProvider({ providerId: PIXEL_PROVIDER, label: "Pixel Web", pixels: true });
+    let clock = 1_000_000;
+    const server = serve([fake], {
+      session: { now: () => clock, ttlMs: 60_000, terminalGraceMs: 1_000, sweepIntervalMs: 0 },
+    });
+    const session = await openSession(server, PIXEL_PROVIDER);
+
+    // DELETE terminalizes it; inside the grace period it still reads exactly as it did before.
+    const cancelled = await fetch(url(server, `/v1/control/auth/sessions/${session.id}`), {
+      method: "DELETE",
+      headers: control(),
+    });
+    expect(cancelled.status).toBe(200);
+    expect((await getJson(server, `/v1/control/auth/sessions/${session.id}`, control())).status).toBe(200);
+
+    clock += 1_000;
+    const collected = await getJson(server, `/v1/control/auth/sessions/${session.id}`, control());
+    const unknown = await getJson(server, "/v1/control/auth/sessions/never-opened", control());
+    expect(collected.status).toBe(404);
+    expect(unknown.status).toBe(404);
+    // Byte-for-byte the same answer an id that never existed gets: collection changes nothing about
+    // the state a client observes, it only forgets the session.
+    expect(await collected.json()).toEqual(await unknown.json());
+
+    // The relay, the input and the acknowledgement all answer that same 404.
+    expect((await fetch(url(server, `/v1/control/auth/sessions/${session.id}/stream`), {
+      headers: control(),
+    })).status).toBe(404);
+    expect((await postInput(server, session.id, { type: "key", key: "Enter" })).status).toBe(404);
+    expect((await fetch(url(server, `/v1/control/auth/sessions/${session.id}`), {
+      method: "DELETE",
+      headers: control(),
+    })).status).toBe(404);
+  });
+
+  test("a captured session hands its material over exactly once, then is collected like any terminal one", async () => {
+    const material: AuthCapture = { kind: "opaque", payload: { secret: OPAQUE_PAYLOAD_SECRET } };
+    const fake = fakeProvider({
+      providerId: PIXEL_PROVIDER,
+      label: "Pixel Web",
+      pixels: true,
+      capture: material,
+      storeResult: { stored: true, location: "profile/session.json" },
+    });
+    let clock = 2_000_000;
+    const server = serve([fake], {
+      session: { now: () => clock, ttlMs: 60_000, terminalGraceMs: 1_000, sweepIntervalMs: 0 },
+    });
+    const session = await openSession(server, PIXEL_PROVIDER);
+    await postInput(server, session.id, { type: "type", text: "user@example.test" });
+
+    // The input that captures the sign-in is itself a read: the handoff is stored and reported in
+    // that very response, so no sweep can ever get between the capture and the store.
+    const captured = await postInput(server, session.id, { type: "key", key: "Enter" });
+    expect(captured.status).toBe(200);
+    const capturedBody = await captured.json() as Record<string, unknown>;
+    expect(capturedBody).toMatchObject({
+      state: "captured",
+      capture: { stored: true, location: "profile/session.json" },
+    });
+    expect(fake.stores).toHaveLength(1);
+    expect(fake.captureCalls()).toBe(1);
+    expect(JSON.stringify(capturedBody)).not.toContain(OPAQUE_PAYLOAD_SECRET);
+
+    // Inside the grace period the session still reads, and the handoff is never taken twice.
+    const inside = await getJson(server, `/v1/control/auth/sessions/${session.id}`, control());
+    expect(inside.status).toBe(200);
+    expect((await inside.json() as Record<string, unknown>).capture)
+      .toEqual({ stored: true, location: "profile/session.json" });
+
+    // Past it the session is collected, exactly like a session that never captured — and the
+    // material is still stored exactly once. (The captured-but-never-read session, which the sweep
+    // must never collect, is proved at the manager level in `issue-276-auth-contract.test.ts`.)
+    clock += 10_000_000;
+    expect((await getJson(server, `/v1/control/auth/sessions/${session.id}`, control())).status).toBe(404);
+    expect(fake.stores).toHaveLength(1);
+    expect(fake.captureCalls()).toBe(1);
+  });
+});
+
 describe("issue #276 slice 2a — the served page", () => {
   test("both documented paths serve the same self-contained document, with no external asset", async () => {
     const fake = fakeProvider({ providerId: PIXEL_PROVIDER, label: "Pixel Web", pixels: true });
