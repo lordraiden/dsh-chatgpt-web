@@ -89,6 +89,28 @@ export function chatGptRetainedDeltaEmptyError(): ChatGptWebAdapterError {
   );
 }
 
+export const CHATGPT_CONTINUATION_PROMPT_MISSING_CODE = "continuation_prompt_missing";
+
+/**
+ * A retained ChatGPT surface was reused for a turn that carried no continuation prompt to send.
+ *
+ * This is a **local continuity failure**, not an upstream one: the provider conversation was kept,
+ * nothing was submitted and ChatGPT never saw the request, so the caller can send the next human
+ * turn and retry. It used to be a bare `Error` thrown at the transport, which the API normalized
+ * into `502 upstream_server_error` and thereby blamed ChatGPT for a local decision (issue #302).
+ */
+export function chatGptContinuationPromptMissingError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "This turn reused the retained ChatGPT conversation but carried no new human turn to send (it has no continuation prompt). Send the next user message as a new turn; nothing reached ChatGPT.",
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: CHATGPT_CONTINUATION_PROMPT_MISSING_CODE,
+      retryable: false,
+    },
+  );
+}
+
 export const CHATGPT_ANSWER_RECOVERY_UNAVAILABLE_CODE = "answer_recovery_unavailable";
 
 /**

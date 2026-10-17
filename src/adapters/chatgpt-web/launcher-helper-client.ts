@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptContinuationPromptMissingError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ChatGptBrowserPhysicalSurface, ResolvedBrowserConfig } from "./browser-worker";
 import {
@@ -534,7 +534,7 @@ export class LauncherBrowserHelperClient {
       else if (message.event === "prepared_selected") {
         const prepare = message.reused ? pending.turn.prepareResume : pending.turn.prepare;
         void Promise.resolve().then(() => prepare?.()).then(prepared => {
-          if (!prepared) throw new Error("Launcher browser helper selected an unavailable continuation prompt");
+          if (!prepared) throw chatGptContinuationPromptMissingError();
           if (this.pending.get(message.id) !== pending) {
             prepared.release();
             return;

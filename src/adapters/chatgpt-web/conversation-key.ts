@@ -61,17 +61,30 @@ export function chatGptConversationKey(
   });
 }
 
-/** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
+/**
+ * New human content a retained epoch still needs: the suffix after its last assistant reply.
+ *
+ * Canonical history belongs to the caller, which is not obliged to resend it: the API identity
+ * projection transmits **only the newest user message** for a caller with a stable identity
+ * (`projectApiConversation`, session mode), and a stateless caller may send a single user turn.
+ * A list with no assistant reply is therefore *all-new* content, not "no continuation": reading it
+ * as the latter left a reused retained surface with no prompt to send, and the turn failed as a
+ * local continuity error dressed up as an upstream one (issue #302).
+ *
+ * `undefined` keeps exactly one meaning — the request ends with the assistant reply, so this turn
+ * carries no new human content.
+ */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {
-  const lastAssistant = parsed.context.messages.findLastIndex(message => message.role === "assistant");
-  if (lastAssistant < 0 || lastAssistant === parsed.context.messages.length - 1) return undefined;
+  const messages = parsed.context.messages;
+  const lastAssistant = messages.findLastIndex(message => message.role === "assistant");
+  if (lastAssistant === messages.length - 1) return undefined;
   return {
     ...parsed,
     context: {
       ...parsed.context,
-      messages: parsed.context.messages.slice(lastAssistant + 1),
+      messages: messages.slice(lastAssistant + 1),
     },
   };
 }

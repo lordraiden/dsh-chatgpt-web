@@ -92,6 +92,7 @@ import {
   chatGptBrowserTabClosedError,
   chatGptContextExhaustedError,
   chatGptAnswerRecoveryUnavailableError,
+  chatGptContinuationPromptMissingError,
   chatGptRetainedConversationUnavailableError,
   chatGptRetainedSurfaceBusyError,
   chatGptRetainedSurfaceLostError,
@@ -4627,7 +4628,7 @@ export class ChatGptBrowserWorker {
         throw chatGptRetainedConversationUnavailableError();
       }
       if (reused && !turn.prepareResume) {
-        throw new Error("Launcher reused a ChatGPT conversation without a continuation prompt");
+        throw chatGptContinuationPromptMissingError();
       }
       await turn.onPreparedSelected?.(reused);
       heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
@@ -4707,7 +4708,7 @@ export class ChatGptBrowserWorker {
     // properties of the turn, not of the conversationKey (issue #170/#171).
     const configurationReuse = reuseConversation;
     const prepare = physicalReuse ? turn.prepareResume : turn.prepare;
-    if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
+    if (!prepare) throw chatGptContinuationPromptMissingError();
     const prepared = await prepare();
     const diagnostics = new ChatGptBrowserDiagnostics(
       turn.traceId,
