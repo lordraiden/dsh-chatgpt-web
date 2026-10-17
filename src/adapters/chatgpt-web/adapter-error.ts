@@ -131,6 +131,33 @@ export function chatGptAnswerRecoveryUnavailableError(timeoutMs: number): ChatGp
   );
 }
 
+export const CHATGPT_SETTLEMENT_WAIT_TIMEOUT_CODE = "settlement_wait_timeout";
+
+/**
+ * A turn waited for another turn's *physical settlement* longer than the settlement-wait grace, so
+ * the retained ChatGPT conversation could not be safely handed over (issue #301).
+ *
+ * This is the service's own stuck-resource category, never an upstream one: nothing was submitted
+ * and ChatGPT never saw the request. The wedged session is retired (its runtime cancelled, so the
+ * physical owner aborts and publishes a `rejected` settlement) and the key is not reused, but the
+ * retained page itself may still finish its teardown — so the caller is told to retry after that
+ * rather than being told the provider failed.
+ */
+export function chatGptSettlementWaitTimeoutError(graceMs: number, phase: string, traceId?: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `A previous ChatGPT Web turn did not publish its physical settlement within ${graceMs} ms (${phase})`
+    + `${traceId ? ` for turn ${traceId}` : ""}. The retained conversation was retired instead of being `
+    + "handed to this turn, so nothing was submitted. Wait for the stuck turn to finish, then retry; if it "
+    + "does not clear, restart the service and replay the conversation.",
+    {
+      status: 503,
+      errorType: "server_error",
+      code: CHATGPT_SETTLEMENT_WAIT_TIMEOUT_CODE,
+      retryable: false,
+    },
+  );
+}
+
 export const CHATGPT_RETAINED_SURFACE_LOST_CODE = "retained_surface_lost";
 
 /**

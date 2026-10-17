@@ -749,6 +749,28 @@ A provider driver must report or enforce physical settlement before reusing a re
 
 This is particularly important for retained browser pages.
 
+**A wait for physical settlement is bounded, and the bound fails closed (issue #301).** A turn may need
+to wait for a *predecessor's* settlement — the sequential work of one native thread, a pending
+retirement, or the close of a retained conversation. That wait used to have no bound at all, so a
+predecessor whose operation never published a settlement (a dead or unresponsive page) held every later
+turn forever, silently: no error, no progress, and an availability surface that kept reporting the
+service healthy. The turn-session registry now bounds every such wait with a settlement-wait grace
+(`DEFAULT_SETTLEMENT_WAIT_GRACE_MS`, `src/adapters/chatgpt-web/turn-execution.ts`). The settlement owner
+remains the only authority on the outcome: the bound only decides which arrives first, and a settlement
+that does land is still awaited in full.
+
+When the grace expires the turn **fails closed** with its own typed, actionable outcome
+(`settlement_wait_timeout`, `503`, not retryable — the service's own stuck-resource category, never an
+upstream one): nothing is submitted, and the wedged session is retired — its runtime cancelled, which is
+how the physical owner is told to abort and publish a `rejected` settlement — so the key is never handed
+to a later turn as if the operation had finished. Until that settlement lands, later turns for the same
+conversation take the same bounded, explicit outcome rather than hanging; when it lands, normal service
+resumes without operator action. This is the #291 discipline (bound, then write off as `rejected`, never
+`fulfilled`, and retire the resource) applied to the turn path instead of only to shutdown. It does not
+bound a turn's wait on its *own* in-flight physical operation: that lifetime belongs to the provider
+driver's own stall budgets (`generationRunningStallMs`, the per-stage timeouts, and the opt-in
+`turnTimeoutMs`), which is why no absolute turn deadline is imposed here.
+
 ### 9.4 Retry authority
 
 There are two different retry layers and they must never become competing execution authorities.

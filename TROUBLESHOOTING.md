@@ -377,6 +377,52 @@ Attached **content** is data the caller meant the model to see, so it is always 
 request fails, read the error before assuming the capability policy caused it — an image or file part is
 a content refusal, and it is not configurable.
 
+## 15. A turn waits for a stuck previous turn (`settlement_wait_timeout`)
+
+### Symptom
+
+A turn fails with HTTP `503`, `type: server_error`, `code: settlement_wait_timeout`, and a message saying
+a previous ChatGPT Web turn did not publish its physical settlement within the settlement-wait grace. The
+log carries the same sentence. Calls made while the condition lasts return the same outcome instead of
+hanging.
+
+### Cause
+
+The conversation's previous turn never proved what happened to the physical browser resource — a page
+that stopped answering, a killed renderer, a launcher that never acknowledged its teardown. A later turn
+for that conversation waits for that settlement so it is not handed a page that may still produce output
+(architecture §9.3). That wait is new-bounded (issue #301, 60 s by default): the service no longer waits
+forever with no error. Nothing of the failed turn was submitted to ChatGPT, so this is a local resource
+condition, never an upstream failure.
+
+### What the service does
+
+- the wedged session is retired, and its runtime cancelled — which is how the physical owner is told to
+  abort and publish a `rejected` settlement (the retained page is closed and its key tombstoned, never
+  reused);
+- later turns for the same conversation fail closed with the same typed outcome while the settlement
+  stays unproven, instead of hanging or silently opening a replacement conversation;
+- once the settlement finally lands, normal service resumes with no operator action.
+
+### What to do
+
+1. Check `active_browser_turns` on `/healthz` (or `/v1/control/status`). It counts the turns this service
+   believes are live, so a wedged turn shows up there as a count that does not fall. There is also an
+   `admin/cancel-turn` control-token endpoint that cancels a turn by `traceId` if the diagnostics name one.
+2. Retry once the stuck turn has cleared. If the count never falls, restart the service — the retained
+   conversation keeps its tombstone and requires an explicit replay from canonical history, exactly like
+   any other `retained_surface_lost` (§12).
+
+### Why `accepting_turns` can still be true
+
+`accepting_turns` is the host's admission flag (`/admin/drain` and `/admin/resume` own it): it says
+whether the *service* is accepting work, not whether one conversation is stuck. The ChatGPT adapter has no
+admission authority and correctly does not fabricate one. The signal for stuck work is
+`active_browser_turns` on the same `/healthz` response, which is derived from the live turn registry —
+and, since issue #301, a stuck turn also ends itself within the grace with a logged, typed outcome instead
+of staying invisible. That is what an operator gets: a bounded failure they can see and act on, not a
+green healthcheck over an infinite hang.
+
 ## 16. Reporting a bug
 
 Include:

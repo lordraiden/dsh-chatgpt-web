@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { CapabilitySnapshot } from "./capability-projector";
 import type { BrokerToolRequest } from "./turn-broker";
-import { chatGptBrowserTabClosedError } from "./adapter-error";
+import { chatGptBrowserTabClosedError, chatGptSettlementWaitTimeoutError } from "./adapter-error";
 import {
   extractChatGptCompactionSourceRevision,
   extractChatGptTurnIdentity,
@@ -10,31 +10,6 @@ import {
 } from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concurrency";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
-
-function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) {
-    // Keep the underlying retirement promise observed even when the caller arrived after abort;
-    // another owner may still depend on its eventual settlement and rejection must not become an
-    // unhandled process-level error.
-    void promise.catch(() => {});
-    return Promise.reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
-  }
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      value => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      error => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
-}
 
 export type ChatGptBrowserOutcome =
   | { type: "final"; answer: string }
@@ -483,6 +458,24 @@ export class ChatGptTurnSession {
   }
 }
 
+/**
+ * How long a turn may wait for *another turn's* physical settlement before it fails closed
+ * (issue #301).
+ *
+ * The lifetime decision this bounds is the registry's serialization: a later turn waits for the
+ * response that already owns a retained conversation. That wait used to have no bound at all, so a
+ * predecessor whose operation never published a settlement (a dead or unresponsive page) held every
+ * later turn forever — no error, no progress, and no signal on the availability surface.
+ *
+ * The grace must never cut a *legitimate* teardown short: the launcher's own turn-end
+ * acknowledgement alone is allowed `LAUNCHER_TURN_END_TIMEOUT_MS` (15 s), and page/context release
+ * and storage-state persistence follow it, so the default is a comfortable multiple of that single
+ * step. #291 bounded shutdown's wait on an attached settlement with the same shape (bound, then
+ * write off as `rejected`, never `fulfilled`, and retire the resource); this is that discipline
+ * applied to the turn path.
+ */
+export const DEFAULT_SETTLEMENT_WAIT_GRACE_MS = 60_000;
+
 export interface ChatGptContextExhaustionRecord {
   readonly conversationKey: string;
   readonly handle: {
@@ -504,7 +497,76 @@ export class ChatGptTurnSessions {
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly maxEntries = 256,
-  ) {}
+    private readonly settlementWaitGraceMs: number = DEFAULT_SETTLEMENT_WAIT_GRACE_MS,
+  ) {
+    if (!Number.isFinite(settlementWaitGraceMs) || settlementWaitGraceMs <= 0) {
+      throw new TypeError("The ChatGPT settlement-wait grace must be a positive finite number of milliseconds");
+    }
+  }
+
+  /**
+   * Wait for *another turn's* physical settlement, bounded by the registry's grace (issue #301).
+   *
+   * The settlement owner stays the only authority on the outcome: this bound only decides which
+   * arrives first. `true` means the settlement landed — fulfilled or rejected, either way the
+   * resource's fate is known; `false` means the grace expired and the caller must fail closed
+   * instead of waiting. The timer is cleared as soon as the settlement lands, so a settlement that
+   * does resolve is still awaited in full and never cut short.
+   */
+  private awaitSettlementWithinGrace(
+    settlement: Promise<unknown>,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      if (signal?.aborted) {
+        // Keep the underlying settlement observed: another owner may still depend on it.
+        void settlement.catch(() => {});
+        reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+        return;
+      }
+      let done = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const finish = (value: boolean): void => {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve(value);
+      };
+      const onAbort = (): void => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(new DOMException("ChatGPT web turn aborted", "AbortError"));
+      };
+      timer = setTimeout(() => finish(false), this.settlementWaitGraceMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      settlement.then(() => finish(true), () => finish(true));
+    });
+  }
+
+  /**
+   * Retire the session whose physical settlement never came and report the explicit outcome.
+   *
+   * Retirement is the resource decision (the #291 shape): the session is cancelled — which is how the
+   * physical owner is told to abort and publish a `rejected` settlement — and its key stops being
+   * reusable, so a later turn can never be handed a page that may still produce output. Nothing is
+   * reported as settled.
+   */
+  private failSettlementWait(
+    key: string,
+    session: ChatGptTurnSession | undefined,
+    phase: string,
+    traceId?: string,
+  ): never {
+    const error = chatGptSettlementWaitTimeoutError(this.settlementWaitGraceMs, phase, traceId);
+    if (session) this.retire(key, session, error);
+    console.warn(`[chatgpt-web] ${error.message}`);
+    throw error;
+  }
 
   getOrCreate(
     key: string,
@@ -630,19 +692,28 @@ export class ChatGptTurnSessions {
       }
       const pending = this.retirements.get(key) ?? this.ownerRetirements.get(ownerKey);
       if (pending) {
-        await awaitWithAbort(pending, signal);
+        // Bounded (issue #301): a retirement whose settlement never lands must not hold this turn
+        // forever. The retired session's runtime was already cancelled when it was retired, so the
+        // physical owner has been asked to abort and publish its settlement.
+        if (!await this.awaitSettlementWithinGrace(pending, signal)) {
+          this.failSettlementWait(key, undefined, "waiting for a previous turn's retirement", traceId);
+        }
         continue;
       }
       const activeOwner = [...this.entries].find(([ownedKey, session]) => (
         ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
       ));
       if (activeOwner) {
-        const [, ownedSession] = activeOwner;
+        const [ownedKey, ownedSession] = activeOwner;
         // A different native message for the same thread is sequential work, not permission to
         // kill the response already using that retained conversation. Wait for its complete
-        // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
-        // only paths that preempt an active owner.
-        await awaitWithAbort(ownedSession.physicalSettlement, signal);
+        // browser/launcher settlement, bounded by the settlement-wait grace (issue #301): a turn
+        // whose operation stopped publishing a settlement is retired instead of holding this one
+        // forever. Explicit tab close and lifecycle cancellation remain the only paths that
+        // preempt an active owner.
+        if (!await this.awaitSettlementWithinGrace(ownedSession.physicalSettlement, signal)) {
+          this.failSettlementWait(ownedKey, ownedSession, "waiting for the active turn that owns this conversation", traceId);
+        }
         continue;
       }
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -665,7 +736,10 @@ export class ChatGptTurnSessions {
   /** Wait for a retained conversation epoch that has been detached but not physically released. */
   async waitForConversationRetirement(conversationKey: string, signal?: AbortSignal): Promise<void> {
     const pending = this.conversationRetirements.get(conversationKey);
-    if (pending) await awaitWithAbort(pending, signal);
+    if (!pending) return;
+    if (!await this.awaitSettlementWithinGrace(pending, signal)) {
+      this.failSettlementWait(conversationKey, undefined, "waiting for a retained conversation to be retired");
+    }
   }
 
   async retireConversationAndWait(conversationKey: string): Promise<number> {
@@ -700,7 +774,9 @@ export class ChatGptTurnSessions {
   ): Promise<number> {
     const pending = this.conversationRetirements.get(conversationKey);
     if (pending) {
-      await pending;
+      if (!await this.awaitSettlementWithinGrace(pending)) {
+        this.failSettlementWait(conversationKey, undefined, "waiting for a retained conversation to be retired");
+      }
       return 0;
     }
     const matches = [...this.entries].filter(([, session]) => (
@@ -732,24 +808,35 @@ export class ChatGptTurnSessions {
     const retirement = Promise.all(matches.map(([, session]) => session.physicalSettlement))
       .then(async () => { await release?.(); });
     this.conversationRetirements.set(conversationKey, retirement);
-    try {
-      await retirement;
-    } finally {
+    // The coordination entry belongs to the physical close, not to this bounded wait: only the
+    // settlement itself removes it, so a caller that arrives while the close is still running keeps
+    // waiting behind the same operation instead of starting a second one.
+    const forgetConversationRetirement = (): void => {
       if (this.conversationRetirements.get(conversationKey) === retirement) {
         this.conversationRetirements.delete(conversationKey);
       }
+    };
+    void retirement.then(forgetConversationRetirement, forgetConversationRetirement);
+    if (!await this.awaitSettlementWithinGrace(retirement)) {
+      this.failSettlementWait(conversationKey, undefined, "retiring a retained conversation");
     }
     return matches.length;
   }
 
   async waitForRetirement(key: string): Promise<void> {
-    await this.retirements.get(key);
+    const pending = this.retirements.get(key);
+    if (!pending) return;
+    if (!await this.awaitSettlementWithinGrace(pending)) {
+      this.failSettlementWait(key, undefined, "waiting for a previous turn's retirement");
+    }
   }
 
   async retireAndWait(key: string, signal?: AbortSignal): Promise<boolean> {
     const pending = this.retirements.get(key);
     if (pending) {
-      await awaitWithAbort(pending, signal);
+      if (!await this.awaitSettlementWithinGrace(pending, signal)) {
+        this.failSettlementWait(key, undefined, "waiting for a previous turn to retire");
+      }
       return true;
     }
     const session = this.entries.get(key);
@@ -757,15 +844,17 @@ export class ChatGptTurnSessions {
 
     this.entries.delete(key);
     this.forgetConversationHead(session);
-    await awaitWithAbort(this.beginRetirement(key, session), signal);
+    if (!await this.awaitSettlementWithinGrace(this.beginRetirement(key, session), signal)) {
+      this.failSettlementWait(key, undefined, "retiring an interrupted turn");
+    }
     return true;
   }
 
-  retire(key: string, session: ChatGptTurnSession): boolean {
+  retire(key: string, session: ChatGptTurnSession, reason?: Error): boolean {
     if (this.entries.get(key) !== session) return false;
     this.entries.delete(key);
     this.forgetConversationHead(session);
-    this.beginRetirement(key, session);
+    this.beginRetirement(key, session, reason);
     return true;
   }
 
