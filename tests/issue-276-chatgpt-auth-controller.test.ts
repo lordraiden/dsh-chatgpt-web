@@ -19,6 +19,7 @@ import { CHATGPT_WEB_DRIVER_ID } from "../src/web-chat/host/provider-host";
 import { createWebChatAuthSessionManager } from "../src/web-chat/host/auth-sessions";
 import {
   isWebChatError,
+  webChatError,
   type AuthSessionState,
   type ProviderAuthController,
   type ProviderAuthSession,
@@ -566,5 +567,113 @@ describe("issue #276 slice 2b — the real listener registers the controller laz
       headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
     });
     expect(await providers.json()).toEqual({ ok: true, providers: [] });
+  });
+});
+
+describe("issue #276 slice 2c — a client's refusal is a 400, an upstream failure is still a 502", () => {
+  const running: RunningServer[] = [];
+  afterEach(async () => {
+    while (running.length > 0) {
+      const server = running.pop()!;
+      await Promise.race([
+        Promise.resolve(server.stop(true)).catch(() => undefined),
+        new Promise(resolve => setTimeout(resolve, 2_000)),
+      ]);
+    }
+  });
+
+  const CONTROL = { authorization: `Bearer ${CONTROL_TOKEN}`, "content-type": "application/json" };
+
+  function serve(providers: ReadonlyArray<{
+    providerId: string;
+    label: string;
+    controller: ProviderAuthController;
+  }>): RunningServer {
+    const server = startServer(
+      { ...defaultConfig(), port: 0, host: "127.0.0.1", controlToken: CONTROL_TOKEN },
+      { auth: { providers: [...providers] } },
+    );
+    running.push(server);
+    return server;
+  }
+
+  async function open(server: RunningServer, providerId: string): Promise<string> {
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/control/auth/sessions`, {
+      method: "POST",
+      headers: CONTROL,
+      body: JSON.stringify({ providerId }),
+    });
+    expect(response.status, `open ${providerId}`).toBe(201);
+    return ((await response.json()) as { id: string }).id;
+  }
+
+  const postInput = (server: RunningServer, id: string, input: unknown) =>
+    fetch(`http://127.0.0.1:${server.port}/v1/control/auth/sessions/${id}/input`, {
+      method: "POST",
+      headers: CONTROL,
+      body: JSON.stringify(input),
+    });
+
+  test("a click outside the viewport is the exact 400 with its typed code, and it is never clamped", async () => {
+    // The REAL controller and its real viewport arithmetic, with the browser seams injected: no
+    // Chromium, no profile and no ChatGPT account.
+    const { controller, page } = makeController({});
+    const server = serve([{
+      providerId: CHATGPT_WEB_AUTH_PROVIDER_ID,
+      label: CHATGPT_WEB_AUTH_PROVIDER_LABEL,
+      controller,
+    }]);
+    const id = await open(server, CHATGPT_WEB_AUTH_PROVIDER_ID);
+
+    const refused = await postInput(server, id, { type: "click", x: 320, y: 10 });
+    // The exact status and the exact typed code: the caller's own bad request, never a 502.
+    expect(refused.status).toBe(400);
+    const body = await refused.json() as { ok: boolean; code: string; message: string };
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("UNSUPPORTED_OPTION");
+    // The provider's own message says what was wrong; the host adds what to do instead.
+    expect(body.message).toContain("outside the 320x480 viewport");
+    expect(body.message).toContain("inside the viewport the stream reported");
+    // Refused, never clamped into a click at a random coordinate.
+    expect(page.calls.clicks).toEqual([]);
+
+    // The good path is untouched: the last valid pixel of the viewport is still relayed verbatim.
+    const clicked = await postInput(server, id, { type: "click", x: 319, y: 479 });
+    expect(clicked.status).toBe(200);
+    expect(page.calls.clicks).toEqual([[319, 479]]);
+  });
+
+  test("a genuine upstream failure on the same route is still a 502", async () => {
+    const disconnected: ProviderAuthSession = {
+      providerId: "broken-web",
+      state: () => "awaiting_input",
+      view: async () => { throw new Error("no frame"); },
+      input: async () => {
+        throw webChatError(
+          "UPSTREAM_ERROR",
+          "The sign-in surface disconnected before the input was relayed",
+          { providerId: "broken-web", providerCode: "AUTH_BROWSER_DISCONNECTED" },
+        );
+      },
+      capture: async () => ({ kind: "none" }),
+      cancel: async () => {},
+    };
+    const server = serve([{
+      providerId: "broken-web",
+      label: "Broken Web",
+      controller: {
+        async startAuth() { return disconnected; },
+        async storeCapture() { return { stored: false }; },
+      },
+    }]);
+    const id = await open(server, "broken-web");
+
+    const failed = await postInput(server, id, { type: "click", x: 10, y: 10 });
+    expect(failed.status).toBe(502);
+    const body = await failed.json() as { ok: boolean; code: string; message: string };
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("UPSTREAM_ERROR");
+    // A genuine upstream failure is not a client-side refusal, so no client guidance is fabricated.
+    expect(body.message).toBe("The sign-in surface disconnected before the input was relayed");
   });
 });

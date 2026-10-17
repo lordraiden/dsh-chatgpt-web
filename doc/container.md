@@ -466,7 +466,7 @@ production artifact; it adds the VNC/noVNC surface only to the sign-in image.
 | Expiry | `doctor --json` reports `login: error — ChatGPT login state is missing or unverified`, with the resolved path. Repeat the sign-in or `auth import`; nothing else needs to change |
 | Anti-bot / verification challenge | The provider may interrupt an automated session. Complete the challenge in the interactive sign-in path; a challenge does not corrupt the volume. When the page's headless flow is rejected, set `authBrowserMode: "display"` and use the noVNC fallback above |
 | Captured, but turns still fail | The page reported the session stored, yet the running service still saw none: it resolved the credentials path at startup. Restart it (`docker compose restart chatgpt-web`) and re-run `doctor` |
-| Click outside the frame | A click outside the viewport the relay reports is refused, not clamped. It currently surfaces as HTTP 502 — a known blemish |
+| Click outside the frame | A click outside the viewport the relay reports is refused, not clamped. It currently is refused with HTTP 400 `UNSUPPORTED_OPTION` — a known blemish |
 | Backup | The volume holds credentials: `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data-$(date +%F).tgz -C /data .` — store it encrypted |
 | Restore | Untar it back into the volume; a restored session keeps working only while the provider still accepts it |
 | Never | commit the volume, paste a capture into an issue, or expect one provider's directory to satisfy another's check (the resolver keys on the provider id) |

@@ -372,6 +372,111 @@ describe("issue #276 — TTL expiry is swept, and captured material is never exp
   });
 });
 
+describe("issue #276 slice 2c — a terminal session is collected after its grace period", () => {
+  test("a terminal session is kept for the grace period, then answers like an unknown id", async () => {
+    const scheduler = createFakeScheduler();
+    let clock = 1_000;
+    const manager = createWebChatAuthSessionManager({
+      now: () => clock,
+      terminalGraceMs: 100,
+      sweepIntervalMs: 250,
+      schedule: scheduler.schedule,
+    });
+    const provider = createFakeProvider({ providerId: "pixel-web", pixels: true });
+    const handle = await manager.open({ providerId: provider.providerId, controller: provider.controller });
+
+    await handle.cancel(); // terminal (cancelled) at 1_000
+    expect(manager.get(handle.id)).toBe(handle);
+
+    // Inside the grace period nothing changes for a client that is still reading.
+    clock = 1_099;
+    await manager.sweep();
+    expect(manager.get(handle.id)).toBe(handle);
+    expect(handle.state()).toBe("expired");
+
+    // Past it the sweep forgets the session; the id is now simply unknown. Collection is not an
+    // expiry, so the sweep's own count is unchanged.
+    clock = 1_100;
+    expect(await manager.sweep()).toBe(0);
+    expect(manager.get(handle.id)).toBeUndefined();
+    expect(manager.activeFor("pixel-web")).toBeUndefined();
+
+    await manager.close();
+    expect(scheduler.cancels).toBe(1);
+  });
+
+  test("a captured session is never collected before its handoff was released", async () => {
+    const scheduler = createFakeScheduler();
+    let clock = 5_000;
+    const manager = createWebChatAuthSessionManager({
+      now: () => clock,
+      ttlMs: 1,
+      terminalGraceMs: 100,
+      sweepIntervalMs: 250,
+      schedule: scheduler.schedule,
+    });
+    const provider = createFakeProvider({ providerId: "pixel-web", pixels: true });
+    const handle = await manager.open({ providerId: provider.providerId, controller: provider.controller });
+    await handle.input({ type: "type", text: "user@example.test" });
+    await handle.input({ type: "key", key: "Enter" });
+    expect(handle.state()).toBe("captured");
+
+    // Far past the TTL and the grace period alike: the sweep expires nothing and collects nothing,
+    // because the caller has not taken the handoff yet. The material is still readable.
+    clock = 5_000_000;
+    expect(await manager.sweep()).toBe(0);
+    expect(manager.get(handle.id)).toBe(handle);
+    expect(() => handle.capturedSession()).not.toThrow();
+    expect(provider.counters().cancels).toBe(0);
+
+    // The release starts the grace period: still there just before it elapses, gone just after.
+    handle.releaseCapture();
+    handle.releaseCapture(); // idempotent: the grace period starts once
+    clock = 5_000_099;
+    await manager.sweep();
+    expect(manager.get(handle.id)).toBe(handle);
+    clock = 5_000_100;
+    await manager.sweep();
+    expect(manager.get(handle.id)).toBeUndefined();
+
+    // Releasing a session that never captured is a no-op, not a refusal.
+    const other = createFakeProvider({ providerId: "other-web", pixels: true });
+    const untouched = await manager.open({ providerId: other.providerId, controller: other.controller });
+    expect(() => untouched.releaseCapture()).not.toThrow();
+    expect(untouched.state()).toBe("awaiting_input");
+    await manager.close();
+    expect(scheduler.cancels).toBe(1);
+  });
+
+  test("the collection rides the injected sweep timer, which close() cancels", async () => {
+    const scheduler = createFakeScheduler();
+    let clock = 9_000;
+    const manager = createWebChatAuthSessionManager({
+      now: () => clock,
+      terminalGraceMs: 50,
+      sweepIntervalMs: 25,
+      schedule: scheduler.schedule,
+    });
+    expect(scheduler.scheduledWith).toBe(25);
+
+    const provider = createFakeProvider({ providerId: "pixel-web", pixels: true });
+    const handle = await manager.open({ providerId: provider.providerId, controller: provider.controller });
+    await handle.cancel();
+    expect(manager.get(handle.id)).toBe(handle);
+
+    // The manager's own timer drives the collection — no manual sweep() call.
+    clock = 9_050;
+    await scheduler.fire();
+    expect(manager.get(handle.id)).toBeUndefined();
+
+    await manager.close();
+    // The collection never owns a timer of its own: it is cancelled with the manager.
+    expect(scheduler.cancels).toBe(1);
+    await scheduler.fire();
+    expect(scheduler.cancels).toBe(1);
+  });
+});
+
 describe("issue #276 — cancellation and close are deterministic", () => {
   test("cancel is idempotent, closes the session, and releases the provider exactly once", async () => {
     const provider = createFakeProvider({ providerId: "pixel-web", pixels: true });
@@ -443,9 +548,13 @@ describe("issue #276 — cancellation and close are deterministic", () => {
     ).rejects.toBeInstanceOf(TypeError);
   });
 
-  test("a manager requires a positive TTL and a non-negative sweep interval", () => {
+  test("a manager requires a positive TTL, a non-negative sweep interval and a non-negative grace", () => {
     expect(() => createWebChatAuthSessionManager({ ttlMs: 0 })).toThrow(TypeError);
     expect(() => createWebChatAuthSessionManager({ ttlMs: 1.5 })).toThrow(TypeError);
     expect(() => createWebChatAuthSessionManager({ sweepIntervalMs: -1 })).toThrow(TypeError);
+    expect(() => createWebChatAuthSessionManager({ terminalGraceMs: -1 })).toThrow(TypeError);
+    expect(() => createWebChatAuthSessionManager({ terminalGraceMs: 1.5 })).toThrow(TypeError);
+    // The default grace is conservative: a full minute after a session becomes collectable.
+    expect(() => createWebChatAuthSessionManager({})).not.toThrow();
   });
 });

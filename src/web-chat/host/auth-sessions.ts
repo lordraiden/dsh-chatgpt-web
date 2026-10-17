@@ -17,6 +17,11 @@
  * - **A fixed TTL with an expiry sweep.** Past `expiresAt` a session becomes `expired`, its provider
  *   session is cancelled, and its provider slot is released. The sweep timer is `unref`'d and is
  *   always cancelled by `close()`, so it can never keep the process alive or outlive the manager.
+ * - **Collection of terminal sessions.** The same sweep forgets a session once it has been
+ *   collectable for longer than the terminal grace period, so a long-lived process does not grow one
+ *   session view per sign-in. A terminal session reads exactly as before inside that grace period; a
+ *   collected id is simply unknown afterwards. A `captured` session is never collectable until the
+ *   caller releases the handoff (`releaseCapture()`), so the sweep can never lose captured material.
  * - **A frame cache.** A late subscriber gets the last frame immediately without touching the
  *   provider. `input()` invalidates the cache while the session can still change, and `invalidate()`
  *   is public, so the caller can paint a fresh frame right after an input without this module
@@ -103,6 +108,15 @@ export interface WebChatAuthSession {
    * be read before the provider proved the sign-in succeeded. The manager never inspects it.
    */
   capturedSession(): ProviderAuthSession;
+  /**
+   * Acknowledge that the captured handoff has been taken: the caller read the material through
+   * {@link capturedSession} and stored it (or recorded why it could not be stored).
+   *
+   * Only then does a `captured` session become collectable, so the sweep can never collect the
+   * material before the caller has read it. Idempotent, and a no-op on a session that has not
+   * captured.
+   */
+  releaseCapture(): void;
 }
 
 /** What a caller supplies to start one session. */
@@ -119,6 +133,16 @@ export interface WebChatAuthSessionManagerOptions {
   readonly ttlMs?: number;
   /** Clock seam; tests inject one so expiry needs no real time. */
   readonly now?: () => number;
+  /**
+   * How long a terminal session is kept before the sweep collects it. Default 60 seconds.
+   *
+   * The grace period is what lets a client that is still reading see the final view and its capture
+   * report. A `captured` session is never collectable until its handoff was released
+   * ({@link WebChatAuthSession.releaseCapture}), whatever this value is, so captured material can
+   * never be lost to the sweep. `0` collects a terminal session on the first sweep after it became
+   * collectable.
+   */
+  readonly terminalGraceMs?: number;
   /** How often expired sessions are swept. `0` disables the timer; `sweep()` still works. */
   readonly sweepIntervalMs?: number;
   /**
@@ -145,7 +169,10 @@ export interface WebChatAuthSessionManager {
   get(id: string): WebChatAuthSession | undefined;
   /** The active (non-terminal) session of one provider, when one exists. */
   activeFor(providerId: string): WebChatAuthSession | undefined;
-  /** Expire every session past its TTL now. Returns how many were expired. */
+  /**
+   * Expire every session past its TTL now, then collect every terminal session whose grace period
+   * has passed. Returns how many were expired (a collected session is not an expiry).
+   */
   sweep(): Promise<number>;
   /** Cancel the sweep timer and every active session. Idempotent. */
   close(): Promise<void>;
@@ -153,6 +180,12 @@ export interface WebChatAuthSessionManager {
 
 const DEFAULT_TTL_MS = 10 * 60 * 1_000;
 const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
+/**
+ * A terminal session is kept for a minute after it can be collected: long enough for a client that
+ * is still reading to see the final view, the capture report included, and short enough that a
+ * long-lived process cannot accumulate one session per sign-in.
+ */
+const DEFAULT_TERMINAL_GRACE_MS = 60_000;
 
 /** Whether a state means the session holds no more sign-in work. */
 function isTerminalAuthState(state: AuthSessionState): boolean {
@@ -183,6 +216,11 @@ interface AuthSessionEntry {
   closeReason?: WebChatAuthSessionCloseReason;
   detail?: string;
   frame?: ProviderAuthView;
+  /**
+   * When this session became collectable, if it has: set when a non-captured session terminalized,
+   * and for a `captured` one only once its handoff was released. Undefined means "never collect".
+   */
+  collectableAt?: number;
   /** Stable handle identity: reading the same session twice returns the same object. */
   handle?: WebChatAuthSession;
 }
@@ -203,6 +241,10 @@ export function createWebChatAuthSessionManager(
   const sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
   if (!Number.isSafeInteger(sweepIntervalMs) || sweepIntervalMs < 0) {
     throw new TypeError("A WebChat auth session manager requires a non-negative sweep interval");
+  }
+  const terminalGraceMs = options.terminalGraceMs ?? DEFAULT_TERMINAL_GRACE_MS;
+  if (!Number.isSafeInteger(terminalGraceMs) || terminalGraceMs < 0) {
+    throw new TypeError("A WebChat auth session manager requires a non-negative terminal grace period");
   }
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? defaultSchedule;
@@ -244,6 +286,17 @@ export function createWebChatAuthSessionManager(
     }
   };
 
+  /**
+   * Mark a session collectable, once. The grace period is measured from here.
+   *
+   * A non-captured terminal session becomes collectable the moment it terminalizes. A `captured`
+   * session becomes collectable only when the caller released the handoff, which is why the sweep
+   * can never collect captured material the caller has not read yet.
+   */
+  const markCollectable = (entry: AuthSessionEntry): void => {
+    if (entry.collectableAt === undefined) entry.collectableAt = now();
+  };
+
   /** Move a session to its terminal state. Only `captured` keeps its frame (the caller's handoff). */
   const terminalize = (entry: AuthSessionEntry, reason: WebChatAuthSessionCloseReason): void => {
     if (reason === "captured") entry.state = "captured";
@@ -253,6 +306,7 @@ export function createWebChatAuthSessionManager(
     if (reason !== "captured") {
       entry.frame = undefined;
       entry.frameValid = false;
+      markCollectable(entry);
     }
   };
 
@@ -406,6 +460,13 @@ export function createWebChatAuthSessionManager(
         }
         return entry.provider;
       },
+
+      releaseCapture() {
+        // Nothing to release before capture, and a second release changes nothing: the grace period
+        // starts once.
+        if (refresh(entry) !== "captured") return;
+        markCollectable(entry);
+      },
     };
     entry.handle = handle;
     return handle;
@@ -507,6 +568,16 @@ export function createWebChatAuthSessionManager(
         if (entry.detail === undefined) entry.detail = "The sign-in session expired";
         expired += 1;
         await cancelProvider(entry);
+      }
+      // Collection pass: a session terminal for longer than the grace period is forgotten, so a
+      // long-lived process does not accumulate one session view (and one provider session object)
+      // per sign-in. This is bookkeeping only — the provider settles its own mechanism when the
+      // session terminalizes — and a `captured` session is only reachable here after its handoff
+      // was released, so captured material is never collected before the caller read it.
+      for (const [id, entry] of [...sessions.entries()]) {
+        if (entry.collectableAt === undefined) continue;
+        if (now() - entry.collectableAt < terminalGraceMs) continue;
+        sessions.delete(id);
       }
       return expired;
     },
