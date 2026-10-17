@@ -38,8 +38,12 @@ an unknown schema version instead of presenting an empty store.
 
 ## Invariants (enforced by tests)
 
-`tests/issue-189-web-chat-core-boundaries.test.ts` scans the core sources and fails when one of
-these is broken:
+The surviving architecture-boundary scans live in `tests/issue-194-web-chat-architecture-contracts.test.ts`,
+which replaced `tests/issue-189-web-chat-core-boundaries.test.ts` when the latter was removed with the
+dead code. That suite pins the public surface and the import direction; the remaining import-rule and
+forbidden-identifier invariants are **recorded** there rather than each asserted behaviourally, so read
+the list below as rules the Core follows:
+
 
 1. **Import rule (§18.1).** Every core import is a `node:` builtin or another module inside the
    core. Never a provider, a browser, a host wire shape or a store.
