@@ -102,6 +102,7 @@ import {
   RetainedSurfaceLostError,
   RetainedSurfaceMissingError,
   RetainedSurfaceRegistry,
+  type RetainedSurfacePage,
 } from "./retained-surface";
 import {
   detectChatGptContextExhaustion,
@@ -1182,6 +1183,11 @@ export class ChatGptSuspensionClock {
   private suspendedTotalMs = 0;
   private lastTickAt: number;
   private timer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * Handlers run on the same steady tick. The retained-surface idle sweep rides this interval instead
+   * of adding a timer of its own, so the worker still has exactly one steady tick.
+   */
+  private readonly tickHandlers = new Set<(now: number) => void>();
 
   constructor(
     private readonly tickIntervalMs = 1_000,
@@ -1197,11 +1203,34 @@ export class ChatGptSuspensionClock {
     this.timer.unref?.();
   }
 
+  /**
+   * Run `handler` on every steady tick; the returned function detaches it.
+   *
+   * A handler is a plain synchronous callback: the tick is not a scheduler, and it must never be held
+   * open by one. A handler that throws is reported and does not stop the tick the stage budgets depend
+   * on.
+   */
+  onTick(handler: (now: number) => void): () => void {
+    this.tickHandlers.add(handler);
+    return () => {
+      this.tickHandlers.delete(handler);
+    };
+  }
+
   /** Exposed for tests; production ticks come from the interval above. */
   tick(now: number): void {
     const gap = now - this.lastTickAt;
     this.lastTickAt = now;
     if (gap >= this.gapThresholdMs) this.suspendedTotalMs += gap - this.tickIntervalMs;
+    for (const handler of [...this.tickHandlers]) {
+      try {
+        handler(now);
+      } catch (error) {
+        console.warn(
+          `[chatgpt-web] steady-tick handler failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
 
   suspendedMs(): number {
@@ -1210,6 +1239,30 @@ export class ChatGptSuspensionClock {
 }
 
 export const chatGptSuspensionClock = new ChatGptSuspensionClock();
+
+/**
+ * Reclaim retained surfaces whose idle window expired, on the worker's existing steady tick.
+ *
+ * The registry enforces the idle window on acquisition, but a process that stops acquiring would keep
+ * every retained page until shutdown: this is the clock half. It rides {@link ChatGptSuspensionClock},
+ * the one steady interval the worker already runs for its stage budgets, so retention gains no
+ * scheduler and no second timer authority — one tick drives both.
+ *
+ * The sweep decides nothing about safety; it only decides *when* to ask. The registry's own eligibility
+ * rule (`!busy && settled`) refuses to close a page an active turn holds or one whose settlement is
+ * still unpublished, so a tick during a live turn reclaims only genuinely idle surfaces, and an evicted
+ * surface is tombstoned exactly as a dead page is (never a silent fork, never reuse of a closed page).
+ *
+ * @returns the detach function; the worker calls it on shutdown.
+ */
+export function attachRetainedSurfaceIdleSweep<P extends RetainedSurfacePage>(
+  registry: RetainedSurfaceRegistry<P>,
+  clock: Pick<ChatGptSuspensionClock, "onTick">,
+): () => void {
+  return clock.onTick(() => {
+    registry.sweep();
+  });
+}
 
 /**
  * How much of a stage budget remains once slept time is refunded. Zero means the stage really
@@ -2178,8 +2231,17 @@ export class ChatGptBrowserWorker {
    * exclusion. It never stores history and is not a second source of truth.
    */
   private readonly retainedSurfaces = new RetainedSurfaceRegistry<Page>();
+  /**
+   * Detaches the retained-surface idle sweep from the steady tick. Retention is enforced on
+   * acquisition by the registry and — so a process that stops acquiring still releases its pages — on
+   * the worker's existing steady tick; this adds no timer of its own (see
+   * {@link attachRetainedSurfaceIdleSweep}).
+   */
+  private readonly detachRetainedSurfaceIdleSweep: () => void;
 
-  private constructor(private readonly config: ResolvedBrowserConfig) {}
+  private constructor(private readonly config: ResolvedBrowserConfig) {
+    this.detachRetainedSurfaceIdleSweep = attachRetainedSurfaceIdleSweep(this.retainedSurfaces, chatGptSuspensionClock);
+  }
 
   /**
    * Lexical/contenteditable may preserve runs of ASCII spaces by exposing some of them as NBSP
@@ -2376,6 +2438,7 @@ export class ChatGptBrowserWorker {
   }
 
   async close(): Promise<void> {
+    this.detachRetainedSurfaceIdleSweep();
     if (this.launcherHelper) {
       const helper = this.launcherHelper;
       this.launcherHelper = undefined;

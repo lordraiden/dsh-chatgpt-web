@@ -16,6 +16,7 @@ import {
 } from "./support/chatgpt-web-home";
 import { runDoctor, webChatProviderChecks } from "../src/doctor";
 import { defaultConfig, saveConfig } from "../src/config";
+import { createChatGptWebDriver } from "../src/adapters/chatgpt-web/chatgpt-driver";
 import {
   CHATGPT_WEB_DRIVER_ID,
   inspectWebChatProvider,
@@ -23,6 +24,7 @@ import {
   webChatDoctorCheck,
 } from "../src/web-chat/host/provider-host";
 import type { WebChatModelDescriptor, WebChatProviderDriver } from "../src/web-chat/core";
+import type { CodexProviderConfig } from "../src/types";
 
 const FINGERPRINT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -74,10 +76,37 @@ describe("issue #193 — the doctor reports one check per provider", () => {
     expect(JSON.stringify(checks)).not.toContain(FINGERPRINT);
   });
 
-  test("an unauthenticated provider is a warning", async () => {
+  test("an unauthenticated provider is a warning that names the sign-in surface", async () => {
     const checks = await webChatProviderChecks([driver({ inspectAccount: async () => ({ authenticated: false }) })]);
     expect(checks[0]?.status).toBe("warning");
     expect(checks[0]?.message).toContain("not authenticated");
+    // A provider reporting not authenticated here has no recorded sign-in. The operator is told what
+    // is missing and where to record it, not merely that a boolean is false.
+    expect(checks[0]?.message).toContain("no sign-in has been recorded");
+    expect(checks[0]?.message).toContain("/v1/control/auth/");
+  });
+
+  test("a derived account identity reaches the operator as a missing sign-in, not a healthy account", async () => {
+    // The real driver, with the identity `providerConfig` substitutes when nothing was recorded: the
+    // doctor must report a warning that names the sign-in surface. The lease's refusal with the same
+    // derived identity is pinned, unchanged, in the concurrency contract suite.
+    const derived = createChatGptWebDriver({
+      provider: {
+        baseUrl: "http://127.0.0.1:17841",
+        chatgptWeb: {
+          accountIdentityFingerprint: "storage-state-derived-fallback",
+          accountIdentityRecorded: false,
+          // A healthy provider with a derived identity: the only failing fact must be the account.
+          solAvailable: true,
+          proAvailable: false,
+          capabilityState: { solAvailable: "supported", proAvailable: "unsupported" },
+        },
+      } as unknown as CodexProviderConfig,
+    });
+    const checks = await webChatProviderChecks([derived]);
+    expect(checks[0]?.status).toBe("warning");
+    expect(checks[0]?.message).toContain("no sign-in has been recorded");
+    expect(checks[0]?.message).toContain("/v1/control/auth/");
   });
 
   test("an unhealthy driver is an error carrying its detail", async () => {

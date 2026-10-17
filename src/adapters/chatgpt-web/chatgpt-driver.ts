@@ -60,6 +60,28 @@ export function chatGptWebConversationHandle(conversationKey: string, generation
 }
 
 /**
+ * Whether this deployment has an **authenticated** account the driver can honestly report.
+ *
+ * An identity is *recorded* when a completed sign-in persisted it (or the configuration authored one),
+ * and only a recorded identity is an account the driver may call authenticated. `providerConfig`
+ * substitutes a storage-state-derived fallback when nothing was recorded and marks it
+ * `accountIdentityRecorded: false`; that fallback is not an account identity and can never match the
+ * account the signed-in page exposes, so reporting it as authenticated is the same untruth the lease's
+ * binding message stopped telling for #287 slice 2. A derived identity is therefore reported as **not**
+ * authenticated, with unknown capabilities — the honest state this driver can express — and the lease's
+ * binding check keeps refusing it independently of this report.
+ *
+ * The literal unknown-session fingerprint means the same thing (no identity at all) and is kept,
+ * because a provider block that omits the account identity entirely carries no provenance fact.
+ */
+export function chatGptWebAccountAuthenticated(provider: CodexProviderConfig): boolean {
+  const fingerprint = chatGptWebAccountFingerprint(provider);
+  return provider.chatgptWeb?.accountIdentityRecorded !== false
+    && fingerprint.length > 0
+    && fingerprint !== accountIdentityFromUnknownSession().fingerprint;
+}
+
+/**
  * Create the ChatGPT Web driver.
  *
  * @param options - the provider configuration and (for tests and reuse) the session registry.
@@ -134,16 +156,16 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
 
     async inspectAccount(): Promise<WebChatAccountInspection> {
       const accountFingerprint = chatGptWebAccountFingerprint(provider);
-      // An unknown session is a reported identity with no authenticated account behind it: the
-      // capabilities are unknown rather than trusted, so the core never starts on a guess.
-      const known = accountFingerprint.length > 0
-        && accountFingerprint !== accountIdentityFromUnknownSession().fingerprint;
+      // A recorded identity is authenticated; a derived one is not an account at all, so it is
+      // reported honestly (see `chatGptWebAccountAuthenticated`) with unknown capabilities rather than
+      // trusted ones: the core never starts on a guess.
+      const authenticated = chatGptWebAccountAuthenticated(provider);
       return {
-        authenticated: known,
+        authenticated,
         accountFingerprint,
         capabilities: {
-          sol: known ? authority.capabilities.solAvailable : "unknown",
-          pro: known ? authority.capabilities.proAvailable : "unknown",
+          sol: authenticated ? authority.capabilities.solAvailable : "unknown",
+          pro: authenticated ? authority.capabilities.proAvailable : "unknown",
         },
       };
     },

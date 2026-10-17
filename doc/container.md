@@ -578,7 +578,9 @@ Consequences worth carrying forward:
 - The `chrome` check is exactly the guard the image's `/usr/bin/google-chrome` **symlink** satisfies;
   the `login` check is the credential boundary (§5.5).
 - `doctor` reports the provider as *reachable but not authenticated, 2 models, 2 routes*, which is a
-  better readiness signal than "the process is up".
+  better readiness signal than "the process is up". (The message above is that run's own capture; it now
+  also names the cause and the fix — no sign-in has been recorded, record one at the operator sign-in
+  surface `/v1/control/auth/`.)
 
 ### Chromium launch with no display (the container's situation)
 

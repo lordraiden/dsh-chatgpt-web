@@ -1359,6 +1359,33 @@ These ideas are architecturally sound:
 - cancellation;
 - provider-specific model metadata.
 
+**Retention is bounded, and the bound is part of the contract.** The retained physical surfaces
+(§9.3, §15.3) are not kept forever: a registry holds at most `DEFAULT_MAX_RETAINED_SURFACES` (16)
+surfaces and retires one left idle beyond `DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS` (30 minutes)
+(`src/adapters/chatgpt-web/retained-surface.ts`). This exists because a caller that resends a *growing*
+history produces a new conversation identity — and therefore a new retained page — per turn, so an
+unbounded registry accumulates one live ChatGPT page per turn in a real signed-in account.
+
+The cap deliberately sits **above** the concurrent-turn ceiling (`MAX_CHATGPT_BROWSER_TABS`, 5): the
+live fan-out alone can never reach it, so an eviction can only ever touch a surface no turn is using.
+The idle window is enforced both when the registry is asked to acquire and on the worker's existing
+steady tick (`ChatGptSuspensionClock`), so a process that stops acquiring still releases its pages
+rather than holding them until shutdown.
+
+**Eviction expresses continuity loss, never a second chance.** An evicted surface is closed once and its
+key is tombstoned exactly like a page that died: a later turn for that conversation fails with the
+existing explicit continuity error (`retained_surface_lost` → `CONVERSATION_LOST`, 409) until the
+conversation is explicitly re-established. A closed page is never handed to a turn that expected the old
+one, and an evicted conversation never silently continues on a fresh page as if its history were still
+installed — no silent fork. Eligibility is the settlement rule itself (`!busy && settled`), so a surface
+a turn holds, or one whose settlement is unpublished, is never closed.
+
+**An evicted conversation is deliberately not auto-replayed.** The caller is told continuity was lost
+and decides. Replay is derived from canonical history, and a turn that only sent a delta — the normal
+case for a retained conversation — has no canonical text to replay from, so replaying it automatically
+would silently lose context. That is exactly the failure the no-silent-fork rule exists to prevent, so
+the explicit replay path stays the caller's decision rather than an implicit fallback.
+
 ### 19.2 Extracted into the common core
 
 These responsibilities became provider-neutral and now live under `src/web-chat/`:
