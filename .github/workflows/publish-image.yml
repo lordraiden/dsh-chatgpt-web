@@ -70,6 +70,22 @@ jobs:
             [ -n "$tag" ] && docker push "$tag"
           done <<< "${{ steps.image.outputs.tags }}"
 
+      # La imagen de sign-in se apoya en la de producción recién construida (mismo `ARG`), así que el
+      # NAS puede hacer el sign-in con noVNC sin clonar el repo ni construir nada.
+      - name: Build the sign-in image (noVNC) from the production image
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.login \
+            --build-arg PRODUCTION_IMAGE="${{ steps.image.outputs.name }}:latest" \
+            -t "${{ steps.image.outputs.name }}-login:latest" \
+            -t "${{ steps.image.outputs.name }}-login:sha-${GITHUB_SHA::7}" .
+
+      - name: Push the sign-in image
+        run: |
+          set -euo pipefail
+          docker push "${{ steps.image.outputs.name }}-login:latest"
+          docker push "${{ steps.image.outputs.name }}-login:sha-${GITHUB_SHA::7}"
+
       - name: Summary
         run: |
           {
@@ -79,6 +95,6 @@ jobs:
             echo "${{ steps.image.outputs.tags }}"
             echo '```'
             echo
-            echo "Para que el homelab pueda descargarla sin credenciales, el paquete debe ser **público**"
+            echo "Imágenes: la de producción y la de sign-in (noVNC). Para que el homelab pueda descargarlas sin credenciales, ambos paquetes deben ser **públicos**"
             echo "en GitHub → Packages → \`dsh-chatgpt-web\` → Package settings → Change visibility."
           } >> "$GITHUB_STEP_SUMMARY"
