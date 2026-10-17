@@ -37,6 +37,10 @@
  * the document says about its own keyboard handling and what it does cannot drift apart. The
  * text field plus *Send text* stays as the paste/long-text path and as the only way to type from a
  * phone, where no hardware keyboard exists.
+ *
+ * A successful capture is reported as **already in effect** (issue #287, slice 4b): the running
+ * service re-derives its provider facts from the sign-in's own completion signal, so the next turn
+ * uses the new session without a restart, and the page must not tell the operator to restart anything.
  */
 
 /** The document served at `/v1/control/auth/`. Static; nothing is interpolated into it. */
@@ -260,6 +264,14 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
     var text = capture.stored
       ? "Session stored" + (capture.location ? " at " + capture.location : "") + "."
       : "The provider stored no session material.";
+    // Issue #287 slice 4b: a captured interactive sign-in is picked up by the running service on the
+    // next request, so the operator is told not to restart anything. A stored capture whose
+    // provider-side side effect did not complete still carries its own detail below — that detail is
+    // the one thing that can keep the next turn failing closed, and this line never swallows it.
+    if (capture.stored) {
+      text += " The running service has already picked this session up: the next turn uses it,"
+        + " with no restart.";
+    }
     el("stored").textContent = text;
     show("stored", true);
     setStatus(text);

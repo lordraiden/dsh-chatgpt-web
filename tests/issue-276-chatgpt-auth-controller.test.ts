@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
@@ -12,13 +12,18 @@ import {
   createChatGptWebAuthController,
   type ChatGptWebAuthBrowserHandle,
   type ChatGptWebAuthBrowserLaunch,
+  type ChatGptWebAuthSessionStored,
 } from "../src/adapters/chatgpt-web/auth-controller";
 import {
   CHATGPT_WEB_ROUTE_ID,
   defaultConfig,
   getConfigPath,
+  loadConfig,
   persistAccountIdentityFingerprint,
+  providerStorageStatePath,
+  resolveProviderStorageStatePath,
   saveConfig,
+  type AppConfig,
 } from "../src/config";
 import {
   captureChatGptWebHome,
@@ -26,9 +31,16 @@ import {
   useTemporaryChatGptWebHome,
 } from "./support/chatgpt-web-home";
 import type { ChatGptWebAccountCapabilities } from "../src/chatgpt-web-models";
-import { startServer, type RunningServer } from "../src/server";
+import { refreshChatGptWebProviderFacts, startServer, type RunningServer } from "../src/server";
+import { storeProviderSession } from "../src/browser-login";
 import { CHATGPT_WEB_DRIVER_ID } from "../src/web-chat/host/provider-host";
 import { createWebChatAuthSessionManager } from "../src/web-chat/host/auth-sessions";
+import { effectiveChatGptWebProviderConfig } from "../src/chatgpt-web-provider-config";
+import { resolveBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
+import { browserAccountLeaseInput } from "../src/adapters/chatgpt-web/index";
+import { formatDoctorReport } from "../src/doctor";
+import type { ProviderAdapter } from "../src/adapters/base";
+import type { CodexProviderConfig } from "../src/types";
 import {
   isWebChatError,
   webChatError,
@@ -120,6 +132,8 @@ function makeController(options: {
   persistIdentity?: (fingerprint: string) => void;
   /** Use the REAL configuration writer instead of the spy, for the persistence tests. */
   realIdentityWriter?: boolean;
+  /** The host's one-shot completion signal (issue #287, slice 4b), forwarded to the controller. */
+  afterSessionStored?: ChatGptWebAuthSessionStored;
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
   maxPolls?: number;
@@ -169,6 +183,9 @@ function makeController(options: {
           options.persistIdentity?.(fingerprint);
         },
       }),
+    ...(options.afterSessionStored !== undefined
+      ? { afterSessionStored: options.afterSessionStored }
+      : {}),
     pollIntervalMs: options.pollIntervalMs ?? 1,
     pollTimeoutMs: options.pollTimeoutMs ?? 60_000,
     ...(options.maxPolls !== undefined ? { maxPolls: options.maxPolls } : {}),
@@ -981,5 +998,471 @@ describe("issue #276 slice 2c — a client's refusal is a 400, an upstream failu
     expect(again.status).toBe(502);
     expect((await again.json() as { code: string }).code).toBe("UPSTREAM_ERROR");
     expect(page.calls.clicks).toEqual([]);
+  });
+});
+
+/**
+ * Issue #287, slice 4b — a successful sign-in takes effect without a restart.
+ *
+ * The owner hit this on a fresh volume: after a successful remote sign-in the session was on disk but
+ * the running process kept the facts it resolved at startup, so the next turn failed until
+ * `docker restart`. Two halves: the **account identity fingerprint** was written to the config file
+ * while the in-memory facts stayed stale, and the **credential path** was resolved once at startup —
+ * on a fresh volume at the legacy location, before the new session existed in `providers/<id>/`.
+ *
+ * Proven here over the REAL listener with the REAL controller and injected browser seams: no
+ * Chromium, no ChatGPT account, no network, and — for every live assertion — the same process.
+ *
+ * The mechanism under test is the **single** refresh primitive in `startServer`, triggered by the
+ * controller's one-shot `afterSessionStored`. The suite pins what it is for:
+ *
+ * - the next request in the same process sees the re-derived facts;
+ * - a turn already in flight across the refresh is unaffected: it finishes on the facts it began
+ *   with, and is never silently switched mid-turn;
+ * - the operator surfaces no longer say "restart" for the half that is fixed, and still do for the
+ *   half that is not.
+ */
+describe("issue #287 slice 4b — a captured sign-in is live on the next turn, with no restart", () => {
+  interface LiveSignInFixture {
+    readonly home: string;
+    readonly server: RunningServer;
+    readonly config: AppConfig;
+    readonly legacyPath: string;
+    /** A snapshot of each provider block the listener's adapter factory received, one per turn. */
+    readonly seen: CodexProviderConfig[];
+    /** Every completion signal the fixture's controller delivered: the one trigger, exactly once. */
+    readonly completions: Array<{ stored: boolean; fingerprint: string; restored: boolean }>;
+    openSession(): Promise<string>;
+    input(id: string, event: unknown): Promise<Response>;
+    view(id: string): Promise<{
+      state: string;
+      capture?: { stored: boolean; location?: string; detail?: string };
+    }>;
+    /** Open a session, let its sign-in complete, and hand its capture over through the surface. */
+    completeSignIn(): Promise<{ id: string; capture: { stored: boolean; location?: string; detail?: string } }>;
+    stop(): Promise<void>;
+  }
+
+  /**
+   * Serve the real listener over a fresh temporary volume, with the real controller and its browser
+   * seams injected. The volume's configured `storageStatePath` is the shipped **legacy** location and
+   * it starts with no session at all — exactly the fresh-volume shape the friction was hit on — and
+   * the listener starts from the production `loadConfig()` read of it, so its startup facts are the
+   * ones production would hold rather than a hand-picked value.
+   */
+  async function serveLiveSignIn(options: {
+    /** When set, the identity writer throws this message: the capture stores but the binding does not. */
+    identityWriteFailure?: string;
+    /** A turn that stays in flight until the returned release function is called. */
+    holdTurnOpen?: boolean;
+  } = {}): Promise<LiveSignInFixture & { releaseTurn: () => void }> {
+    const home = useTemporaryChatGptWebHome("dsh-287-signin-");
+    const legacyPath = join(home, "browser", "storage-state.json");
+    saveConfig({
+      ...defaultConfig(),
+      // A persisted configuration validates a real port; `startServer` is what binds the ephemeral
+      // one (the suites' own pattern, asserted on the listener below).
+      port: 17841,
+      host: "127.0.0.1",
+      controlToken: CONTROL_TOKEN,
+      authBrowserMode: "headless",
+      // The shipped default already points at the legacy location; stated explicitly so the
+      // "the startup resolution points at legacy" premise cannot drift with a default change.
+      storageStatePath: legacyPath,
+      accountIdentityFingerprint: undefined,
+    } as AppConfig);
+    const config = { ...loadConfig(), port: 0 } as AppConfig;
+    expect(config.storageStatePath, "a fresh volume resolves the credential path at startup").toBe(legacyPath);
+    expect(config.accountIdentityFingerprint).toBeUndefined();
+
+    let authInspectionReached = false;
+    const markAuthReady = (): boolean => {
+      if (!authInspectionReached) {
+        authInspectionReached = true;
+        return false;
+      }
+      return true;
+    };
+
+    const completions: Array<{ stored: boolean; fingerprint: string; restored: boolean }> = [];
+    const seen: CodexProviderConfig[] = [];
+    let settleTurn: (() => void) | undefined;
+    let turnsStarted = 0;
+    const runTurn: ProviderAdapter["runTurn"] = async () => {
+      // Only the first turn is held open: that is the turn which is "in flight" across the sign-in,
+      // and the second turn must be able to complete once the refresh has happened.
+      turnsStarted += 1;
+      if (options.holdTurnOpen === true && turnsStarted === 1) {
+        await new Promise<void>(done => { settleTurn = done; });
+      }
+    };
+
+    const signIn = makeController({
+      storageState: { cookies: [{ name: "session", value: "opaque" }], origins: [] },
+      // The first inspection deliberately fails: the sign-in must still be awaiting the operator
+      // when `startAuth()` returns, so the HTTP `input` below is the real operator's relay.
+      inspect: async () => {
+        if (markAuthReady()) return CAPTURED_CAPABILITIES;
+        throw new Error("the composer is not visible yet");
+      },
+      detectIdentity: async () => IDENTITY_FINGERPRINT,
+      // The PRODUCTION writer: the session lands in `providers/<id>/`, which is exactly the location
+      // a fresh volume's startup resolution did not know about yet.
+      store: (state, capabilities) => storeProviderSession(
+        state as Parameters<typeof storeProviderSession>[0],
+        capabilities,
+      ),
+      ...(options.identityWriteFailure === undefined
+        ? { realIdentityWriter: true }
+        : { persistIdentity: () => { throw new Error(options.identityWriteFailure); } }),
+      // The production wiring, over the test's controller: the same one-shot completion signal,
+      // bound to the same single refresh primitive `startServer` binds its default controller to.
+      afterSessionStored: (stored, identity) => {
+        completions.push({ stored: stored.stored, fingerprint: identity.fingerprint, restored: identity.restored });
+        refreshChatGptWebProviderFacts(config, identity);
+      },
+    });
+
+    const server = startServer(config, {
+      adapterFactory: provider => {
+        // The seam: the provider block the real listener resolved for this turn, at turn start.
+        seen.push(JSON.parse(JSON.stringify(provider)) as CodexProviderConfig);
+        return { name: "issue-287-signin-stub", runTurn };
+      },
+      auth: {
+        providers: [{
+          providerId: CHATGPT_WEB_AUTH_PROVIDER_ID,
+          label: CHATGPT_WEB_AUTH_PROVIDER_LABEL,
+          controller: signIn.controller,
+        }],
+      },
+    });
+
+    expect(server.port, "the listener bound an ephemeral port of its own").toBeGreaterThan(0);
+    const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
+    const control = { authorization: `Bearer ${CONTROL_TOKEN}`, "content-type": "application/json" };
+    const openSession = async (): Promise<string> => {
+      const response = await fetch(url("/v1/control/auth/sessions"), {
+        method: "POST",
+        headers: control,
+        body: JSON.stringify({ providerId: CHATGPT_WEB_AUTH_PROVIDER_ID }),
+      });
+      expect(response.status).toBe(201);
+      return ((await response.json()) as { id: string }).id;
+    };
+    const viewOf = async (id: string) => {
+      const response = await fetch(url(`/v1/control/auth/sessions/${id}`), { headers: control });
+      expect(response.status).toBe(200);
+      return await response.json() as Awaited<ReturnType<LiveSignInFixture["view"]>>;
+    };
+    return {
+      home,
+      server,
+      config,
+      legacyPath,
+      seen,
+      completions,
+      releaseTurn: () => { settleTurn?.(); },
+      openSession,
+      input: (id, event) => fetch(url(`/v1/control/auth/sessions/${id}/input`), {
+        method: "POST",
+        headers: control,
+        body: JSON.stringify(event),
+      }),
+      view: viewOf,
+      async completeSignIn() {
+        const id = await openSession();
+        // The real controller runs its own poll loop and reaches `captured` on its own. Without a
+        // restart, and with nothing else driving it: the listener is the only party that acts.
+        const deadline = Date.now() + 2_000;
+        for (;;) {
+          const snapshot = await viewOf(id);
+          if (snapshot.state === "captured" && snapshot.capture !== undefined) {
+            expect(snapshot.capture.stored, "the capture is handed over through the surface").toBe(true);
+            return { id, capture: snapshot.capture };
+          }
+          if (Date.now() > deadline) throw new Error(`the sign-in never captured; last state ${snapshot.state}`);
+          await new Promise(resolve => setTimeout(resolve, 2));
+        }
+      },
+      async stop() {
+        await Promise.race([
+          Promise.resolve(server.stop(true)).catch(() => undefined),
+          new Promise(resolve => setTimeout(resolve, 2_000)),
+        ]);
+      },
+    };
+  }
+
+  const bearerControl = { authorization: `Bearer ${CONTROL_TOKEN}`, "content-type": "application/json" };
+
+  /** POST one turn at the listener's `/v1/responses` route. */
+  const postTurn = async (fixture: LiveSignInFixture, input: string): Promise<Response> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("postTurn timeout")), 3_000);
+    try {
+      return await fetch(`http://127.0.0.1:${fixture.server.port}/v1/responses`, {
+        method: "POST",
+        headers: bearerControl,
+        body: JSON.stringify({ model: "chatgpt-web/luna", input, stream: false }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const readControlStatus = async (fixture: LiveSignInFixture): Promise<{
+    storageStatePath: string;
+    storageStatePresent: boolean;
+  }> => {
+    const response = await fetch(`http://127.0.0.1:${fixture.server.port}/v1/control/status`, {
+      headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    return await response.json() as { storageStatePath: string; storageStatePresent: boolean };
+  };
+
+  test("the next request in the same process uses the new identity and credential path", async () => {
+    const saved = captureChatGptWebHome();
+    const fixture = await serveLiveSignIn();
+    try {
+      const pid = ((await (await fetch(`http://127.0.0.1:${fixture.server.port}/healthz`)).json()) as { pid: number }).pid;
+      const before = await readControlStatus(fixture);
+      expect(before.storageStatePath).toBe(fixture.legacyPath);
+      expect(before.storageStatePresent).toBe(false);
+
+      const completed = await fixture.completeSignIn();
+      // The sign-in wrote the provider-scoped session: the capture's own answer names it, and the
+      // callback fired exactly once with the binding it persisted.
+      const scopedPath = providerStorageStatePath();
+      expect(completed.capture.location).toBe(scopedPath);
+      expect(existsSync(scopedPath), "the capture landed in providers/<id>/").toBe(true);
+      expect(fixture.completions).toEqual([
+        { stored: true, fingerprint: IDENTITY_FINGERPRINT, restored: true },
+      ]);
+
+      // 1. The memory the listener serves from: both facts the sign-in changes are live, and the
+      //    scoped session the sign-in wrote is the same location the resolver now reports.
+      expect(resolveProviderStorageStatePath(fixture.config.storageStatePath)).toBe(scopedPath);
+      expect(fixture.config.storageStatePath).toBe(scopedPath);
+      expect(fixture.config.accountIdentityFingerprint).toBe(IDENTITY_FINGERPRINT);
+
+      // 2. The resolver every seam reads, and the provider block the next turn derives from it.
+      const effective = effectiveChatGptWebProviderConfig(fixture.config);
+      expect(effective.chatgptWeb?.accountIdentityFingerprint).toBe(IDENTITY_FINGERPRINT);
+      expect(effective.chatgptWeb?.accountIdentityRecorded).toBe(true);
+      //    The block the adapter reads carries the re-resolved path, not the startup alias.
+      expect(effective.chatgptWeb?.storageStatePath).toBe(scopedPath);
+      //    The lease input and the execution namespace are derived from the same block, so the next
+      //    turn's account binding is the signed-in account rather than the unrecorded fallback.
+      expect(browserAccountLeaseInput(effective, "trace-after")).toMatchObject({
+        accountIdentity: IDENTITY_FINGERPRINT,
+        accountIdentityRecorded: true,
+      });
+      //    The credential path was resolved once at startup, but the browser layer re-resolves the
+      //    configured value per turn, so what the turn reads is the scoped session — never the alias.
+      expect(resolveBrowserConfig(effective).storageStatePath).toBe(scopedPath);
+
+      // 3. The next request itself, through the real listener and its adapter factory.
+      expect((await postTurn(fixture, "after the sign-in")).status).toBe(200);
+      expect(fixture.seen).toHaveLength(1);
+      expect(fixture.seen[0]?.chatgptWeb?.accountIdentityFingerprint).toBe(IDENTITY_FINGERPRINT);
+      expect(fixture.seen[0]?.chatgptWeb?.accountIdentityRecorded).toBe(true);
+      expect(resolveBrowserConfig(fixture.seen[0]!).storageStatePath).toBe(scopedPath);
+
+      // 4. The same process, and the operator-visible picture agrees with what the turn reads.
+      const samePid = ((await (await fetch(`http://127.0.0.1:${fixture.server.port}/healthz`)).json()) as { pid: number }).pid;
+      expect(samePid).toBe(pid);
+      const after = await readControlStatus(fixture);
+      expect(after.storageStatePath).toBe(scopedPath);
+      expect(after.storageStatePresent).toBe(true);
+    } finally {
+      await fixture.stop();
+      restoreChatGptWebHome(saved, fixture.home);
+    }
+  });
+
+  test("a turn already in flight across the refresh finishes on the facts it started with", async () => {
+    const saved = captureChatGptWebHome();
+    const fixture = await serveLiveSignIn({ holdTurnOpen: true });
+    try {
+      expect((await readControlStatus(fixture)).storageStatePath).toBe(fixture.legacyPath);
+
+      // A genuinely in-flight turn: the listener has already resolved the provider block for it and
+      // handed it to the adapter, which is still running.
+      const turn = postTurn(fixture, "in flight across the sign-in");
+      let handedToAdapter = false;
+      for (let attempt = 0; attempt < 500 && !handedToAdapter; attempt += 1) {
+        handedToAdapter = fixture.seen.length > 0;
+        if (!handedToAdapter) await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      expect(handedToAdapter, "the turn must be in flight before the sign-in completes").toBe(true);
+      const inFlight = fixture.seen[0]!;
+      expect(inFlight.chatgptWeb?.accountIdentityFingerprint, "it began on the unrecorded fallback")
+        .toBe("unknown");
+      expect(inFlight.chatgptWeb?.accountIdentityRecorded).toBe(false);
+
+      // The sign-in completes while that turn is still running: this is the refresh.
+      await fixture.completeSignIn();
+      expect(fixture.config.accountIdentityFingerprint).toBe(IDENTITY_FINGERPRINT);
+      expect(fixture.config.storageStatePath).toBe(resolveProviderStorageStatePath(fixture.legacyPath));
+
+      // The in-flight turn was never switched mid-turn: its provider block is byte-for-byte the one
+      // it started with, and it only completes once it is allowed to.
+      expect(fixture.seen).toHaveLength(1);
+      expect(fixture.seen[0]).toEqual(inFlight);
+      expect(fixture.seen[0]!.chatgptWeb?.accountIdentityFingerprint).toBe("unknown");
+
+      fixture.releaseTurn();
+      const inFlightResponse = await turn;
+      expect(inFlightResponse.status).toBe(200);
+      // Drain it: the in-flight turn must be fully observed before the next one is issued, exactly
+      // like a client that reads the response it was promised.
+      await inFlightResponse.text();
+
+      // The *next* turn is the one that sees the refresh — never the turn that was running.
+      const second = await postTurn(fixture, "after the sign-in");
+      expect(second.status).toBe(200);
+      await second.text();
+      expect(fixture.seen).toHaveLength(2);
+      expect(fixture.seen[1]?.chatgptWeb?.accountIdentityFingerprint).toBe(IDENTITY_FINGERPRINT);
+      expect(fixture.seen[1]?.chatgptWeb?.accountIdentityRecorded).toBe(true);
+    } finally {
+      fixture.releaseTurn();
+      await fixture.stop();
+      restoreChatGptWebHome(saved, fixture.home);
+    }
+  });
+
+  test("a capture whose account binding did not land keeps the session but reports why it fails closed", async () => {
+    const saved = captureChatGptWebHome();
+    const fixture = await serveLiveSignIn({ identityWriteFailure: "EACCES: permission denied" });
+    try {
+      const { capture } = await fixture.completeSignIn();
+
+      // Stored, not failed: the session the operator just produced is never thrown away. But the
+      // operator gets the reason the next turn fails closed, and the live facts were NOT refreshed
+      // from a binding that never landed.
+      expect(capture.stored).toBe(true);
+      expect(capture.detail).toContain("could not be written");
+      expect(capture.detail).toContain("fail closed");
+      expect(fixture.config.accountIdentityFingerprint).toBeUndefined();
+
+      // The next turn therefore still runs on the unrecorded fallback — the honest outcome, and
+      // exactly what the reported detail told the operator to expect.
+      expect((await postTurn(fixture, "still unbound")).status).toBe(200);
+      expect(fixture.seen[0]?.chatgptWeb?.accountIdentityFingerprint).toBe("unknown");
+      expect(fixture.seen[0]?.chatgptWeb?.accountIdentityRecorded).toBe(false);
+    } finally {
+      await fixture.stop();
+      restoreChatGptWebHome(saved, fixture.home);
+    }
+  });
+
+  test("one refresh: the completion signal fires exactly once per stored capture", async () => {
+    const saved = captureChatGptWebHome();
+    const home = useTemporaryChatGptWebHome("dsh-287-signin-once-");
+    try {
+      // A real data home, because this test uses the REAL identity writer: the completion signal only
+      // fires for a binding that actually landed, which is exactly the property being pinned.
+      saveConfig({ ...defaultConfig(), appName: "issue-287-signin-once", automaticAppName: "issue-287-signin-once" });
+      const completions: Array<{ stored: boolean; fingerprint: string; restored: boolean }> = [];
+      const signIn = makeController({
+        storageState: { cookies: [], origins: [] },
+        inspect: async () => CAPTURED_CAPABILITIES,
+        realIdentityWriter: true,
+        afterSessionStored: (stored, identity) => {
+          completions.push({ stored: stored.stored, fingerprint: identity.fingerprint, restored: identity.restored });
+        },
+      });
+      const session = await signIn.controller.startAuth();
+      await waitForState(session, "captured");
+      const capture = await session.capture();
+      const stored = await signIn.controller.storeCapture(capture);
+      expect(readFileSync(getConfigPath(), "utf8")).toContain(IDENTITY_FINGERPRINT);
+      // Storing the very same capture again changes nothing, so it is not a second refresh.
+      await signIn.controller.storeCapture(capture).catch(() => undefined);
+      await session.cancel();
+      expect(stored.stored).toBe(true);
+      expect(completions).toEqual([{ stored: true, fingerprint: IDENTITY_FINGERPRINT, restored: true }]);
+    } finally {
+      restoreChatGptWebHome(saved, home);
+    }
+  });
+
+  test("a host completion hook that throws cannot turn a stored sign-in into a failed one", async () => {
+    // The hook is a host seam and runs after the session and its binding are already durable. A host
+    // internal must never be reported to the operator as a provider failure, and it must never discard
+    // the session the operator just produced.
+    const saved = captureChatGptWebHome();
+    const home = useTemporaryChatGptWebHome("dsh-287-signin-hook-");
+    try {
+      saveConfig({
+        ...defaultConfig(),
+        appName: "issue-287-signin-hook",
+        automaticAppName: "issue-287-signin-hook",
+      });
+      let hookCalls = 0;
+      const signIn = makeController({
+        storageState: { cookies: [], origins: [] },
+        inspect: async () => CAPTURED_CAPABILITIES,
+        realIdentityWriter: true,
+        afterSessionStored: () => {
+          hookCalls += 1;
+          throw new Error("the host refresh exploded");
+        },
+      });
+      const session = await signIn.controller.startAuth();
+      await waitForState(session, "captured");
+      const result = await signIn.controller.storeCapture(await session.capture());
+      // Stored, with no provider-facing detail: the session landed and the binding landed.
+      expect(result).toMatchObject({ stored: true });
+      expect(result.detail).toBeUndefined();
+      expect(hookCalls).toBe(1);
+      // And it really is durable — the hook's failure changed nothing about the write.
+      expect(readFileSync(getConfigPath(), "utf8")).toContain(IDENTITY_FINGERPRINT);
+      await session.cancel();
+    } finally {
+      restoreChatGptWebHome(saved, home);
+    }
+  });
+
+  test("the operator is told the sign-in is live, and told where a restart is still required", async () => {
+    // The sign-in page's success line is the operator's only receipt, and the page is served
+    // anonymously by design, so a listener with no provider registration serves the same bytes.
+    const pageServer = startServer(
+      { ...defaultConfig(), port: 0, host: "127.0.0.1", controlToken: CONTROL_TOKEN },
+      { auth: { providers: [] } },
+    );
+    let page: string;
+    try {
+      page = await (await fetch(`http://127.0.0.1:${pageServer.port}/v1/control/auth/`)).text();
+    } finally {
+      await pageServer.stop(true);
+    }
+    expect(page).toContain("no restart");
+    expect(page).not.toContain("Restart the service");
+    // The page must say the running service is already using the session — the sentence that
+    // replaced the old restart instruction.
+    expect(page).toContain("has already picked this session up");
+
+    // `doctor`'s guidance names the interactive sign-in as restart-free, and still requires the
+    // restart for `auth import`, which writes from its own short-lived process.
+    const report = {
+      ok: false,
+      mode: "browser-only" as const,
+      checks: [{
+        id: "login",
+        status: "error" as const,
+        message: "ChatGPT login state is missing or unverified",
+        detail: "provider chatgpt-web",
+      }],
+    };
+    const text = formatDoctorReport(report);
+    expect(text).toContain("/v1/control/auth/");
+    expect(text).toContain("no restart");
+    expect(text).toContain("auth import");
+    expect(text).toContain("then: docker compose restart chatgpt-web");
   });
 });

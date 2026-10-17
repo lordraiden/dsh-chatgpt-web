@@ -76,8 +76,8 @@ docker compose up -d --wait
 curl -fsS http://127.0.0.1:17841/healthz
 
 # 3. sign in: open http://127.0.0.1:17841/v1/control/auth/ in a browser, enter the control
-#    token, sign in, then restart the service so it picks the session up (see Sign in to ChatGPT)
-docker compose restart chatgpt-web
+#    token and sign in. The running service picks the session up on the next turn: no restart
+#    (see Sign in to ChatGPT)
 
 # 4. doctor: the container's own checks, ending in the next command when something fails
 docker compose exec chatgpt-web node lib/cli.js doctor
@@ -220,12 +220,10 @@ and the only way to type from a phone, whose on-screen keyboard cannot drive the
 
 It needs no display and no second container, and it uses the same loopback port as the API —
 **control token only**, so the API key does not open it (and the control token still does not open
-`/v1/*`). **Restart the service once the session is captured**, because it resolved the credentials
-path at startup:
-
-```bash
-docker compose restart chatgpt-web
-```
+`/v1/*`). **Nothing needs to be restarted once the session is captured:** the running service
+re-derives the account identity and the credentials path from the sign-in itself, so the very next
+turn uses the new session. (The `auth import` route below is the exception — it runs in its own
+process, so restart the service after adopting a capture that way.)
 
 ### Adopt a capture (`auth import`)
 
