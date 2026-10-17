@@ -2,11 +2,15 @@
 
 ## Unreleased
 
-- Headless provider sign-in via noVNC (issues #249/#259): `Dockerfile.login` layers Xvfb, x11vnc and
-  noVNC/websockify on top of the production image, and the `login` compose profile now serves the
-  sign-in on `127.0.0.1:6080` so a host with no display can complete it in one command. The display
-  stack stays out of the production artifact (no x11vnc, no websockify, no noVNC web root in it), and
-  the port is published on loopback only because it grants control of an authenticated session.
+- Retire the noVNC sign-in image (issue #276 slice 3b). The remote sign-in was verified against a real
+  account end to end (`/v1/control/auth/` → session stored in `providers/chatgpt-web/` → a streamed
+  turn with `finish_reason: "stop"`), so the `display` fallback's noVNC image is dead weight and is
+  gone: `Dockerfile.login`, `docker/entrypoint-login.sh`, the `login` Compose profile, the container
+  CI noVNC probe, the publish-image sign-in steps, and every doc/quickstart instruction that told an
+  operator to build or run it. `authBrowserMode: "display"` stays in the contract and in the code
+  path, but now means the operator supplies a display (an X server/socket, or their own headed
+  environment): the container provides none, and `headless` — the default, and what the verified sign-in
+  used — is the supported path on a headless host.
 - Per-provider credentials and a guided login path (issue #249): the session now lives in
   `providers/<providerId>/` inside the data volume, with the legacy single-provider path kept as a
   read alias so nothing is migrated and `config.json` is never rewritten. `auth import` adopts a

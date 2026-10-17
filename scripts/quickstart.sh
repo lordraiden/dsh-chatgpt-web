@@ -110,8 +110,8 @@ if [ "$login_status" != "ok" ]; then
   printf '\nquickstart: the stack is up and the API responds, but no real answer can be produced yet.\n' >&2
   printf '  No verified provider session on the data volume (doctor: login=%s).\n' "${login_status:-unknown}" >&2
   hint \
+    "open http://127.0.0.1:17841/v1/control/auth/ and sign in (no display needed), then: docker compose restart chatgpt-web" \
     "docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture" \
-    "docker compose --profile login up -d login   # or sign in at http://127.0.0.1:6080/vnc.html" \
     "# then prove the browser surface (cheap, no provider turn) and continue:" \
     "docker compose exec chatgpt-web node lib/cli.js browser check" \
     "scripts/quickstart.sh"

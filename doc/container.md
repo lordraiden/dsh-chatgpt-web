@@ -221,7 +221,7 @@ code change owned by #247.
 | Upgrade | `git pull && docker compose build --pull && docker compose up -d` — the volume survives; the base tag is pinned, so `--pull` refreshes that tag only |
 | Bind-mount variant (data on the host) | `mkdir -p data && docker compose --profile bind up -d chatgpt-web-bind` |
 | Interactive sign-in (no display needed) | open `http://127.0.0.1:17841/v1/control/auth/` in a browser, then `docker compose restart chatgpt-web` (§5.5) |
-| Interactive login (CLI `login`, needs a display) | `docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY login` (noVNC sign-in: §5.5) |
+| Interactive login (CLI `login`, needs a display you supply) | `dsh-chatgpt-web login`, or `docker compose run --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix chatgpt-web login` (§5.5) |
 
 Notes:
 
@@ -426,50 +426,39 @@ cannot be verified — malformed, expired, or unverifiable without a browser —
 printed. Unknown providers are refused (only `chatgpt-web` has a credential layout today; #250 owns the
 rest).
 
-**Fallback: `authBrowserMode: "display"` (the noVNC sign-in image, not retired)**
+**Fallback: `authBrowserMode: "display"` (the operator supplies a display)**
 
-`authBrowserMode` in `config.json` is optional and defaults to `headless`. Set it to `"display"` when a
-flow rejects headless: it makes the sign-in page launch a real window instead of `--headless=new`, and
-it needs a display — today the project's only one is the noVNC login image (`Dockerfile.login`), which
-is **not retired**. It stays as this fallback until the new page is confirmed with a real account, and
-it changes nothing about the managed turn browser.
+`authBrowserMode` in `config.json` is optional and defaults to `headless`. `headless` is the supported
+path on a headless host — it is what the remote sign-in page was verified against a real account with —
+and it needs no display. Set it to `"display"` only when a flow rejects headless: it makes the sign-in
+page launch a real window instead of `--headless=new`, and it needs a display **you supply** — an X
+server/socket the service can reach, or your own headed environment. The container starts no display
+server for you and ships no VNC server or noVNC web root, and the setting changes nothing about the
+managed turn browser.
 
-The `login` service in `docker-compose.yml` shares the data volume and runs the container's own
-interactive sign-in command — a separate path from the page, and unchanged. It needs a real display, so
-today it is run against a host X server:
+> **Retired (issue #276 slice 3b).** The former noVNC sign-in image (`Dockerfile.login`) and its `login`
+> Compose profile are gone. They existed only as a fallback until the service's own remote sign-in was
+> confirmed end to end against a real account, which it now is (`/v1/control/auth/` → session stored in
+> `providers/chatgpt-web/` → `POST /v1/chat/completions` streaming `finish_reason: "stop"`). On a host
+> with no display, use the page above; do not build or run a sign-in image.
+
+The CLI `login` path is unchanged and still needs a real display, so run it on a host that has one
+(`dsh-chatgpt-web login`), or hand the service container your own display — never one it ships:
 
 ```bash
-docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY="$DISPLAY" login
+docker compose run --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix chatgpt-web login
 ```
 
-A host with **no display** signs in through noVNC, in one command (issue #259):
-
-```bash
-docker build -t dsh-chatgpt-web:local . && docker compose --profile login build login
-docker compose --profile login up -d login
-# then open http://127.0.0.1:6080/vnc.html, sign in, and stop the service:
-docker compose --profile login down
-```
-
-The display stack (Xvfb, x11vnc, noVNC/websockify) lives **only** in `Dockerfile.login`, which layers on
-top of the production image, so the production artifact keeps no VNC surface. The checked facts:
-`/vnc.html` answers `200` on the published port, the published binding is `127.0.0.1:6080`, `DISPLAY=:99`
-inside the container, and the sign-in really is a headed browser on that display (11 Chrome processes
-observed). The session it captures is written to the provider credential layout above.
-
-`Xvfb` is the one exception worth naming: it is **already** present in the production image because the
-Playwright base image ships it for headed runs in CI. This change adds no display *server* to the
-production artifact; it adds the VNC/noVNC surface only to the sign-in image.
-
-> The noVNC port grants control of an authenticated browser session. It is published on the host's
-> **loopback only**; never expose it on `0.0.0.0`.
+> A display you supply for `authBrowserMode: "display"` (or for the CLI `login`) grants control of an
+> authenticated browser session. Keep an X server exposed for it on the host's **loopback only**; never
+> expose it on `0.0.0.0`.
 
 **Session lifecycle**
 
 | | |
 | --- | --- |
 | Expiry | `doctor --json` reports `login: error — ChatGPT login state is missing or unverified`, with the resolved path. Repeat the sign-in or `auth import`; nothing else needs to change |
-| Anti-bot / verification challenge | The provider may interrupt an automated session. Complete the challenge in the interactive sign-in path; a challenge does not corrupt the volume. When the page's headless flow is rejected, set `authBrowserMode: "display"` and use the noVNC fallback above |
+| Anti-bot / verification challenge | The provider may interrupt an automated session. Complete the challenge in the interactive sign-in path; a challenge does not corrupt the volume. When the page's headless flow is rejected, set `authBrowserMode: "display"` and supply a display yourself — the container provides none (§5.5) |
 | Captured, but turns still fail | The page reported the session stored, yet the running service still saw none: it resolved the credentials path at startup. Restart it (`docker compose restart chatgpt-web`) and re-run `doctor` |
 | Click outside the frame | A click outside the viewport the relay reports is refused, not clamped. It currently is refused with HTTP 400 `UNSUPPORTED_OPTION` — a known blemish |
 | Backup | The volume holds credentials: `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data-$(date +%F).tgz -C /data .` — store it encrypted |

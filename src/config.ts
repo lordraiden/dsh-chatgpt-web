@@ -390,10 +390,13 @@ export interface AppConfig {
    * How the interactive sign-in browser (`/v1/control/auth/*`) is launched (issue #276).
    *
    * `headless` — the default when the field is absent — runs Chromium with `--headless=new`, the same
-   * shape the managed ChatGPT browser already uses. `display` launches a real window instead, for a
-   * provider or anti-bot flow that rejects headless and needs a display: today that means the noVNC
-   * sign-in image. It is the escape hatch until slice 3 removes that image, and it changes nothing
-   * about the managed turn browser.
+   * shape the managed ChatGPT browser already uses, and is the supported path on a headless host
+   * (it is what the sign-in was verified against a real account with). `display` launches a real
+   * window instead, for a provider or anti-bot flow that rejects headless: it needs a display the
+   * **operator supplies** (an X server/socket reachable by the service, or their own headed
+   * environment). The container starts no display server, and the former noVNC `Dockerfile.login`
+   * sign-in image is retired (issue #276 slice 3b). It changes nothing about the managed turn
+   * browser.
    */
   authBrowserMode?: "headless" | "display";
   chromeExecutablePath: string;
