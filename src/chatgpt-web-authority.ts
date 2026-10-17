@@ -8,8 +8,8 @@ import {
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
   chatGptWebModelRoute,
   type ChatGptWebModelRoute,
-} from "./chatgpt-web-models";
-import type { CodexProviderConfig } from "./types";
+} from "./chatgpt-web-models.ts";
+import type { CodexProviderConfig } from "./types.ts";
 
 export type ChatGptWebCapabilityState = "supported" | "unsupported" | "unknown";
 

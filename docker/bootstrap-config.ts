@@ -6,12 +6,15 @@
  * same default `setup` would write *before* its login step — deterministic, no provider session, no
  * secrets beyond a freshly generated control token — and the entrypoint announces it on stderr.
  *
- * The relative import works both in the image (`/app/docker/…` → `/app/src/config.ts`) and when run
- * from a repository checkout, so it can be exercised locally:
+ * The entrypoint runs this file with `node` — the same runtime as `node lib/cli.js` — so everything it
+ * reaches must be resolvable by Node's ESM loader, which never adds an extension: the relative
+ * specifiers in `src/config.ts` and the modules it imports are fully specified (issue #267). Bun
+ * resolves both forms, so this file can still be exercised locally either way:
+ *   DSH_CHATGPT_WEB_HOME=<dir> node docker/bootstrap-config.ts
  *   DSH_CHATGPT_WEB_HOME=<dir> bun docker/bootstrap-config.ts
  *
  * `defaultConfig()` records a durable runtime command, so this must run as a FILE and from a
- * non-ephemeral path (never `bun -e`, never from /tmp).
+ * non-ephemeral path (never an evaluated script, never from /tmp).
  */
 import { existsSync } from "node:fs";
 import { defaultConfig, saveConfig, getConfigPath } from "../src/config.ts";

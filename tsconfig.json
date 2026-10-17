@@ -6,6 +6,10 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
+    // The container's first-run bootstrap graph is loaded by node (docker/bootstrap-config.ts), so
+    // its relative specifiers name their `.ts` files explicitly (issue #267). `noEmit` above is what
+    // makes this flag legal.
+    "allowImportingTsExtensions": true,
     "types": ["bun-types"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"]

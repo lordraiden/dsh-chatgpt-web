@@ -127,6 +127,16 @@ done
 BOOTSTRAP="$("${ENGINE[@]}" logs "$CONTAINER" 2>&1 | head -4)"
 check "the entrypoint bootstrapped the configuration" "wrote default configuration" "$BOOTSTRAP"
 
+# Issue #267: that bootstrap must not need bun either. Re-run the entrypoint itself on a second empty
+# data home with bun removed from PATH — only `node`, the runtime the service uses, may be required to
+# bring a volume up. Before the fix this aborts with `bun: not found` (exit 127).
+say "4b. an empty data home bootstraps with bun removed from PATH"
+NO_BUN="$("${ENGINE[@]}" run --rm --entrypoint sh "$IMAGE" -c \
+  'rm -rf /tmp/dsh-267-first-run; PATH=/usr/bin:/bin DSH_CHATGPT_WEB_HOME=/tmp/dsh-267-first-run sh /usr/local/bin/dsh-entrypoint --version' 2>&1; echo "exit=$?")"
+printf '%s\n' "$NO_BUN"
+check "the bootstrap runs without bun" "wrote default configuration" "$NO_BUN"
+check "the whole entrypoint then exits 0" "exit=0" "$NO_BUN"
+
 # The production image is non-root by default; the bind/root variant is the exception.
 RUNNING_USER="$("${ENGINE[@]}" exec "$CONTAINER" id 2>&1)"
 if [ "${#USER_ARG[@]}" -eq 0 ]; then
