@@ -13,6 +13,7 @@ import {
 import { projectChatGptCapabilities } from "../src/adapters/chatgpt-web/capability-projector";
 import {
   CHATGPT_RETAINED_SURFACE_BUSY_CODE,
+  ChatGptWebAdapterError,
   chatGptRetainedSurfaceBusyError,
 } from "../src/adapters/chatgpt-web/adapter-error";
 import {
@@ -205,9 +206,11 @@ describe("issue #201 — ChatGPT account fan-out is bounded, exclusivity is per 
       accountIdentity: "account-shared",
       nativeThreadId: "thread-shared",
     })));
-    expect(refusal.message).toBe(
-      "ChatGPT Web cannot synchronously start a second provider turn for an active native DSH thread",
-    );
+    // The refusal is the one conversation-busy category this provider publishes (issue #305): a local
+    // admission decision, never a bare `Error` the API would normalize into `502 upstream_server_error`.
+    expect(refusal).toBeInstanceOf(ChatGptWebAdapterError);
+    expect((refusal as ChatGptWebAdapterError).code).toBe(CHATGPT_RETAINED_SURFACE_BUSY_CODE);
+    expect(classifyChatGptWebFailure(refusal as ChatGptWebAdapterError)).toBe("TRANSPORT_UNAVAILABLE");
     // The refused turn never acquired a lease of its own.
     expect(leases.activeCount()).toBe(1);
 

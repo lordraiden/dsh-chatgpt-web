@@ -179,7 +179,15 @@ export function chatGptRetainedSurfaceLostError(): ChatGptWebAdapterError {
 
 export const CHATGPT_RETAINED_SURFACE_BUSY_CODE = "retained_surface_busy";
 
-/** Two turns of the same DSH chat raced for the one retained managed-chrome surface. */
+/**
+ * Another turn already owns this ChatGPT Web conversation.
+ *
+ * It is the one caller-facing refusal for "one active turn per logical conversation", published by
+ * every enforcement point that refuses a concurrent turn on one conversation: the retained
+ * managed-chrome surface (issue #171), the native DSH thread admission guard and the single
+ * cancellation attachment of a reused provider turn (issue #305). One category, so "wait, a turn is in
+ * flight" never has to be told apart from "the provider failed".
+ */
 export function chatGptRetainedSurfaceBusyError(): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     "Another turn is already using this ChatGPT Web conversation; concurrent turns of one chat are not allowed.",

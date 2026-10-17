@@ -41,7 +41,7 @@ import {
   cancelStructuredCompactionNativeTurn,
   cancelStructuredCompactionTrace,
 } from "./adapters/chatgpt-web/compaction-handoff";
-import { chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
 import {
   CHATGPT_TURN_REVISION_CONFLICT_MESSAGE,
   extractChatGptTurnIdentity,
@@ -666,7 +666,20 @@ export async function responseRequest(
         queue.push(event);
       });
     } catch (error) {
-      const event: AdapterEvent = { type: "error", message: error instanceof Error ? error.message : String(error) };
+      // A turn that rejects without a terminal event still owes its consumer one, and a typed adapter
+      // refusal owes it its **own category**: dropping the classification here made the bridge re-derive
+      // one from the message text, which is how a local admission decision was published as an upstream
+      // failure (issue #305). The fields are the same ones every other adapter error event carries.
+      const event: AdapterEvent = error instanceof ChatGptWebAdapterError
+        ? {
+            type: "error",
+            message: error.message,
+            status: error.status,
+            errorType: error.errorType,
+            code: error.code,
+            retryable: error.retryable,
+          }
+        : { type: "error", message: error instanceof Error ? error.message : String(error) };
       options.onAdapterEvent?.(event);
       queue.push(event);
     } finally {
@@ -1999,8 +2012,22 @@ export function startServer(
           payload = {};
         }
         // A provider failure must not look like an empty successful completion to an OpenAI client.
+        // The failed Responses payload already carries the provider's own classification; this surface
+        // relays it instead of re-labelling every failure as an upstream one, which is how a local
+        // admission refusal came to mean "the provider failed" (issue #305). Same rule `compactRequest`
+        // applies below. A payload with no published type keeps the historical 502/upstream_error.
         const failure = responseFailure(payload);
-        if (failure) return declareDropped(formatErrorResponse(502, "upstream_error", failure.message));
+        if (failure) {
+          const error = {
+            message: failure.message,
+            type: failure.type ?? "upstream_error",
+            code: failure.code ?? null,
+          };
+          return declareDropped(Response.json(
+            { error },
+            { status: httpStatusFromTerminalError(error) },
+          ));
+        }
         return declareDropped(
           Response.json(toChatCompletion(payload, translation.model), { status: upstream.ok ? 200 : upstream.status }),
         );

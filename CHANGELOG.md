@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Report a concurrent-turn refusal on one conversation as its own category (issue #305). Two overlapping
+  requests on the same identity used to answer `200` and, in ~0 ms, `502 upstream_server_error` with
+  `ChatGPT Web cannot synchronously start a second provider turn for an active native DSH thread`. The
+  refusal is correct — one active turn per logical conversation — but it is a **local admission
+  decision**, and `upstream_server_error` means "the provider failed": waiting resolves the first while
+  retrying makes the second worse. The admission guard and the other bare `Error` on that path (a
+  cancellation callback attached twice because a turn reused the active lifecycle) now throw the existing
+  conversation-busy refusal (`retained_surface_busy`, category `TRANSPORT_UNAVAILABLE`, not retryable)
+  with a message telling the caller that concurrent turns of one chat are not allowed. The two seams that
+  discarded the typed classification — the rejected-turn event of the Responses route, and the
+  OpenAI-compatible failure mapping, which re-labelled **every** failed turn as
+  `502 upstream_server_error` — now relay the category the turn already published. Admission is
+  unchanged: the same refusal still happens at the same point, with the same strictness, and is returned
+  concurrently instead of being queued behind the in-flight turn.
+
 - Bound a turn's wait for a *previous* turn's physical settlement (issue #301). A retained ChatGPT page
   whose operation stopped publishing a settlement used to hold every later turn for that conversation
   forever: no error, no progress, and `/healthz` still answering `accepting_turns: true`. Every such wait
