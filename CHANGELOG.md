@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Bound a turn's wait for a *previous* turn's physical settlement (issue #301). A retained ChatGPT page
+  whose operation stopped publishing a settlement used to hold every later turn for that conversation
+  forever: no error, no progress, and `/healthz` still answering `accepting_turns: true`. Every such wait
+  in the turn path is now bounded by a settlement-wait grace (60 s, `DEFAULT_SETTLEMENT_WAIT_GRACE_MS`);
+  the settlement owner stays the authority on the outcome, so a settlement that does land is still awaited
+  in full and never cut short. When the grace expires the turn fails closed with its own typed,
+  actionable category (`settlement_wait_timeout`, `503`, not retryable) — the service's own stuck-resource
+  condition, never an upstream one — and the wedged session is retired: its runtime is cancelled (which is
+  how the physical owner is told to abort and publish a `rejected` settlement, tombstoning the retained
+  key instead of reusing it) and later turns for that conversation take the same bounded, explicit
+  outcome instead of hanging, until the settlement lands and normal service resumes. This is the #291
+  shutdown discipline applied to the turn path; `TROUBLESHOOTING.md` §15 records the operator response and
+  why `accepting_turns` is not the stuck-work signal (`active_browser_turns` is).
+
 - Stop refusing capability declarations on the OpenAI-compatible surface. `tools`, `tool_choice`, `mcp`
   and the legacy `functions`/`function_call` are now accepted and **discarded by design** — never
   executed, never forwarded — because the provider is a consumer web chat reached as text, with no

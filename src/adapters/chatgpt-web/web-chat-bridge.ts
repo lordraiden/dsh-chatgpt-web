@@ -164,6 +164,10 @@ const CHATGPT_WEB_CHAT_CATEGORY_BY_CODE: Readonly<Record<string, WebChatErrorCat
   context_canonical_state_missing: "CONVERSATION_STATE_MISMATCH",
   compaction_source_unavailable: "CONVERSATION_STATE_MISMATCH",
   retained_surface_busy: "TRANSPORT_UNAVAILABLE",
+  // The retained conversation could not be handed over because a previous turn's physical
+  // settlement stayed unproven past the settlement-wait grace (issue #301): the same resource
+  // unavailability as a busy surface, never an upstream failure.
+  settlement_wait_timeout: "TRANSPORT_UNAVAILABLE",
   // Submission and response.
   chatgpt_submission_ambiguous: "SUBMISSION_AMBIGUOUS",
   chatgpt_submitted_turn_failed: "UPSTREAM_ERROR",
