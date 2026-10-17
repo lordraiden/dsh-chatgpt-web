@@ -386,6 +386,16 @@ export interface AppConfig {
   browserHost: BrowserHostMode;
   browserInteractionMode: BrowserInteractionMode;
   browserHostDescriptorPath?: string;
+  /**
+   * How the interactive sign-in browser (`/v1/control/auth/*`) is launched (issue #276).
+   *
+   * `headless` — the default when the field is absent — runs Chromium with `--headless=new`, the same
+   * shape the managed ChatGPT browser already uses. `display` launches a real window instead, for a
+   * provider or anti-bot flow that rejects headless and needs a display: today that means the noVNC
+   * sign-in image. It is the escape hatch until slice 3 removes that image, and it changes nothing
+   * about the managed turn browser.
+   */
+  authBrowserMode?: "headless" | "display";
   chromeExecutablePath: string;
   storageStatePath: string;
   /** Stable authenticated ChatGPT account fingerprint derived from /api/auth/session user.id. */
@@ -622,6 +632,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
     browserHost: "managed-chrome",
     browserInteractionMode: "automatic",
+    authBrowserMode: "headless",
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
@@ -858,6 +869,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   const browserInteractionMode = parsed.browserInteractionMode ?? "automatic";
   if (browserInteractionMode !== "automatic" && browserInteractionMode !== "manual") {
     throw new Error(`Invalid browserInteractionMode in ${path}`);
+  }
+  // The interactive sign-in browser mode (issue #276) is additive and optional: absent means the
+  // documented `headless` default, and a present value must be one of the two enumerated modes.
+  if (parsed.authBrowserMode !== undefined
+    && parsed.authBrowserMode !== "headless"
+    && parsed.authBrowserMode !== "display") {
+    throw new Error(`Invalid authBrowserMode in ${path}`);
   }
   if (browserInteractionMode === "manual" && parsed.mode !== "full") {
     throw new Error(`Zero Risk requires full mode in ${path}`);
