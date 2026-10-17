@@ -1255,3 +1255,171 @@ describe("issue #287 slice 3 — a logical outcome is not a physical settlement"
     expect(turn.snapshot().logicalOutcome).toBe("completed");
   });
 });
+
+/**
+ * The remainder of the deleted `scripts/test-issue-9-provider-core.ts`: the two pre-submission turn
+ * guards a future provider driver walks, asserted against the ProviderCore as it is now.
+ *
+ * - a surface cannot become ready without the physical resource it belongs to;
+ * - a turn cannot be reported as running before the provider accepted its submission.
+ *
+ * Neither is reachable through the controlled browser surface (`tests/support/chatgpt-web-surface.ts`):
+ * its transport always binds a physical resource before `onSurfaceReady` and always confirms the
+ * submission before it streams. That is exactly why the deleted contract drove them through the
+ * core's own lifecycle, and why this does the same, browser-free.
+ */
+describe("issue #287 slice 3 — the pre-submission turn guards a driver walks", () => {
+  function providerTurnInput(executionKey: string): ChatGptWebProviderCoreTurnInput {
+    return {
+      executionKey,
+      traceId: `${executionKey}-trace`,
+      nativeTurnId: `${executionKey}-native`,
+      nativeThreadId: `${executionKey}-thread`,
+      accountIdentity: "account-guard",
+      browserProfile: "profile-guard",
+      browserContext: "context-guard",
+      pageIdentity: `page-${executionKey}`,
+      capabilitySnapshot: {
+        snapshotId: `snapshot-${executionKey}`,
+        sessionId: "session-guard",
+        agentId: "session-guard",
+        turnId: `${executionKey}-native`,
+        createdAt: 1_700_000_000_000,
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    };
+  }
+
+  function physicalResource(executionKey: string) {
+    return {
+      resourceId: `surface-${executionKey}`,
+      browserContextId: "context-guard",
+      pageId: `page-${executionKey}`,
+      profileId: "profile-guard",
+      accountId: "chatgpt-account:account-guard",
+    };
+  }
+
+  /** Capture the synchronous refusal instead of matching it, so its exact shape is asserted. */
+  function refusalOf(run: () => unknown): Error {
+    try {
+      run();
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error("Expected the operation to be refused, but it succeeded");
+  }
+
+  test("a surface cannot become ready before its physical browser resource is bound", () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-287-guard-unbound-surface";
+    const turn = core.begin(providerTurnInput(executionKey));
+    expect(turn.snapshot().state).toBe("LEASED");
+    expect(turn.snapshot().physicalResourceBound).toBe(false);
+
+    const refusal = refusalOf(() => turn.markSurfaceReady());
+    expect(refusal).toBeInstanceOf(Error);
+    expect(refusal.message).toBe(
+      "Provider turn surface cannot become ready before a physical browser resource is bound",
+    );
+
+    // The refusal is not a fake binding and not terminal: the turn stays leased, stays unbound, and
+    // becomes ready once the physical resource really exists.
+    expect(turn.snapshot().state).toBe("LEASED");
+    expect(turn.snapshot().physicalResourceBound).toBe(false);
+    expect(turn.snapshot().physicalResource).toBeUndefined();
+    expect(turn.lease.isActive()).toBe(true);
+    expect(turn.lease.physicalResourceBinding()).toBeUndefined();
+
+    turn.bindPhysicalResource(physicalResource(executionKey));
+    expect(turn.snapshot().physicalResourceBound).toBe(true);
+    expect(() => turn.markSurfaceReady()).not.toThrow();
+    expect(turn.snapshot().state).toBe("SURFACE_READY");
+    // Readiness is a no-op once recorded, not a refusal: a repeated driver callback is harmless.
+    expect(() => turn.markSurfaceReady()).not.toThrow();
+    expect(turn.snapshot().state).toBe("SURFACE_READY");
+
+    turn.failBeforePhysicalSettlement();
+  });
+
+  test("a send-activated submission cannot be reported as running", () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin(providerTurnInput("issue-287-guard-before-accept"));
+    turn.bindPhysicalResource(physicalResource("issue-287-guard-before-accept"));
+    turn.markSurfaceReady();
+    turn.markSendActivated();
+
+    // Send activation already moved the provider turn to SUBMITTED; acceptance is a later fact.
+    expect(turn.snapshot().state).toBe("SUBMITTED");
+    expect(turn.snapshot().submission).toBe("send_activated");
+
+    const refusal = refusalOf(() => turn.markRunning());
+    expect(refusal.message).toBe("Provider turn cannot enter RUNNING before submission is accepted");
+    // Nothing moved and nothing was invented as an activity.
+    expect(turn.snapshot().state).toBe("SUBMITTED");
+    expect(turn.snapshot().submission).toBe("send_activated");
+    expect(turn.snapshot().activity).toBe("idle");
+
+    // Acceptance is the fact that unlocks it, and the refusal was not terminal.
+    turn.markSubmitted();
+    expect(turn.snapshot().submission).toBe("accepted");
+    expect(() => turn.markRunning()).not.toThrow();
+    expect(turn.snapshot().state).toBe("RUNNING");
+    expect(turn.snapshot().activity).toBe("running");
+
+    turn.failBeforePhysicalSettlement();
+  });
+
+  test("an accepted submission alone is not enough: RUNNING also requires the ready surface", () => {
+    // The submission gate and the state gate are separate. A driver that confirms a send while its
+    // surface is not ready has an accepted submission and is still refused, with the state named.
+    const leaseBound = new ChatGptWebProviderCore();
+    const acceptedWhileLeased = leaseBound.begin(providerTurnInput("issue-287-guard-accepted-leased"));
+    acceptedWhileLeased.bindPhysicalResource(physicalResource("issue-287-guard-accepted-leased"));
+    acceptedWhileLeased.markSubmitted();
+    expect(acceptedWhileLeased.snapshot().state).toBe("LEASED");
+    expect(acceptedWhileLeased.snapshot().submission).toBe("accepted");
+    expect(refusalOf(() => acceptedWhileLeased.markRunning()).message)
+      .toBe("Provider turn cannot enter RUNNING from LEASED");
+    expect(acceptedWhileLeased.snapshot().state).toBe("LEASED");
+    acceptedWhileLeased.failBeforePhysicalSettlement();
+
+    // And a ready surface with no submission at all is refused by the same state gate, first.
+    const core = new ChatGptWebProviderCore();
+    const readyButUnsubmitted = core.begin(providerTurnInput("issue-287-guard-ready-unsubmitted"));
+    readyButUnsubmitted.bindPhysicalResource(physicalResource("issue-287-guard-ready-unsubmitted"));
+    readyButUnsubmitted.markSurfaceReady();
+    expect(readyButUnsubmitted.snapshot().state).toBe("SURFACE_READY");
+    expect(readyButUnsubmitted.snapshot().submission).toBe("prepared");
+    expect(refusalOf(() => readyButUnsubmitted.markRunning()).message)
+      .toBe("Provider turn cannot enter RUNNING from SURFACE_READY");
+    expect(readyButUnsubmitted.snapshot().state).toBe("SURFACE_READY");
+    readyButUnsubmitted.failBeforePhysicalSettlement();
+  });
+
+  test("once accepted, RUNNING is re-entrant and a capability wait returns to it", () => {
+    const core = new ChatGptWebProviderCore();
+    const turn = core.begin(providerTurnInput("issue-287-guard-running-reentrant"));
+    turn.bindPhysicalResource(physicalResource("issue-287-guard-running-reentrant"));
+    turn.markSurfaceReady();
+    turn.markSubmitted();
+    turn.markRunning();
+    expect(turn.snapshot().state).toBe("RUNNING");
+    expect(turn.snapshot().activity).toBe("running");
+
+    turn.markCapabilityWait();
+    expect(turn.snapshot().activity).toBe("capability_wait");
+
+    // The broker returning a tool batch reports RUNNING again: from RUNNING with an accepted
+    // submission this is allowed and only restores the activity, it never re-transitions.
+    expect(() => turn.markRunning()).not.toThrow();
+    expect(turn.snapshot().state).toBe("RUNNING");
+    expect(turn.snapshot().activity).toBe("running");
+    expect(() => turn.markRunning()).not.toThrow();
+    expect(turn.snapshot().state).toBe("RUNNING");
+
+    turn.failBeforePhysicalSettlement();
+  });
+});

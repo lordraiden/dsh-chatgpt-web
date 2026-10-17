@@ -3,14 +3,19 @@ import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFil
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
+// Fully specified on purpose (issue #267): the container's first-run bootstrap runs this module
+// directly under `node`, whose ESM loader has no extension resolution. Every relative specifier in
+// this module and in the modules it reaches (chatgpt-web-authority, chatgpt-web-models, types,
+// version) must therefore name its `.ts` file; the issue #267 test runs that bootstrap under node
+// and fails when one does not. `bun` and `tsc` accept the same source (`allowImportingTsExtensions`).
 import {
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
   resolveChatGptWebContextLimits,
-} from "./chatgpt-web-models";
-import type { CodexProviderConfig } from "./types";
-import { accountIdentityFromStorageState } from "./chatgpt-web-authority";
-import { VERSION } from "./version";
+} from "./chatgpt-web-models.ts";
+import type { CodexProviderConfig } from "./types.ts";
+import { accountIdentityFromStorageState } from "./chatgpt-web-authority.ts";
+import { VERSION } from "./version.ts";
 
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";

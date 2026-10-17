@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   BrowserAccountLeaseRegistry,
   CHATGPT_WEB_ACCOUNT_IDENTITY_MISSING_MESSAGE,
@@ -446,5 +447,144 @@ describe("issue #201 — ChatGPT account fan-out is bounded, exclusivity is per 
     expect(CHATGPT_RETAINED_SURFACE_BUSY_CODE).toBe("retained_surface_busy");
     expect(chatGptRetainedSurfaceBusyError().code).toBe(CHATGPT_RETAINED_SURFACE_BUSY_CODE);
     expect(classifyChatGptWebFailure(chatGptRetainedSurfaceBusyError())).toBe("TRANSPORT_UNAVAILABLE");
+  });
+});
+
+/**
+ * The lease provenance is the one identity channel that must never carry a raw identity.
+ *
+ * Restored from the deleted `scripts/test-issue-9-provider-core.ts` ("provenance fingerprints trusted
+ * account/profile context/page identity"), asserted against the lease as it is now and extended to
+ * every identity the provenance reports and to the whole published key set. The suite's own `3b`
+ * cases already pin the same fingerprint vocabulary in the *refusal* text; this pins it in the
+ * published provenance and in the lease id.
+ *
+ * The lease provenance is browser-free by construction: it is a plain value derived from the
+ * descriptor, so no page, account or path has to exist.
+ */
+describe("issue #201 — the lease provenance publishes fingerprints, never an identity", () => {
+  /** This file's own copy of the fingerprint the lease uses: sha256, hex, first 12. */
+  function fingerprint(value: string): string {
+    return createHash("sha256").update(value).digest("hex").slice(0, 12);
+  }
+
+  const PROVENANCE_KEYS = [
+    "account",
+    "browserContext",
+    "browserProfile",
+    "leaseId",
+    "page",
+    "physicalResourceBound",
+    "serviceId",
+    "turnId",
+  ];
+
+  const RAW = {
+    accountIdentity: "raw-account-201",
+    browserProfile: "raw-profile-201",
+    browserContext: "raw-context-201",
+    pageIdentity: "raw-page-201",
+    resourceId: "raw-surface-201",
+  };
+
+  test("every identity the lease reports is a 12-hex fingerprint, and no raw value is published", () => {
+    const registry = new BrowserAccountLeaseRegistry();
+    const lease = registry.acquire({
+      serviceId: "chatgpt-web",
+      accountIdentity: RAW.accountIdentity,
+      browserProfile: RAW.browserProfile,
+      browserContext: RAW.browserContext,
+      pageIdentity: RAW.pageIdentity,
+      turnId: "turn-provenance-201",
+    });
+
+    const provenance = lease.provenance();
+
+    // The exact published key set, so an added or renamed identity field fails loudly here instead
+    // of the absence of one being read by cast and silently missing a rename.
+    expect(Object.keys(provenance).sort()).toEqual(PROVENANCE_KEYS);
+
+    // Each reported identity is the fingerprint of the descriptor value it stands for.
+    expect(provenance.account).toBe(fingerprint(RAW.accountIdentity));
+    expect(provenance.browserProfile).toBe(fingerprint(RAW.browserProfile));
+    expect(provenance.browserContext).toBe(fingerprint(RAW.browserContext));
+    expect(provenance.page).toBe(fingerprint(RAW.pageIdentity));
+    for (const field of ["account", "browserProfile", "browserContext", "page"] as const) {
+      expect(provenance[field]).toMatch(/^[0-9a-f]{12}$/);
+    }
+
+    // `serviceId` is the provider label and `turnId` is the lease owner the registry dedupes on;
+    // neither is an account/profile/context/page identity, and nothing here is a path.
+    expect(provenance.serviceId).toBe("chatgpt-web");
+    expect(provenance.turnId).toBe("turn-provenance-201");
+
+    // The lease id is those same fingerprints in a fixed order plus the raw lease owner: it is a
+    // second publication of the same sanitized identities, never a second raw channel.
+    expect(provenance.leaseId).toBe([
+      "chatgpt-web",
+      fingerprint(RAW.accountIdentity),
+      fingerprint(RAW.browserProfile),
+      fingerprint(RAW.browserContext),
+      fingerprint(RAW.pageIdentity),
+      "turn-provenance-201",
+    ].join(":"));
+    expect(provenance.leaseId).toMatch(/^chatgpt-web(?::[0-9a-f]{12}){4}:turn-provenance-201$/);
+
+    const published = JSON.stringify(provenance);
+    for (const raw of Object.values(RAW)) expect(published).not.toContain(raw);
+  });
+
+  test("binding a physical resource reports that it exists, never which resource, page or path it is", () => {
+    const registry = new BrowserAccountLeaseRegistry();
+    const lease = registry.acquire({
+      serviceId: "chatgpt-web",
+      accountIdentity: RAW.accountIdentity,
+      browserProfile: RAW.browserProfile,
+      browserContext: RAW.browserContext,
+      pageIdentity: RAW.pageIdentity,
+      turnId: "turn-bound-201",
+    });
+    expect(lease.provenance().physicalResourceBound).toBe(false);
+
+    registry.bindPhysicalResource(lease, {
+      resourceId: RAW.resourceId,
+      browserContextId: RAW.browserContext,
+      pageId: RAW.pageIdentity,
+      profileId: RAW.browserProfile,
+      accountId: `chatgpt-account:${RAW.accountIdentity}`,
+    });
+
+    const bound = lease.provenance();
+    // The resource identity is deliberately not reported: provenance carries the boolean, and the
+    // raw binding stays in `physicalResourceBinding()`, where the driver that owns it reads it.
+    expect(bound.physicalResourceBound).toBe(true);
+    expect(Object.keys(bound).sort()).toEqual(PROVENANCE_KEYS);
+    expect(lease.physicalResourceBinding()?.resourceId).toBe(RAW.resourceId);
+
+    const published = JSON.stringify(bound);
+    for (const raw of Object.values(RAW)) expect(published).not.toContain(raw);
+  });
+
+  test("a turn publishes that same sanitized provenance while `begin()` still holds the raw identity", () => {
+    const leases = new BrowserAccountLeaseRegistry();
+    const core = new ChatGptWebProviderCore("chatgpt-web", leases);
+    const turn = core.begin({
+      ...leaseInput("provenance-201"),
+      accountIdentity: RAW.accountIdentity,
+      pageIdentity: RAW.pageIdentity,
+    });
+
+    expect(Object.keys(turn.snapshot().lease).sort()).toEqual(PROVENANCE_KEYS);
+    expect(JSON.stringify(turn.snapshot().lease)).not.toContain(RAW.accountIdentity);
+    expect(JSON.stringify(turn.snapshot().lease)).not.toContain(RAW.pageIdentity);
+
+    // The raw binding the driver needs is a separate field of the turn snapshot, and it only appears
+    // once the physical resource really exists.
+    expect(turn.snapshot().physicalResource).toBeUndefined();
+    turn.bindPhysicalResource(physicalResource("provenance-201", RAW.accountIdentity));
+    expect(turn.snapshot().physicalResource?.resourceId).toBe("surface-provenance-201");
+    // Binding changes neither the published lease shape nor what it says.
+    expect(Object.keys(turn.snapshot().lease).sort()).toEqual(PROVENANCE_KEYS);
+    expect(JSON.stringify(turn.snapshot().lease)).not.toContain(RAW.accountIdentity);
   });
 });
