@@ -14,6 +14,9 @@
  * - The exchange state machine, transport readiness and physical settlement are contracted here but
  *   implemented by the exchange lifecycle work (issue #191 / PR 3).
  * - Provider drivers are implemented by the provider migrations (issue #192 and later).
+ * - Interactive authentication is contracted here as an optional provider capability (`auth.ts`),
+ *   and implemented by the provider drivers; the host relays pixels and input but never owns the
+ *   navigation or the completion decision (issue #276).
  * - The core is never a transcript store: canonical history stays with the host, and
  *   `replayHistory` is only an input.
  */
@@ -26,6 +29,18 @@ export {
   type WebChatErrorCategory,
   type WebChatErrorOptions,
 } from "./errors";
+
+export {
+  AUTH_SESSION_STATES,
+  isAuthInput,
+  isAuthSessionState,
+  isProviderAuthView,
+  type AuthInput,
+  type AuthSessionState,
+  type ProviderAuthController,
+  type ProviderAuthSession,
+  type ProviderAuthView,
+} from "./auth";
 
 export {
   WEB_CHAT_EXCHANGE_EVENT_TYPES,
