@@ -89,11 +89,14 @@ export type AuthCapture =
  *
  * `stored: false` is a legitimate answer (nothing to persist, or persistence is the provider's own
  * side effect). `location` is a non-secret, human-readable place the material landed, which the
- * operator page may show.
+ * operator page may show. `detail` is a non-secret diagnostic for a *stored* capture whose provider
+ * side effect did not fully complete (an account binding that could not be recorded, for instance):
+ * the operator page may show it, exactly like a session's `detail`, and it carries no credential.
  */
 export interface ProviderAuthStoreResult {
   readonly stored: boolean;
   readonly location?: string;
+  readonly detail?: string;
 }
 
 /**

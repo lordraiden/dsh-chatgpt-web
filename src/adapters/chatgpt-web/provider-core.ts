@@ -151,8 +151,11 @@ export class BrowserAccountLease {
     }
     const expectedAccountId = `chatgpt-account:${this.descriptor.accountIdentity}`;
     if (binding.accountId !== expectedAccountId) {
+      // Both sides, fingerprinted: the operator needs to see *which* physical account refused, but a
+      // raw account identifier never travels. `fingerprint` is this file's own sanitizer.
       throw new Error(
-        `Browser lease physical account does not match its logical account identity: expected ${expectedAccountId}`,
+        `Browser lease physical account does not match its logical account identity: `
+        + `expected ${fingerprint(expectedAccountId)}, actual ${fingerprint(binding.accountId)}`,
       );
     }
     if (this.physicalResource && this.physicalResource.resourceId !== binding.resourceId) {

@@ -71,6 +71,8 @@ export interface WebChatAuthViewport {
 export interface WebChatAuthCaptureReport {
   readonly stored: boolean;
   readonly location?: string;
+  /** Non-secret provider diagnostic for a stored capture whose side effect did not fully complete. */
+  readonly detail?: string;
 }
 
 /** One provider as the operator page may list it. */
@@ -294,6 +296,11 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
           stored: result.stored,
           ...(typeof result.location === "string" && result.location.length > 0
             ? { location: result.location }
+            : {}),
+          // A provider's non-secret explanation for a stored capture whose provider-side side effect
+          // did not fully complete, relayed verbatim like a session's own `detail`.
+          ...(typeof result.detail === "string" && result.detail.length > 0
+            ? { detail: result.detail }
             : {}),
         };
       } catch (error) {

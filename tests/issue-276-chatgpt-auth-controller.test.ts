@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
@@ -12,7 +13,18 @@ import {
   type ChatGptWebAuthBrowserHandle,
   type ChatGptWebAuthBrowserLaunch,
 } from "../src/adapters/chatgpt-web/auth-controller";
-import { CHATGPT_WEB_ROUTE_ID, defaultConfig } from "../src/config";
+import {
+  CHATGPT_WEB_ROUTE_ID,
+  defaultConfig,
+  getConfigPath,
+  persistAccountIdentityFingerprint,
+  saveConfig,
+} from "../src/config";
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+} from "./support/chatgpt-web-home";
 import type { ChatGptWebAccountCapabilities } from "../src/chatgpt-web-models";
 import { startServer, type RunningServer } from "../src/server";
 import { CHATGPT_WEB_DRIVER_ID } from "../src/web-chat/host/provider-host";
@@ -44,6 +56,9 @@ const ONE_BY_ONE_PNG = new Uint8Array(
 );
 
 const CAPTURED_CAPABILITIES: ChatGptWebAccountCapabilities = { solAvailable: true, proAvailable: false };
+
+/** A realistic 24-hex account fingerprint, i.e. exactly what `accountIdentityFromUserId` produces. */
+const IDENTITY_FINGERPRINT = "4f1c9a27b3d05e688a21cc0d";
 
 interface FakePage {
   readonly page: Page;
@@ -101,6 +116,10 @@ function makeController(options: {
   page?: FakePage;
   storageState?: unknown;
   store?: (storageState: unknown, capabilities: ChatGptWebAccountCapabilities) => string;
+  detectIdentity?: (page: Page) => Promise<string>;
+  persistIdentity?: (fingerprint: string) => void;
+  /** Use the REAL configuration writer instead of the spy, for the persistence tests. */
+  realIdentityWriter?: boolean;
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
   maxPolls?: number;
@@ -112,12 +131,17 @@ function makeController(options: {
   const storageState = options.storageState ?? { cookies: [], origins: [] };
   const storeCalls: Array<{ storageState: unknown; capabilities: ChatGptWebAccountCapabilities }> = [];
   const removes: string[] = [];
+  /** Every page the completion check probed for the account identity (there must be exactly one). */
+  const identityProbes: Page[] = [];
+  /** Every fingerprint the controller handed to its writer; empty means it never even tried. */
+  const identityWriteAttempts: string[] = [];
   let closes = 0;
   const handle: ChatGptWebAuthBrowserHandle = {
     page: page.page,
     storageState: async () => storageState,
     close: async () => { closes += 1; },
   };
+  const detectIdentity = options.detectIdentity ?? (async () => IDENTITY_FINGERPRINT);
   const controller: ProviderAuthController = createChatGptWebAuthController({
     config: { chromeExecutablePath: "/fake/chrome", authBrowserMode: options.authBrowserMode },
     profileRoot: "/fake/profile-root",
@@ -133,6 +157,18 @@ function makeController(options: {
       storeCalls.push({ storageState: state, capabilities });
       return "/fake/providers/chatgpt-web/storage-state.json";
     }),
+    detectIdentity: async probe => {
+      identityProbes.push(probe);
+      return await detectIdentity(probe);
+    },
+    ...(options.realIdentityWriter === true
+      ? {}
+      : {
+        persistIdentity: (fingerprint: string) => {
+          identityWriteAttempts.push(fingerprint);
+          options.persistIdentity?.(fingerprint);
+        },
+      }),
     pollIntervalMs: options.pollIntervalMs ?? 1,
     pollTimeoutMs: options.pollTimeoutMs ?? 60_000,
     ...(options.maxPolls !== undefined ? { maxPolls: options.maxPolls } : {}),
@@ -144,6 +180,8 @@ function makeController(options: {
     storageState,
     storeCalls,
     removes,
+    identityProbes,
+    identityWriteAttempts,
     closes: () => closes,
   };
 }
@@ -467,6 +505,173 @@ describe("issue #276 slice 2b — capture and store", () => {
     expect(await controller.storeCapture({ kind: "opaque", payload: {} })).toEqual({ stored: false });
     expect(await controller.storeCapture({ kind: "none" })).toEqual({ stored: false });
     expect(storeCalls).toHaveLength(0);
+
+    await session.cancel();
+  });
+});
+
+describe("issue #276 — a captured session binds the account it signed in", () => {
+  /**
+   * The production bug these tests pin down: the interactive sign-in stored the session but never the
+   * account fingerprint, so the logical identity stayed a fallback (`providerConfig` substitutes the
+   * storage-state-derived value for an absent `accountIdentityFingerprint`) and every turn failed
+   * closed on the lease's account-binding check. The controller now reads the same probe `login` uses
+   * and persists its fingerprint once the session is stored.
+   */
+
+  test("the completion check probes identity once on the live page and storeCapture writes that fingerprint", async () => {
+    const storageState = { cookies: [{ name: "session", value: "opaque" }], origins: [] };
+    let inspections = 0;
+    const { controller, page, storeCalls, identityProbes, identityWriteAttempts } = makeController({
+      storageState,
+      // Three inspections: the detection must happen once, at completion, never per poll.
+      inspect: async () => {
+        inspections += 1;
+        if (inspections < 3) throw new Error("the composer is not visible yet");
+        return CAPTURED_CAPABILITIES;
+      },
+    });
+    const session = await controller.startAuth();
+    await waitForState(session, "captured");
+
+    // Detection runs against the very page the session drives, exactly once.
+    expect(identityProbes).toEqual([page.page]);
+
+    const result = await controller.storeCapture(await session.capture());
+    expect(result).toEqual({ stored: true, location: "/fake/providers/chatgpt-web/storage-state.json" });
+    expect(storeCalls).toHaveLength(1);
+    expect(identityWriteAttempts).toEqual([IDENTITY_FINGERPRINT]);
+
+    await session.cancel();
+  });
+
+  test("the real configuration writer persists the fingerprint and leaves every other field untouched", async () => {
+    const saved = captureChatGptWebHome();
+    const home = useTemporaryChatGptWebHome("dsh-276-binding-");
+    try {
+      const initial = {
+        ...defaultConfig(),
+        port: 4242,
+        appName: "issue-276-binding",
+        automaticAppName: "issue-276-binding",
+      };
+      saveConfig(initial);
+      const before = JSON.parse(readFileSync(getConfigPath(), "utf8")) as Record<string, unknown>;
+      expect(before.accountIdentityFingerprint).toBeUndefined();
+
+      let inspections = 0;
+      const { controller, identityProbes } = makeController({
+        // The REAL default writer: this is the path `storeCapture` takes in production.
+        realIdentityWriter: true,
+        inspect: async () => {
+          inspections += 1;
+          if (inspections < 2) throw new Error("not yet");
+          return CAPTURED_CAPABILITIES;
+        },
+      });
+      const session = await controller.startAuth();
+      await waitForState(session, "captured");
+      const result = await controller.storeCapture(await session.capture());
+      expect(result).toEqual({ stored: true, location: "/fake/providers/chatgpt-web/storage-state.json" });
+      expect(identityProbes).toHaveLength(1);
+
+      const after = JSON.parse(readFileSync(getConfigPath(), "utf8")) as Record<string, unknown>;
+      expect(after.accountIdentityFingerprint).toBe(IDENTITY_FINGERPRINT);
+      const { accountIdentityFingerprint: persisted, ...restAfter } = after;
+      const { accountIdentityFingerprint: absent, ...restBefore } = before;
+      expect(absent).toBeUndefined();
+      expect(persisted).toBe(IDENTITY_FINGERPRINT);
+      // Nothing that already existed was clobbered, not the port, not the connector name, and not the
+      // configured `storageStatePath` that `loadConfig` resolves for reads only.
+      expect(restAfter).toEqual(restBefore);
+      expect(after.port).toBe(4242);
+      expect(after.appName).toBe("issue-276-binding");
+      expect(after.storageStatePath).toBe(initial.storageStatePath);
+
+      // Exactly once at the file too: storing the same value again is a no-op.
+      const bytes = readFileSync(getConfigPath(), "utf8");
+      expect(persistAccountIdentityFingerprint(IDENTITY_FINGERPRINT)).toBe(false);
+      expect(readFileSync(getConfigPath(), "utf8")).toBe(bytes);
+
+      await session.cancel();
+    } finally {
+      restoreChatGptWebHome(saved, home);
+    }
+  });
+
+  test("a failed session store writes no fingerprint at all", async () => {
+    const saved = captureChatGptWebHome();
+    const home = useTemporaryChatGptWebHome("dsh-276-binding-fail-");
+    try {
+      saveConfig({
+        ...defaultConfig(),
+        appName: "issue-276-binding-fail",
+        automaticAppName: "issue-276-binding-fail",
+      });
+      const { controller } = makeController({
+        realIdentityWriter: true,
+        store: () => { throw new Error("EACCES: the storage state could not be written"); },
+        inspect: async () => CAPTURED_CAPABILITIES,
+      });
+      const session = await controller.startAuth();
+      await waitForState(session, "captured");
+
+      const failure = await controller.storeCapture(await session.capture()).catch(error => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain("EACCES");
+
+      // The session never landed, so the account binding must not have either.
+      const config = JSON.parse(readFileSync(getConfigPath(), "utf8")) as Record<string, unknown>;
+      expect(config.accountIdentityFingerprint).toBeUndefined();
+      await session.cancel();
+    } finally {
+      restoreChatGptWebHome(saved, home);
+    }
+  });
+
+  test("an unreadable account identity keeps the session stored and reports why the next turn fails closed", async () => {
+    const { controller, storeCalls, identityWriteAttempts } = makeController({
+      storageState: { cookies: [], origins: [] },
+      inspect: async () => CAPTURED_CAPABILITIES,
+      detectIdentity: async () => {
+        throw new Error("auth session probe failed at https://chatgpt.com/api/auth/session?code=very-secret");
+      },
+    });
+    const session = await controller.startAuth();
+    await waitForState(session, "captured");
+
+    const result = await controller.storeCapture(await session.capture());
+    // Stored, not failed: a session the operator just produced is never thrown away for a missing
+    // account binding. But the operator is told, in non-secret terms, that the next turn fails closed.
+    expect(result.stored).toBe(true);
+    expect(result.location).toBe("/fake/providers/chatgpt-web/storage-state.json");
+    expect(result.detail).toContain("account identity could not be read");
+    expect(result.detail).toContain("fail closed");
+    expect(result.detail).not.toContain("very-secret");
+    expect(storeCalls).toHaveLength(1);
+    expect(identityWriteAttempts).toEqual([]);
+
+    await session.cancel();
+  });
+
+  test("a configuration write failure is reported on the stored capture, never thrown", async () => {
+    const { controller, storeCalls, identityWriteAttempts } = makeController({
+      storageState: { cookies: [], origins: [] },
+      inspect: async () => CAPTURED_CAPABILITIES,
+      persistIdentity: () => {
+        throw new Error("EACCES: permission denied, open '/operator/.dsh/storages/chatgpt-web/config.json'");
+      },
+    });
+    const session = await controller.startAuth();
+    await waitForState(session, "captured");
+
+    const result = await controller.storeCapture(await session.capture());
+    expect(result.stored).toBe(true);
+    expect(result.detail).toContain("could not be written");
+    expect(result.detail).toContain("fail closed");
+    expect(storeCalls).toHaveLength(1);
+    // The write was attempted exactly once and its failure was reported, not thrown.
+    expect(identityWriteAttempts).toEqual([IDENTITY_FINGERPRINT]);
 
     await session.cancel();
   });

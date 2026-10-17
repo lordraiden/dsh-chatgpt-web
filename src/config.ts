@@ -1061,6 +1061,32 @@ export function saveConfig(config: AppConfig): void {
   atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, original));
 }
 
+/**
+ * Persist the authenticated ChatGPT account fingerprint (issue #276).
+ *
+ * `setup` and `login` mutate the config they already hold and save it themselves; the interactive
+ * sign-in controller holds only deployment facts, so it read-modify-writes through this module's own
+ * helpers instead of writing the JSON itself. Reads go through `loadConfigForSetup`, which preserves
+ * the *configured* `storageStatePath` — `loadConfig` resolves that path for READS only, so saving its
+ * result would rewrite a persisted field. `saveConfig` keeps the BOM and writes atomically, and no
+ * other field is touched.
+ *
+ * @param fingerprint - the non-secret account fingerprint derived from the signed-in page.
+ * @returns whether the stored value changed.
+ */
+export function persistAccountIdentityFingerprint(fingerprint: string): boolean {
+  const normalized = fingerprint.trim();
+  if (!normalized) {
+    // Never write a placeholder: an empty fingerprint would silently become a *different* binding.
+    throw new Error("A ChatGPT account identity fingerprint must be a non-empty string");
+  }
+  const config = loadConfigForSetup();
+  if (config.accountIdentityFingerprint === normalized) return false;
+  config.accountIdentityFingerprint = normalized;
+  saveConfig(config);
+  return true;
+}
+
 function accountIdentityFingerprint(config: AppConfig): string {
   try {
     if (!existsSync(config.storageStatePath)) return "unknown";
