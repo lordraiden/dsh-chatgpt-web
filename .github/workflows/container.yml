@@ -55,6 +55,16 @@ jobs:
       - name: Build the production image
         run: docker build -t dsh-chatgpt-web:local .
 
+      # Issue #267: bringing an empty volume up must not need bun. Run the image's own entrypoint on a
+      # fresh data home with bun removed from PATH: only `node`, the runtime the service itself uses,
+      # may be required. Before the fix this aborts with `bun: not found` (exit 127) and the volume
+      # never gets a config.json.
+      - name: An empty data home bootstraps with bun removed from PATH
+        run: |
+          output="$(docker run --rm --entrypoint sh dsh-chatgpt-web:local -c 'rm -rf /tmp/dsh-267-first-run; PATH=/usr/bin:/bin DSH_CHATGPT_WEB_HOME=/tmp/dsh-267-first-run sh /usr/local/bin/dsh-entrypoint --version' 2>&1)"
+          printf '%s\n' "$output"
+          printf '%s' "$output" | grep -q "wrote default configuration"
+
       - name: Start the default stack and wait for the healthcheck
         run: docker compose up -d --wait
 

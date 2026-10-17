@@ -151,8 +151,10 @@ docker compose down -v
 ```
 
 On an empty volume the entrypoint writes a default `config.json` (`docker/bootstrap-config.ts`) and
-announces it on stderr: a first `compose up` therefore reaches `healthy` without manual steps. Real
-turns still need a provider session (§4.1, §5.5).
+announces it on stderr: a first `compose up` therefore reaches `healthy` without manual steps. That
+step runs on `node`, the runtime the service itself uses, so bringing a fresh volume up needs no bun
+(issue #267: the bootstrap's import graph is fully specified for Node's ESM loader, which never adds
+an extension). Real turns still need a provider session (§4.1, §5.5).
 
 Every CLI subcommand stays reachable through `docker run`, because the entrypoint execs
 `node lib/cli.js "$@"`:
@@ -180,6 +182,10 @@ Two traps it already avoids: the sidecar needs `--network host` (F1), and the co
 generated from a **file**, never with `bun -e` — `defaultConfig()` refuses an evaluated script
 (`Cannot install a service from an evaluated Bun script`).
 
+Its step 4b re-runs the entrypoint on a second empty data home with `bun` removed from `PATH`, so a
+regression that makes the first run need bun fails the transcript instead of the operator (issue
+#267).
+
 Its full transcript is recorded in §7.
 
 ## 4.1 The data volume — what a container needs
@@ -196,12 +202,13 @@ fresh volume with no manual step. A **real turn** additionally needs the provide
 
 `config.json` can be produced non-interactively with the application's own primitives
 (`defaultConfig()` + `saveConfig()` — the same path `setup` uses before its login step), so a
-container entrypoint does not have to reimplement the schema. It must be run from a **file**
-(`bun /tmp/make-config.ts`), not with `bun -e`: `defaultConfig()` refuses an evaluated script
-(`Cannot install a service from an evaluated Bun script`). The generated record also carries a
-`runtimeCommand` that points at that fixture; `serve` and `doctor` do not use it in a container (the
-managed service is intentionally not used there). Its `controlToken` is a secret: it belongs in the
-volume, never in the image or the repository.
+container entrypoint does not have to reimplement the schema. It must be run from a **file**, not with
+`bun -e`: `defaultConfig()` refuses an evaluated Bun script (`Cannot install a service from an
+evaluated Bun script`). The generated record also carries a `runtimeCommand` derived from the process
+that wrote it — `[<bun>, <file>]` under bun and `[<node>]` under node, which is what the entrypoint
+uses (issue #267); `serve` and `doctor` do not use it in a container (the managed service is
+intentionally not used there). Its `controlToken` is a secret: it belongs in the volume, never in the
+image or the repository.
 
 `parseConfig()` also hard-forces `host === "127.0.0.1"` (`"The Responses proxy must bind to
 127.0.0.1"`), so **F1 cannot be worked around by configuration alone**: a non-loopback bind needs the
