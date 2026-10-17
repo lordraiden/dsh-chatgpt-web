@@ -222,6 +222,35 @@ describe("issue #287 slice 3 — shutdown drains owned resources and does not re
     await expect(core.shutdown()).resolves.toBeUndefined();
   });
 
+  test("core shutdown bounds an attached settlement that never resolves and writes the turn off", async () => {
+    // Issue #287 slice 4a. The settlement IS attached, so shutdown used to await it with no bound: a
+    // promise that never resolves kept the process alive past `docker stop`'s grace and into SIGKILL.
+    // Zero grace keeps the bound deterministic; the drain test above pins the other side — an attached
+    // settlement that does resolve is still awaited and still drains as `fulfilled`. The explicit test
+    // timeout makes a regression fail the suite instead of hanging it, which is what the old code did.
+    const core = new ChatGptWebProviderCore("chatgpt-web", undefined, 0);
+    const executionKey = "issue-287-shutdown-stuck";
+    const turn = boundCoreTurn(core, executionKey);
+    core.bindPhysicalSettlement(executionKey, new Promise<void>(() => { /* never resolves */ }));
+
+    await expect(core.shutdown(new Error("test shutdown"))).resolves.toBeUndefined();
+
+    // The turn was written off with a defined physical outcome: attached, but settled as the failure
+    // category, retired, and its resource released. Never `fulfilled`, so nothing is reused.
+    const snapshot = turn.snapshot();
+    expect(snapshot.state).toBe("RETIRED");
+    expect(snapshot.physicalSettlementAttached).toBe(true);
+    expect(snapshot.physicalSettled).toBe(true);
+    expect(snapshot.physicalSettlementOutcome).toBe("rejected");
+    // The timeout is explicit and observable, not inferred from the outcome word alone.
+    expect(snapshot.physicalSettlementError).toContain("did not resolve within the 0ms shutdown settlement grace");
+    expect(snapshot.physicalSettlementOutcome).not.toBe("fulfilled");
+    expect(turn.lease.isActive()).toBe(false);
+    expect(core.get(executionKey)).toBeUndefined();
+    // The core records the same failure settlement as the provider view.
+    expect(turn.coreSnapshot().physical).toBe("rejected");
+  }, 5_000);
+
   test("adapter shutdown terminates, is idempotent, and refuses a turn afterwards", async () => {
     const provider = controlledProviderConfig(home);
     const surface = new ControlledSurface();
