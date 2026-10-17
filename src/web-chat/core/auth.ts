@@ -112,6 +112,15 @@ export interface ProviderAuthSession {
    */
   state(): AuthSessionState;
   /**
+   * An optional non-secret diagnostic for the current state.
+   *
+   * A provider explains a `failed` session here (a closed browser, an unverifiable surface); the host
+   * relays the string to the operator page and never interprets it. Credential-free by the same rule
+   * as `state()`: never a cookie, a storage state, a token, or a full URL carrying query parameters.
+   * A provider that has nothing to say simply does not implement it.
+   */
+  detail?(): string | undefined;
+  /**
    * The current frame.
    *
    * A provider without a browser returns a static instruction image here; a provider whose sign-in

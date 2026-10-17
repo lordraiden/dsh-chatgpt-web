@@ -225,6 +225,25 @@ export function createWebChatAuthSessionManager(
     return state;
   };
 
+  /**
+   * The provider's own non-secret explanation of a failure, when it offers one.
+   *
+   * Optional and guarded: a provider without `detail()`, one that throws from it, or one that returns
+   * a non-string must never make the session unreadable — the failed state is the fact, this is the
+   * diagnostic. The surface already relays `detail`/`error`; this is the one place it is filled from
+   * the provider rather than from a cancellation the manager observed itself.
+   */
+  const readProviderDetail = (entry: AuthSessionEntry): string | undefined => {
+    try {
+      const detail = entry.provider.detail?.();
+      if (typeof detail !== "string") return undefined;
+      const trimmed = detail.trim();
+      return trimmed.length > 0 ? trimmed.slice(0, 300) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   /** Move a session to its terminal state. Only `captured` keeps its frame (the caller's handoff). */
   const terminalize = (entry: AuthSessionEntry, reason: WebChatAuthSessionCloseReason): void => {
     if (reason === "captured") entry.state = "captured";
@@ -246,6 +265,10 @@ export function createWebChatAuthSessionManager(
     if (isTerminalAuthState(entry.state)) return entry.state;
     const state = readProviderState(entry);
     entry.state = state;
+    if (state === "failed") {
+      const detail = readProviderDetail(entry);
+      if (detail !== undefined) entry.detail = detail;
+    }
     if (state === "captured") terminalize(entry, "captured");
     else if (state === "failed") terminalize(entry, "failed");
     return entry.state;

@@ -1,4 +1,9 @@
 import { chatGptWebTraceId, createChatGptWebAdapter, type ChatGptWebProviderAdapter } from "./adapters/chatgpt-web";
+import {
+  CHATGPT_WEB_AUTH_PROVIDER_LABEL,
+  createChatGptWebAuthController,
+} from "./adapters/chatgpt-web/auth-controller";
+import { CHATGPT_WEB_DRIVER_ID } from "./web-chat/host/provider-host";
 import { createChatGptWebProviderRuntime } from "./adapters/chatgpt-web/provider-runtime";
 import {
   AdvisorHostError,
@@ -1345,7 +1350,9 @@ export function startServer(
      *
      * The host composes them, exactly like the provider catalogue: this listener never invents a
      * provider, and a provider that exposes no auth controller is simply not offered. Left out, the
-     * surface lists no provider — which is today's state until a provider driver contributes one.
+     * listener registers the ChatGPT Web controller — construction is inert and only `startAuth()`
+     * launches a browser, so a host with no Chrome still starts. An explicit value (including an empty
+     * `providers` list) replaces the default entirely.
      */
     auth?: WebChatAuthSurfaceOptions;
   } = {},
@@ -1427,8 +1434,23 @@ export function startServer(
    * The interactive sign-in surface (issue #276). One owner for the life of this listener: it holds
    * the one-active-session-per-provider slots, so two listeners — or two requests — can never race
    * two sign-ins over one account's stored state.
+   *
+   * Registration is the production default and is deliberately lazy: composing the controller starts
+   * nothing, and a missing Chrome surfaces as a typed `startAuth()` failure on the request that needs
+   * it rather than at startup.
    */
-  const authSurface: WebChatAuthSurface = createWebChatAuthSurface(dependencies.auth);
+  const authSurface: WebChatAuthSurface = createWebChatAuthSurface(dependencies.auth ?? {
+    providers: [{
+      providerId: CHATGPT_WEB_DRIVER_ID,
+      label: CHATGPT_WEB_AUTH_PROVIDER_LABEL,
+      controller: createChatGptWebAuthController({
+        config: {
+          chromeExecutablePath: config.chromeExecutablePath,
+          authBrowserMode: config.authBrowserMode,
+        },
+      }),
+    }],
+  });
 
   /**
    * The port the listening socket is actually bound to.
