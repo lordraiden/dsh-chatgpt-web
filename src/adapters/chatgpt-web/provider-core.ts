@@ -5,6 +5,7 @@ import {
   type WebChatContinuationOutcome,
   type WebChatRetryRefusal,
 } from "../../web-chat/core";
+import { chatGptRetainedSurfaceBusyError } from "./adapter-error";
 import type { CapabilitySnapshot } from "./capability-projector";
 import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concurrency";
 
@@ -610,7 +611,10 @@ export class ProviderTurnLifecycle {
   }
 
   attachCancellation(cancel: (reason: Error) => void): void {
-    if (this.cancelExecution) throw new Error("Provider turn cancellation callback can only be attached once");
+    // A second attachment is a second turn that reused this lifecycle — another turn is already
+    // running for this conversation. Reported as that local refusal, never as a bare `Error` the API
+    // normalizes into `502 upstream_server_error` and blames the provider for (issue #305).
+    if (this.cancelExecution) throw chatGptRetainedSurfaceBusyError();
     this.cancelExecution = cancel;
     if (this.shutdownRequested) {
       cancel(new Error("ChatGPT Web ProviderCore is shutting down"));
@@ -960,9 +964,11 @@ export class ChatGptWebProviderCore {
         if (executionKey === input.executionKey) continue;
         const snapshot = activeTurn.snapshot();
         if (!snapshot.physicalSettled && snapshot.provenance.nativeThreadId === input.nativeThreadId) {
-          throw new Error(
-            "ChatGPT Web cannot synchronously start a second provider turn for an active native DSH thread",
-          );
+          // The refusal itself is correct (one active turn per logical conversation), but it is a
+          // **local admission decision**: the caller is told a turn is already in flight and to wait,
+          // never that the provider failed (issue #305). It is the same conversation-busy refusal the
+          // busy retained surface publishes, so the caller reads one category whichever layer refuses.
+          throw chatGptRetainedSurfaceBusyError();
         }
       }
     }

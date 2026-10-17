@@ -279,13 +279,25 @@ export function responseText(payload: Record<string, unknown>): string {
   return parts.join("");
 }
 
-/** The failure carried by one internal Responses payload, if any. */
-export function responseFailure(payload: Record<string, unknown>): { message: string; code?: string } | undefined {
+/**
+ * The failure carried by one internal Responses payload, if any.
+ *
+ * The published `type` and `code` are carried through untouched: they are the provider's own
+ * classification of the failure, and this surface must not re-infer one from the message text
+ * (issue #305).
+ */
+export function responseFailure(
+  payload: Record<string, unknown>,
+): { message: string; type?: string; code?: string } | undefined {
   const error = payload.error;
   if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
   const record = error as Record<string, unknown>;
   const message = typeof record.message === "string" ? record.message : "The provider turn failed.";
-  return { message, ...(typeof record.code === "string" ? { code: record.code } : {}) };
+  return {
+    message,
+    ...(typeof record.type === "string" ? { type: record.type } : {}),
+    ...(typeof record.code === "string" ? { code: record.code } : {}),
+  };
 }
 
 /**
