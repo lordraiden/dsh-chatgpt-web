@@ -159,6 +159,7 @@ const CHATGPT_WEB_CHAT_CATEGORY_BY_CODE: Readonly<Record<string, WebChatErrorCat
   // Conversation continuity and state.
   retained_surface_lost: "CONVERSATION_LOST",
   retained_delta_empty: "CONVERSATION_STATE_MISMATCH",
+  continuation_prompt_missing: "CONVERSATION_STATE_MISMATCH",
   chatgpt_surface_stale: "CONVERSATION_STATE_MISMATCH",
   context_canonical_state_missing: "CONVERSATION_STATE_MISMATCH",
   compaction_source_unavailable: "CONVERSATION_STATE_MISMATCH",

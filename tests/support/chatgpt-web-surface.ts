@@ -10,6 +10,7 @@
  */
 import { join } from "node:path";
 
+import { chatGptContinuationPromptMissingError } from "../../src/adapters/chatgpt-web/adapter-error";
 import type {
   ChatGptWebSurfaceTransport,
   WebSurfaceTurn,
@@ -75,7 +76,7 @@ export class ControlledSurface {
         const reused = turn.conversationKey !== undefined && turn.conversationKey === this.previousConversationKey;
         await turn.onPreparedSelected?.(reused);
         const prepare = reused ? turn.prepareResume : turn.prepare;
-        if (!prepare) throw new Error("a reused surface has no continuation prompt");
+        if (!prepare) throw chatGptContinuationPromptMissingError();
         const compiled = await prepare();
         try {
           const run: ControlledSurfaceRun = {
