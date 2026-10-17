@@ -1,0 +1,84 @@
+name: Publish image
+
+# Publica la imagen de producción en GHCR desde el repositorio PÚBLICO, que es lo que hace esto gratis:
+# los runners estándar de GitHub no consumen minutos en repos públicos. El repo homelab que consume la
+# imagen no necesita construir nada (ni gastar su propia cuota).
+#
+#   ghcr.io/lordraiden/dsh-chatgpt-web:latest        sigue a main
+#   ghcr.io/lordraiden/dsh-chatgpt-web:sha-<7>       inmutable, para fijar una versión
+#   ghcr.io/lordraiden/dsh-chatgpt-web:vX.Y.Z        en un tag de release
+#
+# Se construye con el Dockerfile de producción, el mismo que verifica `.github/workflows/container.yml`.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build and push to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GHCR exige que el nombre del paquete sea minúscula; GITHUB_REPOSITORY ya lo es aquí, pero no
+      # dependemos de eso.
+      - name: Resolve the image name and tags
+        id: image
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          tags="$image:latest
+          $image:sha-$short_sha"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tags="$tags
+          $image:${GITHUB_REF_NAME}"
+          fi
+          {
+            echo "name=$image"
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "will publish:"; echo "$tags"
+
+      # Login con el GITHUB_TOKEN del propio workflow: no hace falta ningún secreto adicional.
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(-t "$tag")
+          done <<< "${{ steps.image.outputs.tags }}"
+          docker build "${args[@]}" .
+
+      - name: Push
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && docker push "$tag"
+          done <<< "${{ steps.image.outputs.tags }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Imagen publicada"
+            echo
+            echo '```'
+            echo "${{ steps.image.outputs.tags }}"
+            echo '```'
+            echo
+            echo "Para que el homelab pueda descargarla sin credenciales, el paquete debe ser **público**"
+            echo "en GitHub → Packages → \`dsh-chatgpt-web\` → Package settings → Change visibility."
+          } >> "$GITHUB_STEP_SUMMARY"
