@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   defaultConfig,
@@ -9,7 +9,13 @@ import {
   saveConfig,
   storageStateMarkerPath,
 } from "../src/config";
-import { browserLoginStateExists, loginVerificationMarkerPath, storeProviderSession } from "../src/browser-login";
+import {
+  browserLoginStateExists,
+  loginToChatGpt,
+  loginVerificationMarkerPath,
+  storeProviderSession,
+  withTemporaryLoginProfile,
+} from "../src/browser-login";
 import {
   captureChatGptWebHome,
   restoreChatGptWebHome,
@@ -178,5 +184,68 @@ describe("issue #249 — `auth import` fails closed", () => {
     const missing = runCli(["auth", "import"], home);
     expect(missing.code).not.toBe(0);
     expect(missing.err).toContain("requires --from");
+  });
+});
+
+/**
+ * Issue #287 slice 4a — the temporary login profile never outlives its sign-in.
+ *
+ * The profile was removed in a `finally` guarded by `browserLoginStateExists(config)`, so a sign-in
+ * that failed before writing any state left `login-profile-*` directories behind in
+ * `providers/<id>/` forever. The removal is now one owner; these tests pin it without a browser.
+ */
+describe("issue #287 slice 4a — the disposable login profile is removed on every exit path", () => {
+  const loginProfilesIn = (dir: string): string[] =>
+    existsSync(dir) ? readdirSync(dir).filter(name => name.startsWith("login-profile-")) : [];
+
+  test("the profile owner removes the profile after success and after failure", async () => {
+    const home = freshHome();
+    const parent = join(home, "providers", "chatgpt-web");
+
+    const seen: string[] = [];
+    const result = await withTemporaryLoginProfile(parent, async profileDir => {
+      // The body runs inside a real, existing `login-profile-*` directory under the parent.
+      expect(profileDir.startsWith(join(parent, "login-profile-"))).toBe(true);
+      expect(existsSync(profileDir)).toBe(true);
+      seen.push(profileDir);
+      return "captured";
+    });
+    expect(result).toBe("captured");
+    expect(loginProfilesIn(parent)).toEqual([]);
+
+    // The failure path is the one that used to leak: no state was ever written, so the old
+    // `browserLoginStateExists()` guard was false and the profile stayed.
+    const failure = await withTemporaryLoginProfile(parent, async profileDir => {
+      seen.push(profileDir);
+      throw new Error("the sign-in failed before any state was written");
+    }).catch(error => error);
+    expect((failure as Error).message).toContain("failed before any state");
+    expect(loginProfilesIn(parent)).toEqual([]);
+
+    // Two distinct profiles were created, and neither survives.
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toBe(seen[1]);
+  });
+
+  test("a sign-in whose browser never comes up leaves no login-profile-* behind", async () => {
+    // The real `loginToChatGpt`, with no browser needed: the configured executable exists (so the
+    // pre-flight passes) but is this runtime, not Chromium, so Playwright fails the launch in
+    // milliseconds and nothing is downloaded or installed.
+    if (process.platform === "win32") {
+      // Under Bun on Windows the function deliberately delegates to `login-helper.cjs` before any
+      // profile is created, so this wiring assertion is not reachable there.
+      return;
+    }
+    const home = freshHome();
+    const config = { ...defaultConfig(), chromeExecutablePath: process.execPath };
+
+    const failure = await loginToChatGpt(config, { timeoutMs: 5_000 }).catch(error => error);
+    expect(failure).toBeInstanceOf(Error);
+
+    // The profile root exists (the run body started) and holds no profile: the launch failure, which
+    // happens before the old `try` even began, is cleaned up too.
+    const providerDir = providerCredentialsDir();
+    expect(existsSync(providerDir)).toBe(true);
+    expect(loginProfilesIn(providerDir)).toEqual([]);
   });
 });

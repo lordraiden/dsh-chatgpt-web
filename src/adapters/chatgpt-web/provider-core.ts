@@ -686,6 +686,21 @@ export class ProviderTurnLifecycle {
     this.onRetired();
   }
 
+  /**
+   * Write off a turn whose attached physical settlement never resolved before shutdown's bound.
+   *
+   * Unlike {@link failBeforePhysicalSettlement} this is the case where physical execution *did*
+   * start, so the outcome cannot be `not_started`. It is still never a success claim: the physical
+   * settlement could not be established, so the turn records the failure category (`rejected`) and
+   * the timeout is the recorded reason in `physicalSettlementError`. The turn retires and its lease
+   * is released through the normal failure-settlement path, so a settlement that never resolved can
+   * never be presented as a resource that is safe to reuse.
+   */
+  failPhysicalSettlementTimeout(detail: string): void {
+    if (this.state === "RETIRED") return;
+    this.finishPhysicalSettlement("rejected", new Error(`Physical settlement timed out: ${detail}`));
+  }
+
   private recordCoreSettlement(outcome: PhysicalSettlementOutcome): void {
     this.core.markPhysicallySettled(outcome);
   }
@@ -1020,6 +1035,16 @@ export class ChatGptWebProviderCore {
     this.turns.delete(executionKey);
   }
 
+  /**
+   * Drain every turn this core owns, bounded by the shutdown settlement grace.
+   *
+   * A physical settlement that is attached is awaited, but not forever: a promise that never resolves
+   * would keep the process alive past `docker stop`'s grace and into SIGKILL. Both cases are bounded
+   * by the same grace — a turn that never attached a settlement is written off as `not_started`, and
+   * one whose settlement never resolved is written off as `rejected` with the timeout as its recorded
+   * reason. Neither is reported as `fulfilled`, so a resource whose physical state could not be
+   * established is retired instead of becoming reusable.
+   */
   async shutdown(reason = new Error("ChatGPT Web ProviderCore is shutting down")): Promise<void> {
     if (this.closed && this.turns.size === 0) return;
     this.closed = true;
@@ -1034,7 +1059,26 @@ export class ChatGptWebProviderCore {
         }
         await new Promise(resolve => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
       }
-      await turn.waitForPhysicalSettlement();
+      if (turn.snapshot().physicalSettled) return;
+      // The settlement is attached: wait for it, still bounded by the same grace. The bound timer is
+      // cleared as soon as the settlement lands, so a drained core leaves no handle on the event loop
+      // behind — a stray timer would itself delay the process exit this bound exists to allow. The
+      // rejection needs no separate handling: the attached settlement handler has already recorded the
+      // outcome, and all this wait decides is whether the settlement or the bound arrived first.
+      const settled = await new Promise<boolean>(resolve => {
+        const timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()));
+        const finish = (): void => {
+          clearTimeout(timer);
+          resolve(true);
+        };
+        void turn.waitForPhysicalSettlement().then(finish, finish);
+      });
+      if (!settled) {
+        turn.failPhysicalSettlementTimeout(
+          `the attached physical settlement did not resolve within the `
+          + `${this.shutdownSettlementGraceMs}ms shutdown settlement grace`,
+        );
+      }
     }));
     this.leases.clear();
     this.turns.clear();

@@ -50,6 +50,7 @@ import {
 import { sanitizeBrowserLoginStorageState, storeProviderSession } from "../../browser-login";
 import type { ChatGptWebAccountCapabilities } from "../../chatgpt-web-models";
 import {
+  isWebChatError,
   webChatError,
   type AuthCapture,
   type AuthInput,
@@ -385,6 +386,22 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
 
   async input(event: AuthInput): Promise<void> {
     const page = this.#livePage("accept input");
+    try {
+      await this.#relayInput(page, event);
+    } catch (error) {
+      throw this.#inputFailure(page, error);
+    }
+  }
+
+  /**
+   * Relay one validated input into the page.
+   *
+   * The refused intent (`UNSUPPORTED_OPTION`), the malformed event (`TypeError`) and the failed
+   * navigation intent (`TRANSPORT_UNAVAILABLE`) are all decided here and rethrown unchanged by
+   * {@link #inputFailure}; only an interaction that throws something else is an unexpected page or
+   * browser failure.
+   */
+  async #relayInput(page: Page, event: AuthInput): Promise<void> {
     switch (event.type) {
       case "click": {
         const size = this.#viewportOf(page);
@@ -432,6 +449,40 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
       default:
         throw new TypeError("A WebChat auth input must be one of click, type, key, scroll or navigate");
     }
+  }
+
+  /**
+   * Translate an unexpected interaction failure into the upstream category the surface maps to 502.
+   *
+   * A page or browser that dies while an input is relayed used to escape as a raw Playwright error,
+   * which the sign-in surface could only answer as a 500 `auth_unavailable`; the operator saw an
+   * internal failure instead of an upstream one. The controller knows better than the host here: the
+   * interactive path it owns has failed, no poll can recover it, so it fails the session (releasing
+   * the browser and the temporary profile through the one teardown) and reports the shared upstream
+   * category. A closed page is distinguishable from any other interaction failure by provider code,
+   * and the detail is sanitized exactly like every other diagnostic that crosses this boundary.
+   */
+  #inputFailure(page: Page, error: unknown): Error {
+    // The categories this controller already publishes pass through untouched: a refused intent is
+    // still the caller's 400, a malformed event is still a 400, and a failed navigation is still the
+    // transport category it has always been.
+    if (isWebChatError(error) || error instanceof TypeError) return error;
+    const detail = nonSecretAuthDetail(error);
+    const closed = page.isClosed();
+    if (closed) {
+      this.#fail("The sign-in browser closed while an input was being relayed");
+      return webChatError(
+        "UPSTREAM_ERROR",
+        `The sign-in browser closed while an input was being relayed: ${detail}`,
+        { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID, providerCode: "AUTH_PAGE_CLOSED", cause: error },
+      );
+    }
+    this.#fail(`The sign-in browser could not relay an input: ${detail}`);
+    return webChatError(
+      "UPSTREAM_ERROR",
+      `The sign-in browser could not relay an input: ${detail}`,
+      { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID, providerCode: "AUTH_INPUT_FAILED", cause: error },
+    );
   }
 
   async capture(): Promise<AuthCapture> {

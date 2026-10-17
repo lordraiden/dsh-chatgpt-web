@@ -396,6 +396,35 @@ export async function captureSystemBrowserLoginToFile(
   atomicWriteFile(markerPath, `${JSON.stringify(capture.marker)}\n`);
 }
 
+/**
+ * One owner of the disposable login profile's lifecycle.
+ *
+ * The profile is created here and removed here, on **every** exit path: the browser that never
+ * launched, the sign-in that failed before it wrote any state, the sign-in that succeeded. It used to
+ * be removed in a `finally` guarded by `browserLoginStateExists(config)`, which is the wrong
+ * question — a failed sign-in has precisely no state yet — so each failure left a `login-profile-*`
+ * directory behind in the provider's credentials directory forever.
+ *
+ * Exported so that contract is testable without a real browser: the run body is whatever the caller
+ * starts inside the profile, and only the profile's removal is this function's business.
+ *
+ * @param parentDir - the credentials directory the profiled directory is created under.
+ * @param run - the sign-in work, given the profile directory to launch the browser against.
+ * @returns whatever `run` returned.
+ */
+export async function withTemporaryLoginProfile<T>(
+  parentDir: string,
+  run: (profileDir: string) => Promise<T>,
+): Promise<T> {
+  mkdirSync(parentDir, { recursive: true, mode: 0o700 });
+  const profileDir = mkdtempSync(join(parentDir, "login-profile-"));
+  try {
+    return await run(profileDir);
+  } finally {
+    rmSync(profileDir, { recursive: true, force: true });
+  }
+}
+
 export async function loginToChatGpt(
   config: AppConfig,
   options: { timeoutMs?: number } = {},
@@ -443,83 +472,85 @@ export async function loginToChatGpt(
     }
   }
 
-  const profileParent = providerCredentialsDir();
-  mkdirSync(profileParent, { recursive: true, mode: 0o700 });
-  const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
-  process.stdout.write(
-    "A Chrome window is open. Sign in to ChatGPT in the window. Once logged in, this setup will automatically capture your session.\n",
-  );
+  return await withTemporaryLoginProfile(providerCredentialsDir(), async profileDir => {
+    process.stdout.write(
+      "A Chrome window is open. Sign in to ChatGPT in the window. Once logged in, this setup will automatically capture your session.\n",
+    );
 
-  const context = await chromium.launchPersistentContext(profileDir, {
-    executablePath: config.chromeExecutablePath,
-    headless: false,
-    ignoreDefaultArgs: [
-      "--enable-automation",
-      "--password-store=basic",
-      "--use-mock-keychain",
-    ],
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
-  try {
-    const page = context.pages()[0] ?? await context.newPage();
+    // The launch is inside the profile owner, so a browser that never came up cannot leave the
+    // profile behind either.
+    let context: BrowserContext | undefined;
     try {
-      await page.goto(CHATGPT_CHAT_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
+      const launched = await chromium.launchPersistentContext(profileDir, {
+        executablePath: config.chromeExecutablePath,
+        headless: false,
+        ignoreDefaultArgs: [
+          "--enable-automation",
+          "--password-store=basic",
+          "--use-mock-keychain",
+        ],
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--no-first-run",
+          "--no-default-browser-check",
+        ],
       });
-    } catch {
-      // In case navigation is redirected immediately (e.g. to login portal)
-    }
-
-    const deadline = Date.now() + (options.timeoutMs ?? 300_000);
-    let activePage: Page | undefined;
-    while (Date.now() < deadline) {
-      for (const p of context.pages()) {
-        try {
-          const composer = p.locator(
-            '[data-testid="prompt-textarea"], #prompt-textarea, [contenteditable="true"][data-lexical-editor="true"], [role="textbox"][aria-label="Ask ChatGPT"], .ProseMirror[contenteditable="true"]',
-          ).first();
-          if (await composer.isVisible().catch(() => false)) {
-            activePage = p;
-            break;
-          }
-        } catch {}
+      context = launched;
+      const page = launched.pages()[0] ?? await launched.newPage();
+      try {
+        await page.goto(CHATGPT_CHAT_URL, {
+          waitUntil: "domcontentloaded",
+          timeout: 60_000,
+        });
+      } catch {
+        // In case navigation is redirected immediately (e.g. to login portal)
       }
-      if (activePage) break;
-      await new Promise(r => setTimeout(r, 1000));
+
+      const deadline = Date.now() + (options.timeoutMs ?? 300_000);
+      let activePage: Page | undefined;
+      while (Date.now() < deadline) {
+        for (const p of launched.pages()) {
+          try {
+            const composer = p.locator(
+              '[data-testid="prompt-textarea"], #prompt-textarea, [contenteditable="true"][data-lexical-editor="true"], [role="textbox"][aria-label="Ask ChatGPT"], .ProseMirror[contenteditable="true"]',
+            ).first();
+            if (await composer.isVisible().catch(() => false)) {
+              activePage = p;
+              break;
+            }
+          } catch {}
+        }
+        if (activePage) break;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      if (!activePage) {
+        throw new Error("The authenticated ChatGPT page did not produce a visible composer within 5 minutes");
+      }
+
+      await assertAuthenticatedChatGptPage(activePage);
+      const rawState = await launched.storageState();
+      const state = sanitizeBrowserLoginStorageState(rawState);
+
+      let capabilities: ChatGptWebAccountCapabilities = {
+        solAvailable: false,
+        proAvailable: false,
+      };
+      capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
+      const accountIdentity = await detectChatGptAuthenticatedAccountIdentity(activePage);
+
+      const target = storeProviderSession(state, capabilities);
+      return {
+        storageStatePath: target,
+        accountSurfaceUrl: activePage.url(),
+        accountIdentityFingerprint: accountIdentity.fingerprint,
+        solAvailable: capabilities.solAvailable,
+        proAvailable: capabilities.proAvailable,
+      };
+    } finally {
+      await context?.close().catch(() => {});
     }
-
-    if (!activePage) {
-      throw new Error("The authenticated ChatGPT page did not produce a visible composer within 5 minutes");
-    }
-
-    await assertAuthenticatedChatGptPage(activePage);
-    const rawState = await context.storageState();
-    const state = sanitizeBrowserLoginStorageState(rawState);
-
-    let capabilities: ChatGptWebAccountCapabilities = {
-      solAvailable: false,
-      proAvailable: false,
-    };
-    capabilities = await detectChatGptAccountCapabilities(activePage, { selectorTimeoutMs: 15_000 });
-    const accountIdentity = await detectChatGptAuthenticatedAccountIdentity(activePage);
-
-    const target = storeProviderSession(state, capabilities);
-    return {
-      storageStatePath: target,
-      accountSurfaceUrl: activePage.url(),
-      accountIdentityFingerprint: accountIdentity.fingerprint,
-      solAvailable: capabilities.solAvailable,
-      proAvailable: capabilities.proAvailable,
-    };
-  } finally {
-    await context.close().catch(() => {});
-    if (browserLoginStateExists(config)) rmSync(profileDir, { recursive: true, force: true });
-  }
+  });
 }
 
 export function browserLoginStateExists(config: AppConfig): boolean {

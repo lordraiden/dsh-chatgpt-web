@@ -372,6 +372,63 @@ describe("issue #276 slice 2b — input mapping", () => {
     expect((failure as Error).message).not.toContain("very-secret");
     await session.cancel();
   });
+
+  test("an unexpected page failure on every interaction is the upstream category, and the session fails", async () => {
+    // Issue #287 slice 4a / #282. A Playwright failure while relaying click/type/key/scroll used to
+    // escape as a raw error, so the sign-in surface answered 500 `auth_unavailable` for what is
+    // genuinely an upstream failure. Each interaction is exercised on its own session because the
+    // failure is terminal by design: the interactive path is dead and no poll can recover it.
+    const blowUp = () => { throw new Error("Target page, context or browser has been closed"); };
+    const cases: Array<{
+      readonly name: string;
+      readonly breakIt: (page: FakePage) => void;
+      readonly event: Parameters<ProviderAuthSession["input"]>[0];
+    }> = [
+      { name: "click", breakIt: page => { page.page.mouse.click = blowUp; }, event: { type: "click", x: 10, y: 20 } },
+      { name: "type", breakIt: page => { page.page.keyboard.type = blowUp; }, event: { type: "type", text: "hola" } },
+      { name: "key", breakIt: page => { page.page.keyboard.press = blowUp; }, event: { type: "key", key: "Enter" } },
+      { name: "scroll", breakIt: page => { page.page.mouse.wheel = blowUp; }, event: { type: "scroll", dy: 120 } },
+    ];
+
+    for (const item of cases) {
+      const { controller, page, closes, removes } = makeController({});
+      const session = await controller.startAuth();
+      item.breakIt(page);
+
+      const failure = await session.input(item.event).catch(error => error);
+      expect(isWebChatError(failure), item.name).toBe(true);
+      expect(failure, item.name).toMatchObject({ category: "UPSTREAM_ERROR", providerCode: "AUTH_INPUT_FAILED" });
+      // The session is failed rather than left interactive forever, and its browser/profile are released.
+      expect(session.state(), item.name).toBe("failed");
+      expect(session.detail?.(), item.name).toContain("could not relay an input");
+      await session.cancel();
+      expect(closes(), item.name).toBe(1);
+      expect(removes, item.name).toEqual(["/fake/profile"]);
+    }
+  });
+
+  test("a closed page is distinguishable from any other interaction failure, and still non-secret", async () => {
+    let closed = false;
+    const page = fakePage({ closed: () => closed });
+    const { controller, closes, removes } = makeController({ page });
+    const session = await controller.startAuth();
+    closed = true;
+    page.page.keyboard.type = () => {
+      throw new Error("Target closed at https://chatgpt.com/auth/callback?code=very-secret");
+    };
+
+    const failure = await session.input({ type: "type", text: "user@example.test" }).catch(error => error);
+    expect(failure).toMatchObject({ category: "UPSTREAM_ERROR", providerCode: "AUTH_PAGE_CLOSED" });
+    expect(session.state()).toBe("failed");
+    expect(session.detail?.()).toContain("browser closed");
+    // The message is sanitized exactly like every other diagnostic that crosses this boundary.
+    expect((failure as Error).message).not.toContain("very-secret");
+    expect((failure as Error).message).toContain("[url]");
+
+    await session.cancel();
+    expect(closes()).toBe(1);
+    expect(removes).toEqual(["/fake/profile"]);
+  });
 });
 
 describe("issue #276 slice 2b — completion and teardown", () => {
@@ -890,5 +947,39 @@ describe("issue #276 slice 2c — a client's refusal is a 400, an upstream failu
     expect(body.code).toBe("UPSTREAM_ERROR");
     // A genuine upstream failure is not a client-side refusal, so no client guidance is fabricated.
     expect(body.message).toBe("The sign-in surface disconnected before the input was relayed");
+  });
+
+  test("a Playwright failure during input is that same 502, and the session ends failed", async () => {
+    // Issue #287 slice 4a / #282, over the REAL listener and the REAL controller with the browser seams
+    // injected. Before the fix the raw Playwright error escaped the controller, so this route answered
+    // 500 `auth_unavailable` — an internal failure — for a page that had simply gone away.
+    const { controller, page } = makeController({});
+    const server = serve([{
+      providerId: CHATGPT_WEB_AUTH_PROVIDER_ID,
+      label: CHATGPT_WEB_AUTH_PROVIDER_LABEL,
+      controller,
+    }]);
+    const id = await open(server, CHATGPT_WEB_AUTH_PROVIDER_ID);
+    page.page.keyboard.type = () => {
+      throw new Error("Target page, context or browser has been closed");
+    };
+
+    const failed = await postInput(server, id, { type: "type", text: "user@example.test" });
+    expect(failed.status).toBe(502);
+    const body = await failed.json() as { ok: boolean; code: string; message: string };
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("UPSTREAM_ERROR");
+    expect(body.message).toContain("could not relay an input");
+
+    // The session is failed, not interactive forever: the view reports the terminal state.
+    const view = await fetch(`http://127.0.0.1:${server.port}/v1/control/auth/sessions/${id}`, { headers: CONTROL });
+    expect(view.status).toBe(200);
+    expect((await view.json() as { state: string }).state).toBe("failed");
+
+    // A further input on the failed session is refused in the same upstream category, never served.
+    const again = await postInput(server, id, { type: "click", x: 10, y: 10 });
+    expect(again.status).toBe(502);
+    expect((await again.json() as { code: string }).code).toBe("UPSTREAM_ERROR");
+    expect(page.calls.clicks).toEqual([]);
   });
 });

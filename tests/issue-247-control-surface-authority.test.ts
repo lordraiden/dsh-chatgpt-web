@@ -251,3 +251,24 @@ describe("/healthz — the shape every health check reads, with nothing sensitiv
     expect(raw).not.toContain(home);
   });
 });
+
+describe("/v1/control/status — the operator status document reports the bound port, like /healthz", () => {
+  test("with an ephemeral configured port, the status port is the listening one and never 0", async () => {
+    // The same defect `/healthz` had (issue #287 slice 4a): the control document echoed `config.port`,
+    // which is the *requested* port. With `port: 0` the OS assigns the real one, so an operator or a
+    // supervisor reading this document would be told "0" and could not reach the service.
+    const config = makeConfig();
+    const server = serve(config);
+    const response = await fetch(url(server, "/v1/control/status"), { headers: bearer(CONTROL_TOKEN) });
+    expect(response.status).toBe(200);
+
+    const body = await response.json() as Record<string, unknown>;
+    expect(config.port).toBe(0);
+    expect(typeof body.port).toBe("number");
+    expect(body.port).toBeGreaterThan(0);
+    expect(body.port).toBe(server.port);
+    // The two surfaces publish the same fact and can never disagree about the bound port.
+    const health = await (await fetch(url(server, "/healthz"))).json() as { port: number };
+    expect(body.port).toBe(health.port);
+  });
+});

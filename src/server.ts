@@ -1564,7 +1564,9 @@ export function startServer(
         version: VERSION,
         mode: config.mode,
         pid: process.pid,
-        port: config.port,
+        // The port the listener is actually bound to, exactly like `/healthz`: `config.port` may be 0
+        // (an ephemeral port), and echoing it would tell an operator or supervisor the wrong port.
+        port: boundPort(),
         uptime: (Date.now() - startedAt) / 1_000,
         accepting_turns: !draining,
         ...activity(),
