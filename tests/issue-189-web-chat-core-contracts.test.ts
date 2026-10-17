@@ -178,8 +178,8 @@ describe("issue #189 — text-only admission", () => {
     expect("providerPrivate" in admitted).toBe(false);
   });
 
-  test("every feature outside the text-only layer is refused by name", () => {
-    for (const feature of ["files", "images", "audio", "video", "attachments", "tools", "toolChoice", "mcp"]) {
+  test("every content feature outside the text-only layer is refused by name", () => {
+    for (const feature of ["files", "images", "audio", "video", "attachments"]) {
       const candidate = { userText: "hola", model: "m", [feature]: [{ anything: true }] };
       expect(() => assertTextOnlyWebChatTurn(candidate)).toThrow(WebChatError);
       try {
@@ -191,6 +191,22 @@ describe("issue #189 — text-only admission", () => {
         expect((error as WebChatError).message).toContain(feature);
       }
     }
+  });
+
+  test("a capability declaration is discarded by design, never refused and never admitted", () => {
+    // The bridge is a text chat reached over the web: the provider cannot execute a tool and has no
+    // return channel to the caller's harness, so a capability declaration is protocol noise rather
+    // than content. It is dropped, reported back to the caller, and cannot reach the admitted turn.
+    for (const feature of ["tools", "toolChoice", "mcp"] as const) {
+      const candidate = { userText: "hola", model: "m", [feature]: [{ anything: true }] };
+      expect(rejectUnsupportedWebChatFeatures(candidate)).toEqual([feature]);
+      const admitted = assertTextOnlyWebChatTurn(candidate);
+      expect(admitted).toEqual({ userText: "hola", model: "m" });
+      expect(feature in admitted).toBe(false);
+    }
+    // Content stays refused even when a capability rides along: one policy does not leak into the other.
+    expect(() => rejectUnsupportedWebChatFeatures({ tools: [{ name: "f" }], images: [{ b64: "x" }] }))
+      .toThrow(/unsupported request features: images/);
   });
 
   test("an empty or absent feature slot carries nothing and is admitted", () => {

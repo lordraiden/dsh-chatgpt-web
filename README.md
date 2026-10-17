@@ -20,7 +20,7 @@ text-only HTTP API. It is not the official OpenAI API and is not affiliated with
 - [Authentication and exposure](#authentication-and-exposure)
 - [Sign in to ChatGPT](#sign-in-to-chatgpt)
 - [Model catalogue](#model-catalogue)
-- [Text-only: what is refused](#text-only-what-is-refused)
+- [Text-only: what is refused and what is discarded](#text-only-what-is-refused-and-what-is-discarded)
 - [The `usage` block is an estimate](#the-usage-block-is-an-estimate)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
@@ -274,18 +274,24 @@ that every account has every route: unknown or unverifiable capability state fai
 unknown model id is a typed `400` that names the accepted ones. Do not configure backend model IDs
 such as `gpt-5.6-sol` or `gpt-5.6-luna`; users select the public `chatgpt-web/...` route.
 
-## Text-only: what is refused
+## Text-only: what is refused and what is discarded
 
-The common WebChat contract is text-only. Refused with a typed `400`, never silently dropped:
+The common WebChat contract is text-only, and it separates **capability declarations** from **attached
+content**:
 
-- `tools`, `tool_choice`, `functions`, `function_call` (legacy);
-- `n > 1`;
-- `logprobs` / `top_logprobs`;
-- `response_format` other than plain text;
-- non-text content parts (`image_url`, `input_audio`, files).
+- **Discarded by design, never executed and never forwarded:** `tools`, `tool_choice`, `mcp` and the
+  legacy `functions` / `function_call`. The provider is a consumer web chat reached as text, so it has no
+  execution path and no return channel to your harness: a tool-sending agent (DSH, Cline, …) works, but
+  gets plain chat and no tool calls. Nothing is silent — an affected response carries
+  `x-dsh-chatgpt-web-ignored-features` and the service logs one line per request.
+- **Refused with a typed `400`, never silently dropped:** `n > 1`; `logprobs` / `top_logprobs`;
+  `response_format` other than plain text; and attached content — `files`, `images`, `audio`, `video`,
+  `attachments` and non-text content parts (`image_url`, `input_audio`, files). Attached content is data
+  the caller meant the model to see, so it can never be dropped.
 
-Tools, images, audio, video, attachments and MCP belong to the common layer's own vocabulary, so the
-API does not maintain a second refusal list. Embeddings, audio, images and batch are not offered at all.
+The capability/content split belongs to the common layer's own vocabulary
+(`WEB_CHAT_CAPABILITY_FEATURES` / `WEB_CHAT_CONTENT_FEATURES`), so the API does not maintain a second
+list. Embeddings, audio, images and batch are not offered at all.
 
 ## The `usage` block is an estimate
 

@@ -83,25 +83,36 @@ export interface WebChatExchange {
 }
 
 /**
- * Request features that exist outside the text-only common layer.
+ * Request features that exist outside the text-only common layer, split by **kind**.
  *
- * They are named explicitly so a caller sees exactly which feature was refused. Presence (not
- * shape) is the signal: an empty array or object carries nothing and is admitted.
+ * The distinction is the policy, not a tunable:
+ *
+ * - a **capability** declaration (`tools`, `toolChoice`, `mcp`) says nothing the model can use
+ *   through this bridge. The provider is a consumer web chat reached as text: it has no execution
+ *   channel and no return channel to the caller's harness, so a tool definition is protocol noise
+ *   here, not content. Discarding it loses nothing the caller meant the model to read, so it is
+ *   **dropped by design** — accepted, never executed, never forwarded, and always declared.
+ * - a **content** feature (`files`, `images`, `audio`, `video`, `attachments`) is data the model was
+ *   supposed to *see*. Discarding it is silent content loss, so it is **refused** — always. This is
+ *   what stops "drop capability declarations" from sliding into "drop attached content".
+ *
+ * They are named explicitly so a caller can see exactly which capability declaration was discarded or
+ * which content feature was refused. Presence (not shape) is the signal: an empty array or object
+ * carries nothing and is admitted.
+ *
+ * The union is derived from the two kinds, so a new feature cannot be added to one list and forgotten
+ * in the other (and a refusal always uses this one order).
  */
-const UNSUPPORTED_WEB_CHAT_FEATURES = [
-  "files",
-  "images",
-  "audio",
-  "video",
-  "attachments",
-  "tools",
-  "toolChoice",
-  "mcp",
-] as const;
+export const WEB_CHAT_CONTENT_FEATURES = ["files", "images", "audio", "video", "attachments"] as const;
+export const WEB_CHAT_CAPABILITY_FEATURES = ["tools", "toolChoice", "mcp"] as const;
 
+const UNSUPPORTED_WEB_CHAT_FEATURES = [...WEB_CHAT_CONTENT_FEATURES, ...WEB_CHAT_CAPABILITY_FEATURES] as const;
+
+export type WebChatContentFeature = (typeof WEB_CHAT_CONTENT_FEATURES)[number];
+export type WebChatCapabilityFeature = (typeof WEB_CHAT_CAPABILITY_FEATURES)[number];
 type UnsupportedWebChatFeature = (typeof UNSUPPORTED_WEB_CHAT_FEATURES)[number];
 
-/** A candidate turn handed to the common layer, including anything it must refuse. */
+/** A candidate turn handed to the common layer, including anything it must refuse or discard. */
 export type WebChatTurnCandidate = Partial<WebChatTurnInput>
   & Partial<Record<UnsupportedWebChatFeature, unknown>>;
 
@@ -115,25 +126,32 @@ function carriesFeature(value: unknown): boolean {
 }
 
 /**
- * Refuse any request that carries features outside the text-only common layer.
+ * Apply the text-only admission: refuse content features, discard capability declarations.
  *
- * The common layer must never silently drop or reinterpret unsupported content (architecture
- * §8.3): a caller that carries files, images, audio/video, attachments, tool definitions or MCP
- * state gets a stable `UNSUPPORTED_OPTION` failure naming them.
+ * Content features are refused with a stable `UNSUPPORTED_OPTION` failure naming them: the common
+ * layer must never silently drop or reinterpret content the caller meant the model to see
+ * (architecture §8.3). Capability declarations are returned instead of refused — the caller can then
+ * *declare* what it discarded, which is what keeps the drop explicit rather than silent. They are
+ * never executed here: this contract has no execution path for them at all, and admits only the
+ * text-shaped semantic input.
  *
  * @param candidate - the turn candidate, or any request-shaped value.
- * @throws {WebChatError} `UNSUPPORTED_OPTION` when an unsupported feature is present.
+ * @returns the capability declarations present and discarded (empty when there were none).
+ * @throws {WebChatError} `UNSUPPORTED_OPTION` when a content feature is present.
  */
-export function rejectUnsupportedWebChatFeatures(candidate: unknown): void {
-  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return;
+export function rejectUnsupportedWebChatFeatures(candidate: unknown): readonly WebChatCapabilityFeature[] {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
   const record = candidate as Record<string, unknown>;
   const present = UNSUPPORTED_WEB_CHAT_FEATURES.filter((feature) => carriesFeature(record[feature]));
-  if (present.length === 0) return;
-  throw webChatError(
-    "UNSUPPORTED_OPTION",
-    `The WebChat common layer is text-only; unsupported request features: ${present.join(", ")}.`,
-    { providerDetail: { unsupported: present } },
-  );
+  const refused = present.filter((feature) => !(WEB_CHAT_CAPABILITY_FEATURES as readonly string[]).includes(feature));
+  if (refused.length > 0) {
+    throw webChatError(
+      "UNSUPPORTED_OPTION",
+      `The WebChat common layer is text-only; unsupported request features: ${refused.join(", ")}.`,
+      { providerDetail: { unsupported: refused } },
+    );
+  }
+  return present as readonly WebChatCapabilityFeature[];
 }
 
 /** Require a non-empty string field of the semantic input. */
@@ -177,13 +195,14 @@ function optionalReplayHistory(value: unknown): readonly WebChatReplayMessage[] 
 /**
  * Admit a turn into the text-only common layer, or fail explicitly.
  *
- * Refuses unsupported features first (so a caller always learns what the layer cannot carry), then
+ * Refuses content features first (so a caller always learns what the layer cannot carry), then
  * validates and normalizes the semantic input. Only admitted fields survive, so a driver can never
- * observe provider-irrelevant request state through this contract.
+ * observe provider-irrelevant request state through this contract, and a capability declaration can
+ * never reach a driver — accepting it cannot execute anything.
  *
  * @param candidate - the turn candidate.
  * @returns the normalized semantic input.
- * @throws {WebChatError} `UNSUPPORTED_OPTION` for features outside the text-only layer.
+ * @throws {WebChatError} `UNSUPPORTED_OPTION` for content features outside the text-only layer.
  * @throws {TypeError} for a malformed candidate (a caller defect).
  */
 export function assertTextOnlyWebChatTurn(candidate: unknown): WebChatTurnInput {

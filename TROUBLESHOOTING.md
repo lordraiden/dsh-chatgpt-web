@@ -336,6 +336,39 @@ Qwen Chat and DeepSeek Chat are architectural roadmap providers, not currently s
 
 Do not add ad-hoc Qwen/DeepSeek routes to ChatGPT-specific code. A new provider requires the shared WebChat contracts to be implemented first.
 
+## 14. A tool-sending harness works, but never receives tool calls
+
+### Symptom
+
+An agent harness (DSH, Cline, and the like) sends `tools` on every `/v1/chat/completions` turn. The turn
+returns `200` with a normal chat answer, and the harness reports no tool calls.
+
+### Cause
+
+This is the intended behavior, not a fault. The provider is a **consumer web chat reached as text**: it
+has no execution path for your tools and no return channel to your harness, so a tool declaration cannot
+mean anything here. Capability declarations (`tools`, `tool_choice`, `mcp`, and the legacy
+`functions`/`function_call`) are discarded by design — accepted, never executed, never forwarded.
+
+### How to see what was dropped
+
+Any response that dropped a capability declaration says so:
+
+~~~bash
+curl -sS -D - http://127.0.0.1:17841/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}],"tools":[{"type":"function","function":{"name":"read_file"}}]}' | head -20
+~~~
+
+The response carries `x-dsh-chatgpt-web-ignored-features: tools`, on JSON and SSE alike, and the service
+logs one line per request naming them. The model answers as plain chat; the harness gets no tool calls.
+
+### What is still refused
+
+Attached **content** is data the caller meant the model to see, so it is always refused with a typed
+`400` and never dropped: files, images, audio, video, attachments, and non-text content parts. If a
+request fails, read the error before assuming the capability policy caused it — an image or file part is
+a content refusal, and it is not configurable.
+
 ## 16. Reporting a bug
 
 Include:

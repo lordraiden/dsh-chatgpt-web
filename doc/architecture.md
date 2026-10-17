@@ -575,7 +575,24 @@ replayHistory is present only when the provider cannot continue the existing rem
 
 Normal continuation should prefer the provider's own conversation memory and send only the new turn plus whatever provider-specific state is required to maintain the contract.
 
-Unsupported DSH input such as files, images, or tool definitions must result in a stable UNSUPPORTED_OPTION-class failure. Providers must not silently drop or reinterpret unsupported content.
+Unsupported DSH input is handled **by kind**, and that distinction is a property of the product rather
+than a configurable policy:
+
+- a **capability** declaration (`tools`, `toolChoice`, `mcp` and the legacy `functions`/`function_call`
+  aliases) names something this bridge cannot execute. The provider is a consumer web chat reached as
+  text: it has no execution path and no return channel to the caller's harness, so a tool definition is
+  protocol noise, not content. It is accepted, discarded, and **declared** (the public API names what it
+  dropped in `x-dsh-chatgpt-web-ignored-features` and in one log line per request) — never refused, and
+  never forwarded.
+- a **content** feature (`files`, `images`, `audio`, `video`, `attachments`, non-text content parts) is
+  data the model was supposed to *see*. It must result in a stable UNSUPPORTED_OPTION-class failure:
+  providers must not silently drop or reinterpret content.
+
+The split is owned once by the core (`WEB_CHAT_CAPABILITY_FEATURES` / `WEB_CHAT_CONTENT_FEATURES`), so no
+surface keeps a second list and "drop capability declarations" cannot slide into "drop attached content".
+The same rule family covers tool-shaped message state: a `role: "tool"` message is dropped by the
+message-only projection (§32.2, issue #253), and an assistant message's `tool_calls` is never read by the
+API translation.
 
 The normalized exchange is:
 
@@ -1179,7 +1196,12 @@ It must not know:
 
 Opaque provider continuation metadata may be retained as replay state when the adapter owns that continuation. The Web Chat architecture may use this mechanism where useful, but long-lived conversation affinity remains a Web Chat responsibility rather than a caller-visible provider ID.
 
-The adapter must also reject unsupported request content rather than silently discard it. In particular, a text-only WebChat route must not quietly strip tool definitions, file/image content, or other unsupported request features simply to make a call succeed. This preserves the service's stable provider error semantics.
+The adapter must also reject unsupported **content** rather than silently discard it. In particular, a
+text-only WebChat route must not quietly strip file/image content or other content the caller meant the
+model to see simply to make a call succeed. This preserves the service's stable provider error
+semantics. Capability declarations — tool definitions, a tool choice, MCP state — are the deliberate
+exception and are discarded instead: the provider cannot execute them and has no return channel to the
+caller's harness (§8.3, §32.2).
 
 The service's local, config-driven route registry performs route selection for a distribution with no separate host. It is not a second public provider registry: it still runs the shared driver resolver, which only maps an already-selected catalogue route to the implementation that owns it (see §17 and §32).
 
@@ -2121,8 +2143,11 @@ local configuration; it must never become a public provider registry.
 - The public API surface requires its own authorization and fails closed on a non-loopback bind
   without a configured key (issue #247).
 
-Text-only is the contract: tools, attachments and non-text content are refused explicitly rather than
-silently dropped (§1.2, §8.3, §16).
+Text-only is the contract: attached content and non-text content parts are refused explicitly rather
+than silently dropped, while **capability declarations** (`tools`, `tool_choice`, `mcp` and the legacy
+aliases) are discarded by design — the provider has no execution path and no return channel to the
+caller's harness — and declared on the response (`x-dsh-chatgpt-web-ignored-features`) and in the log,
+never forwarded (§1.2, §8.3, §16).
 
 **Message-only is part of that contract.** The API transmits the conversation's messages and nothing
 else: session context a harness injects at the start of a session (its own instructions, environment

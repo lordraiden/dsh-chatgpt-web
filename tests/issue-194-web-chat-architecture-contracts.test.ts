@@ -27,7 +27,11 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   // Issue #276 added the interactive-auth contract: the state vocabulary plus the guards. They are
   // deliberately in the pinned surface — the auth relay must validate its own inputs, frames and
   // capture envelope, and a rename or an extra auth value is a surface change, not just a diff.
+  // The text-only vocabulary is split by kind (capabilities are discarded by design, content is
+  // refused); the two lists are the one owner of that split, so they are deliberately pinned.
   "AUTH_SESSION_STATES",
+  "WEB_CHAT_CAPABILITY_FEATURES",
+  "WEB_CHAT_CONTENT_FEATURES",
   "WEB_CHAT_ERROR_CATEGORIES",
   "WEB_CHAT_EXCHANGE_EVENT_TYPES",
   "WebChatError",

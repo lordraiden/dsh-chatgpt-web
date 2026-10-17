@@ -202,8 +202,28 @@ Do not add to the common core:
 - sandbox execution;
 - generic autonomous-browser behavior.
 
-Unsupported request content must fail explicitly. Never silently discard files, images, tools, or other
-unsupported request content just to make a request succeed.
+Unsupported request content must fail explicitly. Never silently discard files, images, or other
+unsupported request **content** just to make a request succeed.
+
+**Capability declarations are discarded by design; attached content is refused.** This is a property of
+the product, not a configurable policy, and future work must not "restore" the old refusal of tools:
+
+- a **capability** declaration (`tools`, `tool_choice`/`function_call`, `mcp`/`functions`) names
+  something this bridge cannot execute. The provider is a consumer web chat reached as text: it has no
+  execution path and no return channel to the caller's harness, so a tool definition is protocol noise,
+  not content. It is therefore accepted, discarded, and **declared** — the public API reports it with
+  the `x-dsh-chatgpt-web-ignored-features` header and one log line per request — never refused, and
+  never forwarded to the provider.
+- a **content** feature (files, images, audio/video, attachments, non-text content parts) is data the
+  model was supposed to *see*. Discarding it would be silent content loss, so it keeps failing
+  explicitly with a stable `UNSUPPORTED_OPTION`-class refusal in every mode. Dropping capability
+  declarations must never become a way to drop attached content.
+
+The split is owned once by the Core (`src/web-chat/core/exchange.ts`,
+`WEB_CHAT_CAPABILITY_FEATURES` vs `WEB_CHAT_CONTENT_FEATURES`); no surface keeps a second list. The
+same rule family covers tool-shaped message state: `role: "tool"` messages are dropped by the
+message-only projection (`src/web-chat/host/api-projection.ts`, issue #253), and an assistant message's
+`tool_calls` is never read by the API translation.
 
 ### Provider-specific responsibilities
 

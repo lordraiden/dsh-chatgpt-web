@@ -7,12 +7,22 @@
  * ProviderCore and no second retry authority (architecture §18, §26).
  *
  * Two rules it must not weaken:
- * - **text-only**: unsupported features are refused through the common layer's own admission
+ * - **text-only**: content features are refused through the common layer's own admission
  *   (`rejectUnsupportedWebChatFeatures`), never silently dropped (architecture §1.2, §8.3, §16);
  * - **only messages**: the turn is projected through `projectApiConversation` (issue #253), so a
  *   harness's session context does not become part of the provider turn.
+ *
+ * Capability declarations are the deliberate exception, by product design and not by configuration:
+ * `tools`, `tool_choice`/`function_call` and `mcp`/`functions` are accepted and discarded, because
+ * this bridge is a text chat with no execution or return channel to the caller's harness. Nothing
+ * here reads a capability field when it builds the turn, so they cannot be forwarded even by
+ * accident; what was discarded is declared on the response (`x-dsh-chatgpt-web-ignored-features`)
+ * and in the log. Attached *content* still refuses — that distinction is not a policy.
  */
-import { rejectUnsupportedWebChatFeatures } from "../web-chat/core";
+import {
+  rejectUnsupportedWebChatFeatures,
+  type WebChatCapabilityFeature,
+} from "../web-chat/core";
 import {
   projectApiConversation,
   normalizeApiSessionId,
@@ -34,6 +44,15 @@ export interface ChatCompletionsTranslation {
   readonly stream: boolean;
   readonly mode: "session" | "stateless";
   readonly droppedRoles: readonly string[];
+  /**
+   * Capability declarations the request carried and this surface discarded.
+   *
+   * They are accepted and never executed (the internal turn is built from messages only), so the
+   * caller gets them back to declare: the route names them on the response
+   * (`x-dsh-chatgpt-web-ignored-features`) and in one log line, so a dropped tool definition is
+   * never a silent drop. Empty when the request carried none.
+   */
+  readonly droppedCapabilities: readonly WebChatCapabilityFeature[];
 }
 
 const MAX_MESSAGE_CHARS = 8 * 1024 * 1024;
@@ -66,7 +85,9 @@ function messageText(message: unknown, index: number): string {
       continue;
     }
     // Non-text parts are refused through the common layer's canonical admission, so the list of what
-    // is unsupported lives in exactly one place.
+    // is unsupported lives in exactly one place. Every mapped feature here is a *content* feature, so
+    // this call can only ever refuse: discarding capability declarations must never become a way to
+    // drop an attachment, and a capability-shaped part (an unknown type) is refused below.
     const feature = type === "image_url" || type === "input_image"
       ? "images"
       : type === "input_audio" || type === "audio"
@@ -91,9 +112,15 @@ function assertSize(text: string, index: number): string {
   return text;
 }
 
-/** Refuse the OpenAI fields this text-only surface cannot carry, using the common layer's list. */
-function rejectUnsupportedTopLevelFields(body: Record<string, unknown>): void {
-  rejectUnsupportedWebChatFeatures({
+/**
+ * Apply the common layer's admission to the OpenAI top-level fields and return the capability
+ * declarations it discarded.
+ *
+ * The legacy aliases (`functions`, `function_call`) are folded into the same canonical vocabulary,
+ * so a legacy tool request is discarded and declared exactly like the modern shape.
+ */
+function applyTopLevelAdmission(body: Record<string, unknown>): readonly WebChatCapabilityFeature[] {
+  const dropped = rejectUnsupportedWebChatFeatures({
     tools: body.tools ?? body.functions,
     toolChoice: body.tool_choice ?? body.function_call,
     files: body.files,
@@ -104,7 +131,8 @@ function rejectUnsupportedTopLevelFields(body: Record<string, unknown>): void {
     mcp: body.mcp,
   });
 
-  // Not part of the common layer's vocabulary, so this surface owns the refusal.
+  // Not part of the common layer's vocabulary, so this surface owns the refusal. These are surface
+  // options, not content: a refusal here is unchanged by the capability policy above.
   const n = body.n;
   if (n !== undefined && n !== null && n !== 1) {
     throw new ChatCompletionsRequestError("`n` greater than 1 is not supported; the API returns one choice");
@@ -121,17 +149,22 @@ function rejectUnsupportedTopLevelFields(body: Record<string, unknown>): void {
       throw new ChatCompletionsRequestError("`response_format` is only supported as plain text");
     }
   }
+  return dropped;
 }
 
 /**
  * Translate an OpenAI chat request into the internal turn.
+ *
+ * Capability declarations (`tools`, `tool_choice`/`function_call`, `mcp`/`functions`) are discarded
+ * and reported in `droppedCapabilities`; they are never read into the internal body, which is built
+ * from the projected messages only.
  *
  * @throws {ChatCompletionsRequestError} for anything the surface refuses — always before any provider
  * work, so a refused request submits nothing.
  */
 export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTranslation {
   const body = asRecord(raw, "request body");
-  rejectUnsupportedTopLevelFields(body);
+  const droppedCapabilities = applyTopLevelAdmission(body);
 
   const model = body.model;
   if (typeof model !== "string" || model.trim() === "") {
@@ -178,6 +211,7 @@ export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTr
     stream,
     mode: projected.mode,
     droppedRoles: projected.droppedRoles,
+    droppedCapabilities,
   };
 }
 
