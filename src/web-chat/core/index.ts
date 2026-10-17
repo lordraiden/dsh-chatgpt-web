@@ -32,13 +32,16 @@ export {
 
 export {
   AUTH_SESSION_STATES,
+  isAuthCapture,
   isAuthInput,
   isAuthSessionState,
   isProviderAuthView,
+  type AuthCapture,
   type AuthInput,
   type AuthSessionState,
   type ProviderAuthController,
   type ProviderAuthSession,
+  type ProviderAuthStoreResult,
   type ProviderAuthView,
 } from "./auth";
 

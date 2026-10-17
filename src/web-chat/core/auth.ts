@@ -18,7 +18,9 @@
  *    first-class provider. The host never decodes, resizes or interprets the bytes.
  * 3. **Credential-free.** `state()` and the view never expose cookies, storage state, tokens or any
  *    other authentication material. The captured material is the provider's business; the common
- *    layer only knows that sign-in *reached* `captured`.
+ *    layer only knows that sign-in *reached* `captured`, hands the provider's own
+ *    {@link AuthCapture} back to the provider's own `storeCapture` (see below), and never inspects
+ *    it.
  * 4. **Transport-agnostic.** SSE today, anything tomorrow: this contract describes a sign-in, not a
  *    wire format. No `WebSocket`, `EventSource`, HTTP status or frame rate appears here.
  *
@@ -68,6 +70,33 @@ export interface ProviderAuthView {
 }
 
 /**
+ * The material a provider captured when its sign-in reached `captured`.
+ *
+ * Opaque by construction. The host relays this value from the provider's own session to the
+ * provider's own `storeCapture` and never reads inside it: no cookie, no token, no storage-state
+ * shape reaches the common layer, and the three kinds exist so a provider can *say* what it produced
+ * without the host growing a persistence policy. `browser-storage` is the shape a browser-backed
+ * provider naturally has (an opaque storage state the host must not touch), `opaque` is any other
+ * provider-defined payload, and `none` is a sign-in that produced nothing worth persisting.
+ */
+export type AuthCapture =
+  | { kind: "browser-storage"; storageState: unknown }
+  | { kind: "opaque"; payload: unknown }
+  | { kind: "none" };
+
+/**
+ * What a provider's `storeCapture` reports.
+ *
+ * `stored: false` is a legitimate answer (nothing to persist, or persistence is the provider's own
+ * side effect). `location` is a non-secret, human-readable place the material landed, which the
+ * operator page may show.
+ */
+export interface ProviderAuthStoreResult {
+  readonly stored: boolean;
+  readonly location?: string;
+}
+
+/**
  * One provider-owned sign-in session.
  *
  * The provider owns navigation, input interpretation and completion detection. The manager owns
@@ -91,12 +120,20 @@ export interface ProviderAuthSession {
   view(): Promise<ProviderAuthView>;
   /** Relay one operator input. The provider decides what it means. */
   input(event: AuthInput): Promise<void>;
+  /**
+   * The material this sign-in captured.
+   *
+   * Only valid once `state()` is `captured`: a provider refuses it before that, exactly like the
+   * host's own `capturedSession()` gate. The host forwards whatever comes back to the same provider's
+   * `storeCapture` and never looks inside it.
+   */
+  capture(): Promise<AuthCapture>;
   /** Abandon the sign-in and release whatever the provider owns. Idempotent. */
   cancel(): Promise<void>;
 }
 
 /**
- * The optional provider capability: start a sign-in.
+ * The optional provider capability: start a sign-in, and own where its capture lands.
  *
  * A driver that implements this can be signed in from the operator's page; a driver that does not is
  * simply not offered for interactive sign-in. Implementing it grants no routing authority.
@@ -104,6 +141,14 @@ export interface ProviderAuthSession {
 export interface ProviderAuthController {
   /** Begin a sign-in. The returned session is owned by the caller through its lifecycle. */
   startAuth(): Promise<ProviderAuthSession>;
+  /**
+   * Persist a capture this provider produced.
+   *
+   * The provider owns *where* its session is stored (an already-configured provider session store, a
+   * profile directory, nothing at all); the host only calls this once, with the provider's own
+   * opaque {@link AuthCapture}, and reports the answer. The host never selects the destination.
+   */
+  storeCapture(capture: AuthCapture): Promise<ProviderAuthStoreResult>;
 }
 
 /**
@@ -161,4 +206,27 @@ export function isProviderAuthView(value: unknown): value is ProviderAuthView {
     && frame.png.length > 0
     && Number.isSafeInteger(frame.width) && (frame.width as number) > 0
     && Number.isSafeInteger(frame.height) && (frame.height as number) > 0;
+}
+
+/**
+ * Whether a value is one of the three capture kinds.
+ *
+ * The host validates the *envelope* before it forwards a capture to `storeCapture` — a provider that
+ * returns a half-built capture is a provider defect, not something to hand on — and it deliberately
+ * does not look at `storageState`/`payload` at all, so no credential can be inspected here even by
+ * accident. A kind with a missing material field is refused.
+ */
+export function isAuthCapture(value: unknown): value is AuthCapture {
+  if (!value || typeof value !== "object") return false;
+  const capture = value as { kind?: unknown; storageState?: unknown; payload?: unknown };
+  switch (capture.kind) {
+    case "browser-storage":
+      return capture.storageState !== undefined;
+    case "opaque":
+      return capture.payload !== undefined;
+    case "none":
+      return true;
+    default:
+      return false;
+  }
 }
