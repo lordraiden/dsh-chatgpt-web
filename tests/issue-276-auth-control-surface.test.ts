@@ -58,7 +58,7 @@ function fakeProvider(options: {
   label: string;
   pixels: boolean;
   capture?: AuthCapture;
-  storeResult?: { stored: boolean; location?: string };
+  storeResult?: { stored: boolean; location?: string; detail?: string };
 }): FakeProvider {
   let state: AuthSessionState = "starting";
   let starts = 0;
@@ -598,6 +598,36 @@ describe("issue #276 slice 2a — the capture handoff happens once", () => {
     });
     expect(acknowledged.status).toBe(200);
     expect(await acknowledged.json()).toMatchObject({ ok: true, state: "captured" });
+  });
+
+  test("a stored capture's non-secret provider detail reaches the operator-facing view", async () => {
+    // The shape a ChatGPT Web sign-in produces when the session stored but the account fingerprint did
+    // not: `stored: true` with a non-secret explanation, so the operator learns the next turn fails
+    // closed instead of reading a bare success.
+    const fake = fakeProvider({
+      providerId: PIXEL_PROVIDER,
+      label: "Pixel Web",
+      pixels: true,
+      capture: { kind: "opaque", payload: { opaque: true } },
+      storeResult: {
+        stored: true,
+        location: "profile/session.json",
+        detail: "The signed-in account identity could not be read; every turn will fail closed",
+      },
+    });
+    const server = serve([fake], { frameIntervalMs: 5_000, session: { sweepIntervalMs: 0 } });
+    const session = await openSession(server, PIXEL_PROVIDER);
+    await postInput(server, session.id, { type: "type", text: "user@example.test" });
+    await postInput(server, session.id, { type: "key", key: "Enter" });
+
+    const response = await getJson(server, `/v1/control/auth/sessions/${session.id}`, control());
+    const body = await response.json() as { state: string; capture?: unknown };
+    expect(body.state).toBe("captured");
+    expect(body.capture).toEqual({
+      stored: true,
+      location: "profile/session.json",
+      detail: "The signed-in account identity could not be read; every turn will fail closed",
+    });
   });
 
   test("a capture the provider refuses is reported as a non-secret error, not a failed session", async () => {

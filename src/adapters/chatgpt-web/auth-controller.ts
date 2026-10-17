@@ -17,6 +17,13 @@
  * - **The controller owns the write.** `storeCapture()` calls the same `storeProviderSession` that
  *   `login`, the system-browser capture and `auth import` use, so there is still exactly one owner for
  *   "persist a ChatGPT session". The host is deliberately ignorant of the destination.
+ * - **The controller also owns the account binding.** A captured session is only usable when the
+ *   account it belongs to is recorded in the configuration, because the logical account identity of
+ *   every turn is `config.accountIdentityFingerprint` (`src/adapters/chatgpt-web/index.ts`). Sign-in
+ *   therefore reads the same `detectChatGptAuthenticatedAccountIdentity` probe `login` uses and, once
+ *   the session is stored, persists its fingerprint through `persistAccountIdentityFingerprint`. The
+ *   fingerprint is provider-side account binding, not captured material, so it stays out of the
+ *   neutral `AuthCapture` the host relays.
  * - **The provider id is the catalogue id.** `CHATGPT_WEB_AUTH_PROVIDER_ID` mirrors
  *   `CHATGPT_WEB_DRIVER_ID` and is asserted equal in the contract tests, so the surface can never
  *   list a provider the catalogue does not have.
@@ -32,12 +39,13 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 
-import { providerCredentialsDir, type AppConfig } from "../../config";
+import { persistAccountIdentityFingerprint, providerCredentialsDir, type AppConfig } from "../../config";
 import {
   CHATGPT_CHAT_URL,
   assertAuthenticatedChatGptPage,
   assertChatGptPage,
   detectChatGptAccountCapabilities,
+  detectChatGptAuthenticatedAccountIdentity,
 } from "../../chatgpt-session";
 import { sanitizeBrowserLoginStorageState, storeProviderSession } from "../../browser-login";
 import type { ChatGptWebAccountCapabilities } from "../../chatgpt-web-models";
@@ -145,6 +153,22 @@ export type ChatGptWebAuthSurfaceInspector =
 export type ChatGptWebAuthSessionStore =
   (storageState: unknown, capabilities: ChatGptWebAccountCapabilities) => string;
 
+/**
+ * Reads the authenticated account's non-secret identity fingerprint from the sign-in page.
+ *
+ * Resolves with the fingerprint once the surface is authenticated; rejects when the page cannot be
+ * probed. The default is the very probe `login` uses, so both sign-in paths bind the same account.
+ */
+export type ChatGptWebAuthIdentityDetector = (page: Page) => Promise<string>;
+
+/**
+ * Persists one detected account fingerprint into the deployment configuration.
+ *
+ * The default is the config module's own read-modify-write; a test injects a spy so "written exactly
+ * once" and "not written at all" are provable without touching a real data home.
+ */
+export type ChatGptWebAuthIdentityWriter = (fingerprint: string) => void;
+
 /** Construction options for {@link createChatGptWebAuthController}. */
 export interface ChatGptWebAuthControllerOptions {
   /** The deployment facts this controller needs: the executable and the launch mode. */
@@ -177,6 +201,13 @@ export interface ChatGptWebAuthControllerOptions {
   readonly inspectSurface?: ChatGptWebAuthSurfaceInspector;
   /** Session store. Defaults to `storeProviderSession`. */
   readonly storeSession?: ChatGptWebAuthSessionStore;
+  /** Account-identity detector. Defaults to the same probe `login` uses. */
+  readonly detectIdentity?: ChatGptWebAuthIdentityDetector;
+  /**
+   * Account-fingerprint writer. Defaults to `persistAccountIdentityFingerprint`, the configuration
+   * module's read-modify-write, so the captured session and the account binding land together.
+   */
+  readonly persistIdentity?: ChatGptWebAuthIdentityWriter;
 }
 
 /**
@@ -520,11 +551,28 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
         return;
       }
       if (this.#settled) return;
+      // Best-effort, never fatal: an unreadable account identity must not discard a signed-in session,
+      // but it is also not silent. Without the fingerprint the logical identity stays the constant
+      // "unknown session" fallback and every turn fails closed on the account-binding check, so the
+      // reason travels to `storeCapture` and is reported to the operator there.
+      let accountIdentityFingerprint: string | undefined;
+      let accountIdentityDetail: string | undefined;
+      try {
+        accountIdentityFingerprint = await this.owner.detectAccountIdentity(page);
+      } catch (error) {
+        accountIdentityDetail = nonSecretAuthDetail(error);
+      }
+      if (this.#settled) return;
       this.#capabilities = capabilities;
       this.#storageState = storageState;
       // The controller remembers the capabilities keyed by the exact opaque state it will hand to the
       // host, so `storeCapture` can pair them without the host ever seeing a capability.
-      this.owner.recordCapture(storageState, capabilities);
+      this.owner.recordCapture(
+        storageState,
+        capabilities,
+        accountIdentityFingerprint,
+        accountIdentityDetail,
+      );
       this.#state = "captured";
       await this.#teardown();
       return;
@@ -544,7 +592,14 @@ interface ChatGptWebAuthControllerOwner {
   readonly removeProfile: (dir: string) => void;
   readonly inspectSurface: ChatGptWebAuthSurfaceInspector;
   storageState(handle: ChatGptWebAuthBrowserHandle): Promise<unknown>;
-  recordCapture(storageState: unknown, capabilities: ChatGptWebAccountCapabilities): void;
+  /** The authenticated account's fingerprint, or a rejection the session records as a detail. */
+  detectAccountIdentity(page: Page): Promise<string>;
+  recordCapture(
+    storageState: unknown,
+    capabilities: ChatGptWebAccountCapabilities,
+    accountIdentityFingerprint: string | undefined,
+    accountIdentityDetail: string | undefined,
+  ): void;
 }
 
 /**
@@ -593,13 +648,48 @@ export function createChatGptWebAuthController(
       state as Parameters<typeof storeProviderSession>[0],
       capabilities,
     ));
+  const detectIdentity = options.detectIdentity ?? (async (page: Page) =>
+    (await detectChatGptAuthenticatedAccountIdentity(page)).fingerprint);
+  const writeIdentity = options.persistIdentity ?? persistAccountIdentityFingerprint;
   const headless = (config.authBrowserMode ?? "headless") === "headless";
 
   /**
-   * The capabilities of each capture this controller produced, keyed by the opaque state object the
-   * host will hand back to `storeCapture`. A WeakMap, so nothing outlives the capture it describes.
+   * The capabilities, and the account fingerprint, of each capture this controller produced, keyed by
+   * the opaque state object the host will hand back to `storeCapture`. A WeakMap, so nothing outlives
+   * the capture it describes.
    */
-  const captures = new WeakMap<object, ChatGptWebAccountCapabilities>();
+  const captures = new WeakMap<object, {
+    readonly capabilities: ChatGptWebAccountCapabilities;
+    readonly accountIdentityFingerprint: string | undefined;
+    readonly accountIdentityDetail: string | undefined;
+  }>();
+
+  /**
+   * Persist the fingerprint a capture detected and report — never throw — why it was skipped.
+   *
+   * The session is already stored when this runs, so a sign-in is never discarded for a missing
+   * account binding; but without the fingerprint the logical identity stays a non-account fallback
+   * (`providerConfig` substitutes the storage-state-derived value when the field is absent), and the
+   * next turn fails closed on the account-binding check. That is exactly what the operator has to be
+   * told, in non-secret terms, through the reported detail.
+   */
+  const persistIdentity = (capture: {
+    readonly accountIdentityFingerprint: string | undefined;
+    readonly accountIdentityDetail: string | undefined;
+  }): string | undefined => {
+    if (capture.accountIdentityFingerprint === undefined) {
+      return "The signed-in ChatGPT account identity could not be read, so no account fingerprint "
+        + `was written${capture.accountIdentityDetail ? ` (${capture.accountIdentityDetail})` : ""}; `
+        + "every turn will fail closed until a sign-in records it.";
+    }
+    try {
+      writeIdentity(capture.accountIdentityFingerprint);
+      return undefined;
+    } catch (error) {
+      return `The ChatGPT account fingerprint could not be written to the deployment configuration: `
+        + `${nonSecretAuthDetail(error)}. Every turn will fail closed until a sign-in records it.`;
+    }
+  };
 
   const owner: ChatGptWebAuthControllerOwner = {
     now,
@@ -614,9 +704,16 @@ export function createChatGptWebAuthController(
     async storageState(handle) {
       return await handle.storageState();
     },
-    recordCapture(storageState, capabilities) {
+    async detectAccountIdentity(page) {
+      return await detectIdentity(page);
+    },
+    recordCapture(storageState, capabilities, accountIdentityFingerprint, accountIdentityDetail) {
       if (storageState !== null && (typeof storageState === "object" || typeof storageState === "function")) {
-        captures.set(storageState as object, capabilities);
+        captures.set(storageState as object, {
+          capabilities,
+          accountIdentityFingerprint,
+          accountIdentityDetail,
+        });
       }
     },
   };
@@ -670,18 +767,24 @@ export function createChatGptWebAuthController(
         // `opaque`/`none` are other providers' shapes; this controller produced nothing to write.
         return { stored: false };
       }
-      const capabilities = typeof capture.storageState === "object" && capture.storageState !== null
+      const record = typeof capture.storageState === "object" && capture.storageState !== null
         ? captures.get(capture.storageState)
         : undefined;
-      if (!capabilities) {
+      if (!record) {
         throw webChatError(
           "CONVERSATION_STATE_MISMATCH",
           `The ${CHATGPT_WEB_AUTH_PROVIDER_ID} sign-in controller was asked to store a capture it did not produce`,
           { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID },
         );
       }
-      const location = storeSession(capture.storageState, capabilities);
-      return { stored: true, location };
+      // The session first, the account binding second: a failed session write must leave the
+      // configuration untouched, so a half-signed-in deployment is never recorded as bound.
+      const location = storeSession(capture.storageState, record.capabilities);
+      // The fingerprint is provider-side account binding, not captured material, so it is persisted
+      // here — the controller already owns the write — rather than widened into the neutral
+      // `AuthCapture` the host relays. `AuthCapture` stays exactly as it is.
+      const detail = persistIdentity(record);
+      return { stored: true, location, ...(detail !== undefined ? { detail } : {}) };
     },
   };
 }

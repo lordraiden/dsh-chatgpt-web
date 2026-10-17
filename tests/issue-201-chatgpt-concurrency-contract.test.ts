@@ -238,6 +238,35 @@ describe("issue #201 — ChatGPT account fan-out is bounded, exclusivity is per 
     expect(first.provenance().physicalResourceBound).toBe(true);
   });
 
+  test("3b: a genuine account mismatch is still refused, and names both sides fingerprinted", () => {
+    // The refusal that a production sign-in hit when the stored account fingerprint was the constant
+    // "unknown session" fallback. The check must keep refusing, and the diagnostic must name *which*
+    // physical account disagreed without ever printing a raw account identifier.
+    const registry = new BrowserAccountLeaseRegistry();
+    const lease = registry.acquire(leaseDescriptor("turn-one", "logical-account-276"));
+
+    const refusal = refusalOf(() => registry.bindPhysicalResource(
+      lease,
+      physicalResource("turn-one", "physical-account-276"),
+    ));
+    expect(refusal.message).toContain("Browser lease physical account does not match its logical account identity");
+    // Both sides are named, and both are this file's own 12-hex fingerprints.
+    expect(refusal.message).toMatch(/expected [0-9a-f]{12}, actual [0-9a-f]{12}/);
+    expect(refusal.message).not.toContain("logical-account-276");
+    expect(refusal.message).not.toContain("physical-account-276");
+    // And it is a real refusal: the lease stays unbound and owns no physical resource.
+    expect(lease.provenance().physicalResourceBound).toBe(false);
+    expect(lease.physicalResourceBinding()).toBeUndefined();
+  });
+
+  test("3c: the matching physical account still binds, so the check is not weakened", () => {
+    const registry = new BrowserAccountLeaseRegistry();
+    const lease = registry.acquire(leaseDescriptor("turn-one", "logical-account-276"));
+    registry.bindPhysicalResource(lease, physicalResource("turn-one", "logical-account-276"));
+    expect(lease.provenance().physicalResourceBound).toBe(true);
+    expect(lease.physicalResourceBinding()?.accountId).toBe("chatgpt-account:logical-account-276");
+  });
+
   test("4: past MAX_CHATGPT_BROWSER_TABS the refusal is the shared bounded message, and release frees exactly one slot", () => {
     const registry = new BrowserAccountLeaseRegistry();
     const live = [];
