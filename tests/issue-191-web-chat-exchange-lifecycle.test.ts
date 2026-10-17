@@ -8,7 +8,10 @@ import {
   chatGptWebChatRetryRefusalOf,
   chatGptWebChatSubmissionPhaseOf,
 } from "../src/adapters/chatgpt-web/web-chat-exchange-bridge";
-import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
+import {
+  ChatGptWebProviderCore,
+  type ChatGptWebProviderCoreTurnInput,
+} from "../src/adapters/chatgpt-web/provider-core";
 import type { CapabilitySnapshot } from "../src/adapters/chatgpt-web/capability-projector";
 import {
   WebChatExchangeLifecycle,
@@ -1080,4 +1083,175 @@ describe("issue #191 — a failure escalates a recovery already recorded (review
       expect(turn.coreSnapshot().logical).toBe("failed");
     });
   }
+});
+
+/**
+ * Issue #287 slice 3 — logical settlement is not physical settlement.
+ *
+ * Restored from the deleted `scripts/test-issue-9-provider-core.ts` (the "logical vs physical
+ * settlement", "rejected physical settlement remains observable", "physical-first failed logical
+ * settlement", "late lifecycle callbacks fail closed except final logical settlement" and
+ * "post-submit retry boundary" cases), asserted against the ProviderCore as it is now. Reporting a
+ * completion is not the same fact as a physically settled resource, and a settlement that cannot be
+ * established retires the turn rather than leaving its resource trusted again.
+ */
+describe("issue #287 slice 3 — a logical outcome is not a physical settlement", () => {
+  function providerTurnInput(executionKey: string): ChatGptWebProviderCoreTurnInput {
+    return {
+      executionKey,
+      traceId: `${executionKey}-trace`,
+      nativeTurnId: `${executionKey}-native`,
+      nativeThreadId: `${executionKey}-thread`,
+      accountIdentity: "account-287",
+      browserProfile: "profile-287",
+      browserContext: "context-287",
+      pageIdentity: `page-${executionKey}`,
+      capabilitySnapshot: {
+        snapshotId: `snapshot-${executionKey}`,
+        sessionId: "session-287",
+        agentId: "session-287",
+        turnId: `${executionKey}-native`,
+        createdAt: 1_700_000_000_000,
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    };
+  }
+
+  function boundTurn(core: ChatGptWebProviderCore, executionKey: string) {
+    const turn = core.begin(providerTurnInput(executionKey));
+    turn.bindPhysicalResource({
+      resourceId: `surface-${executionKey}`,
+      browserContextId: "context-287",
+      pageId: `page-${executionKey}`,
+      profileId: "profile-287",
+      accountId: "chatgpt-account:account-287",
+    });
+    turn.markSurfaceReady();
+    return turn;
+  }
+
+  test("a reported completion keeps the resource until the physical settlement is published", async () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-287-logical-before-physical";
+    const turn = boundTurn(core, executionKey);
+    turn.markSubmitted();
+    turn.markRunning();
+
+    let settle!: () => void;
+    const settlement = new Promise<void>(resolve => { settle = resolve; });
+    core.bindPhysicalSettlement(executionKey, settlement);
+
+    // The client-visible outcome is known...
+    turn.markLogicalSettled("completed");
+    const reported = turn.snapshot();
+    expect(reported.logicalSettled).toBe(true);
+    expect(reported.logicalOutcome).toBe("completed");
+
+    // ...and that is not a physical settlement: nothing is proven about the browser resource yet.
+    expect(reported.physicalSettled).toBe(false);
+    expect(reported.physicalSettlementOutcome).toBe("pending");
+    expect(reported.state).not.toBe("RETIRED");
+    // So the turn still owns the resource: no other turn may reach for it.
+    expect(turn.lease.isActive()).toBe(true);
+    expect(core.get(executionKey)).toBe(turn);
+    // The core records the same distinction, which is what the lease's reusability is derived from.
+    expect(turn.coreSnapshot().physical).toBe("pending");
+    expect(turn.coreSnapshot().retired).toBe(false);
+
+    // Only the published settlement retires the turn and hands the resource back.
+    settle();
+    await turn.waitForPhysicalSettlement();
+    const settled = turn.snapshot();
+    expect(settled.physicalSettled).toBe(true);
+    expect(settled.physicalSettlementOutcome).toBe("fulfilled");
+    expect(settled.state).toBe("RETIRED");
+    expect(turn.lease.isActive()).toBe(false);
+    expect(core.get(executionKey)).toBeUndefined();
+    expect(() => turn.assertCanAct()).toThrow(/retired/i);
+  });
+
+  test("a settlement that cannot be established retires the turn instead of reusing its resource", async () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-287-rejected-settlement";
+    const turn = core.begin(providerTurnInput(executionKey));
+    turn.markSubmitted();
+
+    const failure = new Error("launcher /turn/end could not be proven");
+    core.bindPhysicalSettlement(executionKey, Promise.reject(failure));
+    await turn.waitForPhysicalSettlement().catch(() => undefined);
+
+    const settled = turn.snapshot();
+    expect(settled.physicalSettlementOutcome).toBe("rejected");
+    // The unprovable settlement stays observable instead of being collapsed into a generic failure.
+    expect(settled.physicalSettlementError).toBe(failure.message);
+    expect(settled.state).toBe("RETIRED");
+    expect(turn.lease.isActive()).toBe(false);
+    // The core wrote the execution off, so its resource is not offered as current again...
+    expect(core.get(executionKey)).toBeUndefined();
+    expect(core.wasRetired(executionKey)).toBe(true);
+    // ...and a replacement for the same conversation is a declared replay, never a silent fresh start.
+    const replacement = core.begin(providerTurnInput(executionKey));
+    expect(replacement.snapshot().recovery).toBe("REPLAY");
+    replacement.failBeforePhysicalSettlement();
+  });
+
+  test("the settlement window fails closed for every mutation except the logical outcome", async () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-287-settling-window";
+    const turn = boundTurn(core, executionKey);
+    turn.markSubmitted();
+    turn.markRunning();
+
+    // Physical settlement wins the race: the turn waits for its client-visible outcome.
+    core.bindPhysicalSettlement(executionKey, Promise.resolve());
+    await turn.waitForPhysicalSettlement();
+    expect(turn.snapshot().state).toBe("SETTLING");
+    expect(turn.snapshot().physicalSettled).toBe(true);
+    expect(turn.snapshot().logicalSettled).toBe(false);
+
+    // Every late lifecycle callback is fail-closed in this window...
+    expect(() => turn.markRunning()).toThrow(/cannot accept lifecycle mutations/i);
+    expect(() => turn.markCapabilityWait()).toThrow(/cannot accept lifecycle mutations/i);
+    expect(() => turn.markRecovery("FAILED")).toThrow(/cannot accept lifecycle mutations/i);
+    expect(() => turn.assertCanAct()).toThrow(/retired/i);
+
+    // ...except the one fact the window exists for. (Its positive half is already pinned by issue #72.)
+    expect(() => turn.markLogicalSettled("completed")).not.toThrow();
+    expect(turn.snapshot().state).toBe("RETIRED");
+    expect(turn.snapshot().logicalOutcome).toBe("completed");
+    expect(turn.lease.isActive()).toBe(false);
+  });
+
+  test("a physical settlement attaches once, and a settled turn cannot be force-retired", () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-287-settlement-attached-once";
+    const turn = boundTurn(core, executionKey);
+
+    core.bindPhysicalSettlement(executionKey, new Promise<void>(() => {}));
+    expect(turn.snapshot().physicalSettlementAttached).toBe(true);
+    expect(turn.snapshot().physicalSettlementOutcome).toBe("pending");
+
+    // One settlement per physical execution, and once it started the turn may not be written off
+    // synchronously by whoever observes the response: the settlement owns that retirement.
+    expect(() => turn.attachPhysicalSettlement(Promise.resolve())).toThrow(/only be attached once/i);
+    expect(() => turn.failBeforePhysicalSettlement()).toThrow(/after physical execution has started/i);
+    expect(turn.snapshot().state).toBe("SURFACE_READY");
+    expect(turn.lease.isActive()).toBe(true);
+  });
+
+  test("a settled logical outcome cannot be re-settled as a different one", () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-287-logical-outcome-fixed";
+    const turn = boundTurn(core, executionKey);
+    turn.markSubmitted();
+    turn.markRunning();
+
+    turn.markLogicalSettled("completed");
+    // Re-reporting the same outcome is idempotent; changing it is refused.
+    expect(() => turn.markLogicalSettled("completed")).not.toThrow();
+    expect(() => turn.markLogicalSettled("failed")).toThrow(/cannot change: completed -> failed/i);
+    expect(turn.snapshot().logicalOutcome).toBe("completed");
+  });
 });
