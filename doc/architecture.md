@@ -2241,6 +2241,36 @@ Codex/DSH path, or a client that sends `client_metadata` — keeps it verbatim; 
 The documented limit is the same and applies identically: two callers with no identity and identical
 content are indistinguishable and share one conversation.
 
+**A caller's native DSH identity is honoured on every ingress, and one reader owns it (issue #307).** A
+harness is not obliged to speak OpenAI's `user` field: the shape it holds is the native one, so
+`client_metadata["x-codex-turn-metadata"].dsh_session_id` is a first-class conversation identity on
+`/v1/chat/completions` exactly as it already is on `/v1/responses`. The precedence is the native one — a
+declared session outranks a provider-private `thread_id` (which would otherwise collapse a session's
+several threads onto one conversation), which outranks the OpenAI-compatible `user`/`session_id` — and it
+is applied in exactly one place (`src/web-chat/host/turn-identity.ts`), which the provider's own reader
+also calls, so the two surfaces cannot disagree about who is talking. A surface that decides an identity
+of its own **preserves** the caller's metadata fields while forwarding them; replacing them is how the
+chat surface used to erase the very identity it was meant to carry. Without any identity the
+content-derived rule above is unchanged, and its new statement of what it really produces is explicit:
+**isolation, not session continuity** — one conversation per distinct content, which is why a sender that
+wants one conversation per session must send its identity. No heuristic (a project header, a time window,
+a message prefix) is admissible: guessing a session from text is per-harness and per-version.
+
+**A caller's auxiliary turn is answered and kept nowhere.** A caller that keeps its own canonical
+transcript also runs housekeeping calls on the same session identity — naming the session, compacting its
+history — and declares them with a turn `purpose`. That classification is a **provider-neutral core
+concept** (`src/web-chat/core/turn-delivery.ts`), because the meaning ("answered, kept nowhere") is common
+while *how* a provider avoids keeping a conversation is provider-specific. An **ephemeral** turn is
+executed and answered like any other, but the provider serving it must not create or retain a provider
+conversation for it, must not write any of the session's conversation state (no continuation state, no
+generation, no installed-prefix fingerprint), must not consume or retire the session's conversation, and
+must **fail closed** rather than answer by quietly taking that conversation over. The concept never leaks
+into a provider's internals: the ChatGPT adapter satisfies it through the retention decision it already
+owns, so no browser worker, prompt compiler or transport learns about `purpose`. A declared purpose is
+the caller's declaration and never an inference, and an unrecognized purpose is treated as ephemeral —
+attaching unknown auxiliary work to the user's chat is the damaging outcome, while merely not retaining it
+costs provider work.
+
 ### 32.3 Runtime and credentials
 
 - The service runs headless Chromium, supplied by a pinned Playwright base image whose browser build

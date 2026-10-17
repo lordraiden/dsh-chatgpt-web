@@ -116,6 +116,23 @@ export function normalizeApiSessionId(value: unknown): string | undefined {
  * Only role and text participate: never a timestamp or any other per-request value. Hashing the
  * parsed messages (which carry a timestamp) would mint a new identity on every call — exactly the
  * per-request fork this rule exists to prevent.
+ *
+ * ## What this rule really produces, stated plainly (issue #307)
+ *
+ * This is **isolation, not session continuity**. Because the identity is a function of the content,
+ * a caller that sends no identity gets **one provider conversation per distinct content** — which is
+ * the correct outcome when nothing in the request can tell two callers apart, and it is why an
+ * identity-less caller is never *wrong* — but it is not "one conversation per session". A harness that
+ * holds a session identity, sends it nowhere and varies its messages therefore produces a new provider
+ * conversation on almost every turn (measured: two harness sessions, nine ChatGPT chats), and no
+ * heuristic here can fix that: matching a project header, a timestamp window or a message prefix would
+ * be guessing a caller's session from its text, which is exactly the fragile behaviour this module
+ * refuses to own.
+ *
+ * **A sender that wants one conversation per session must send its identity**: `user` / `session_id`
+ * on the OpenAI-compatible surface, or the native turn metadata (`dsh_session_id` in
+ * `client_metadata["x-codex-turn-metadata"]`, read through `src/web-chat/host/turn-identity.ts`), which
+ * every surface of this product now honours.
  */
 export function contentConversationIdentity(messages: readonly ApiConversationMessage[]): string {
   const conversational = messages.filter(message => CONVERSATIONAL_ROLES.has(message.role));

@@ -59,7 +59,12 @@ export interface ControlledSurfacePlan {
 export class ControlledSurface {
   readonly runs: ControlledSurfaceRun[] = [];
   private readonly plans: ControlledSurfacePlan[] = [];
-  private previousConversationKey: string | undefined;
+  /**
+   * Conversation keys this fixture has already served, so a later turn on one of them is a resume even
+   * when another conversation ran in between — the shape the production surface keeps per retained
+   * conversation, and the shape an ephemeral turn (which retains nothing) leaves untouched.
+   */
+  private readonly retainedConversationKeys = new Set<string>();
 
   enqueue(plan: ControlledSurfacePlan): void {
     this.plans.push(plan);
@@ -73,7 +78,8 @@ export class ControlledSurface {
     return {
       run: async (turn: WebSurfaceTurn): Promise<string> => {
         const plan = this.plans.shift() ?? {};
-        const reused = turn.conversationKey !== undefined && turn.conversationKey === this.previousConversationKey;
+        const reused = turn.conversationKey !== undefined
+          && this.retainedConversationKeys.has(turn.conversationKey);
         await turn.onPreparedSelected?.(reused);
         const prepare = reused ? turn.prepareResume : turn.prepare;
         if (!prepare) throw chatGptContinuationPromptMissingError();
@@ -102,7 +108,9 @@ export class ControlledSurface {
           if (plan.error) throw plan.error;
           const answer = plan.answer ?? "controlled answer";
           turn.onTextDelta(answer);
-          this.previousConversationKey = turn.conversationKey;
+          if (turn.conversationKey !== undefined) {
+            this.retainedConversationKeys.add(turn.conversationKey);
+          }
           return answer;
         } finally {
           compiled.release();

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Honour the caller identity the service already understands on `/v1/chat/completions`, and answer a
+  harness housekeeping turn without claiming a provider conversation (issue #307). A DSH harness that
+  reaches this service through an OpenAI-compatible provider adapter sends no identity at all, so the
+  chat surface took its content-derived branch and one harness session became one web conversation **per
+  distinct content** (measured: two harness sessions, nine ChatGPT chats). Two causes are fixed, both on
+  the service side. First, the surface read identity only from `body.user`/`body.session_id` and then
+  **replaced** the caller's `client_metadata`, so a caller that sent the native shape had its
+  `dsh_session_id` and its turn `purpose` erased before the adapter could read them; identity now comes
+  from one host reader (`src/web-chat/host/turn-identity.ts`) with the precedence the native path already
+  applies (a declared session outranks a provider-private thread, which outranks `user`/`session_id`),
+  the caller's own metadata fields are preserved on the way through, and the two surfaces finally agree
+  about who is talking. Second, nothing consumed a turn `purpose`, so a `session-title` or `compaction`
+  call was treated as the user's own turn and claimed the session's retained conversation. The
+  classification is now a provider-neutral Core concept (`src/web-chat/core/turn-delivery.ts`): an
+  **ephemeral** turn is answered like any other, but the provider must serve it without creating or
+  retaining a conversation, without writing any of the session's conversation state, and without the
+  concept leaking into provider internals — the contract, and the fail-closed requirement for a provider
+  that cannot run ephemerally, are documented there. The ChatGPT adapter satisfies it through the
+  retention decision it already owns (`shouldRetainChatGptWebConversation`), never by teaching the
+  browser worker about `purpose`. Capability/content policy, authority, retention bounds, #302
+  continuation, #301 settlement and #305's refusal category are unchanged. **Still required for "one
+  harness session = one web chat": the harness has to forward the identity it already holds** — while it
+  sends nothing, this change cannot fuse its turns, and `contentConversationIdentity`'s documented
+  behaviour (and its newly explicit limit) is unchanged.
+
 - Report a concurrent-turn refusal on one conversation as its own category (issue #305). Two overlapping
   requests on the same identity used to answer `200` and, in ~0 ms, `502 upstream_server_error` with
   `ChatGPT Web cannot synchronously start a second provider turn for an active native DSH thread`. The
