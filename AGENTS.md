@@ -10,6 +10,8 @@ self-contained service distributed as a Docker image plus Compose stacks.
 - the CLI (`dsh-chatgpt-web serve|doctor|login|auth import`, plus its other documented subcommands);
 - the HTTP API (`/v1/responses`, `/v1/chat/completions`, `/v1/models`, `/healthz`, `/admin/*`,
   `/v1/control/*`), with API-key authentication through `DSH_CHATGPT_WEB_API_KEY`;
+- the remote interactive sign-in surface (`GET /v1/control/auth/` and the `/v1/control/auth/*` endpoints),
+  which drives a provider's own sign-in browser from the operator's page;
 - the ChatGPT-Web browser adapter;
 - the WebChat core contracts and the durable conversation store;
 - the container artifacts (`Dockerfile`, `Dockerfile.login`, the Compose stacks, `docker/**`).
@@ -314,8 +316,16 @@ Do not weaken:
 - the operator control-token authority (`/v1/control/*`, `/admin/*`) or its separation from the API key;
 - path validation or timing-sensitive comparisons.
 
-The noVNC sign-in port grants control of an authenticated browser session: keep it on the host's
-loopback only.
+The noVNC sign-in port (the `authBrowserMode: "display"` fallback, not retired) grants control of an
+authenticated browser session: keep it on the host's loopback only.
+
+The interactive sign-in surface (`/v1/control/auth/*`) follows the same authority boundary:
+
+- the operator **control token** guards it, never the API key;
+- the page at `GET /v1/control/auth/` is served anonymously **by design** — a browser navigation cannot
+  carry a header, and the token must never be put in a URL — while every endpoint that carries data is
+  guarded like the rest of `/v1/control/*`;
+- no cookie or browser storage state may ever appear in a session view or a log.
 
 Use sanitized examples in issues and documentation.
 
