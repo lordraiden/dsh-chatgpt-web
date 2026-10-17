@@ -11,6 +11,15 @@ import {
   type AdvisorHost,
 } from "./advisor";
 import type { WebChatProviderRuntime } from "./web-chat/host/text-turn";
+import { WEB_CHAT_AUTH_PAGE_HTML, WEB_CHAT_AUTH_PAGE_PATHS } from "./web-chat/host/auth-page";
+import {
+  createWebChatAuthSurface,
+  type WebChatAuthSessionView,
+  type WebChatAuthStreamEvent,
+  type WebChatAuthSurface,
+  type WebChatAuthSurfaceOptions,
+} from "./web-chat/host/auth-surface";
+import { isAuthInput, isWebChatError, type AuthInput } from "./web-chat/core";
 import { ChatGptWebProviderCore } from "./adapters/chatgpt-web/provider-core";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeNativeChatGptContinuityStores } from "./adapters/chatgpt-web/index";
@@ -1118,6 +1127,210 @@ async function advisorRecoverRequest(
   return Response.json(result, { status: result.ok ? 200 : 502, headers: controlCorsHeaders() });
 }
 
+/**
+ * The interactive sign-in control surface (issue #276, slice 2a).
+ *
+ * `/v1/control/auth/*` is the operator's authority, exactly like the rest of `/v1/control/*`: the
+ * control token opens it, the API key does not, and the control token still cannot open `/v1/*`.
+ * Nothing here is a second execution path for turns — this surface relays a provider's *sign-in* and
+ * never runs one.
+ *
+ * - `GET    /v1/control/auth/providers`            — the providers exposing an auth controller
+ * - `POST   /v1/control/auth/sessions`             — open one (409 when that provider is busy)
+ * - `GET    /v1/control/auth/sessions/<id>`        — the session view: no cookie, no storage state,
+ *                                                    no frame bytes and no page URL
+ * - `GET    /v1/control/auth/sessions/<id>/stream` — SSE, `data: {"seq","state","frame"…}` at 2-3 fps
+ * - `POST   /v1/control/auth/sessions/<id>/input`  — one `AuthInput`; the fresh state is the response
+ *                                                    and the fresh frame arrives on the stream
+ * - `DELETE /v1/control/auth/sessions/<id>`        — cancel, idempotently, and acknowledge a capture
+ *
+ * The page at `GET /v1/control/auth/` is the one path under `/v1/control/` deliberately NOT behind the
+ * control token: a browser cannot attach a header to a navigation, and putting the token in the URL is
+ * exactly what the page refuses to do. It is a static document carrying no data, and every endpoint
+ * that carries data is guarded like the rest of the control surface.
+ */
+function authProviderListResponse(surface: WebChatAuthSurface): Response {
+  return Response.json({ ok: true, providers: surface.providers() }, { headers: controlCorsHeaders() });
+}
+
+/** Map a malformed body or a surface refusal to the control API's HTTP answer. */
+function authFailureResponse(error: unknown): Response {
+  if (error instanceof TypeError) {
+    return Response.json(
+      { ok: false, code: "invalid_auth_input", message: error.message },
+      { status: 400, headers: controlCorsHeaders() },
+    );
+  }
+  if (isWebChatError(error)) {
+    // `MODEL_UNAVAILABLE` here is the host refusing an unknown provider id (the message names the
+    // valid ones); the transport/state categories are the sign-in lifecycle refusing the request.
+    const status = error.category === "MODEL_UNAVAILABLE" ? 404
+      : error.category === "SHUTDOWN" ? 503
+        : error.category === "TRANSPORT_UNAVAILABLE"
+          || error.category === "CONVERSATION_STATE_MISMATCH"
+          || error.category === "AUTH_EXPIRED" ? 409
+          : 502;
+    return Response.json(
+      { ok: false, code: error.category, message: error.message },
+      { status, headers: controlCorsHeaders() },
+    );
+  }
+  return Response.json(
+    { ok: false, code: "auth_unavailable", message: error instanceof Error ? error.message : String(error) },
+    { status: 500, headers: controlCorsHeaders() },
+  );
+}
+
+function authSessionNotFoundResponse(): Response {
+  return Response.json(
+    { ok: false, code: "session_not_found", message: "No sign-in session with that id is open on this service." },
+    { status: 404, headers: controlCorsHeaders() },
+  );
+}
+
+/** The session view as JSON. Captured material is deliberately absent, not redacted. */
+function authSessionBody(view: WebChatAuthSessionView): Record<string, unknown> {
+  return { ok: true, ...view };
+}
+
+/** `POST /v1/control/auth/sessions` — open one sign-in session for an already-selected provider. */
+async function authOpenRequest(req: Request, surface: WebChatAuthSurface): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await readJsonRequestBody(req);
+  } catch (error) {
+    const tooLarge = requestBodyFailure(error);
+    if (tooLarge) return tooLarge;
+    return Response.json(
+      { ok: false, code: "invalid_request_error", message: "The sign-in session body must be valid JSON" },
+      { status: 400, headers: controlCorsHeaders() },
+    );
+  }
+  const providerId = raw && typeof raw === "object" && typeof (raw as { providerId?: unknown }).providerId === "string"
+    ? (raw as { providerId: string }).providerId.trim()
+    : "";
+  if (providerId.length === 0) {
+    return Response.json(
+      { ok: false, code: "invalid_request_error", message: 'A sign-in session body requires a non-empty "providerId"' },
+      { status: 400, headers: controlCorsHeaders() },
+    );
+  }
+  try {
+    const view = await surface.open(providerId);
+    return Response.json(authSessionBody(view), { status: 201, headers: controlCorsHeaders() });
+  } catch (error) {
+    return authFailureResponse(error);
+  }
+}
+
+/** `POST /v1/control/auth/sessions/<id>/input` — relay one validated input. */
+async function authInputRequest(req: Request, surface: WebChatAuthSurface, id: string): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await readJsonRequestBody(req);
+  } catch (error) {
+    const tooLarge = requestBodyFailure(error);
+    if (tooLarge) return tooLarge;
+    return Response.json(
+      { ok: false, code: "invalid_auth_input", message: "A sign-in input must be valid JSON" },
+      { status: 400, headers: controlCorsHeaders() },
+    );
+  }
+  // The slice-1 guard is the only input vocabulary: an unknown intent or half an instruction is
+  // refused here, so nothing incomplete ever reaches a provider.
+  if (!isAuthInput(raw)) {
+    return Response.json(
+      {
+        ok: false,
+        code: "invalid_auth_input",
+        message: "A sign-in input must be one of click, type, key, scroll or navigate",
+      },
+      { status: 400, headers: controlCorsHeaders() },
+    );
+  }
+  try {
+    const view = await surface.input(id, raw as AuthInput);
+    return view
+      ? Response.json(authSessionBody(view), { headers: controlCorsHeaders() })
+      : authSessionNotFoundResponse();
+  } catch (error) {
+    return authFailureResponse(error);
+  }
+}
+
+/** One SSE event payload. Frame bytes are relayed as base64 and never decoded here. */
+function authStreamPayload(event: WebChatAuthStreamEvent): Record<string, unknown> {
+  return {
+    seq: event.seq,
+    state: event.state,
+    terminal: event.terminal,
+    ...(event.png !== undefined ? { frame: Buffer.from(event.png).toString("base64") } : {}),
+    ...(event.viewport !== undefined ? { viewport: event.viewport } : {}),
+    ...(event.capture !== undefined ? { capture: event.capture } : {}),
+    ...(event.closeReason !== undefined ? { closeReason: event.closeReason } : {}),
+    ...(event.error !== undefined ? { error: event.error } : {}),
+  };
+}
+
+/**
+ * `GET /v1/control/auth/sessions/<id>/stream` — the frame/state relay.
+ *
+ * The body is the surface's own generator: it yields immediately, again right after any input (the
+ * session's wake signal, not a poll) and on the frame cadence, and stops after one terminal event.
+ * The final event is both a `data:` frame and an `event: end`, so a client may key off either.
+ */
+function authStreamResponse(surface: WebChatAuthSurface, id: string, signal: AbortSignal): Response {
+  const encoder = new TextEncoder();
+  const frames = surface.stream(id, signal);
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        for await (const event of frames) {
+          const payload = JSON.stringify(authStreamPayload(event));
+          controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+          if (event.terminal) {
+            controller.enqueue(encoder.encode(`event: end\ndata: ${payload}\n\n`));
+            break;
+          }
+        }
+      } catch {
+        // A refusal or a dead socket ends the relay; the session itself is unaffected.
+      }
+      try {
+        controller.close();
+      } catch {
+        // Already closed by the client.
+      }
+    },
+    async cancel() {
+      await frames.return?.(undefined);
+    },
+  });
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      ...controlCorsHeaders(),
+    },
+  });
+}
+
+/** The static sign-in page. No data, no secret and no absolute URL of any kind. */
+function authPageResponse(): Response {
+  return new Response(WEB_CHAT_AUTH_PAGE_HTML, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      // Same-origin only, data: frames only, and no form may ever be submitted natively: a browser
+      // with scripting disabled must not turn the token field into a URL query.
+      "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
+      ...controlCorsHeaders(),
+    },
+  });
+}
+
 export function startServer(
   config: AppConfig,
   dependencies: {
@@ -1127,6 +1340,14 @@ export function startServer(
      * exact same instance to every adapter created for this listener.
      */
     adapterFactory?: (provider: CodexProviderConfig, providerCore: ChatGptWebProviderCore) => ProviderAdapter;
+    /**
+     * The interactive sign-in providers this listener serves (issue #276).
+     *
+     * The host composes them, exactly like the provider catalogue: this listener never invents a
+     * provider, and a provider that exposes no auth controller is simply not offered. Left out, the
+     * surface lists no provider — which is today's state until a provider driver contributes one.
+     */
+    auth?: WebChatAuthSurfaceOptions;
   } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
@@ -1203,6 +1424,13 @@ export function startServer(
   const advisorHost: AdvisorHost = createAdvisorHost({ runtimes: advisorRuntimes });
 
   /**
+   * The interactive sign-in surface (issue #276). One owner for the life of this listener: it holds
+   * the one-active-session-per-provider slots, so two listeners — or two requests — can never race
+   * two sign-ins over one account's stored state.
+   */
+  const authSurface: WebChatAuthSurface = createWebChatAuthSurface(dependencies.auth);
+
+  /**
    * The port the listening socket is actually bound to.
    *
    * `config.port` is the *requested* port and may be `0` (an ephemeral port, which the test suites and
@@ -1232,6 +1460,12 @@ export function startServer(
         last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
         ...activity(),
       });
+    }
+    // The sign-in page (issue #276): a static document, deliberately readable without the control
+    // token — a browser cannot put a header on a navigation, and the page's whole token handling
+    // exists to keep the token out of the URL. It carries no data; every endpoint below is guarded.
+    if (req.method === "GET" && WEB_CHAT_AUTH_PAGE_PATHS.includes(url.pathname)) {
+      return authPageResponse();
     }
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/control/")) {
       return new Response(null, { status: 204, headers: controlCorsHeaders() });
@@ -1310,6 +1544,47 @@ export function startServer(
     if (req.method === "GET" && url.pathname === "/v1/control/recent-turns") {
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 10) || 10, 1), 25);
       return Response.json({ turns: readRecentBrowserTurns(limit) }, { headers: controlCorsHeaders() });
+    }
+    if (url.pathname === "/v1/control/auth/providers" && req.method === "GET") {
+      return authProviderListResponse(authSurface);
+    }
+    if (url.pathname === "/v1/control/auth/sessions" && req.method === "POST") {
+      return authOpenRequest(req, authSurface);
+    }
+    if (url.pathname.startsWith("/v1/control/auth/sessions/")) {
+      const rest = url.pathname.slice("/v1/control/auth/sessions/".length);
+      const stream = rest.endsWith("/stream");
+      const input = rest.endsWith("/input");
+      const id = decodeURIComponent(stream ? rest.slice(0, -"/stream".length)
+        : input ? rest.slice(0, -"/input".length)
+          : rest);
+      if (id.length === 0 || id.includes("/")) {
+        return Response.json(
+          { ok: false, code: "invalid_request_error", message: "A sign-in session id is required" },
+          { status: 400, headers: controlCorsHeaders() },
+        );
+      }
+      if (stream && req.method === "GET") {
+        // Resolved before the stream so an unknown session is a 404 and not an empty 200 event stream.
+        if (!await authSurface.view(id)) return authSessionNotFoundResponse();
+        return authStreamResponse(authSurface, id, req.signal);
+      }
+      if (input && req.method === "POST") {
+        return authInputRequest(req, authSurface, id);
+      }
+      if (!stream && !input && req.method === "GET") {
+        const view = await authSurface.view(id);
+        return view
+          ? Response.json(authSessionBody(view), { headers: controlCorsHeaders() })
+          : authSessionNotFoundResponse();
+      }
+      if (!stream && !input && req.method === "DELETE") {
+        const view = await authSurface.cancel(id);
+        return view
+          ? Response.json(authSessionBody(view), { headers: controlCorsHeaders() })
+          : authSessionNotFoundResponse();
+      }
+      return new Response("Method not allowed", { status: 405, headers: controlCorsHeaders() });
     }
     if (req.method === "GET" && url.pathname === "/v1/control/advisor/models") {
       return httpTurns.track(
@@ -1660,6 +1935,9 @@ export function startServer(
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
         sharedProviderCore.shutdown(),
+        // The sign-in surface owns the provider slots and the sweep timer (issue #276). A captured
+        // session is deliberately left alone: its material may still be unacknowledged.
+        authSurface.close(),
         // The durable continuity store owns an open file and one writer slot per process; the
         // sidecar releases it on its own shutdown path (#193).
         closeNativeChatGptContinuityStores(),

@@ -71,6 +71,12 @@ function createFakeProvider(options: { providerId: string; pixels: boolean }) {
         state = "captured";
       }
     },
+    // Slice 2a widened the provider-owned half of the contract: the session exposes its own capture
+    // and the controller owns where that capture lands. This double produces no material, which is
+    // the `none` kind — the manager and the relay must not care either way.
+    async capture() {
+      return { kind: "none" } as const;
+    },
     async cancel(): Promise<void> {
       cancels += 1;
       if (state !== "captured") state = "expired";
@@ -82,6 +88,9 @@ function createFakeProvider(options: { providerId: string; pixels: boolean }) {
       async startAuth(): Promise<ProviderAuthSession> {
         state = "awaiting_input";
         return session;
+      },
+      async storeCapture(): Promise<{ stored: boolean }> {
+        return { stored: false };
       },
     } satisfies ProviderAuthController,
     session,
@@ -385,6 +394,9 @@ describe("issue #276 — cancellation and close are deterministic", () => {
       async startAuth() {
         const session = await provider.controller.startAuth();
         return { ...session, cancel: async () => { throw new Error("browser already gone"); } };
+      },
+      async storeCapture() {
+        return { stored: false };
       },
     };
     const manager = createWebChatAuthSessionManager({ sweepIntervalMs: 0 });
