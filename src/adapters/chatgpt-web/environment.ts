@@ -12,10 +12,12 @@ import type {
 } from "../../types";
 import { contentConversationIdentity, type ApiConversationMessage } from "../../web-chat/host/api-projection";
 import {
+  declaredTurnChannels,
   NATIVE_TURN_METADATA_KEY,
   nativeTurnMetadataString,
   parseNativeTurnMetadata,
   resolveNativeTurnIdentity,
+  type NativeTurnHeaderSource,
 } from "../../web-chat/host/turn-identity";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
 import type { CapabilitySnapshot } from "./capability-projector";
@@ -681,7 +683,10 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
   }
   const body = record(parsed._rawBody);
   const metadata = clientTurnMetadataFromBody(body);
-  const base = extractCodexTurnIdentityFromBody(body);
+  // The inbound wire headers reach the one declared-identity reader when the surface that built this
+  // request could see them (`_wireHeaders`); a body-only surface passes nothing and the body channels
+  // still apply.
+  const base = extractCodexTurnIdentityFromBody(body, parsed._wireHeaders);
   if (!base.turnId && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     const contentHash = createHash("sha256")
       .update(JSON.stringify(parsed.context.messages))
@@ -726,17 +731,26 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
  * The conversation identity and the declared turn purpose come from the host's one resolver
  * (`resolveNativeTurnIdentity`, issue #307), so the provider and the API surfaces cannot disagree
  * about what a caller declared: a `dsh_session_id` outranks a provider-private `thread_id`, and a
- * declared purpose is carried through for the retention decision. What stays here is the identity only
- * this provider has — the turn id, the parent thread, the agent name and the subagent kind.
+ * declared purpose is carried through for the retention decision. The resolver also reads the declared
+ * OpenAI-wire channels — the body's `prompt_cache_key` and, when the surface could see request headers,
+ * the session-affinity and declared-purpose headers — which sit below every native identity. What stays
+ * here is the identity only this provider has — the turn id, the parent thread, the agent name and the
+ * subagent kind.
+ *
+ * @param value - the caller's request body, in the shape this provider reads identity from.
+ * @param headers - the inbound request headers, when the surface could see them.
  */
-export function extractCodexTurnIdentityFromBody(value: unknown): ChatGptTurnIdentity {
+export function extractCodexTurnIdentityFromBody(
+  value: unknown,
+  headers?: NativeTurnHeaderSource,
+): ChatGptTurnIdentity {
   const metadata = clientTurnMetadataFromBody(value);
   const turnId = nativeTurnMetadataString(metadata, "turn_id");
   const parentThreadId = nativeTurnMetadataString(metadata, "parent_thread_id");
   const agentName = nativeTurnMetadataString(metadata, "agent_name");
   const subagentKind = nativeTurnMetadataString(metadata, "subagent_kind");
   return {
-    ...resolveNativeTurnIdentity(metadata, undefined),
+    ...resolveNativeTurnIdentity(metadata, undefined, undefined, declaredTurnChannels(value, headers)),
     ...(turnId !== undefined ? { turnId } : {}),
     ...(parentThreadId !== undefined ? { parentThreadId } : {}),
     ...(agentName !== undefined ? { agentName } : {}),

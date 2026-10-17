@@ -174,6 +174,23 @@ A declared `dsh_session_id` wins over a provider-private `thread_id` (a session 
 even when its threads change), which wins over `user`/`session_id`. One reader decides that for both
 ingresses, so the two surfaces agree.
 
+**A caller that speaks the OpenAI wire need not send `user`.** Two more channels carry the same
+declaration, and one reader (`src/web-chat/host/turn-identity.ts`) resolves all of them, so neither can
+shadow the identities above:
+
+- `prompt_cache_key` in the body — the session affinity an OpenAI-compatible client declares there. The
+  `@earendil-works/pi-ai` adapter writes the harness session id into it verbatim (only ever truncated to
+  64 characters, never hashed) when the harness profile sets `cacheRetention: "long"`, so a DSH session
+  reaches the service as its ChatGPT-Web conversation with **no installation at all**: the profile alone
+  puts it on the wire.
+- the session-affinity request headers a client may send instead — `x-session-affinity`, `session_id`,
+  or `x-session-id` (pi-ai's own spellings). `x-client-request-id`, which pi-ai emits beside them, is
+  deliberately *not* read: it names a request, not a session.
+
+`user`/`session_id`, a native `thread_id` and a native `dsh_session_id` all outrank both, and a blank
+value is absence. So does the purpose below. The retirement condition is the same for both channels: a
+caller that states a native identity does not need them, and they contribute nothing once it does.
+
 **An auxiliary turn is answered and kept nowhere.** If the request also declares a turn `purpose`
 (`"session-title"` or `"compaction"` — the harness's own housekeeping calls), the turn is executed and
 answered normally, but the service **retains no provider conversation for it**: it is not the session's
@@ -181,10 +198,16 @@ chat, it does not continue it, and it cannot disturb it. This is the documented 
 provider-neutral "ephemeral turn" (`src/web-chat/core/turn-delivery.ts`). Plain chat turns never carry a
 `purpose`, so this cannot affect a normal caller.
 
+The declaration travels in the native metadata, or — when only an OpenAI wire is available — in the
+`x-dsh-turn-purpose: <purpose>` request header, which a dedicated auxiliary route can attach as a static
+per-route header. Both are the caller's *word*: the service classifies from the declaration and never
+infers a purpose from content, headers, timestamps or project names. A native `purpose` outranks the
+header.
+
 If you are sending no identity at all, read the limit above literally: the service keeps **isolation,
 not session continuity** — the same content stays in one conversation, but different content becomes a
-different one. Forwarding the session identity (or the native metadata above) is what turns a harness
-session into **one** web chat.
+different one. Forwarding the session identity (the native metadata above, `prompt_cache_key`, or the
+affinity headers) is what turns a harness session into **one** web chat.
 
 ### Every CLI subcommand through the image
 

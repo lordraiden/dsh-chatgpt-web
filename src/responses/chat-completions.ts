@@ -44,9 +44,11 @@ import {
   type ApiConversationMessage,
 } from "../web-chat/host/api-projection";
 import {
+  declaredTurnChannels,
   nativeTurnMetadataFor,
   nativeTurnMetadataFromBody,
   resolveNativeTurnIdentity,
+  type NativeTurnHeaderSource,
 } from "../web-chat/host/turn-identity";
 
 /** A request the surface cannot serve. The server maps it to a typed 400. */
@@ -185,10 +187,21 @@ function applyTopLevelAdmission(body: Record<string, unknown>): readonly WebChat
  * and reported in `droppedCapabilities`; they are never read into the internal body, which is built
  * from the projected messages only.
  *
+ * @param raw - the caller's chat-completions body.
+ * @param headers - the request headers, when the HTTP surface can supply them. They carry the declared
+ *   identity channels an OpenAI-compatible caller may use instead of `user` / `session_id` — the
+ *   session-affinity headers and a declared auxiliary purpose header — which the host's one reader
+ *   resolves before this surface projects the identity onto the metadata channel the turn already
+ *   travels on. A surface that cannot see headers passes nothing, and the body channel
+ *   (`prompt_cache_key`) still applies.
+ *
  * @throws {ChatCompletionsRequestError} for anything the surface refuses — always before any provider
  * work, so a refused request submits nothing.
  */
-export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTranslation {
+export function translateChatCompletionsRequest(
+  raw: unknown,
+  headers?: NativeTurnHeaderSource,
+): ChatCompletionsTranslation {
   const body = asRecord(raw, "request body");
   const droppedCapabilities = applyTopLevelAdmission(body);
 
@@ -214,8 +227,14 @@ export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTr
   // instead of keeping a second, narrower idea of "identity": a declared `dsh_session_id` is the
   // conversation, and a declared auxiliary `purpose` makes the turn ephemeral (answered, kept nowhere)
   // rather than a turn of the caller's own chat.
+  //
+  // An OpenAI-compatible caller that sends no native metadata still declares an identity on the wire
+  // this surface speaks: `prompt_cache_key` in the body and the session-affinity headers beside it. Both
+  // are read through the same owner and sit below every identity this product already understands, so a
+  // native declaration keeps winning. The resolved purpose is projected onto the metadata this surface
+  // already emits, so `/v1/responses` and this route read one classification downstream.
   const native = nativeTurnMetadataFromBody(body);
-  const resolved = resolveNativeTurnIdentity(native, sessionId);
+  const resolved = resolveNativeTurnIdentity(native, sessionId, undefined, declaredTurnChannels(body, headers));
   // An ephemeral turn resolves to no identity by contract (`resolveNativeTurnIdentity`), so the
   // projection's own stateless branch gives it a content-derived identity: the provider still creates a
   // conversation surface for the answer, but nothing that could later be resolved as the caller's chat.
@@ -248,9 +267,12 @@ export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTr
     // declared `dsh_session_id` and a turn `purpose` must not have them erased by this surface on the
     // way through, or the turn would arrive unaddressed and unclassified. `thread_id` carries the
     // identity this surface resolved, so the adapter's reader resolves the same conversation here as it
-    // does on `/v1/responses`.
+    // does on `/v1/responses`; a purpose declared only on a route header is written here so the turn
+    // arrives classified on the same channel.
     client_metadata: {
-      "x-codex-turn-metadata": JSON.stringify(nativeTurnMetadataFor(native, projected.conversationIdentity)),
+      "x-codex-turn-metadata": JSON.stringify(
+        nativeTurnMetadataFor(native, projected.conversationIdentity, resolved.purpose),
+      ),
     },
   };
   if (typeof body.temperature === "number") internal.temperature = body.temperature;
