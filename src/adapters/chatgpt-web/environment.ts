@@ -11,6 +11,12 @@ import type {
   DshNativeTurnContext,
 } from "../../types";
 import { contentConversationIdentity, type ApiConversationMessage } from "../../web-chat/host/api-projection";
+import {
+  NATIVE_TURN_METADATA_KEY,
+  nativeTurnMetadataString,
+  parseNativeTurnMetadata,
+  resolveNativeTurnIdentity,
+} from "../../web-chat/host/turn-identity";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
 import type { CapabilitySnapshot } from "./capability-projector";
 
@@ -39,6 +45,12 @@ export interface ChatGptTurnIdentity {
   agentName?: string;
   subagentKind?: string;
   promptCacheKey?: string;
+  /**
+   * The caller's declared turn purpose, when it sent one (issue #307). The classification itself is
+   * owned by the core (`webChatTurnDeliveryFor`); this only carries the declaration to the provider's
+   * retention decision, which must serve an ephemeral turn without claiming a provider conversation.
+   */
+  purpose?: string;
 }
 
 export interface ChatGptThreadSpawnLineage {
@@ -101,17 +113,20 @@ function nativeDshContext(parsed: CodexParsedRequest): DshNativeTurnContext | un
   return parsed._dshContext;
 }
 
+/**
+ * The wire turn metadata of one request.
+ *
+ * The payload parsing lives in the host owner (`parseNativeTurnMetadata`, issue #307) so the
+ * provider's reader and the API surfaces cannot disagree about what a metadata payload is; this
+ * function only says *where* the provider finds it in a Responses body.
+ */
 function clientTurnMetadataFromBody(value: unknown): Record<string, unknown> | undefined {
   const body = record(value);
   const metadata = record(body?.client_metadata);
-  const raw = metadata?.["x-codex-turn-metadata"];
-  if (typeof raw === "string") {
-    try { return record(JSON.parse(raw)); }
-    catch { return undefined; }
-  }
-  return record(raw);
+  return parseNativeTurnMetadata(metadata?.[NATIVE_TURN_METADATA_KEY]);
 }
 
+/** The wire turn metadata of one parsed request. */
 function clientTurnMetadata(parsed: CodexParsedRequest): Record<string, unknown> | undefined {
   return clientTurnMetadataFromBody(parsed._rawBody);
 }
@@ -660,9 +675,12 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
       ...(native.dshSessionId ? { dshSessionId: native.dshSessionId } : {}),
       threadId: native.threadId,
       turnId: native.turnId,
+      // The native projection's own classification, carried for the retention decision.
+      ...(native.purpose !== undefined ? { purpose: native.purpose } : {}),
     };
   }
   const body = record(parsed._rawBody);
+  const metadata = clientTurnMetadataFromBody(body);
   const base = extractCodexTurnIdentityFromBody(body);
   if (!base.turnId && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     const contentHash = createHash("sha256")
@@ -683,8 +701,13 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
       // indistinguishable and share one conversation, because nothing in the request separates them.
       // `turnId` below is a *round* identity and stays per-request by design; only the conversation
       // identity must be stable.
+      //
+      // An auxiliary purpose is housekeeping (issue #307): `resolveNativeTurnIdentity` already resolved
+      // no caller identity for it, so the content-derived fallback below is the only identity it can get
+      // and the session's own thread is never addressed by it.
       threadId: base.threadId ?? contentConversationIdentity(requestConversationMessages(parsed)),
       turnId: `dsh-luna-${contentHash}`,
+      ...(base.purpose !== undefined ? { purpose: base.purpose } : {}),
       ...(base.parentThreadId ? { parentThreadId: base.parentThreadId } : {}),
       ...(base.agentName ? { agentName: base.agentName } : {}),
       ...(base.subagentKind ? { subagentKind: base.subagentKind } : {}),
@@ -697,21 +720,27 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
   };
 }
 
-/** Read only Codex-owned lifecycle identity without interpreting or rewriting the provider body. */
+/**
+ * Read only Codex-owned lifecycle identity without interpreting or rewriting the provider body.
+ *
+ * The conversation identity and the declared turn purpose come from the host's one resolver
+ * (`resolveNativeTurnIdentity`, issue #307), so the provider and the API surfaces cannot disagree
+ * about what a caller declared: a `dsh_session_id` outranks a provider-private `thread_id`, and a
+ * declared purpose is carried through for the retention decision. What stays here is the identity only
+ * this provider has — the turn id, the parent thread, the agent name and the subagent kind.
+ */
 export function extractCodexTurnIdentityFromBody(value: unknown): ChatGptTurnIdentity {
   const metadata = clientTurnMetadataFromBody(value);
-  const threadId = typeof metadata?.thread_id === "string" && metadata.thread_id.trim() ? metadata.thread_id.trim() : undefined;
-  const turnId = typeof metadata?.turn_id === "string" && metadata.turn_id.trim() ? metadata.turn_id.trim() : undefined;
-  const dshSessionId = typeof metadata?.dsh_session_id === "string" && metadata.dsh_session_id.trim()
-    ? metadata.dsh_session_id.trim()
-    : undefined;
+  const turnId = nativeTurnMetadataString(metadata, "turn_id");
+  const parentThreadId = nativeTurnMetadataString(metadata, "parent_thread_id");
+  const agentName = nativeTurnMetadataString(metadata, "agent_name");
+  const subagentKind = nativeTurnMetadataString(metadata, "subagent_kind");
   return {
-    ...(dshSessionId ? { dshSessionId } : {}),
-    ...(threadId ? { threadId } : {}),
-    ...(turnId ? { turnId } : {}),
-    ...(typeof metadata?.parent_thread_id === "string" ? { parentThreadId: metadata.parent_thread_id } : {}),
-    ...(typeof metadata?.agent_name === "string" ? { agentName: metadata.agent_name } : {}),
-    ...(typeof metadata?.subagent_kind === "string" ? { subagentKind: metadata.subagent_kind } : {}),
+    ...resolveNativeTurnIdentity(metadata, undefined),
+    ...(turnId !== undefined ? { turnId } : {}),
+    ...(parentThreadId !== undefined ? { parentThreadId } : {}),
+    ...(agentName !== undefined ? { agentName } : {}),
+    ...(subagentKind !== undefined ? { subagentKind } : {}),
   };
 }
 

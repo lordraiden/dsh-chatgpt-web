@@ -65,7 +65,7 @@ import {
   settleActiveCompactionSource,
   settleActiveZeroRiskCompactionSource,
 } from "./compaction-handoff";
-import { webChatAccountBindingId, type WebChatAccountBinding, type WebChatConversationStore } from "../../web-chat/core";
+import { webChatAccountBindingId, isEphemeralWebChatTurn, type WebChatAccountBinding, type WebChatConversationStore } from "../../web-chat/core";
 import {
   CHATGPT_WEB_DRIVER_ID,
   closeWebChatConversationStore,
@@ -329,6 +329,16 @@ export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexPa
  * retention. Manual Zero Risk turns own an explicit launcher lifecycle and
  * compaction requests follow a separate retention path, so neither retains
  * here.
+ *
+ * One thing this provider deliberately does **not** do: answer an **ephemeral** turn by putting its
+ * conversation on the session's key. A caller that declares an auxiliary `purpose` (a session title, a
+ * compaction) is running housekeeping, and the host contract for such a turn is that it is answered and
+ * kept nowhere (`isEphemeralWebChatTurn`, the one owner of that classification). Retaining nothing is
+ * how this provider satisfies it: the machinery below already distinguishes "retained" from "not
+ * retained", so an ephemeral turn never creates a conversation key, never becomes a conversation head,
+ * never records an installed-prefix fingerprint, and never becomes the surface the session's own next
+ * turn continues. The browser still serves the turn — that is the transport — but no *provider
+ * conversation* is claimed for it.
  */
 export function shouldRetainChatGptWebConversation(
   parsed: CodexParsedRequest,
@@ -336,6 +346,9 @@ export function shouldRetainChatGptWebConversation(
   manualRequest = false,
 ): boolean {
   if (manualRequest || parsed._compactionRequest) return false;
+  // The caller's own classification outranks every retention reason below: housekeeping is answered,
+  // never remembered (issue #307).
+  if (isEphemeralWebChatTurn(extractChatGptTurnIdentity(parsed).purpose)) return false;
   // A ChatGPT Advisor review turn (issue #178) always retains its independent
   // Advisor conversation: the marker is the owner of the Advisor continuity
   // decision.

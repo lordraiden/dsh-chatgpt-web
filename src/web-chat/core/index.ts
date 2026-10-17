@@ -84,6 +84,14 @@ export {
 
 export { legacyWebChatThreadKey, webChatAffinityKey, type WebChatAffinityKeyInput } from "./conversation-key";
 
+export {
+  WEB_CHAT_AUXILIARY_TURN_PURPOSES,
+  isEphemeralWebChatTurn,
+  webChatTurnDeliveryFor,
+  type WebChatAuxiliaryTurnPurpose,
+  type WebChatTurnDelivery,
+} from "./turn-delivery";
+
 export { webChatAccountBindingId, type WebChatAccountBindingId } from "./account-binding";
 
 export {

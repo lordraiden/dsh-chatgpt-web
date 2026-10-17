@@ -19,6 +19,14 @@
  * identity channel, and the provider still sees only message text — the identity is never part of a
  * message. See `src/web-chat/host/api-projection.ts` for the rule and its documented limit.
  *
+ * A fourth, added with issue #307: **which identity counts**. The channel was already read, but this
+ * surface used to read identity only from `body.user`/`body.session_id` and then *replace* the caller's
+ * `client_metadata` with what it derived — so a caller that sent the native shape had its
+ * `dsh_session_id` and its turn `purpose` erased here. The derivation now goes through the host's one
+ * reader (`src/web-chat/host/turn-identity.ts`), which resolves the native metadata first and keeps the
+ * caller's fields on the way through, so this surface and `/v1/responses` agree about who is talking
+ * and about which turns are housekeeping.
+ *
  * Capability declarations are the deliberate exception, by product design and not by configuration:
  * `tools`, `tool_choice`/`function_call` and `mcp`/`functions` are accepted and discarded, because
  * this bridge is a text chat with no execution or return channel to the caller's harness. Nothing
@@ -35,6 +43,11 @@ import {
   normalizeApiSessionId,
   type ApiConversationMessage,
 } from "../web-chat/host/api-projection";
+import {
+  nativeTurnMetadataFor,
+  nativeTurnMetadataFromBody,
+  resolveNativeTurnIdentity,
+} from "../web-chat/host/turn-identity";
 
 /** A request the surface cannot serve. The server maps it to a typed 400. */
 export class ChatCompletionsRequestError extends Error {
@@ -196,9 +209,22 @@ export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTr
   });
 
   const sessionId = normalizeApiSessionId(body.user) ?? normalizeApiSessionId(body.session_id);
+  // The native metadata shape a DSH caller can send (`client_metadata["x-codex-turn-metadata"]`) is
+  // read through the host's one reader (issue #307), so this surface agrees with `/v1/responses`
+  // instead of keeping a second, narrower idea of "identity": a declared `dsh_session_id` is the
+  // conversation, and a declared auxiliary `purpose` makes the turn ephemeral (answered, kept nowhere)
+  // rather than a turn of the caller's own chat.
+  const native = nativeTurnMetadataFromBody(body);
+  const resolved = resolveNativeTurnIdentity(native, sessionId);
+  // An ephemeral turn resolves to no identity by contract (`resolveNativeTurnIdentity`), so the
+  // projection's own stateless branch gives it a content-derived identity: the provider still creates a
+  // conversation surface for the answer, but nothing that could later be resolved as the caller's chat.
   let projected;
   try {
-    projected = projectApiConversation({ messages, ...(sessionId !== undefined ? { sessionId } : {}) });
+    projected = projectApiConversation({
+      messages,
+      ...(resolved.threadId !== undefined ? { sessionId: resolved.threadId } : {}),
+    });
   } catch (error) {
     throw new ChatCompletionsRequestError(error instanceof Error ? error.message : String(error));
   }
@@ -217,8 +243,14 @@ export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTr
     // extractor already reads (`client_metadata["x-codex-turn-metadata"].thread_id`), the same
     // channel the native Codex and compact surfaces use. It is a request-level field, never a
     // message: the provider-visible text stays message-only.
+    //
+    // The caller's own metadata fields are preserved rather than replaced (issue #307): a caller that
+    // declared `dsh_session_id` and a turn `purpose` must not have them erased by this surface on the
+    // way through, or the turn would arrive unaddressed and unclassified. `thread_id` carries the
+    // identity this surface resolved, so the adapter's reader resolves the same conversation here as it
+    // does on `/v1/responses`.
     client_metadata: {
-      "x-codex-turn-metadata": JSON.stringify({ thread_id: projected.conversationIdentity }),
+      "x-codex-turn-metadata": JSON.stringify(nativeTurnMetadataFor(native, projected.conversationIdentity)),
     },
   };
   if (typeof body.temperature === "number") internal.temperature = body.temperature;

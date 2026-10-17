@@ -29,7 +29,13 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   // capture envelope, and a rename or an extra auth value is a surface change, not just a diff.
   // The text-only vocabulary is split by kind (capabilities are discarded by design, content is
   // refused); the two lists are the one owner of that split, so they are deliberately pinned.
+  //
+  // Issue #307 added the turn-delivery contract: one predicate and one classification for "this turn
+  // is answered and kept nowhere". They are in the pinned surface because a provider asks this instead
+  // of comparing purpose strings itself — that is what keeps "what makes a turn ephemeral" owned once,
+  // in the common layer, rather than re-decided per provider.
   "AUTH_SESSION_STATES",
+  "WEB_CHAT_AUXILIARY_TURN_PURPOSES",
   "WEB_CHAT_CAPABILITY_FEATURES",
   "WEB_CHAT_CONTENT_FEATURES",
   "WEB_CHAT_ERROR_CATEGORIES",
@@ -49,6 +55,7 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   "isAuthCapture",
   "isAuthInput",
   "isAuthSessionState",
+  "isEphemeralWebChatTurn",
   "isProviderAuthView",
   "isWebChatError",
   "isWebChatExchangeEventType",
@@ -66,6 +73,7 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   "webChatError",
   "webChatReplayStateOwnedBy",
   "webChatRetrySafetyOf",
+  "webChatTurnDeliveryFor",
 ].sort();
 
 const ROOT = join(import.meta.dir, "..");

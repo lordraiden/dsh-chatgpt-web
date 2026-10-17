@@ -157,6 +157,35 @@ adapter's own fallback calls the same identity owner instead of inventing a seco
 that provides a native Codex/DSH thread keeps that thread exactly as before — only the metadata-less
 fallback changed.
 
+**A DSH caller can send its native identity instead of `user`.** Both ingresses honour
+`client_metadata["x-codex-turn-metadata"]`:
+
+```jsonc
+{
+  "model": "chatgpt-web/luna",
+  "messages": [{ "role": "user", "content": "hola" }],
+  "client_metadata": {
+    "x-codex-turn-metadata": "{\"dsh_session_id\":\"<your session id>\"}"
+  }
+}
+```
+
+A declared `dsh_session_id` wins over a provider-private `thread_id` (a session keeps one conversation
+even when its threads change), which wins over `user`/`session_id`. One reader decides that for both
+ingresses, so the two surfaces agree.
+
+**An auxiliary turn is answered and kept nowhere.** If the request also declares a turn `purpose`
+(`"session-title"` or `"compaction"` — the harness's own housekeeping calls), the turn is executed and
+answered normally, but the service **retains no provider conversation for it**: it is not the session's
+chat, it does not continue it, and it cannot disturb it. This is the documented contract of the
+provider-neutral "ephemeral turn" (`src/web-chat/core/turn-delivery.ts`). Plain chat turns never carry a
+`purpose`, so this cannot affect a normal caller.
+
+If you are sending no identity at all, read the limit above literally: the service keeps **isolation,
+not session continuity** — the same content stays in one conversation, but different content becomes a
+different one. Forwarding the session identity (or the native metadata above) is what turns a harness
+session into **one** web chat.
+
 ### Every CLI subcommand through the image
 
 The entrypoint execs `node lib/cli.js "$@"`, so any subcommand is reachable with `docker run`:
