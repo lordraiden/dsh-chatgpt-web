@@ -547,7 +547,7 @@ export async function responseRequest(
     ? (raw as { model?: unknown }).model
     : undefined;
   try {
-    const identity = extractCodexTurnIdentityFromBody(raw);
+    const identity = extractCodexTurnIdentityFromBody(raw, req.headers);
     if (identity.threadId && identity.turnId) {
       options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
     }
@@ -576,6 +576,11 @@ export async function responseRequest(
   let route: ChatGptWebModelRoute;
   try {
     parsed = parseRequest(expanded);
+    // The inbound wire headers are kept with the parsed request so the host's one declared-identity
+    // reader can read the session-affinity and declared-purpose headers an OpenAI-compatible caller
+    // uses instead of `user` / `session_id` (issue #307 follow-up). Transport-only: never persisted and
+    // never model-visible.
+    parsed._wireHeaders = req.headers;
     route = routeChatGptWebRequest(parsed, config);
     const identity = extractChatGptTurnIdentity(parsed);
     if (identity.threadId && identity.turnId) {
@@ -774,7 +779,7 @@ export async function compactRequest(
     };
   }
   try {
-    const identity = extractCodexTurnIdentityFromBody(raw);
+    const identity = extractCodexTurnIdentityFromBody(raw, req.headers);
     if (identity.threadId && identity.turnId) {
       options.onTurnIdentity?.({ threadId: identity.threadId, turnId: identity.turnId });
     }
@@ -1959,7 +1964,7 @@ export function startServer(
       if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
       let translation;
       try {
-        translation = translateChatCompletionsRequest(await readJsonRequestBody(req));
+        translation = translateChatCompletionsRequest(await readJsonRequestBody(req), req.headers);
       } catch (error) {
         const tooLarge = requestBodyFailure(error);
         if (tooLarge) return tooLarge;

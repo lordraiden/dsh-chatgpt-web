@@ -35,6 +35,15 @@ export interface CodexParsedRequest {
   _dshContext?: DshNativeTurnContext;
   /** Internal transport projection only; never the authority for DSH state. */
   _rawBody?: unknown;
+  /**
+   * The inbound HTTP request headers, when the surface that built this request could see them.
+   *
+   * Internal transport projection only, like `_rawBody`: it is carried solely so the host's one
+   * declared-identity reader (`src/web-chat/host/turn-identity.ts`) can read the session-affinity and
+   * declared-purpose headers an OpenAI-compatible caller uses instead of `user` / `session_id`. It is
+   * never the authority for DSH state, is never persisted, and is never model-visible.
+   */
+  _wireHeaders?: Headers;
   /** Number of leading raw input items restored from local previous_response_id state. */
   _replayPrefixLen?: number;
   /**

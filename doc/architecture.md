@@ -2256,6 +2256,24 @@ content-derived rule above is unchanged, and its new statement of what it really
 wants one conversation per session must send its identity. No heuristic (a project header, a time window,
 a message prefix) is admissible: guessing a session from text is per-harness and per-version.
 
+**A caller's declared identity is also read from the OpenAI wire itself, and the same one reader owns it.**
+A harness that reaches this service through an OpenAI-compatible provider does not have to speak native
+metadata either: it can put its session identity in `prompt_cache_key` in the body and in the
+session-affinity headers (`x-session-affinity`, `session_id`, `x-session-id` — the spellings
+`@earendil-works/pi-ai` itself emits), and it can mark a housekeeping call with an `x-dsh-turn-purpose`
+request header. All of them are **declarations the caller makes**, resolved by the same one owner as the
+native fields and placed **below** every identity this product already understood: a native
+`dsh_session_id`, a native `thread_id` and OpenAI's own `user`/`session_id` all outrank them, a blank
+value is absence, and a native `purpose` outranks the header. So neither channel can shadow an existing
+identity, and the retirement condition is the same for both — a caller that states a native identity
+needs neither. The body field is the one that makes this reachable with **configuration alone**: a pi-ai
+profile with `cacheRetention: "long"` writes the harness session id into `prompt_cache_key` verbatim
+(truncated past 64 characters, never hashed), with no installation and no plugin. The affinity *header*
+is not configurable in the currently installed pi-ai adapter (its compat gate withholds
+`sendSessionAffinityHeaders`), so it is read as the same declared channel but is not the channel a user
+can switch on today. Neither channel is inferred from content: text sniffing remains inadmissible for the
+reason the unit above gives.
+
 **A caller's auxiliary turn is answered and kept nowhere.** A caller that keeps its own canonical
 transcript also runs housekeeping calls on the same session identity — naming the session, compacting its
 history — and declares them with a turn `purpose`. That classification is a **provider-neutral core

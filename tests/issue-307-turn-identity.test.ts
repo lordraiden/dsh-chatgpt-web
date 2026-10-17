@@ -7,7 +7,7 @@ import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution"
 import { defaultConfig, saveConfig } from "../src/config";
 import { translateChatCompletionsRequest } from "../src/responses/chat-completions";
 import { parseRequest } from "../src/responses/parser";
-import { routeChatGptWebRequest } from "../src/server";
+import { routeChatGptWebRequest, startServer, type RunningServer } from "../src/server";
 import { isEphemeralWebChatTurn, webChatTurnDeliveryFor } from "../src/web-chat/core";
 import {
   nativeTurnMetadataFromBody,
@@ -49,9 +49,17 @@ import {
  * What remains, stated rather than implied: with the harness still sending no identity, this change
  * cannot fuse its turns — see the last block. Everything here is the service being ready for the
  * identity, not the identity arriving.
+ *
+ * The follow-up block covers the two channels an OpenAI-compatible harness can actually reach with
+ * **configuration only** (verified against the installed `@earendil-works/pi-ai` and the harness's
+ * `dsh-llm-pi-ai` profile schema): `prompt_cache_key` in the body, which the harness session id lands
+ * in once its profile sets `cacheRetention: "long"`, and the session-affinity / declared-purpose
+ * request headers. Both are read by the same one owner, below every identity this product already
+ * understood, and neither is ever inferred from content.
  */
 let home: string;
 let savedHome: SavedChatGptWebHome;
+const listeners: RunningServer[] = [];
 
 beforeEach(async () => {
   savedHome = captureChatGptWebHome();
@@ -62,6 +70,13 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  while (listeners.length > 0) {
+    const server = listeners.pop()!;
+    await Promise.race([
+      Promise.resolve(server.stop(true)).catch(() => undefined),
+      new Promise(resolve => setTimeout(resolve, 2_000)),
+    ]);
+  }
   await closeNativeChatGptContinuityStores();
   chatGptTurnSessions.clear();
   restoreChatGptWebHome(savedHome, home);
@@ -110,6 +125,37 @@ function plainApiTurn(messages: readonly WireMessage[]): CodexParsedRequest {
     model: LUNA,
     messages: messages.map(message => ({ role: message.role, content: message.content })),
   });
+  const parsed = parseRequest(translated.body);
+  routeChatGptWebRequest(parsed, defaultConfig());
+  return parsed;
+}
+
+/**
+ * One `/v1/chat/completions` request that declares its identity on the **OpenAI wire**, not in native
+ * metadata: `prompt_cache_key` in the body and/or the session-affinity and declared-purpose request
+ * headers.
+ *
+ * These are the channels an OpenAI-compatible harness (`@earendil-works/pi-ai`) actually uses when its
+ * profile asks for long prompt-cache retention, so this drives the same production path as
+ * `nativeApiTurn` — translation, the shared Responses parser and the catalogue route — with the request
+ * headers the HTTP surface supplies.
+ */
+function channelApiTurn(options: {
+  readonly messages: readonly WireMessage[];
+  readonly promptCacheKey?: string;
+  readonly headers?: Record<string, string>;
+  readonly metadata?: NativeMetadata;
+  readonly user?: string;
+}): CodexParsedRequest {
+  const translated = translateChatCompletionsRequest({
+    model: LUNA,
+    ...(options.user !== undefined ? { user: options.user } : {}),
+    ...(options.promptCacheKey !== undefined ? { prompt_cache_key: options.promptCacheKey } : {}),
+    messages: options.messages.map(message => ({ role: message.role, content: message.content })),
+    ...(options.metadata
+      ? { client_metadata: { "x-codex-turn-metadata": JSON.stringify(options.metadata) } }
+      : {}),
+  }, new Headers(options.headers ?? {}));
   const parsed = parseRequest(translated.body);
   routeChatGptWebRequest(parsed, defaultConfig());
   return parsed;
@@ -356,6 +402,279 @@ describe("issue #307 — an auxiliary purpose is answered, but claims no provide
       dshSessionId: "native-session",
       threadId: "native-session",
     });
+  });
+});
+
+describe("issue #307 — a declared OpenAI-wire identity and purpose are read, never guessed", () => {
+  test("the body's prompt_cache_key is one conversation per value, never one per content", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "dos" });
+    surface.enqueue({ answer: "tres" });
+    const target = adapter(surface);
+
+    const first = await runTurn(target, channelApiTurn({
+      promptCacheKey: "pi-ai-session-307-a",
+      messages: [{ role: "user", content: "alfa" }],
+    }));
+    // The SAME declared key with different content: the declaration owns the conversation, so this is
+    // a continuation (delta only) rather than the fork the content-derived rule would produce.
+    const second = await runTurn(target, channelApiTurn({
+      promptCacheKey: "pi-ai-session-307-a",
+      messages: [
+        { role: "user", content: "alfa" },
+        { role: "assistant", content: "uno" },
+        { role: "user", content: "beta" },
+      ],
+    }));
+    // A DIFFERENT key with content byte-identical to the second turn: content alone cannot separate
+    // these two callers, and the declared key must.
+    const other = await runTurn(target, channelApiTurn({
+      promptCacheKey: "pi-ai-session-307-b",
+      messages: [
+        { role: "user", content: "alfa" },
+        { role: "assistant", content: "uno" },
+        { role: "user", content: "beta" },
+      ],
+    }));
+
+    expect(errors(first)).toEqual([]);
+    expect(errors(second)).toEqual([]);
+    expect(errors(other)).toEqual([]);
+    expect(finalText(first)).toBe("uno");
+    expect(finalText(second)).toBe("dos");
+    expect(finalText(other)).toBe("tres");
+
+    expect(surface.runs).toHaveLength(3);
+    expect(surface.runs[1]!.turn.conversationKey).toBe(surface.runs[0]!.turn.conversationKey);
+    expect(surface.runs[2]!.turn.conversationKey).not.toBe(surface.runs[0]!.turn.conversationKey);
+    expect(surface.runs[0]!.prompt).toContain(INSTALL_HEADER);
+    expect(surface.runs[1]!.prompt).toBe("beta");
+    expect(surface.runs[2]!.prompt).toContain(INSTALL_HEADER);
+    // The declared key is request identity, never text the model could read.
+    for (const run of surface.runs) {
+      expect(run.prompt).not.toContain("pi-ai-session-307");
+    }
+  });
+
+  test("the session-affinity headers name the same conversation in pi-ai's own spellings", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "dos" });
+    surface.enqueue({ answer: "tres" });
+    const target = adapter(surface);
+
+    const byAffinity = await runTurn(target, channelApiTurn({
+      headers: { "x-session-affinity": "header-session-307" },
+      messages: [{ role: "user", content: "alfa" }],
+    }));
+    // The same declaration in pi-ai's other spelling is the SAME conversation, not a second one.
+    const bySessionId = await runTurn(target, channelApiTurn({
+      headers: { session_id: "header-session-307" },
+      messages: [
+        { role: "user", content: "alfa" },
+        { role: "assistant", content: "uno" },
+        { role: "user", content: "beta" },
+      ],
+    }));
+    // A third spelling and a different value: its own conversation, even with identical content.
+    const bySessionIdHeader = await runTurn(target, channelApiTurn({
+      headers: { "x-session-id": "header-session-307-other" },
+      messages: [{ role: "user", content: "beta" }],
+    }));
+
+    expect(errors(byAffinity)).toEqual([]);
+    expect(errors(bySessionId)).toEqual([]);
+    expect(errors(bySessionIdHeader)).toEqual([]);
+    expect(finalText(byAffinity)).toBe("uno");
+    expect(finalText(bySessionId)).toBe("dos");
+    expect(finalText(bySessionIdHeader)).toBe("tres");
+
+    expect(surface.runs).toHaveLength(3);
+    expect(surface.runs[1]!.turn.conversationKey).toBe(surface.runs[0]!.turn.conversationKey);
+    expect(surface.runs[1]!.prompt).toBe("beta");
+    expect(surface.runs[2]!.turn.conversationKey).not.toBe(surface.runs[0]!.turn.conversationKey);
+    expect(surface.runs[2]!.prompt).toContain(INSTALL_HEADER);
+    for (const run of surface.runs) {
+      expect(run.prompt).not.toContain("header-session-307");
+    }
+  });
+
+  test("a purpose on the auxiliary route's static header classifies the turn ephemeral", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "un titulo" });
+    surface.enqueue({ answer: "dos" });
+    const target = adapter(surface);
+
+    // The session's own first turn, declaring its identity only on the wire header pi-ai emits.
+    const human = await runTurn(target, channelApiTurn({
+      headers: { "x-session-affinity": "aux-route-307-human" },
+      messages: [{ role: "user", content: "pregunta uno" }],
+    }));
+    expect(errors(human)).toEqual([]);
+    const humanRun = surface.runs[0]!;
+    expect(humanRun.prompt).toContain(INSTALL_HEADER);
+
+    // The harness housekeeping call: the SAME wire session, routed at the profile whose static header
+    // declares `session-title`, carrying no native metadata at all (the harness drops `purpose` before
+    // an OpenAI-compatible wire, so the route header is the declaration that survives).
+    const titleRequest = channelApiTurn({
+      headers: { "x-session-affinity": "aux-route-307-human", "x-dsh-turn-purpose": "session-title" },
+      messages: [{ role: "user", content: "pregunta uno" }],
+    });
+    expect(extractChatGptTurnIdentity(titleRequest).purpose).toBe("session-title");
+    expect(isEphemeralWebChatTurn(extractChatGptTurnIdentity(titleRequest).purpose)).toBe(true);
+    expect(shouldRetainChatGptWebConversation(titleRequest, { localTools: false })).toBe(false);
+
+    const title = await runTurn(target, titleRequest);
+    // It is answered, and it claims no provider conversation at all.
+    expect(errors(title)).toEqual([]);
+    expect(finalText(title)).toBe("un titulo");
+    expect(surface.runs[1]!.turn.conversationKey).toBeUndefined();
+
+    // A declaration, never an inference: the byte-identical body without the header is the session's
+    // own conversational turn, with the same wire session identity.
+    const undeclared = channelApiTurn({
+      headers: { "x-session-affinity": "aux-route-307-human" },
+      messages: [{ role: "user", content: "pregunta uno" }],
+    });
+    expect(extractChatGptTurnIdentity(undeclared).purpose).toBeUndefined();
+    expect(shouldRetainChatGptWebConversation(undeclared, { localTools: false })).toBe(true);
+
+    // The session's own conversation is untouched and is still what the next turn resumes.
+    const after = await runTurn(target, channelApiTurn({
+      headers: { "x-session-affinity": "aux-route-307-human" },
+      messages: [{ role: "user", content: "pregunta dos" }],
+    }));
+    expect(errors(after)).toEqual([]);
+    expect(finalText(after)).toBe("dos");
+    expect(surface.runs).toHaveLength(3);
+    expect(surface.runs[2]!.turn.conversationKey).toBe(humanRun.turn.conversationKey);
+    expect(surface.runs[2]!.prompt).toBe("pregunta dos");
+    expect(surface.runs[2]!.prompt).not.toContain("un titulo");
+  });
+
+  test("an explicit native identity outranks both declared wire channels", () => {
+    const messages = [{ role: "user" as const, content: "hola" }];
+
+    // A caller that states a native session AND both declared channels: the native identity wins, and
+    // the turn is still addressed by it.
+    expect(extractChatGptTurnIdentity(channelApiTurn({
+      metadata: { dsh_session_id: "native-307" },
+      promptCacheKey: "cache-307",
+      headers: { "x-session-affinity": "affinity-307" },
+      messages,
+    }))).toMatchObject({ dshSessionId: "native-307", threadId: "native-307" });
+
+    // OpenAI's own `user` spelling outranks the declared channels too.
+    expect(extractChatGptTurnIdentity(channelApiTurn({
+      user: "openai-user-307",
+      promptCacheKey: "cache-307",
+      headers: { "x-session-affinity": "affinity-307" },
+      messages,
+    })).threadId).toBe("openai-user-307");
+
+    // The body channel outranks the header channel, and a blank value is absence, not an identity.
+    expect(extractChatGptTurnIdentity(channelApiTurn({
+      promptCacheKey: "cache-307",
+      headers: { "x-session-affinity": "affinity-307" },
+      messages,
+    })).threadId).toBe("cache-307");
+    expect(extractChatGptTurnIdentity(channelApiTurn({
+      promptCacheKey: "   ",
+      headers: { "x-session-affinity": "affinity-307" },
+      messages,
+    })).threadId).toBe("affinity-307");
+
+    // A native purpose outranks a route header's declaration of the same axis.
+    expect(extractChatGptTurnIdentity(channelApiTurn({
+      metadata: { dsh_session_id: "native-307", purpose: "session-title" },
+      headers: { "x-dsh-turn-purpose": "compaction" },
+      messages,
+    })).purpose).toBe("session-title");
+
+    // The precedence itself, at its one owner, with no surface in the way.
+    expect(resolveNativeTurnIdentity(undefined, undefined, undefined, { promptCacheKey: "cache" }))
+      .toEqual({ threadId: "cache" });
+    expect(resolveNativeTurnIdentity(undefined, "user", undefined, {
+      promptCacheKey: "cache",
+      headers: new Headers({ session_id: "affinity" }),
+    })).toEqual({ threadId: "user" });
+    expect(resolveNativeTurnIdentity(undefined, undefined, undefined, {
+      headers: new Headers({ "x-session-affinity": "affinity" }),
+    })).toEqual({ threadId: "affinity" });
+    expect(resolveNativeTurnIdentity(undefined, undefined, undefined, {
+      headers: new Headers({ "x-session-affinity": "affinity", "x-dsh-turn-purpose": "session-title" }),
+    })).toEqual({ purpose: "session-title" });
+    // A hand-derived surface fallback still applies when the caller declared nothing at all.
+    expect(resolveNativeTurnIdentity(undefined, undefined, "content-derived")).toEqual({ threadId: "content-derived" });
+  });
+
+  test("the real listener hands both declared wire channels to the adapter's one reader", async () => {
+    const seen: Array<{
+      identity: ReturnType<typeof extractChatGptTurnIdentity>;
+      retained: boolean;
+    }> = [];
+    const server = startServer(
+      {
+        ...defaultConfig(),
+        port: 0,
+        host: "127.0.0.1",
+        controlToken: "issue-307-listener-control-token-0123456789",
+        webChat: { conversationStorePath: join(home, "conversations.json") },
+      },
+      {
+        adapterFactory: () => ({
+          name: "issue-307-wire-stub",
+          runTurn: async (
+            parsed: CodexParsedRequest,
+            _incoming: unknown,
+            emit: (event: AdapterEvent) => void,
+          ) => {
+            seen.push({
+              identity: extractChatGptTurnIdentity(parsed),
+              retained: shouldRetainChatGptWebConversation(parsed, { localTools: false }),
+            });
+            emit({ type: "text_delta", text: "ok", phase: "final_answer" });
+          },
+        }),
+      } as never,
+    );
+    listeners.push(server);
+
+    const post = async (body: Record<string, unknown>, headers: Record<string, string>) =>
+      fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify(body),
+      });
+
+    // A conversational turn declaring its identity only on the wire channels.
+    const conversational = await post(
+      { model: LUNA, messages: [{ role: "user", content: "hola" }], prompt_cache_key: "listener-cache-307" },
+      { "x-session-affinity": "listener-header-307" },
+    );
+    // The housekeeping turn: its route declares the purpose with a static header.
+    const housekeeping = await post(
+      { model: LUNA, messages: [{ role: "user", content: "hola" }] },
+      { "x-session-affinity": "listener-header-307", "x-dsh-turn-purpose": "session-title" },
+    );
+
+    expect(conversational.status).toBe(200);
+    expect(housekeeping.status).toBe(200);
+    expect(seen).toHaveLength(2);
+    // The body channel won over the header channel, the declared purpose classified the second turn
+    // ephemeral, and both reached the adapter through the listener rather than a content hash.
+    expect(seen[0]!.identity).toMatchObject({ threadId: "listener-cache-307" });
+    expect(seen[0]!.identity.threadId).not.toMatch(/^dsh-chat-/);
+    expect(seen[0]!.retained).toBe(true);
+    expect(seen[1]!.identity).toMatchObject({ purpose: "session-title" });
+    // The ephemeral turn carries no caller identity: only the content-derived surface the provider
+    // answers on, which no later turn can resolve to.
+    expect(seen[1]!.identity.dshSessionId).toBeUndefined();
+    expect(seen[1]!.identity.threadId).toMatch(/^dsh-chat-[0-9a-f]{16}$/);
+    expect(seen[1]!.retained).toBe(false);
   });
 });
 
