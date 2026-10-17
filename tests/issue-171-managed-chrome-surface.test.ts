@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_MAX_RETAINED_SURFACES,
+  DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS,
   RetainedSurfaceBusyError,
   RetainedSurfaceLostError,
   RetainedSurfaceMissingError,
   RetainedSurfaceRegistry,
   type RetainedSurfacePage,
 } from "../src/adapters/chatgpt-web/retained-surface";
-import { chatGptEffortSelectionRequired } from "../src/adapters/chatgpt-web/browser-worker";
+import { MAX_CHATGPT_BROWSER_TABS, chatGptEffortSelectionRequired } from "../src/adapters/chatgpt-web/browser-worker";
 
 /** Minimal stand-in for a Playwright Page: only the registry's two capabilities. */
 function fakePage(name: string): RetainedSurfacePage & { name: string; closeCount: number; markClosed: () => void } {
@@ -311,4 +313,422 @@ describe("issue #171 physical reuse vs configuration reuse", () => {
   // `browser-worker.ts` and `index.ts` and asserted on their text. The registry behaviour they
   // guarded is asserted above and in `issue-192-retained-surface-settlement.test.ts`; the worker
   // call sites themselves remain unverifiable without a browser worker (recorded in the report).
+});
+
+/**
+ * The default retention cap has to sit above the provider's concurrent-turn ceiling, or eviction
+ * could be forced onto a surface that a live turn owns. The ceiling is a provider fact
+ * (`MAX_CHATGPT_BROWSER_TABS`); the check below pins the default so a future change to either number
+ * cannot silently cross them.
+ */
+describe("issue #171 bounded retention — the cap cannot be below the concurrent-turn ceiling", () => {
+  test("the default cap is above the concurrent ChatGPT browser turns", () => {
+    expect(DEFAULT_MAX_RETAINED_SURFACES).toBeGreaterThan(MAX_CHATGPT_BROWSER_TABS);
+  });
+});
+
+/**
+ * Issue #171 bounded retention — eviction is retirement.
+ *
+ * The registry used to retain one physical page per conversationKey forever: a caller that resends a
+ * *growing* history produces a new conversation identity per turn, so pages accumulated without
+ * bound (and a second provider multiplies it). These tests pin the bound and, more importantly, the
+ * safety rule around it: what is evicted is retired, never handed on, never closed while a turn is
+ * using it, and never closed while its settlement is still unproven.
+ *
+ * Everything here runs against the real registry with an injected clock and fake pages: no browser
+ * and no real time.
+ */
+
+/** A fake clock the test advances by hand. */
+function fixedClock(start = 1_000_000): { now: () => number; advance: (ms: number) => void } {
+  let current = start;
+  return {
+    now: () => current,
+    advance: (ms: number) => {
+      current += ms;
+    },
+  };
+}
+
+interface CountingPage extends RetainedSurfacePage {
+  readonly name: string;
+  readonly closeCount: number;
+  /** Simulate the page dying outside the registry (a crash, a closed tab). */
+  readonly markClosed: () => void;
+}
+
+function countingPage(name: string): CountingPage {
+  let closed = false;
+  let closeCount = 0;
+  const page: CountingPage = {
+    name,
+    get closeCount() {
+      return closeCount;
+    },
+    isClosed: () => closed,
+    close: async () => {
+      closed = true;
+      closeCount += 1;
+    },
+    markClosed: () => {
+      closed = true;
+    },
+  };
+  return page;
+}
+
+/** One completed, settled turn on `key`, the state a retained surface is normally left in. */
+async function retainSettled(
+  registry: RetainedSurfaceRegistry<CountingPage>,
+  key: string,
+  page: CountingPage,
+): Promise<void> {
+  const acquired = await registry.acquire(key, { required: false, create: async () => page });
+  expect(acquired.created).toBe(true);
+  registry.release(key);
+  registry.settle(key, "fulfilled");
+}
+
+describe("issue #171 bounded retention — eviction is retirement, never reuse", () => {
+  test("exceeding the cap retires the least-recently-used surface and closes it exactly once", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 2,
+      idleTimeoutMs: DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS,
+      now: clock.now,
+    });
+    const first = countingPage("page-1");
+    const second = countingPage("page-2");
+    await retainSettled(registry, "key-1", first);
+    clock.advance(60_000);
+    await retainSettled(registry, "key-2", second);
+    clock.advance(60_000);
+
+    // The third conversation exceeds the cap of 2. key-1 was used least recently.
+    const third = countingPage("page-3");
+    await retainSettled(registry, "key-3", third);
+
+    expect(registry.size).toBe(2);
+    // key-1 is the one that was retired, and its page was closed — exactly once.
+    expect(registry.has("key-1")).toBe(false);
+    expect(first.isClosed()).toBe(true);
+    expect(first.closeCount).toBe(1);
+    // The two most recently used surfaces are untouched.
+    expect(registry.has("key-2")).toBe(true);
+    expect(registry.has("key-3")).toBe(true);
+    expect(second.closeCount).toBe(0);
+    expect(third.closeCount).toBe(0);
+  });
+
+  test("a surface idle beyond the timeout is retired and a recently used one is not", async () => {
+    const clock = fixedClock();
+    const idleTimeoutMs = 30 * 60_000;
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 8,
+      idleTimeoutMs,
+      now: clock.now,
+    });
+    const stale = countingPage("page-stale");
+    const fresh = countingPage("page-fresh");
+    await retainSettled(registry, "key-stale", stale);
+    clock.advance(10 * 60_000);
+    await retainSettled(registry, "key-fresh", fresh);
+
+    // Ten more minutes: key-stale has been idle for twenty, still inside the window, so a sweep
+    // retires nothing.
+    clock.advance(10 * 60_000);
+    expect(registry.sweep()).toHaveLength(0);
+    expect(registry.has("key-stale")).toBe(true);
+    expect(stale.closeCount).toBe(0);
+
+    // Eleven more minutes: key-stale is now past the thirty-minute window while key-fresh (used ten
+    // minutes later) is still inside it.
+    clock.advance(11 * 60_000);
+    const evictions = registry.sweep();
+    expect(evictions.map(eviction => eviction.conversationKey)).toEqual(["key-stale"]);
+    expect(evictions[0]!.reason).toBe("idle-timeout");
+    expect(stale.isClosed()).toBe(true);
+    expect(stale.closeCount).toBe(1);
+    expect(registry.has("key-stale")).toBe(false);
+    // The recently used surface is still retained and untouched.
+    expect(registry.has("key-fresh")).toBe(true);
+    expect(fresh.closeCount).toBe(0);
+  });
+
+  test("a surface with an active turn is never evicted, even at the cap and past the timeout", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 3,
+      idleTimeoutMs: 60_000,
+      now: clock.now,
+    });
+    // Both surfaces are held by turns that have not released them, long past any idle window.
+    const busyA = countingPage("page-busy-a");
+    const busyB = countingPage("page-busy-b");
+    await registry.acquire("key-busy-a", { required: false, create: async () => busyA });
+    await registry.acquire("key-busy-b", { required: false, create: async () => busyB });
+    await retainSettled(registry, "key-idle", countingPage("page-idle"));
+    clock.advance(10 * 60_000);
+
+    // A settled surface is retained in the LRU position in front of the two held ones: an
+    // over-capacity acquire must retire that, and never a page a turn is still using.
+    const evictable = countingPage("page-evictable");
+    await retainSettled(registry, "key-evictable", evictable);
+    const incoming = countingPage("page-incoming");
+    await registry.acquire("key-incoming", { required: false, create: async () => incoming });
+    expect(evictable.isClosed()).toBe(true);
+    expect(evictable.closeCount).toBe(1);
+    expect(registry.isLost("key-evictable")).toBe(true);
+    expect(busyA.closeCount).toBe(0);
+    expect(busyB.closeCount).toBe(0);
+    expect(incoming.closeCount).toBe(0);
+    expect(registry.has("key-busy-a")).toBe(true);
+    expect(registry.has("key-busy-b")).toBe(true);
+
+    // When the held surfaces are the only obstacles left, the acquire refuses BEFORE it creates
+    // anything, so no page is leaked either.
+    const refused = countingPage("page-refused");
+    await expect(registry.acquire("key-refused", { required: false, create: async () => refused }))
+      .rejects.toBeInstanceOf(RetainedSurfaceBusyError);
+    expect(refused.closeCount).toBe(0);
+    expect(busyA.closeCount).toBe(0);
+    expect(busyB.closeCount).toBe(0);
+    expect(busyA.isClosed()).toBe(false);
+    expect(busyB.isClosed()).toBe(false);
+
+    // Releasing one turn makes exactly that surface retirable, and only because it stopped holding:
+    // the surface still in a turn keeps its page.
+    registry.release("key-busy-a");
+    registry.settle("key-busy-a", "fulfilled");
+    clock.advance(2 * 60_000);
+    expect(registry.sweep().map(eviction => eviction.conversationKey)).toEqual(["key-busy-a"]);
+    expect(busyA.closeCount).toBe(1);
+    expect(busyB.closeCount).toBe(0);
+    expect(busyB.isClosed()).toBe(false);
+    expect(registry.has("key-busy-b")).toBe(true);
+  });
+
+  test("a surface whose settlement is unproven is never closed by an eviction", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 2,
+      idleTimeoutMs: 30 * 60_000,
+      now: clock.now,
+    });
+    // A settled surface the registry may retire, and one released without a settlement that it may
+    // not: the second is the LRU and would be the obvious victim at the cap.
+    const settled = countingPage("page-settled");
+    await retainSettled(registry, "key-settled", settled);
+    const settling = countingPage("page-settling");
+    await registry.acquire("key-settling", { required: false, create: async () => settling });
+    registry.release("key-settling");
+    clock.advance(10 * 60_000);
+
+    // The idle sweep refuses to touch the unsettled surface, even though it is the oldest.
+    expect(registry.sweep()).toEqual([]);
+    expect(settling.closeCount).toBe(0);
+
+    // The over-capacity acquire retires the settled surface instead of the unsettled one.
+    const incoming = countingPage("page-incoming");
+    await registry.acquire("key-incoming", { required: false, create: async () => incoming });
+    expect(settling.closeCount).toBe(0);
+    expect(settling.isClosed()).toBe(false);
+    expect(registry.has("key-settling")).toBe(true);
+    expect(settled.isClosed()).toBe(true);
+    expect(settled.closeCount).toBe(1);
+    expect(registry.isLost("key-settled")).toBe(true);
+
+    // Age does not change the answer: settlement, not time, is what gates the closing.
+    clock.advance(31 * 60_000);
+    expect(registry.sweep()).toEqual([]);
+    expect(settling.closeCount).toBe(0);
+  });
+
+  test("after eviction a turn for that conversation is a continuity loss, not a silent new page", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 1,
+      idleTimeoutMs: 60_000,
+      now: clock.now,
+    });
+    const evicted = countingPage("page-evicted");
+    await retainSettled(registry, "key-evicted", evicted);
+    clock.advance(10 * 60_000);
+
+    // The cap forces a new conversation in; the old one is retired on the way.
+    await retainSettled(registry, "key-current", countingPage("page-current"));
+    expect(evicted.closeCount).toBe(1);
+
+    // The contract the caller reads: the conversation is tombstoned (explicit continuity loss), and a
+    // later turn for it is refused instead of being handed the closed page or a fresh one.
+    expect(registry.has("key-evicted")).toBe(false);
+    expect(registry.isLost("key-evicted")).toBe(true);
+    expect(registry.isReusable("key-evicted")).toBe(false);
+    const freshPage = countingPage("page-should-not-be-used");
+    await expect(registry.acquire("key-evicted", { required: false, create: async () => freshPage }))
+      .rejects.toBeInstanceOf(RetainedSurfaceLostError);
+    // The refused acquire created nothing and touched nothing.
+    expect(freshPage.closeCount).toBe(0);
+    expect(evicted.closeCount).toBe(1);
+
+    // Recovery is explicit, exactly as the continuity contract requires: the caller replays.
+    const replayed = await registry.acquire("key-evicted", {
+      required: false,
+      acceptRetired: true,
+      create: async () => freshPage,
+    });
+    expect(replayed.created).toBe(true);
+    expect(replayed.page).toBe(freshPage);
+    expect(registry.isLost("key-evicted")).toBe(false);
+  });
+
+  test("shutdown after eviction still closes everything that remains, once", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 2,
+      idleTimeoutMs: 60_000,
+      now: clock.now,
+    });
+    const evicted = countingPage("page-evicted");
+    const keptA = countingPage("page-kept-a");
+    const keptB = countingPage("page-kept-b");
+    await retainSettled(registry, "key-evicted", evicted);
+    clock.advance(5_000);
+    await retainSettled(registry, "key-a", keptA);
+    clock.advance(5_000);
+    await retainSettled(registry, "key-b", keptB);
+    expect(evicted.closeCount).toBe(1);
+
+    await registry.closeAll();
+    expect(registry.size).toBe(0);
+    expect(keptA.closeCount).toBe(1);
+    expect(keptB.closeCount).toBe(1);
+    // Idempotence is preserved: the shutdown path closes nothing a second time.
+    await registry.closeAll();
+    expect(evicted.closeCount).toBe(1);
+    expect(keptA.closeCount).toBe(1);
+    expect(keptB.closeCount).toBe(1);
+    // Shutdown clears every tombstone, including the one this eviction wrote.
+    expect(registry.isLost("key-evicted")).toBe(false);
+  });
+
+  /**
+   * The guard is a re-check for every candidate, and each half of it is what this test pins:
+   *
+   * - the **busy** half: `key-held` has an active turn, so it is never evicted even when it is the
+   *   LRU and over the cap;
+   * - the **settled** half: `key-stale` is over the cap in the LRU order, but its settlement is
+   *   unpublished, so the reclaim that needs a slot passes over it.
+   *
+   * Replace `!busy && settled` with "close the oldest" and the first expectations fail.
+   */
+  test("eviction re-checks the settlement/retirement guard for every candidate", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 2,
+      idleTimeoutMs: 60_000,
+      now: clock.now,
+    });
+    // A surface still held by a turn, and one released without a settlement. key-held is acquired
+    // first, so it is the LRU candidate a "close the oldest" policy would reach first.
+    const held = countingPage("page-held");
+    const stale = countingPage("page-stale");
+    await registry.acquire("key-held", { required: false, create: async () => held });
+    await registry.acquire("key-stale", { required: false, create: async () => stale });
+    registry.release("key-stale");
+    clock.advance(5_000);
+
+    // The reclaim needs a slot and both candidates are off limits: it refuses, having closed
+    // nothing, instead of closing a page a turn is using or one whose settlement is unproven.
+    expect(registry.sweep()).toHaveLength(0);
+    await expect(registry.acquire("key-new", { required: false, create: async () => countingPage("page-new") }))
+      .rejects.toBeInstanceOf(RetainedSurfaceBusyError);
+    expect(registry.size).toBe(2);
+    expect(held.closeCount).toBe(0);
+    expect(stale.closeCount).toBe(0);
+    expect(registry.isLost("key-held")).toBe(false);
+    expect(registry.isLost("key-stale")).toBe(false);
+
+    // Removing the obstacles one at a time is what proves both halves are live guards. Publishing
+    // key-stale's settlement alone changes nothing for the cap, because key-held is still held — the
+    // reclaim walks past the held surface and reaches only key-stale.
+    registry.settle("key-stale", "fulfilled");
+    expect(registry.sweep()).toHaveLength(0);
+    const incoming = countingPage("page-incoming");
+    await registry.acquire("key-incoming", { required: false, create: async () => incoming });
+    expect(stale.isClosed()).toBe(true);
+    expect(stale.closeCount).toBe(1);
+    expect(registry.isLost("key-stale")).toBe(true);
+    expect(held.isClosed()).toBe(false);
+    expect(held.closeCount).toBe(0);
+    expect(registry.isLost("key-held")).toBe(false);
+    expect(registry.has("key-held")).toBe(true);
+    expect(incoming.closeCount).toBe(0);
+  });
+
+  test("an over-capacity acquire retires the eligible LRU surface and never the held one", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 2,
+      idleTimeoutMs: 60_000,
+      now: clock.now,
+    });
+    // A surface still held by a turn, and an idle settled one behind it in the LRU order. The
+    // reclaim has to walk past the held surface and retire the settled one.
+    const held = countingPage("page-held");
+    await registry.acquire("key-held", { required: false, create: async () => held });
+    const retired = countingPage("page-retired");
+    await retainSettled(registry, "key-retired", retired);
+    clock.advance(10 * 60_000);
+
+    const incoming = countingPage("page-incoming");
+    await registry.acquire("key-incoming", { required: false, create: async () => incoming });
+    expect(retired.isClosed()).toBe(true);
+    expect(retired.closeCount).toBe(1);
+    expect(registry.isLost("key-retired")).toBe(true);
+    expect(held.closeCount).toBe(0);
+    expect(held.isClosed()).toBe(false);
+    expect(registry.isLost("key-held")).toBe(false);
+    expect(registry.has("key-held")).toBe(true);
+    expect(incoming.closeCount).toBe(0);
+    expect(registry.size).toBe(2);
+  });
+
+  test("the registry fills to exactly the cap and evicts only past it", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({
+      maxSurfaces: 3,
+      idleTimeoutMs: DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS,
+      now: clock.now,
+    });
+    const pages: CountingPage[] = [];
+    for (const key of ["key-1", "key-2", "key-3"]) {
+      const page = countingPage(`page-${key}`);
+      pages.push(page);
+      clock.advance(60_000);
+      await retainSettled(registry, key, page);
+    }
+    // Reaching the cap is normal use: nothing is evicted to get there.
+    expect(registry.size).toBe(3);
+    expect(pages.every(page => page.closeCount === 0)).toBe(true);
+
+    // One more conversation is the one that exceeds it.
+    const fourth = countingPage("page-4");
+    clock.advance(60_000);
+    await retainSettled(registry, "key-4", fourth);
+    expect(registry.size).toBe(3);
+    expect(pages[0]!.closeCount).toBe(1);
+    expect(pages[1]!.closeCount).toBe(0);
+    expect(pages[2]!.closeCount).toBe(0);
+    expect(registry.has("key-1")).toBe(false);
+    expect(registry.isLost("key-1")).toBe(true);
+  });
+
+  test("malformed retention options are refused instead of silently defaulting", () => {
+    expect(() => new RetainedSurfaceRegistry({ maxSurfaces: 0 })).toThrow(TypeError);
+    expect(() => new RetainedSurfaceRegistry({ maxSurfaces: 1.5 })).toThrow(TypeError);
+    expect(() => new RetainedSurfaceRegistry({ idleTimeoutMs: 0 })).toThrow(TypeError);
+    expect(() => new RetainedSurfaceRegistry({ idleTimeoutMs: Number.POSITIVE_INFINITY })).toThrow(TypeError);
+  });
 });

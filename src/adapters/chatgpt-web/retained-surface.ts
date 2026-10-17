@@ -8,14 +8,73 @@
  * it introduces no journal. A lost retained surface is reported through an
  * explicit continuity error, never by silently creating a new conversation.
  *
+ * ## Bounded retention
+ *
+ * Retention is bounded: a registry keeps at most {@link DEFAULT_MAX_RETAINED_SURFACES} surfaces, and
+ * a surface left idle beyond {@link DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS} is retired. This exists
+ * because a caller that resends a *growing* history produces a new conversation identity per turn
+ * (and therefore a new retained page per turn), so an unbounded registry accumulates one live
+ * ChatGPT page per turn forever — and each page is a real browser document in the signed-in account.
+ *
+ * **Eviction is retirement, never reuse.** An evicted surface is closed and its key is tombstoned,
+ * exactly like a dead page: a later turn for that conversation fails with
+ * {@link RetainedSurfaceLostError} until an explicit {@link RetainedSurfaceRegistry.reset} (or an
+ * explicit replay that re-establishes the conversation) clears the tombstone. A closed page is never
+ * handed to a turn that expects the old one, and an evicted conversation never silently continues on
+ * a fresh page as if its history were still installed.
+ *
  * The registry is generic over the concrete page type so callers keep their
  * full page capability (e.g. Playwright `Page`) without a widening cast.
  */
+import { createHash } from "node:crypto";
 
 /** The only page capabilities the registry needs; Playwright Page satisfies it. */
 export interface RetainedSurfacePage {
   isClosed(): boolean;
   close(): Promise<void>;
+}
+
+/**
+ * How many retained surfaces one registry keeps before the least-recently-used one is retired.
+ *
+ * The bound deliberately sits above the provider's concurrent-turn ceiling (five simultaneous
+ * browser turns per authenticated account), so eviction can only ever touch a surface that no turn
+ * is using: the live fan-out alone can never reach this cap. Each retained surface is a real
+ * browser document in the signed-in account, so the cap is what keeps a long-lived process from
+ * accumulating one page per caller identity.
+ */
+export const DEFAULT_MAX_RETAINED_SURFACES = 16;
+/**
+ * How long a retained surface may sit idle before it is retired.
+ *
+ * Thirty minutes: long enough that a normal pause inside one chat (reading, thinking, a short
+ * interruption) never costs the physical conversation, and short enough that an abandoned chat
+ * releases its ChatGPT page within one working session. The next turn for a retired key needs an
+ * explicit replay, which is the documented recovery the no-silent-fork contract requires.
+ */
+export const DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS = 30 * 60_000;
+
+/** Why one retained surface was retired. */
+export type RetainedSurfaceEvictionReason = "idle-timeout" | "over-capacity";
+
+/** What one eviction did, for tests and for the caller's diagnostics. */
+export interface RetainedSurfaceEviction<P extends RetainedSurfacePage> {
+  /** The conversation whose surface was retired; its key is tombstoned. */
+  readonly conversationKey: string;
+  readonly reason: RetainedSurfaceEvictionReason;
+  readonly page: P;
+  /** Settlement of the operation that last held it was proven, so the page was free to close. */
+  readonly settled: boolean;
+}
+
+/** Construction options for {@link RetainedSurfaceRegistry}. */
+export interface RetainedSurfaceRegistryOptions {
+  /** Retention cap; see {@link DEFAULT_MAX_RETAINED_SURFACES}. */
+  readonly maxSurfaces?: number;
+  /** Idle retirement window; see {@link DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS}. */
+  readonly idleTimeoutMs?: number;
+  /** Clock seam; tests inject one so idle expiry needs no real time. */
+  readonly now?: () => number;
 }
 
 export interface RetainedSurfaceAcquired<P extends RetainedSurfacePage> {
@@ -33,6 +92,16 @@ export interface RetainedSurfaceAcquireOptions<P extends RetainedSurfacePage> {
   required: boolean;
   /** Creates the surface for the first turn of the conversation. */
   create: () => Promise<P>;
+  /**
+   * This turn IS the explicit recovery of a retired key: the caller has already decided to
+   * re-establish the conversation from canonical history (a replay), so clearing the tombstone is
+   * that decision, taken here, instead of an implicit fallback.
+   *
+   * Defaults to false. Without it a retired key keeps failing with
+   * {@link RetainedSurfaceLostError}, so an eviction can never be mistaken for "the conversation is
+   * still there, just somewhere else".
+   */
+  acceptRetired?: boolean;
 }
 
 /** A required retained surface does not exist for the conversation key. */
@@ -59,6 +128,17 @@ export class RetainedSurfaceBusyError extends Error {
   }
 }
 
+/**
+ * The non-secret identity of one conversation in the eviction log.
+ *
+ * The same 12-hex-character SHA-256 prefix the execution trace uses. A conversation key is derived
+ * from session and thread identities, so the raw value must never reach a log line; the digest is
+ * stable within one process, which is all an operator needs to correlate an eviction with a chat.
+ */
+function retainedSurfaceDigest(conversationKey: string): string {
+  return createHash("sha256").update(conversationKey).digest("hex").slice(0, 12);
+}
+
 interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
   page: P;
   busy: boolean;
@@ -70,10 +150,19 @@ interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
    * says what happened, and only an explicit settlement — or an explicit loss — makes it reusable.
    */
   settled: boolean;
+  /**
+   * When the surface last became idle (or was created). Retention ages a surface from here, never
+   * from whichever wall-clock moment a sweep happens to run: the idle window measures how long the
+   * caller has left the conversation alone, not how long the registry has existed.
+   */
+  lastUsedAt: number;
 }
 
 export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSurfacePage> {
   private readonly surfaces = new Map<string, RetainedSurfaceEntry<P>>();
+  private readonly maxSurfaces: number;
+  private readonly idleTimeoutMs: number;
+  private readonly now: () => number;
   /**
    * In-flight first creations, per key. A key that is being created is busy,
    * so a second acquire of the same key fails with RetainedSurfaceBusyError
@@ -91,6 +180,20 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
    * what happened; it is not a journal.
    */
   private readonly lostSurfaces = new Set<string>();
+
+  constructor(options: RetainedSurfaceRegistryOptions = {}) {
+    const maxSurfaces = options.maxSurfaces ?? DEFAULT_MAX_RETAINED_SURFACES;
+    const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS;
+    if (!Number.isSafeInteger(maxSurfaces) || maxSurfaces < 1) {
+      throw new TypeError("The retained-surface cap must be a positive safe integer");
+    }
+    if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0) {
+      throw new TypeError("The retained-surface idle timeout must be a positive finite number of milliseconds");
+    }
+    this.maxSurfaces = maxSurfaces;
+    this.idleTimeoutMs = idleTimeoutMs;
+    this.now = options.now ?? Date.now;
+  }
 
   get size(): number {
     return this.surfaces.size;
@@ -118,12 +221,19 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
    * `release` is called, so two turns of the same conversationKey can never
    * share a page concurrently. A dead stored page is tombstoned and reported
    * as a continuity loss; it is never replaced silently.
+   *
+   * A successful acquire also enforces bounded retention (see the module comment): acquiring the
+   * surface is the moment retention is eligible to change, so the idle sweep and the cap live here
+   * rather than on a real timer. The cap is checked before the page is created, so the registry never
+   * grows past it on the way to a new conversation.
    */
   async acquire(
     conversationKey: string,
     options: RetainedSurfaceAcquireOptions<P>,
   ): Promise<RetainedSurfaceAcquired<P>> {
-    if (this.lostSurfaces.has(conversationKey)) {
+    if (this.lostSurfaces.has(conversationKey) && options.acceptRetired !== true) {
+      // A tombstoned key stays a continuity loss even for a `required` turn: the caller has to know
+      // the conversation is broken, not merely missing (issue #171 contract, kept unchanged).
       throw new RetainedSurfaceLostError(conversationKey);
     }
     const existing = this.surfaces.get(conversationKey);
@@ -141,12 +251,25 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
         throw new RetainedSurfaceBusyError(conversationKey);
       }
       existing.busy = true;
+      this.touch(conversationKey, existing);
       return { page: existing.page, created: false };
     }
     if (this.pendingCreates.has(conversationKey)) {
       throw new RetainedSurfaceBusyError(conversationKey);
     }
     if (options.required) throw new RetainedSurfaceMissingError(conversationKey);
+    // Room is made BEFORE the surface is created: a registry at its cap retires the surface that is
+    // both least recently used and safe to retire. When only a surface with an active turn or an
+    // unpublished settlement stands in the way, this refuses explicitly instead of closing a page
+    // that may still produce output — the condition stays visible rather than being swallowed.
+    if (this.surfaces.size >= this.maxSurfaces) {
+      this.reclaimFor(conversationKey);
+      if (this.surfaces.size >= this.maxSurfaces) throw new RetainedSurfaceBusyError(conversationKey);
+    }
+    // This acquire is the explicit recovery of a retired key (the caller asked for it), or the key
+    // was never retired. Either way the regression is behind us: the tombstone is cleared so the
+    // re-established conversation starts from a clean continuity state.
+    this.lostSurfaces.delete(conversationKey);
     // Claim the key before the (awaitable) creation so a concurrent acquire of the
     // same key is rejected while the first surface is being created. The marker is
     // always cleared, on success and on failure, so a failed creation never leaves
@@ -158,7 +281,15 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
         this.surfaces.delete(conversationKey);
         throw new RetainedSurfaceLostError(conversationKey);
       }
-      this.surfaces.set(conversationKey, { page, busy: true, settled: true });
+      this.surfaces.set(conversationKey, {
+        page,
+        busy: true,
+        settled: true,
+        lastUsedAt: this.now(),
+      });
+      // The new surface is not a candidate for its own pass, so this only reclaims surfaces that have
+      // gone idle while the registry was busy; it is what returns the registry to its cap.
+      this.sweep(conversationKey);
       return { page, created: true };
     } finally {
       this.pendingCreates.delete(conversationKey);
@@ -176,6 +307,7 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
     if (entry) {
       entry.busy = false;
       entry.settled = false;
+      this.touch(conversationKey, entry);
     }
   }
 
@@ -196,6 +328,101 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
       return;
     }
     entry.settled = outcome !== "pending";
+    this.touch(conversationKey, entry);
+  }
+
+  /**
+   * Retire every surface idle beyond the timeout.
+   *
+   * A surface with an active turn (`busy`) or an unpublished settlement is never retired: it may
+   * still produce output, so closing its page is not safe (architecture §9.3, §15.3). When an
+   * over-capacity acquire is blocked by exactly such a surface, {@link acquire} refuses explicitly
+   * with {@link RetainedSurfaceBusyError}; the condition stays visible instead of being swallowed.
+   *
+   * Called before a creation that would exceed the cap and after every successful acquire, and public
+   * so a long-lived owner can enforce the idle window on its own schedule (never on a real timer this
+   * class owns — a timer would make the behaviour untestable with an injected clock).
+   *
+   * @param currentConversationKey - the key just acquired, which this pass never retires.
+   * @returns the evictions performed, oldest first.
+   */
+  sweep(currentConversationKey?: string): RetainedSurfaceEviction<P>[] {
+    const evictions: RetainedSurfaceEviction<P>[] = [];
+    const idleCutoff = this.now() - this.idleTimeoutMs;
+    for (const [conversationKey, entry] of this.surfaces) {
+      if (conversationKey === currentConversationKey) continue;
+      if (entry.lastUsedAt <= idleCutoff) {
+        this.retire(conversationKey, "idle-timeout", evictions);
+      }
+    }
+    return evictions;
+  }
+
+  /**
+   * Make room for one new surface at the cap.
+   *
+   * Retires the least-recently-used surface that is safe to retire; the registry's insertion order is
+   * its LRU order, because every acquire and every release moves a key to the back (see
+   * {@link touch}). A candidate is skipped, never closed, while a turn holds it or its settlement is
+   * still unpublished — that is what makes an over-capacity acquire refuse rather than close a page
+   * that may still produce output.
+   *
+   * This is deliberately NOT the idle sweep: room has to be made whether or not the oldest surface
+   * has reached the idle window yet, because the registry may not grow past its cap.
+   *
+   * @param incomingConversationKey - the key asking for room; it is never itself retired.
+   * @returns the evictions performed, or an empty list when nothing could be safely retired.
+   */
+  private reclaimFor(incomingConversationKey: string): RetainedSurfaceEviction<P>[] {
+    const evictions: RetainedSurfaceEviction<P>[] = [];
+    for (const conversationKey of [...this.surfaces.keys()]) {
+      // One slot has to be free for the incoming surface, so stop once the registry is below its cap.
+      if (this.surfaces.size < this.maxSurfaces) break;
+      if (conversationKey === incomingConversationKey) continue;
+      this.retire(conversationKey, "over-capacity", evictions);
+    }
+    return evictions;
+  }
+
+  /**
+   * Retire one surface: close its page once and tombstone its key.
+   *
+   * Eviction is retirement, never reuse: the key is tombstoned exactly like a dead page, so no later
+   * turn can be handed this surface and nothing silently creates a replacement for it.
+   */
+  private retire(
+    conversationKey: string,
+    reason: RetainedSurfaceEvictionReason,
+    evictions: RetainedSurfaceEviction<P>[],
+  ): void {
+    const entry = this.surfaces.get(conversationKey);
+    if (!entry || !this.isEvictable(conversationKey)) return;
+    this.surfaces.delete(conversationKey);
+    this.lostSurfaces.add(conversationKey);
+    console.info(
+      `[chatgpt-web] retained surface evicted key=${retainedSurfaceDigest(conversationKey)}`
+      + ` reason=${reason} settlement=${entry.settled ? "proven" : "unproven"}`,
+    );
+    evictions.push({ conversationKey, reason, page: entry.page, settled: entry.settled });
+    void entry.page.close().catch(() => {});
+  }
+
+  /** Move a key to the back of the LRU order (the Map's insertion order). */
+  private touch(conversationKey: string, entry: RetainedSurfaceEntry<P>): void {
+    entry.lastUsedAt = this.now();
+    this.surfaces.delete(conversationKey);
+    this.surfaces.set(conversationKey, entry);
+  }
+
+  /**
+   * Whether this surface may be retired without endangering an operation.
+   *
+   * Both conditions are the settlement rule read literally: no turn holds it, and the operation that
+   * last held it published a settlement (so nothing is still producing output).
+   */
+  private isEvictable(conversationKey: string): boolean {
+    const entry = this.surfaces.get(conversationKey);
+    return entry !== undefined && !entry.busy && entry.settled;
   }
 
   /**
