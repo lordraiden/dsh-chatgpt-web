@@ -101,8 +101,22 @@ export function chatGptWebAccountFingerprint(provider: CodexProviderConfig): str
     ?? accountIdentityFromUnknownSession().fingerprint;
 }
 
-function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string): {
+/**
+ * The account and browser facts one turn's lease is acquired with.
+ *
+ * The single reader of the provider facts for the lease, including the account identity's provenance:
+ * `providerConfig` decides whether the fingerprint was recorded or is its derived fallback, and this
+ * only carries that decision to `ChatGptWebProviderCore.begin`, which puts it on the lease the
+ * account-binding check reads. It never re-decides provenance.
+ */
+export function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string): {
   accountIdentity: string;
+  /**
+   * Provenance of `accountIdentity`, read from the provider fact `providerConfig` sets where it
+   * substitutes the storage-state fallback. Absent means recorded — the honest default for a config
+   * that states an identity itself — so this reads the fact and never re-decides it.
+   */
+  accountIdentityRecorded: boolean;
   browserProfile: string;
   browserContext: string;
   pageIdentity: string;
@@ -118,6 +132,7 @@ function browserAccountLeaseInput(provider: CodexProviderConfig, traceId: string
     ?? "default-context";
   return {
     accountIdentity,
+    accountIdentityRecorded: browser?.accountIdentityRecorded ?? true,
     browserProfile,
     browserContext,
     pageIdentity: traceId,
@@ -284,9 +299,15 @@ export function chatGptWebChatBindingIdFor(provider: CodexProviderConfig): strin
 
 
 export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): string {
+  // This namespace keys every conversation key and every execution key, so it hashes the deployment
+  // shape it has always hashed. `accountIdentityRecorded` **describes** the identity next to it rather
+  // than naming a new deployment; hashing it would silently re-key every existing conversation (and
+  // address different ChatGPT threads through the legacy digest) on upgrade. It is excluded
+  // explicitly, here, and a test pins that the namespace of a recorded deployment is unchanged.
+  const { accountIdentityRecorded: _identityProvenance, ...deployment } = provider.chatgptWeb ?? {};
   return createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,
-    chatgptWeb: provider.chatgptWeb ?? {},
+    chatgptWeb: deployment,
   })).digest("hex");
 }
 

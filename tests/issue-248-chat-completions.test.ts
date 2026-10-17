@@ -652,3 +652,81 @@ describe("issue #248 — the caller's identity reaches the turn", () => {
     expect(statelessText).toContain("sin identidad");
   });
 });
+
+/**
+ * Slice 2 of the pre-vendor hardening programme — the *other* door: `/v1/responses`.
+ *
+ * Slice 1 stopped `/v1/chat/completions` collapsing every metadata-less caller onto the constant
+ * `dsh-session`. `/v1/responses` reaches the same `extractChatGptTurnIdentity` but never passes through
+ * the chat surface's translation, so its own metadata-less fallback still produced that constant: two
+ * unrelated Responses callers shared ONE provider conversation. The fallback now calls the SAME
+ * content-identity owner slice 1 introduced (`contentConversationIdentity`), so the properties are the
+ * same: stable for identical content, distinct for different content, never per request.
+ *
+ * The proofs are behavioural, over the REAL listener with the stub adapter, because the adapter's
+ * resolved identity is the only thing that matters — plus one unit assertion for the native DSH path,
+ * which cannot be reached over HTTP and must not change.
+ */
+describe("issue #248 — the Responses surface gives every caller its own conversation too", () => {
+  const responsesRequest = (text: string, extra: Record<string, unknown> = {}) => ({
+    model: "chatgpt-web/luna",
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text }] }],
+    ...extra,
+  });
+  const say = (server: RunningServer, body: Record<string, unknown>) =>
+    post(server, body, "/v1/responses");
+
+  test("no identity: different content is isolated, identical content is the same conversation", async () => {
+    const stub = stubAdapter();
+    const server = serve(stub.factory);
+
+    await say(server, responsesRequest("alpha"));
+    await say(server, responsesRequest("beta"));
+    // The identical request again: a resending client, or a retry the client chose to make.
+    await say(server, responsesRequest("alpha"));
+
+    expect(stub.turns).toHaveLength(3);
+    const [alpha, beta, alphaAgain] = stub.turns;
+
+    // The constant that fused every Responses caller is gone from this surface.
+    expect(alpha!.identity.threadId).toMatch(/^dsh-chat-[0-9a-f]{16}$/);
+    for (const turn of stub.turns) {
+      expect(turn.identity.threadId).not.toBe("dsh-session");
+      expect(turn.conversationKey).toBeTruthy();
+    }
+    // ISOLATION: different content, no identity → different provider conversations.
+    expect(alpha!.identity.threadId).not.toBe(beta!.identity.threadId);
+    expect(alpha!.conversationKey).not.toBe(beta!.conversationKey);
+    // NO PER-REQUEST MINTING: identical content keeps its conversation, so a resend does not fork one.
+    expect(alphaAgain!.identity.threadId).toBe(alpha!.identity.threadId);
+    expect(alphaAgain!.conversationKey).toBe(alpha!.conversationKey);
+  });
+
+  test("a caller that provides a thread keeps it, and the native DSH thread is untouched", async () => {
+    const stub = stubAdapter();
+    const server = serve(stub.factory);
+
+    await say(server, responsesRequest("alpha", {
+      client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "client-thread-9" }) },
+    }));
+
+    expect(stub.turns).toHaveLength(1);
+    // A caller-chosen thread is used verbatim: the fallback is the only thing this change moves.
+    expect(stub.turns[0]!.identity.threadId).toBe("client-thread-9");
+    expect(stub.turns[0]!.identity.threadId).not.toMatch(/^dsh-chat-/);
+
+    // The native Codex / DSH path carries its own thread identity and never consults the fallback.
+    const nativeDshTurn = {
+      modelId: "gpt-5.6-luna",
+      context: { systemPrompt: [], messages: [] },
+      stream: false,
+      options: {},
+      _dshContext: { dshSessionId: "dsh-session-1", threadId: "native-thread-1", turnId: "turn-1" },
+    } as unknown as Parameters<typeof extractChatGptTurnIdentity>[0];
+    expect(extractChatGptTurnIdentity(nativeDshTurn)).toEqual({
+      dshSessionId: "dsh-session-1",
+      threadId: "native-thread-1",
+      turnId: "turn-1",
+    });
+  });
+});

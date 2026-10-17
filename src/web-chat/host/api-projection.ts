@@ -24,7 +24,7 @@
  * heuristics, which are per-harness and per-version and therefore cannot be the primary rule; the
  * API does not pretend otherwise.
  *
- * ## Conversation identity (pre-vendor hardening, slice 1)
+ * ## Conversation identity (pre-vendor hardening, slices 1 and 2)
  *
  * The projection also decides **which provider conversation the turn belongs to**, because an API
  * caller is not a DSH thread and carries no native turn metadata (see `translateChatCompletionsRequest`,
@@ -40,6 +40,12 @@
  *
  * The rule is deliberately content-derived and **never per-request**: minting a fresh identity on each
  * call would fork every turn of a client that resends its history.
+ *
+ * `contentConversationIdentity` is the **one owner of the content-derived identity**, for every
+ * surface. `/v1/chat/completions` reaches it through `projectApiConversation`; the Responses surface
+ * cannot (its caller sends no session identity and its parsed turn is the only input the surface
+ * translation never sees), so the adapter's metadata-less fallback calls the same function instead of
+ * writing a second derivation. One rule, two callers.
  *
  * Documented limit, deliberately not papered over: two callers that send **no identity** and
  * **identical message content** are indistinguishable and share one provider conversation. Nothing in
@@ -98,14 +104,22 @@ export function normalizeApiSessionId(value: unknown): string | undefined {
 }
 
 /**
- * Identity of a stateless caller, derived from the canonical content of the transmitted messages.
+ * Identity of a caller that sent no identity, derived from the canonical content of the conversation
+ * it sent.
+ *
+ * This is the **one owner** of the content-derived identity rule (see the module contract): the chat
+ * surface reaches it through `projectApiConversation`, and the adapter's metadata-less Responses
+ * fallback calls it with the turn it is about to run. Callers pass the messages they have; the
+ * conversational-role filter lives here too, so no caller can keep a second copy of "what counts as
+ * content" and let harness context split or fuse a conversation.
  *
  * Only role and text participate: never a timestamp or any other per-request value. Hashing the
  * parsed messages (which carry a timestamp) would mint a new identity on every call — exactly the
  * per-request fork this rule exists to prevent.
  */
-function contentConversationIdentity(messages: readonly ApiConversationMessage[]): string {
-  const canonical = JSON.stringify(messages.map(message => [message.role, message.content]));
+export function contentConversationIdentity(messages: readonly ApiConversationMessage[]): string {
+  const conversational = messages.filter(message => CONVERSATIONAL_ROLES.has(message.role));
+  const canonical = JSON.stringify(conversational.map(message => [message.role, message.content]));
   const digest = createHash("sha256").update(canonical).digest("hex");
   return `${CONTENT_IDENTITY_PREFIX}${digest.slice(0, CONTENT_IDENTITY_HASH_CHARS)}`;
 }

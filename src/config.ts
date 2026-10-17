@@ -321,13 +321,21 @@ export function mergeChatGptWebProviderFacts(
   if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return base;
   validateChatGptWebProviderFacts(overlay, path, { crossField: false });
   const declared = Object.fromEntries(
-    Object.entries(overlay as Record<string, unknown>).filter(([, value]) => value !== undefined),
+    Object.entries(overlay as Record<string, unknown>)
+      // `accountIdentityRecorded` describes the *effective* fingerprint rather than a fact of its own,
+      // so it is never taken from either block: it is recomputed below, from the fingerprint the
+      // overlay states. Without this, an authored value could mislabel a genuinely recorded identity.
+      .filter(([key, value]) => value !== undefined && key !== "accountIdentityRecorded"),
   );
   const declaredMode = declared.browserInteractionMode;
   if (declaredMode !== undefined && declaredMode !== base.browserInteractionMode) {
     throw new Error(`browserInteractionMode conflicts with deployment mode in ${path}`);
   }
   const merged = { ...base, ...declared };
+  // A fingerprint a scoped block states itself is a *recorded* identity by definition, so the
+  // derived-fallback marker the flat block carried cannot survive its own replacement. A scoped block
+  // that states no fingerprint keeps the flat block's provenance, which `providerConfig` decided.
+  if (declared.accountIdentityFingerprint !== undefined) merged.accountIdentityRecorded = true;
   const state = declared.capabilityState as
     | { solAvailable?: "supported" | "unsupported" | "unknown"; proAvailable?: "supported" | "unsupported" | "unknown" }
     | undefined;
@@ -1150,6 +1158,11 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       storageStatePath: config.storageStatePath,
       accountIdentityFingerprint: config.accountIdentityFingerprint
         ?? accountIdentityFingerprint(config),
+      // The provenance of the fingerprint is decided here, at the ONE place the fallback is
+      // substituted: a recorded identity is one a sign-in persisted (or config authored), and the
+      // fallback over the storage-state file is not an account identity. The lease's binding check
+      // reads this to name the real cause instead of a mismatch between two unrelated hashes.
+      accountIdentityRecorded: config.accountIdentityFingerprint !== undefined,
       chromeExecutablePath: config.chromeExecutablePath,
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),

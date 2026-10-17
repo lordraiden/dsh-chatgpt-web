@@ -3,7 +3,14 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../lib/compaction";
 import { absolutePaths, contains, pathIdentity, record, type AbsolutePathPolicy } from "../../path-identity";
-import type { CodexContentPart, CodexParsedRequest, CodexTool, DshNativeTurnContext } from "../../types";
+import type {
+  CodexAssistantContentPart,
+  CodexContentPart,
+  CodexParsedRequest,
+  CodexTool,
+  DshNativeTurnContext,
+} from "../../types";
+import { contentConversationIdentity, type ApiConversationMessage } from "../../web-chat/host/api-projection";
 import { CHATGPT_WEB_LUNA_MODEL_ID } from "./model";
 import type { CapabilitySnapshot } from "./capability-projector";
 
@@ -60,6 +67,34 @@ export class MissingTrustedCodexEnvironmentError extends Error {
 function contentText(content: string | CodexContentPart[]): string {
   if (typeof content === "string") return content;
   return content.filter(part => part.type === "text").map(part => part.text).join("\n");
+}
+
+/**
+ * Text of one message as the conversation carries it: text parts only, never reasoning or an image
+ * reference. A call's thinking is provider replay state, not something the caller sent.
+ */
+function conversationMessageText(content: string | CodexContentPart[] | CodexAssistantContentPart[]): string {
+  if (typeof content === "string") return content;
+  const parts: string[] = [];
+  for (const part of content) {
+    if (part.type === "text") parts.push(part.text);
+  }
+  return parts.join("\n");
+}
+
+/**
+ * The conversation the caller sent, in the canonical shape the shared content-identity rule reads.
+ *
+ * This is only the *input adaptation* for that rule, never a second derivation: which roles count is
+ * decided by `contentConversationIdentity` itself, where the message-only rule's own vocabulary lives,
+ * so harness context (`developer`, `agentMessage`, `toolResult`) cannot split or fuse a conversation
+ * here while counting as content there.
+ */
+function requestConversationMessages(parsed: CodexParsedRequest): ApiConversationMessage[] {
+  return parsed.context.messages.map(message => ({
+    role: message.role,
+    content: conversationMessageText(message.content),
+  }));
 }
 
 function nativeDshContext(parsed: CodexParsedRequest): DshNativeTurnContext | undefined {
@@ -636,7 +671,19 @@ export function extractChatGptTurnIdentity(parsed: CodexParsedRequest): ChatGptT
       .slice(0, 16);
     return {
       ...(base.dshSessionId ? { dshSessionId: base.dshSessionId } : {}),
-      threadId: base.threadId ?? "dsh-session",
+      // A caller-chosen thread is used verbatim — this is where the native Codex / DSH thread and the
+      // chat surface's `client_metadata` identity arrive, and neither changes. Only the fallback for a
+      // caller that named none changes (pre-vendor hardening, slice 2): it used to be the constant
+      // `dsh-session`, so every metadata-less Responses caller shared ONE provider conversation. It is
+      // now the same content-derived identity `/v1/chat/completions` gets — one owner,
+      // `contentConversationIdentity` — so identical content keeps its conversation (continuity for a
+      // resending client, no fork on a retry) and different content is isolated. Deliberately never
+      // per-request: minting one per call would fork every turn of a resending client. Documented
+      // limit, unchanged from that surface: two callers with no identity and identical content are
+      // indistinguishable and share one conversation, because nothing in the request separates them.
+      // `turnId` below is a *round* identity and stays per-request by design; only the conversation
+      // identity must be stable.
+      threadId: base.threadId ?? contentConversationIdentity(requestConversationMessages(parsed)),
       turnId: `dsh-luna-${contentHash}`,
       ...(base.parentThreadId ? { parentThreadId: base.parentThreadId } : {}),
       ...(base.agentName ? { agentName: base.agentName } : {}),

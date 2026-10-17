@@ -377,9 +377,13 @@ describe("issue #189 — the ChatGPT path consumes the core", () => {
       }),
     });
     // The provider-specific Luna fallback stays provider-specific: it still projects, and the
-    // projection simply reports the thread the ChatGPT path would use.
+    // projection simply reports the thread the ChatGPT path would use. A caller that named no thread
+    // gets the same content-derived conversation identity every other surface gets (slice 2), never
+    // the constant `dsh-session` that used to fuse every metadata-less Responses caller.
     const lunaWithoutNativeContext = { modelId: "gpt-5.6-luna", context: { systemPrompt: [], messages: [] }, stream: false, options: {} } as unknown as CodexParsedRequest;
-    expect(chatGptWebChatTurnIdentity(lunaWithoutNativeContext, { providerId: "chatgpt-web", bindingId: "b", namespace: "ns" }).threadId).toBe("dsh-session");
+    const lunaThread = chatGptWebChatTurnIdentity(lunaWithoutNativeContext, { providerId: "chatgpt-web", bindingId: "b", namespace: "ns" }).threadId;
+    expect(lunaThread).toMatch(/^dsh-chat-[0-9a-f]{16}$/);
+    expect(lunaThread).not.toBe("dsh-session");
     // A request with no provider identity at all fails closed rather than inventing one.
     const identityless = { modelId: "gpt-5.6-sol", context: { systemPrompt: [], messages: [] }, stream: false, options: {} } as unknown as CodexParsedRequest;
     expect(() => chatGptWebChatTurnIdentity(identityless, { providerId: "chatgpt-web", bindingId: "b", namespace: "ns" })).toThrow(/no provider thread identity/);
