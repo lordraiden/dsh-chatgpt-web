@@ -12,9 +12,6 @@
 #                    because Compose cannot run it and the default service at once (same port) — see
 #                    doc/container.md §5.2. `docker compose -f docker-compose.exposed.yml up -d`.
 #
-#   `login` profile  the interactive provider login, over a noVNC display (Dockerfile.login, #259). It shares the default volume and ships its
-#                    own noVNC/desktop-lite display (#249), so a host with no display can still sign in.
-#
 # Only one of `chatgpt-web` / `chatgpt-web-bind` can run at a time: both use host networking and
 # therefore the same loopback port.
 #
@@ -62,34 +59,6 @@ services:
     user: "0:0"
     volumes:
       - ./data:/data
-
-  # Headless sign-in (issues #249/#259): this image adds Xvfb + x11vnc + noVNC and nothing else, so a
-  # host with no display can still sign in. It layers on top of the production image:
-  #   docker build -t dsh-chatgpt-web:local . && docker compose --profile login build login
-  #   docker compose --profile login up -d login
-  #   open http://127.0.0.1:6080/vnc.html
-  # The sign-in writes the provider credential layout (providers/<providerId>/storage-state.json and its
-  # .verified.json marker) into the volume, which is what the `chatgpt-web` service reads.
-  login:
-    profiles: ["login"]
-    build:
-      context: .
-      dockerfile: Dockerfile.login
-      args:
-        PRODUCTION_IMAGE: dsh-chatgpt-web:local
-    image: dsh-chatgpt-web-login:local
-    environment:
-      DSH_CHATGPT_WEB_HOME: /data
-    volumes:
-      - dsh-data:/data
-    # Runs as the image's unprivileged user so the session lands in the volume with the identity the
-    # runtime reads it with.
-    stdin_open: true
-    tty: true
-    ports:
-      # Loopback ONLY. This port grants control of an authenticated browser session; never publish it
-      # on 0.0.0.0.
-      - "127.0.0.1:6080:6080"
 
 volumes:
   dsh-data:

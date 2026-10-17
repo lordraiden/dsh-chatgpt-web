@@ -227,10 +227,10 @@ exits non-zero and writes **nothing**. Cookie values are never printed.
 
 ### Fallback when a flow rejects headless
 
-`authBrowserMode: "display"` in `config.json` launches a real window instead of headless (`headless` is
-the default). Today the only display the project provides is the **noVNC sign-in image**, which is not
-retired; `login` over a host X server or noVNC is documented in
-[`doc/container.md`](./doc/container.md) §5.5.
+`authBrowserMode: "display"` in `config.json` launches a real window instead of headless. `headless` is
+the default and the supported path on a headless host — it is what the remote sign-in was verified
+with. `"display"` needs a display **you** supply (an X server/socket, or your own headed environment);
+the container provides none. See [`doc/container.md`](./doc/container.md) §5.5.
 
 ### Prove the browser surface (`browser check`)
 

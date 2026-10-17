@@ -308,16 +308,18 @@ export async function runDoctor(): Promise<DoctorReport> {
 const COMPOSE_EXEC = "docker compose exec chatgpt-web";
 
 /**
- * The two documented sign-in routes (#249), in the order a first run should try them.
+ * The two documented sign-in routes (#249, #276), in the order a first run should try them.
  *
- * `/capture` is the path `docker/verify-container.sh` and README.md already use: the operator mounts
- * a directory holding a Playwright `storage-state.json` and adopts it. Nothing here prints a cookie,
- * a token or a key — only the command that consumes the capture.
+ * The first is the service's own page, which needs no display and is what the sign-in was verified
+ * with against a real account. The second is the `/capture` path `docker/verify-container.sh` and
+ * README.md already use: the operator mounts a directory holding a Playwright `storage-state.json`
+ * and adopts it. Nothing here prints a cookie, a token or a key — only the command that consumes the
+ * capture.
  */
 function signInFixCommands(): string[] {
   return [
+    "sign in at http://127.0.0.1:17841/v1/control/auth/ (no display needed), then: docker compose restart chatgpt-web",
     `${COMPOSE_EXEC} node lib/cli.js auth import --provider chatgpt-web --from /capture`,
-    "docker compose --profile login up -d login   # then sign in at http://127.0.0.1:6080/vnc.html and run: docker compose --profile login down",
   ];
 }
 

@@ -14,7 +14,7 @@ self-contained service distributed as a Docker image plus Compose stacks.
   which drives a provider's own sign-in browser from the operator's page;
 - the ChatGPT-Web browser adapter;
 - the WebChat core contracts and the durable conversation store;
-- the container artifacts (`Dockerfile`, `Dockerfile.login`, the Compose stacks, `docker/**`).
+- the container artifacts (`Dockerfile`, the Compose stacks, `docker/**`).
 
 **The DeepSeek Harness Cordis plugin is abandoned.** There is no DSH plugin, no Cordis bundle, no
 `client.js`, no `cordis.patch.yml`, no `lib/plugin.js`, no `ctx.llm` provider, and no
@@ -316,8 +316,10 @@ Do not weaken:
 - the operator control-token authority (`/v1/control/*`, `/admin/*`) or its separation from the API key;
 - path validation or timing-sensitive comparisons.
 
-The noVNC sign-in port (the `authBrowserMode: "display"` fallback, not retired) grants control of an
-authenticated browser session: keep it on the host's loopback only.
+A display supplied by the operator for `authBrowserMode: "display"` (or for the CLI `login`) grants
+control of an authenticated browser session: keep an X server exposed for it on the host's loopback
+only. The container provides no display of its own, and the former noVNC sign-in image is retired
+(issue #276 slice 3b): `headless` is the default and the supported path on a headless host.
 
 The interactive sign-in surface (`/v1/control/auth/*`) follows the same authority boundary:
 
@@ -375,7 +377,7 @@ docker compose up -d --wait
 ```
 
 The `Container image` workflow (`.github/workflows/container.yml`) builds the image, runs the default
-and exposed stacks, checks both catalogue shapes and verifies the noVNC sign-in surface; keep it green.
+and exposed stacks and checks both catalogue shapes; keep it green.
 
 For browser/session changes, also use the relevant diagnostics:
 
@@ -460,7 +462,7 @@ Releases are tag-based. A merge to `main` is not itself a release.
    (GitHub suppresses runs caused by `GITHUB_TOKEN`).
 
 The **container image is the shipping distribution**. `.github/workflows/container.yml` builds the
-production image and waits for health on every change to `Dockerfile`, `Dockerfile.login`, the Compose
+production image and waits for health on every change to `Dockerfile`, the Compose
 stacks, `docker/**`, `package.json`, `bun.lock` or `src/**`. Nothing is pushed to an image registry and
 there is no private-registry or plugin-update release contract to maintain; do not add one.
 
