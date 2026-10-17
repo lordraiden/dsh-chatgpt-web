@@ -220,7 +220,8 @@ code change owned by #247.
 | Restore | `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar xzf /backup/dsh-data-<date>.tgz -C /data` |
 | Upgrade | `git pull && docker compose build --pull && docker compose up -d` — the volume survives; the base tag is pinned, so `--pull` refreshes that tag only |
 | Bind-mount variant (data on the host) | `mkdir -p data && docker compose --profile bind up -d chatgpt-web-bind` |
-| Interactive login (needs a display) | `docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY login` (noVNC sign-in: §5.5) |
+| Interactive sign-in (no display needed) | open `http://127.0.0.1:17841/v1/control/auth/` in a browser, then `docker compose restart chatgpt-web` (§5.5) |
+| Interactive login (CLI `login`, needs a display) | `docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY login` (noVNC sign-in: §5.5) |
 
 Notes:
 
@@ -359,7 +360,51 @@ The runtime needs a **verified** browser session: `storage-state.json` plus its 
 in `providers/<providerId>/` inside the data volume. Cookies alone are never enough, and the marker is
 what makes the difference between "a file exists" and "this session was proven against the provider".
 
-**Adopting a capture from anywhere (`auth import`)**
+**Signing in from the service's own page (the primary path)**
+
+The running service serves the sign-in page itself at `GET /v1/control/auth/`: no second container and
+no display needed.
+
+```text
+http://127.0.0.1:17841/v1/control/auth/
+```
+
+Open it in any browser — a phone included, as long as it can reach the service (§5.2 for exposure; the
+default stack is loopback-only). It asks for the **control token** (the `controlToken` in the volume's
+`config.json`) once, keeps it in that tab's `sessionStorage`, and shows the provider's browser live. The
+page is one self-contained document from the image — no CDN, no external asset — so it loads without
+reaching anything but the service itself.
+
+The page is the client of this control surface, and it is **control token only**, exactly like the
+rest of `/v1/control/*`: the API key does not open it, and the control token still does not open
+`/v1/*`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/control/auth/` | the page itself; served anonymously by design (a navigation cannot carry a header) |
+| `GET /v1/control/auth/providers` | the providers offering interactive sign-in |
+| `POST /v1/control/auth/sessions` | open one: `{"providerId":"chatgpt-web"}` (409 when that provider is already signing in) |
+| `GET /v1/control/auth/sessions/<id>` | the session view: state, TTL, viewport — never a cookie, a storage state or a page URL |
+| `GET /v1/control/auth/sessions/<id>/stream` | SSE frame/state relay (~2.5 fps, plus an immediate frame after every input) |
+| `POST /v1/control/auth/sessions/<id>/input` | one `click` / `type` / `key` / `scroll` / `navigate` intent |
+| `DELETE /v1/control/auth/sessions/<id>` | cancel, idempotently; it also acknowledges a capture |
+
+The ChatGPT controller launches a **headless** Chromium (`--headless=new`) on a temporary profile,
+detects the authenticated surface with the same checks `login` already uses, and writes the session
+through the single session owner, verifying it *first* — into `providers/chatgpt-web/`, the layout
+above.
+
+**Restart the service after a successful capture.** It resolved the credentials path at startup, so the
+running process keeps serving the old picture until it restarts:
+
+```bash
+docker compose restart chatgpt-web
+```
+
+**Adopting a capture from anywhere (`auth import`) — scripted / offline**
+
+Use this route when the page cannot be used: an air-gapped or headless-only host, or provisioning that
+must be automated.
 
 ```bash
 # on a machine where you can sign in (or from a browser profile you already trust):
@@ -376,10 +421,17 @@ cannot be verified — malformed, expired, or unverifiable without a browser —
 printed. Unknown providers are refused (only `chatgpt-web` has a credential layout today; #250 owns the
 rest).
 
-**Signing in inside the container**
+**Fallback: `authBrowserMode: "display"` (the noVNC sign-in image, not retired)**
 
-The `login` service in `docker-compose.yml` shares the data volume and runs the interactive command. The
-sign-in needs a real display, so today it is run against a host X server:
+`authBrowserMode` in `config.json` is optional and defaults to `headless`. Set it to `"display"` when a
+flow rejects headless: it makes the sign-in page launch a real window instead of `--headless=new`, and
+it needs a display — today the project's only one is the noVNC login image (`Dockerfile.login`), which
+is **not retired**. It stays as this fallback until the new page is confirmed with a real account, and
+it changes nothing about the managed turn browser.
+
+The `login` service in `docker-compose.yml` shares the data volume and runs the container's own
+interactive sign-in command — a separate path from the page, and unchanged. It needs a real display, so
+today it is run against a host X server:
 
 ```bash
 docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY="$DISPLAY" login
@@ -412,7 +464,9 @@ production artifact; it adds the VNC/noVNC surface only to the sign-in image.
 | | |
 | --- | --- |
 | Expiry | `doctor --json` reports `login: error — ChatGPT login state is missing or unverified`, with the resolved path. Repeat the sign-in or `auth import`; nothing else needs to change |
-| Anti-bot / verification challenge | The provider may interrupt an automated session. Complete the challenge in the interactive sign-in path; a challenge does not corrupt the volume |
+| Anti-bot / verification challenge | The provider may interrupt an automated session. Complete the challenge in the interactive sign-in path; a challenge does not corrupt the volume. When the page's headless flow is rejected, set `authBrowserMode: "display"` and use the noVNC fallback above |
+| Captured, but turns still fail | The page reported the session stored, yet the running service still saw none: it resolved the credentials path at startup. Restart it (`docker compose restart chatgpt-web`) and re-run `doctor` |
+| Click outside the frame | A click outside the viewport the relay reports is refused, not clamped. It currently surfaces as HTTP 502 — a known blemish |
 | Backup | The volume holds credentials: `docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data-$(date +%F).tgz -C /data .` — store it encrypted |
 | Restore | Untar it back into the volume; a restored session keeps working only while the provider still accepts it |
 | Never | commit the volume, paste a capture into an issue, or expect one provider's directory to satisfy another's check (the resolver keys on the provider id) |

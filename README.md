@@ -50,8 +50,8 @@ Requirements: Docker Engine with the Compose plugin (or Podman), ~4 GB free disk
 roughly 1 GB RAM per active turn.
 
 The first hour is five steps, and `scripts/quickstart.sh` walks them in order: **build** and **start**
-the default stack, wait for `/healthz`, **sign in** (either route below), run the container's own
-**`doctor`**, then make a **first API call**. The script does the first two and the last two itself —
+the default stack, wait for `/healthz`, **sign in** (the page, or `auth import`), run the container's
+own **`doctor`**, then make a **first API call**. The script does the first two and the last two itself —
 it makes one real request and ends with the exact command to copy next. When the volume has no
 provider session yet it exits non-zero and names the sign-in command, which is the expected first-run
 state.
@@ -75,8 +75,9 @@ The same path by hand:
 docker compose up -d --wait
 curl -fsS http://127.0.0.1:17841/healthz
 
-# 3. sign in — either route, see Sign in to ChatGPT
-docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture
+# 3. sign in: open http://127.0.0.1:17841/v1/control/auth/ in a browser, enter the control
+#    token, sign in, then restart the service so it picks the session up (see Sign in to ChatGPT)
+docker compose restart chatgpt-web
 
 # 4. doctor: the container's own checks, ending in the next command when something fails
 docker compose exec chatgpt-web node lib/cli.js doctor
@@ -112,7 +113,7 @@ docker compose down -v                     # stop and DROP the credentials volum
 | `POST /v1/chat/completions` | OpenAI-compatible text chat, streaming and non-streaming. |
 | `GET /v1/models` | The provider-qualified catalogue (`models[]`, plus an additive OpenAI `data[]`). |
 | `GET /healthz` | Liveness metadata. Deliberately open: Docker's healthcheck and any load balancer need it. |
-| `/v1/control/*`, `/admin/*` | Operator routes, authorized with the control token. |
+| `/v1/control/*`, `/admin/*` | Operator routes, authorized with the control token. The sign-in page alone is served anonymously by design — see [Sign in to ChatGPT](#sign-in-to-chatgpt). |
 
 ```bash
 # OpenAI-compatible chat
@@ -188,10 +189,28 @@ The runtime needs a **verified** browser session: `storage-state.json` plus its 
 marker, under `providers/<providerId>/` in the data volume. Cookies alone are never enough — the marker
 is what distinguishes "a file exists" from "this session was proven against the provider".
 
+### Sign in from the service's page
+
+The running service serves its own sign-in page. Open it in any browser and enter the **control
+token** (the `controlToken` in `config.json`); the provider's browser appears in the tab:
+
+```text
+http://127.0.0.1:17841/v1/control/auth/
+```
+
+It needs no display and no second container, and it uses the same loopback port as the API —
+**control token only**, so the API key does not open it (and the control token still does not open
+`/v1/*`). **Restart the service once the session is captured**, because it resolved the credentials
+path at startup:
+
+```bash
+docker compose restart chatgpt-web
+```
+
 ### Adopt a capture (`auth import`)
 
-On a machine where you can sign in, capture a Playwright `storageState` JSON (or a directory
-containing `storage-state.json`), then:
+Scripted or offline-from-desktop provisioning: on a machine where you can sign in, capture a Playwright
+`storageState` JSON (or a directory containing `storage-state.json`), then:
 
 ```bash
 docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture
@@ -201,28 +220,12 @@ docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-w
 surface *first*, and both files are written atomically *afterwards*. A capture that cannot be verified
 exits non-zero and writes **nothing**. Cookie values are never printed.
 
-### Sign in inside the container
+### Fallback when a flow rejects headless
 
-The `login` service shares the data volume and runs the interactive sign-in.
-
-With a display:
-
-```bash
-docker compose --profile login run --rm -v /tmp/.X11-unix:/tmp/.X11-unix -e DISPLAY="$DISPLAY" login
-```
-
-With **no display**, sign in over noVNC in one command:
-
-```bash
-docker build -t dsh-chatgpt-web:local . && docker compose --profile login build login
-docker compose --profile login up -d login
-# open http://127.0.0.1:6080/vnc.html, sign in, then stop the service:
-docker compose --profile login down
-```
-
-The noVNC display stack lives only in `Dockerfile.login`, which layers on top of the production image,
-so the production artifact keeps no VNC surface. The port is published on the host's **loopback only**
-because it grants control of an authenticated browser session — never expose it on `0.0.0.0`.
+`authBrowserMode: "display"` in `config.json` launches a real window instead of headless (`headless` is
+the default). Today the only display the project provides is the **noVNC sign-in image**, which is not
+retired; `login` over a host X server or noVNC is documented in
+[`doc/container.md`](./doc/container.md) §5.5.
 
 ### Prove the browser surface (`browser check`)
 

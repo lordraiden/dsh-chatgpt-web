@@ -54,9 +54,31 @@ Then run:
 dsh-chatgpt-web doctor
 ~~~
 
-Authentication belongs to the container's own sign-in flow (`login`, the noVNC sign-in image, or `auth import`); do not create a second session store outside the data volume.
+Authentication belongs to the container's own sign-in flow (`login`, the service's own sign-in page at `/v1/control/auth/`, `auth import`, or the noVNC sign-in image as the `display` fallback); do not create a second session store outside the data volume.
 
 Treat the data volume (`DSH_CHATGPT_WEB_HOME`) as credential material.
+
+### The sign-in page shows a provider but the session fails
+
+The page at `/v1/control/auth/` relays the provider's own sign-in, and the state it prints is the authoritative one. Read it before changing anything:
+
+| State | Meaning |
+| --- | --- |
+| `starting` | the provider is bringing its sign-in mechanism up |
+| `awaiting_input` | the browser is interactive and waiting for you |
+| `verifying` | the provider is checking what you just submitted |
+| `captured` | the sign-in succeeded and the session was stored |
+| `failed` | the provider or its browser failed; the reported message names the cause |
+| `expired` | the session outlived its TTL (10 minutes by default) and was cancelled |
+
+The failures seen so far, and what each one means:
+
+- **Chrome is missing.** Opening a session fails closed with `The interactive sign-in browser could not start: Chrome was not found at <path>` (the provider's own `CHROME_EXECUTABLE_MISSING` diagnostic). Fix the configured `chromeExecutablePath` (see §4) before retrying.
+- **The provider rejects the automated surface (anti-bot / verification wall).** The page's browser never reaches the authenticated surface, so the session stays `awaiting_input`/`verifying` and eventually reports `failed`. Set `authBrowserMode: "display"` in `config.json` and use the display/noVNC fallback (doc/container.md §5.5). `headless` is the default, so this is opt-in.
+- **A session for that provider is already active.** A second sign-in is refused (409, `A sign-in session for provider chatgpt-web is already active`) until the first reaches a terminal state; cancel it from the page and reopen.
+- **The session was captured but turns still fail.** The page reported the session stored, yet the running service still sees none: it resolved the credentials path at startup. Restart it (`docker compose restart chatgpt-web`), then re-run `doctor`.
+
+A click outside the viewport the relay reports is refused rather than clamped, and currently surfaces as HTTP 502 — a known blemish, not a credential problem.
 
 ## 3. Snap/Chromium cannot create its browser profile
 
@@ -321,7 +343,7 @@ Include:
 - Node/Bun version;
 - browser name/version;
 - selected chatgpt-web/... route;
-- how the browser session was obtained (`login`, the noVNC sign-in image, or `auth import`);
+- how the browser session was obtained (`login`, the service's own sign-in page at `/v1/control/auth/`, `auth import`, or the noVNC sign-in image as the `display` fallback);
 - relevant doctor --json output after redaction;
 - clear reproduction steps;
 - the exact failure state or error.
