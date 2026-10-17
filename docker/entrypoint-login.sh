@@ -28,9 +28,14 @@ while [ ! -e "/tmp/.X11-unix/X${display#:}" ]; do
   sleep 0.1
 done
 
-# `-localhost` keeps the VNC port off the network: noVNC on 6080 is what an operator reaches.
-x11vnc -display "$display" -forever -shared -nopw -rfbport 5900 -localhost -quiet -bg
-websockify --web=/usr/share/novnc 6080 localhost:5900 &
+# Loopback only, and EXPLICITLY IPv4: with `-localhost` x11vnc may bind ::1 while websockify resolves
+# `localhost` to 127.0.0.1 (or the reverse), which leaves the noVNC client stuck at "connecting" with
+# nothing in the log. `-noxdamage` avoids the frozen/black screen Xvfb can produce, and the log file is
+# what makes a failure diagnosable at all (`docker exec <ctr> cat /tmp/x11vnc.log`).
+x11vnc -display "$display" -forever -shared -nopw -rfbport 5900 -listen 127.0.0.1 \
+  -noxdamage -o /tmp/x11vnc.log &
+# Verbose, and the target spelled out as 127.0.0.1 for the same reason as above.
+websockify -v --web=/usr/share/novnc 6080 127.0.0.1:5900 &
 echo "noVNC ready: http://127.0.0.1:6080/vnc.html (display $display)" >&2
 
 # Hand the display to the interactive command: the sign-in opens a headed browser (it must, to be
