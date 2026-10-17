@@ -9,7 +9,7 @@ import {
   CHATGPT_WEB_MODEL_ID,
   resolveChatGptWebModelMode,
 } from "../src/adapters/chatgpt-web/model";
-import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
+import { ChatGptWebProviderCore, type ChatGptWebProviderCoreTurnInput } from "../src/adapters/chatgpt-web/provider-core";
 import {
   captureChatGptWebHome,
   restoreChatGptWebHome,
@@ -124,5 +124,118 @@ describe("chat-only stability baseline", () => {
     expect(captured.text()).not.toContain("Pure Chat");
     expect(captured.text()).not.toContain("hola");
     await adapter.shutdown?.();
+  });
+});
+
+/**
+ * Issue #287 slice 3 — shutdown drains what it owns and never hands it back out.
+ *
+ * Restored from the deleted `scripts/test-issue-9-provider-core.ts` ("ProviderCore shutdown drains
+ * physical settlement" and "shutdown cannot hang on an unbound physical settlement"), extended to the
+ * adapter seam this file already drives. Both are browser-free: the physical settlement is a promise
+ * the test owns, and the adapter runs over the same controlled surface transport as above.
+ */
+describe("issue #287 slice 3 — shutdown drains owned resources and does not reuse them", () => {
+  function coreTurnInput(executionKey: string): ChatGptWebProviderCoreTurnInput {
+    return {
+      executionKey,
+      traceId: `${executionKey}-trace`,
+      nativeTurnId: `${executionKey}-native`,
+      nativeThreadId: `${executionKey}-thread`,
+      accountIdentity: "account-287-shutdown",
+      browserProfile: "profile-287-shutdown",
+      browserContext: "context-287-shutdown",
+      pageIdentity: `page-${executionKey}`,
+      capabilitySnapshot: {
+        snapshotId: `snapshot-${executionKey}`,
+        sessionId: "session-287-shutdown",
+        agentId: "session-287-shutdown",
+        turnId: `${executionKey}-native`,
+        createdAt: 1_700_000_000_000,
+        lifecycle: "active",
+        tools: [],
+      },
+      retryPolicy: "strict",
+    };
+  }
+
+  function boundCoreTurn(core: ChatGptWebProviderCore, executionKey: string) {
+    const turn = core.begin(coreTurnInput(executionKey));
+    turn.bindPhysicalResource({
+      resourceId: `surface-${executionKey}`,
+      browserContextId: "context-287-shutdown",
+      pageId: `page-${executionKey}`,
+      profileId: "profile-287-shutdown",
+      accountId: "chatgpt-account:account-287-shutdown",
+    });
+    turn.markSurfaceReady();
+    return turn;
+  }
+
+  test("core shutdown drains a bound settlement and hands its resource back", async () => {
+    const core = new ChatGptWebProviderCore();
+    const executionKey = "issue-287-shutdown-drain";
+    const turn = boundCoreTurn(core, executionKey);
+
+    // The physical operation settles only because cancellation released it: shutdown must drive the
+    // turn's own cancellation, then wait for the settlement it produced.
+    let releaseSettlement!: () => void;
+    const settlement = new Promise<void>(resolve => { releaseSettlement = resolve; });
+    core.bindPhysicalSettlement(executionKey, settlement);
+    let cancelled = false;
+    turn.attachCancellation(() => {
+      cancelled = true;
+      releaseSettlement();
+    });
+
+    await expect(core.shutdown(new Error("test shutdown"))).resolves.toBeUndefined();
+
+    expect(cancelled).toBe(true);
+    expect(turn.snapshot().logicalOutcome).toBe("cancelled");
+    expect(turn.snapshot().physicalSettled).toBe(true);
+    expect(turn.snapshot().physicalSettlementOutcome).toBe("fulfilled");
+    expect(turn.snapshot().state).toBe("RETIRED");
+    // The drained turn's resource was settled and released, not left owned by a dead core.
+    expect(turn.lease.isActive()).toBe(false);
+    expect(core.get(executionKey)).toBeUndefined();
+  });
+
+  test("core shutdown terminates when no settlement can be bound, and the core is unusable afterwards", async () => {
+    // Zero grace: the turn never attaches a physical settlement, so shutdown must not wait forever.
+    const core = new ChatGptWebProviderCore("chatgpt-web", undefined, 0);
+    const executionKey = "issue-287-shutdown-unbound";
+    const turn = boundCoreTurn(core, executionKey);
+
+    await expect(core.shutdown(new Error("test shutdown"))).resolves.toBeUndefined();
+
+    // It wrote the turn off explicitly: settled as never started, retired, resource released.
+    expect(turn.snapshot().state).toBe("RETIRED");
+    expect(turn.snapshot().physicalSettled).toBe(true);
+    expect(turn.snapshot().physicalSettlementAttached).toBe(false);
+    expect(turn.snapshot().physicalSettlementOutcome).toBe("not_started");
+    expect(turn.lease.isActive()).toBe(false);
+    expect(core.get(executionKey)).toBeUndefined();
+
+    // A shut-down core refuses new work instead of drawing another resource.
+    expect(() => core.begin(coreTurnInput("issue-287-after-shutdown"))).toThrow(/shut down/i);
+    // Terminating twice is still terminating once.
+    await expect(core.shutdown()).resolves.toBeUndefined();
+  });
+
+  test("adapter shutdown terminates, is idempotent, and refuses a turn afterwards", async () => {
+    const provider = controlledProviderConfig(home);
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "answer before shutdown" });
+    const adapter = createChatGptWebAdapter(provider, { surfaceTransport: surface.transport });
+    await adapter.runTurn(controlledParsed(), controlledIncoming(), () => {});
+    expect(surface.runs).toHaveLength(1);
+
+    await expect(adapter.shutdown?.()).resolves.toBeUndefined();
+    await expect(adapter.shutdown?.()).resolves.toBeUndefined();
+
+    // After shutdown the adapter refuses new work rather than reaching for another resource.
+    await expect(adapter.runTurn(controlledParsed(), controlledIncoming(), () => {}))
+      .rejects.toThrow(/shutting down/i);
+    expect(surface.runs).toHaveLength(1);
   });
 });
