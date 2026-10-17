@@ -375,6 +375,11 @@ default stack is loopback-only). It asks for the **control token** (the `control
 page is one self-contained document from the image — no CDN, no external asset — so it loads without
 reaching anything but the service itself.
 
+Clicking the provider's screen relays the click and routes your **keyboard** to the remote browser; the
+indicator under the screen always says where your keys go, and `Escape` (or clicking any field on the
+page) hands the keyboard back. The *Send text* field is the paste/long-text fallback and the only way to
+type from a phone, whose on-screen keyboard cannot drive the remote browser.
+
 The page is the client of this control surface, and it is **control token only**, exactly like the
 rest of `/v1/control/*`: the API key does not open it, and the control token still does not open
 `/v1/*`.
