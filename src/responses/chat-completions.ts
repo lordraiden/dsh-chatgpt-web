@@ -12,6 +12,13 @@
  * - **only messages**: the turn is projected through `projectApiConversation` (issue #253), so a
  *   harness's session context does not become part of the provider turn.
  *
+ * A third rule it used to compute and then drop: the **caller's conversation identity**. `mode` and
+ * the resolved session id were computed but never reached the turn, so every caller without turn
+ * metadata collapsed onto one constant provider conversation. The identity now travels on the channel
+ * the turn identity extractor already reads (`client_metadata`), so this surface adds no second
+ * identity channel, and the provider still sees only message text — the identity is never part of a
+ * message. See `src/web-chat/host/api-projection.ts` for the rule and its documented limit.
+ *
  * Capability declarations are the deliberate exception, by product design and not by configuration:
  * `tools`, `tool_choice`/`function_call` and `mcp`/`functions` are accepted and discarded, because
  * this bridge is a text chat with no execution or return channel to the caller's harness. Nothing
@@ -43,6 +50,12 @@ export interface ChatCompletionsTranslation {
   readonly model: string;
   readonly stream: boolean;
   readonly mode: "session" | "stateless";
+  /**
+   * The provider conversation identity this turn belongs to (the caller's `user`/`session_id`, or a
+   * content-derived identity for a stateless caller). Carried to the turn through `client_metadata`;
+   * never part of the messages, so it stays invisible to the provider.
+   */
+  readonly conversationIdentity: string;
   readonly droppedRoles: readonly string[];
   /**
    * Capability declarations the request carried and this surface discarded.
@@ -200,6 +213,13 @@ export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTr
       content: [{ type: "input_text", text: message.content }],
     })),
     stream,
+    // The caller's conversation identity reaches the turn on the ONE channel the turn identity
+    // extractor already reads (`client_metadata["x-codex-turn-metadata"].thread_id`), the same
+    // channel the native Codex and compact surfaces use. It is a request-level field, never a
+    // message: the provider-visible text stays message-only.
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({ thread_id: projected.conversationIdentity }),
+    },
   };
   if (typeof body.temperature === "number") internal.temperature = body.temperature;
   if (typeof body.max_tokens === "number") internal.max_output_tokens = body.max_tokens;
@@ -210,6 +230,7 @@ export function translateChatCompletionsRequest(raw: unknown): ChatCompletionsTr
     model,
     stream,
     mode: projected.mode,
+    conversationIdentity: projected.conversationIdentity,
     droppedRoles: projected.droppedRoles,
     droppedCapabilities,
   };

@@ -128,3 +128,29 @@ describe("issue #253 — without a session identity the request is stateless", (
       .toThrow(/no user message/);
   });
 });
+
+describe("issue #253 — the projection decides the provider conversation identity", () => {
+  test("an explicit identity is used verbatim, and a stateless identity is content-derived", () => {
+    expect(projectApiConversation({ messages: HARNESS_PAYLOAD, sessionId: "harness-session-1" }).conversationIdentity)
+      .toBe("harness-session-1");
+
+    const stateless = projectApiConversation({ messages: HARNESS_PAYLOAD });
+    expect(stateless.mode).toBe("stateless");
+    expect(stateless.conversationIdentity).toMatch(/^dsh-chat-[0-9a-f]{16}$/);
+  });
+
+  test("the identity is never per-request: same content, same conversation; different content, different one", () => {
+    const one = projectApiConversation({ messages: [FIRST_USER_WITH_CONTEXT, ASSISTANT_TURN, REAL_QUESTION] });
+    const again = projectApiConversation({ messages: [FIRST_USER_WITH_CONTEXT, ASSISTANT_TURN, REAL_QUESTION] });
+    const other = projectApiConversation({ messages: [REAL_QUESTION] });
+
+    // Continuity for a client that resends its history — and for a resend of the identical request.
+    expect(again.conversationIdentity).toBe(one.conversationIdentity);
+    // Isolation for different content.
+    expect(other.conversationIdentity).not.toBe(one.conversationIdentity);
+    // Dropped roles never participate: injected harness context cannot split or fuse a conversation.
+    const withExtraSystem: ApiConversationMessage[] = [{ ...SYSTEM_PROMPT }, ENVIRONMENT_BLOCK, ...one.messages];
+    expect(projectApiConversation({ messages: withExtraSystem }).conversationIdentity)
+      .toBe(one.conversationIdentity);
+  });
+});
