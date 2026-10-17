@@ -24,6 +24,10 @@ import {
 
 /** The runtime value exports the core publishes; type-only exports are covered by `tsc`. */
 const EXPECTED_CORE_RUNTIME_SURFACE = [
+  // Issue #276 added the interactive-auth contract: the state vocabulary plus three guards. They are
+  // deliberately in the pinned surface — the auth relay must validate its own inputs and frames, and
+  // a rename or an extra auth value is a surface change, not just a diff.
+  "AUTH_SESSION_STATES",
   "WEB_CHAT_ERROR_CATEGORIES",
   "WEB_CHAT_EXCHANGE_EVENT_TYPES",
   "WebChatError",
@@ -38,6 +42,9 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   "createMemoryConversationStore",
   "createWebChatDriverResolver",
   "decideWebChatRetry",
+  "isAuthInput",
+  "isAuthSessionState",
+  "isProviderAuthView",
   "isWebChatError",
   "isWebChatExchangeEventType",
   "isWebChatInitializationCurrent",
