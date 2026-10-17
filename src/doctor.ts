@@ -99,7 +99,9 @@ export async function webChatProviderChecks(
       message: check.status === "ok"
         ? `WebChat provider "${check.providerId}" is authenticated and healthy`
         : check.status === "warning"
-          ? `WebChat provider "${check.providerId}" is reachable but not authenticated`
+          ? `WebChat provider "${check.providerId}" is reachable but not authenticated: no sign-in has `
+            + "been recorded, so no account identity could be verified. Record one at the operator "
+            + "sign-in surface /v1/control/auth/ (the running service picks it up on the next turn, no restart)"
           : `WebChat provider "${check.providerId}" is unhealthy`,
       detail: check.detail,
     });

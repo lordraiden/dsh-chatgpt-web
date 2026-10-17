@@ -8,7 +8,12 @@ import {
   RetainedSurfaceRegistry,
   type RetainedSurfacePage,
 } from "../src/adapters/chatgpt-web/retained-surface";
-import { MAX_CHATGPT_BROWSER_TABS, chatGptEffortSelectionRequired } from "../src/adapters/chatgpt-web/browser-worker";
+import {
+  MAX_CHATGPT_BROWSER_TABS,
+  ChatGptSuspensionClock,
+  attachRetainedSurfaceIdleSweep,
+  chatGptEffortSelectionRequired,
+} from "../src/adapters/chatgpt-web/browser-worker";
 
 /** Minimal stand-in for a Playwright Page: only the registry's two capabilities. */
 function fakePage(name: string): RetainedSurfacePage & { name: string; closeCount: number; markClosed: () => void } {
@@ -730,5 +735,80 @@ describe("issue #171 bounded retention — eviction is retirement, never reuse",
     expect(() => new RetainedSurfaceRegistry({ maxSurfaces: 1.5 })).toThrow(TypeError);
     expect(() => new RetainedSurfaceRegistry({ idleTimeoutMs: 0 })).toThrow(TypeError);
     expect(() => new RetainedSurfaceRegistry({ idleTimeoutMs: Number.POSITIVE_INFINITY })).toThrow(TypeError);
+  });
+});
+
+/**
+ * Issue #171 (next retention slice) — the idle sweep runs on the worker's steady tick.
+ *
+ * The registry enforced the idle window only when something asked it to acquire, so a process that
+ * stopped acquiring held its retained pages until shutdown and the window was mostly decorative. The
+ * sweep now rides `ChatGptSuspensionClock`, the one steady interval the worker already runs for its
+ * stage budgets: no scheduler and no second timer were added. This is the wiring under test, against
+ * the real registry, the real clock class and fake pages — no browser and no real time.
+ */
+describe("issue #171 bounded retention — the idle sweep runs on the worker's steady tick", () => {
+  test("an idle surface is reclaimed on the clock without a new acquisition", async () => {
+    const clock = fixedClock();
+    const idleTimeoutMs = 30 * 60_000;
+    const registry = new RetainedSurfaceRegistry<CountingPage>({ idleTimeoutMs, now: clock.now });
+    const suspensionClock = new ChatGptSuspensionClock();
+    const detach = attachRetainedSurfaceIdleSweep(registry, suspensionClock);
+    const page = countingPage("page-idle");
+    await retainSettled(registry, "key-idle", page);
+    expect(page.closeCount).toBe(0);
+
+    // Nothing acquires anything: only the clock advances and the worker's tick fires.
+    clock.advance(idleTimeoutMs + 1);
+    suspensionClock.tick(clock.now());
+
+    expect(registry.has("key-idle")).toBe(false);
+    expect(page.isClosed()).toBe(true);
+    expect(page.closeCount).toBe(1);
+    // Eviction is retirement: the key is tombstoned exactly like a page that died.
+    expect(registry.isLost("key-idle")).toBe(true);
+    detach();
+  });
+
+  test("the tick never reclaims a surface an active turn holds", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({ idleTimeoutMs: 60_000, now: clock.now });
+    const suspensionClock = new ChatGptSuspensionClock();
+    const detach = attachRetainedSurfaceIdleSweep(registry, suspensionClock);
+    const busy = countingPage("page-busy");
+    // Held by a turn: acquired and never released, so `busy` is true.
+    await registry.acquire("key-busy", { required: false, create: async () => busy });
+
+    clock.advance(24 * 60 * 60_000);
+    suspensionClock.tick(clock.now());
+    // The registry's own eligibility rule (`!busy && settled`) refused to close it; the wiring only
+    // asked, and it respects that refusal.
+    expect(registry.has("key-busy")).toBe(true);
+    expect(busy.isClosed()).toBe(false);
+    expect(busy.closeCount).toBe(0);
+
+    // Once the turn releases and settles its surface, the next tick past the window reclaims it.
+    registry.release("key-busy");
+    registry.settle("key-busy", "fulfilled");
+    clock.advance(60_001);
+    suspensionClock.tick(clock.now());
+    expect(busy.isClosed()).toBe(true);
+    expect(busy.closeCount).toBe(1);
+    detach();
+  });
+
+  test("detaching the tick stops the sweep", async () => {
+    const clock = fixedClock();
+    const registry = new RetainedSurfaceRegistry<CountingPage>({ idleTimeoutMs: 1_000, now: clock.now });
+    const suspensionClock = new ChatGptSuspensionClock();
+    const detach = attachRetainedSurfaceIdleSweep(registry, suspensionClock);
+    const page = countingPage("page-detached");
+    await retainSettled(registry, "key-detached", page);
+    detach();
+
+    clock.advance(60_000);
+    suspensionClock.tick(clock.now());
+    expect(registry.has("key-detached")).toBe(true);
+    expect(page.closeCount).toBe(0);
   });
 });

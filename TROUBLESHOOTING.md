@@ -275,6 +275,7 @@ Exclusivity is per logical conversation and per physical transport resource:
 Read the refusal to tell the two apart:
 
 - `retained_surface_busy` / `TRANSPORT_UNAVAILABLE` means the *same* provider conversation already has an active turn (the per-conversation guards above);
+- `retained_surface_lost` / `CONVERSATION_LOST` means the retained conversation was retired (its page died, or it was idle past the retention window / past the retention cap) and is deliberately **not** auto-replayed: re-send the canonical history as an explicit replay to re-establish it (`doc/architecture.md` §19.1);
 - the bounded fan-out sentence means the authenticated account is at its 5-turn ceiling — wait for a browser turn to finish, then retry;
 - `ChatGPT Web has no recorded account identity for this deployment, ... sign in again at the operator sign-in surface (/v1/control/auth/)` means nothing recorded *which* account this deployment signed in as, so no physical account could be verified against it. Sign in again (or run `login`) to record it;
 - `Browser lease physical account does not match its logical account identity: expected <fingerprint>, actual <fingerprint>` means two *recorded* identities genuinely disagree — the browser session belongs to a different account than the one this deployment recorded. Re-authenticate that account, or point the deployment at the browser session it recorded.

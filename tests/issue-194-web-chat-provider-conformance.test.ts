@@ -413,6 +413,34 @@ describe("issue #192 — the ChatGPT driver", () => {
     expect(account.capabilities?.pro).toBe("unsupported");
   });
 
+  test("a derived account identity is never reported as an authenticated account", async () => {
+    // `providerConfig` substitutes a storage-state-derived fallback when no sign-in persisted an
+    // identity, and marks it `accountIdentityRecorded: false`. That fallback is not an account and can
+    // never match the signed-in page's, so the driver must not report a healthy authenticated account:
+    // this is the same untruth #287 slice 2 removed from the lease's binding message. The lease's own
+    // refusal with a derived identity is pinned, unchanged, in the concurrency contract suite.
+    const derived = createChatGptWebDriver({
+      provider: {
+        ...driverProvider,
+        chatgptWeb: {
+          ...driverProvider.chatgptWeb,
+          accountIdentityFingerprint: "storage-state-derived-fallback",
+          accountIdentityRecorded: false,
+        },
+      } as unknown as CodexProviderConfig,
+    });
+    const account = await derived.inspectAccount();
+    expect(account.authenticated).toBe(false);
+    expect(account.accountFingerprint).toBe("storage-state-derived-fallback");
+    // Capabilities are unknown rather than trusted for an identity that is not an account at all.
+    expect(account.capabilities?.sol).toBe("unknown");
+    expect(account.capabilities?.pro).toBe("unknown");
+
+    // A recorded identity still reads as authenticated: only the derived one changes.
+    const recorded = await createChatGptWebDriver({ provider: driverProvider }).inspectAccount();
+    expect(recorded.authenticated).toBe(true);
+  });
+
   test("it lists and resolves only the routes this deployment serves", async () => {
     const driver = createChatGptWebDriver({ provider: driverProvider });
     const models = await driver.listModels();
