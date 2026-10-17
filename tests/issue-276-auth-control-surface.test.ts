@@ -184,6 +184,11 @@ async function postInput(server: RunningServer, id: string, input: unknown) {
   });
 }
 
+/** Every input the fake provider received, in the order it received them, as comparable strings. */
+const inputOrder = (fake: FakeProvider): string[] =>
+  fake.inputs.map(event =>
+    event.type === "type" ? `type:${event.text}` : event.type === "key" ? `key:${event.key}` : event.type);
+
 /** Read the SSE relay block by block, with the event name, and a bounded wait. */
 function sseReader(response: Response) {
   const reader = response.body!.getReader();
@@ -742,5 +747,95 @@ describe("issue #276 slice 2a — the served page", () => {
     });
     expect(refused.status).toBe(404);
     expect((await refused.json() as { message: string }).message).toContain("none");
+  });
+});
+
+/**
+ * Issue #276 — the keyboard relay (the operator's "I cannot type" report).
+ *
+ * The page's own JavaScript has no DOM harness in CI, so this suite splits the claim honestly in two:
+ *
+ * - **Server side, proven here.** The `input` endpoint relays a rapid `type`+`key` sequence to the
+ *   provider in exactly the order it was issued (a fake session records every call), which is the
+ *   ordering the page's flush-before-Enter rule depends on.
+ * - **Page side, the published contract only.** The served document declares the routing marker, the
+ *   batch timer and the named-key vocabulary its relay uses, and its script consumes those same three
+ *   attributes and posts to the same endpoint the server serves. That proves the agreement between the
+ *   page and this server; it does **not** prove what a browser does with a `keydown`. Whether the route
+ *   actually moves, whether a keystroke reaches the provider, whether a dead key or an IME composes, and
+ *   whether the caret is visible in a relayed frame are all real-browser questions and are listed as
+ *   uncovered in the change report.
+ */
+describe("issue #276 — the keyboard relay: server ordering and the page's published contract", () => {
+  test("a rapid type+key sequence reaches the provider in exactly the order the page sent it", async () => {
+    const fake = fakeProvider({ providerId: PIXEL_PROVIDER, label: "Pixel Web", pixels: true });
+    const server = serve([fake], { frameIntervalMs: 5_000, session: { sweepIntervalMs: 0 } });
+    const first = await openSession(server, PIXEL_PROVIDER);
+
+    // Exactly what the relay does for "user@x.com" followed by Enter: the batched text is flushed
+    // first, then the named key, back to back and each awaited before the next (the page has one send
+    // chain), so the order the operator typed in is the order the provider sees.
+    expect((await postInput(server, first.id, { type: "type", text: "user@x.com" })).status).toBe(200);
+    expect((await postInput(server, first.id, { type: "key", key: "Enter" })).status).toBe(200);
+    expect(inputOrder(fake)).toEqual(["type:user@x.com", "key:Enter"]);
+
+    // A burst of batches interleaved with named keys keeps that same order in both directions: text is
+    // never reordered behind, or ahead of, the key it was typed with. (The first session is `captured`,
+    // which is terminal, so the provider slot is free again for the second one.)
+    const second = await openSession(server, PIXEL_PROVIDER);
+    const burst: AuthInput[] = [
+      { type: "type", text: "ab" },
+      { type: "key", key: "Tab" },
+      { type: "type", text: "cd" },
+      { type: "key", key: "Backspace" },
+      { type: "type", text: "e@f.g" },
+    ];
+    for (const event of burst) {
+      expect((await postInput(server, second.id, event)).status, JSON.stringify(event)).toBe(200);
+    }
+    expect(inputOrder(fake)).toEqual([
+      "type:user@x.com", "key:Enter",
+      "type:ab", "key:Tab", "type:cd", "key:Backspace", "type:e@f.g",
+    ]);
+  });
+
+  test("the served page publishes the routing marker, the batch timer and the named-key vocabulary", async () => {
+    const server = serve([]);
+    const html = await (await fetch(url(server, "/v1/control/auth/"))).text();
+
+    // 1. The routing state is published rather than hidden: the marker is in the served document before
+    // any script runs, and the script paints that same attribute when the route moves.
+    expect(html).toContain('data-keyboard-routing="local"');
+
+    // 2. The batch timer is published, and inside the 60-80 ms band the relay must use.
+    const flush = /data-keyboard-flush-ms="(\d+)"/.exec(html);
+    expect(flush).not.toBeNull();
+    const flushMs = Number(flush![1]);
+    expect(flushMs).toBeGreaterThanOrEqual(60);
+    expect(flushMs).toBeLessThanOrEqual(80);
+
+    // 3. The named keys the relay may map to `{type:"key"}` are published as one vocabulary.
+    const named = /data-keyboard-named-keys="([^"]+)"/.exec(html);
+    expect(named).not.toBeNull();
+    const namedKeys = named![1].split(" ");
+    for (const key of ["Enter", "Tab", "Backspace", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]) {
+      expect(namedKeys, `the relay must map ${key} to a key event`).toContain(key);
+    }
+
+    // 4. The script reads back the same three attributes the document publishes, and talks to the
+    // endpoint this server serves. This is the contract between the two halves; the behaviour behind it
+    // is what needs a real browser (see the suite comment).
+    const script = html.slice(html.indexOf("<script>"));
+    for (const name of ['"data-keyboard-routing"', '"data-keyboard-flush-ms"', '"data-keyboard-named-keys"']) {
+      expect(script, `the script must consume ${name}`).toContain(name);
+    }
+    expect(script).toContain('"sessions/"');
+    expect(script).toContain('"/input"');
+
+    // 5. A phone has no hardware keyboard and no hover: nothing in the relay may depend on either, and
+    // the text field must be labelled as the fallback rather than as the way to type.
+    expect(html).not.toMatch(/:hover|mouseenter|mouseover/);
+    expect(html).toContain("Send text");
+    expect(html).toMatch(/fallback/i);
   });
 });

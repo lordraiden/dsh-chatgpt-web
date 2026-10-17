@@ -78,7 +78,9 @@ The failures seen so far, and what each one means:
 - **A session for that provider is already active.** A second sign-in is refused (409, `A sign-in session for provider chatgpt-web is already active`) until the first reaches a terminal state; cancel it from the page and reopen.
 - **The session was captured but turns still fail.** The page reported the session stored, yet the running service still sees none: it resolved the credentials path at startup. Restart it (`docker compose restart chatgpt-web`), then re-run `doctor`.
 
-A click outside the viewport the relay reports is refused rather than clamped, and currently is refused with HTTP 400 `UNSUPPORTED_OPTION` — a known blemish, not a credential problem.
+A click outside the viewport the relay reports is refused rather than clamped, and currently is refused with HTTP 400 `UNSUPPORTED_OPTION`; that is the intended answer, not a credential problem.
+
+Keystrokes reach the provider only while the page's indicator says `Keyboard → remote sign-in screen`: clicking the provider's screen routes the keyboard there, and `Escape` (or clicking any field on the page) hands it back. If the indicator says `Keyboard → this page`, the keys belong to the page's own controls and never reach the provider — that is the design, not a failure. On a phone, type into *Send text*: an on-screen keyboard cannot drive the remote browser, so the field is the only way to type.
 
 ## 3. Snap/Chromium cannot create its browser profile
 

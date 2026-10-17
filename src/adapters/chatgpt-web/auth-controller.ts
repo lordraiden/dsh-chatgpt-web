@@ -341,7 +341,12 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
   async view(): Promise<ProviderAuthView> {
     const page = this.#livePage("relay a frame");
     const size = this.#viewportOf(page);
-    const png = await page.screenshot({ type: "png" });
+    // `caret: "initial"` is load-bearing, not cosmetic: Playwright hides the blinking text caret in
+    // screenshots by default ("hide"), which removed the operator's only visual confirmation that a
+    // click had focused a field — the report that started this fix read as "the click is broken". With
+    // the caret left at the browser's own behaviour, the relayed frames show which field is focused.
+    // (Supported by the pinned playwright-core; `hide` remains the default this deliberately overrides.)
+    const png = await page.screenshot({ type: "png", caret: "initial" });
     // The screenshot is the viewport, so the geometry reported is the geometry the page must map a
     // click into. This is the only place in the controller that produces pixels.
     return { png, width: size.width, height: size.height };

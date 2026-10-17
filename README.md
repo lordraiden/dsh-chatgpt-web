@@ -198,6 +198,11 @@ token** (the `controlToken` in `config.json`); the provider's browser appears in
 http://127.0.0.1:17841/v1/control/auth/
 ```
 
+Clicks on the provider's screen are relayed as clicks, and a click also routes your **keyboard** to the
+remote browser: the indicator under the screen always says where your keys go. Press `Escape`, or click
+any field on the page, to get the keyboard back. The *Send text* field is the paste/long-text fallback
+and the only way to type from a phone, whose on-screen keyboard cannot drive the remote browser.
+
 It needs no display and no second container, and it uses the same loopback port as the API —
 **control token only**, so the API key does not open it (and the control token still does not open
 `/v1/*`). **Restart the service once the session is captured**, because it resolved the credentials

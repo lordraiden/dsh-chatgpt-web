@@ -54,6 +54,7 @@ interface FakePage {
     wheels: Array<[number, number]>;
     gotos: string[];
     screenshots: number;
+    screenshotOptions: Array<{ caret?: string; type?: string }>;
   };
 }
 
@@ -69,6 +70,7 @@ function fakePage(options: {
     wheels: [],
     gotos: [],
     screenshots: 0,
+    screenshotOptions: [],
   };
   const page = {
     viewportSize: () => viewport,
@@ -80,8 +82,9 @@ function fakePage(options: {
       type: (text: string) => { calls.types.push(text); },
       press: (key: string) => { calls.keys.push(key); },
     },
-    screenshot: async () => {
+    screenshot: async (screenshotOptions?: { caret?: string; type?: string }) => {
       calls.screenshots += 1;
+      calls.screenshotOptions.push(screenshotOptions ?? {});
       return Buffer.from(ONE_BY_ONE_PNG);
     },
     goto: async (url: string) => { calls.gotos.push(url); },
@@ -188,6 +191,13 @@ describe("issue #276 slice 2b — the provider identity and the launch", () => {
     expect(frame.height).toBe(480);
     expect(frame.png.length).toBeGreaterThan(0);
     expect(page.calls.screenshots).toBe(1);
+    // Playwright hides the blinking text caret in screenshots by default. That default is exactly what
+    // made a focused field invisible to the operator ("no blinking caret appears"), so the frame must
+    // ask for the browser's own caret behaviour on every capture, not just the first one.
+    expect(page.calls.screenshotOptions).toEqual([{ type: "png", caret: "initial" }]);
+    await session.view();
+    expect(page.calls.screenshots).toBe(2);
+    expect(page.calls.screenshotOptions.every(option => option.caret === "initial")).toBe(true);
     // The live page is navigated once at launch (inside the browser seam), never per frame.
     expect(page.calls.gotos).toEqual([]);
 
