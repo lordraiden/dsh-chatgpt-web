@@ -14,10 +14,21 @@
  * The rule is structural, never per-harness (a generic client carries no provenance, so a
  * per-harness rule could not be universal):
  *
- * - a stable client session identity is present → transmit **only the current user message**; the
- *   provider conversation is the history, so context injected in earlier turns cannot cross;
+ * - a stable client session identity is present → transmit **only the current turn**, expressed as
+ *   the newest user message that still carries human content; the provider conversation is the
+ *   history, so context injected in earlier turns cannot cross;
  * - no session identity → treat the request as stateless: transmit the client's `user`/`assistant`
  *   messages and **drop every non-conversational role** (`system`, `developer`, `tool`, …).
+ *
+ * "The newest user message that carries human content", not "the last user message", because a
+ * request may express one turn as several user messages: a harness that owns its own clock appends
+ * its runtime snapshot as one more `user` message after the human one. Selecting by role alone then
+ * transmits the snapshot — a turn with no human content, which the provider's compiler is *required*
+ * to refuse (issue #307: the harness's identity arrived, the snapshot became the last user message,
+ * and every install after that was refused with "must carry a human message"). Human content is
+ * decided by `sanitizeConversationText`, the product's one owner of "what is host context", so this
+ * owner agrees with the compiler by construction instead of keeping a second marker list. The
+ * messages themselves are transmitted unchanged; the compiler still sanitizes what it sends.
  *
  * Documented limit, deliberately not papered over: in the stateless mode, context that the harness
  * puts *inside* the current user message still crosses. Removing that would require content
@@ -55,6 +66,8 @@
  * know that a later, different message belongs to the same client.
  */
 import { createHash } from "node:crypto";
+
+import { sanitizeConversationText } from "../../conversation-sanitizer";
 
 /** The roles that carry a conversation. Everything else is harness context (or unknown). */
 const CONVERSATIONAL_ROLES = new Set(["user", "assistant"]);
@@ -144,8 +157,9 @@ export function contentConversationIdentity(messages: readonly ApiConversationMe
 /**
  * Apply the message-only rule.
  *
- * @throws {Error} when the projection would leave nothing to say — the caller must turn that into a
- * typed 400 rather than submitting an empty turn.
+ * @throws {Error} when the projection would leave nothing to say — no conversational message at all,
+ * or (session mode) no user message that still carries human content. The caller must turn that into
+ * a typed 400 rather than submitting an empty turn.
  */
 export function projectApiConversation(input: ApiProjectionInput): ApiProjectionResult {
   const droppedRoles: string[] = [];
@@ -161,19 +175,30 @@ export function projectApiConversation(input: ApiProjectionInput): ApiProjection
   const sessionId = normalizeApiSessionId(input.sessionId);
   if (sessionId !== undefined) {
     // The provider conversation owns the history, so only the turn being asked now is transmitted.
-    let lastUser = -1;
+    // That turn is the newest user message that still carries human content — not merely the last
+    // message with role `user`, because a harness may append its own runtime snapshot after the human
+    // turn. A snapshot-only message is not a turn: transmitting it sends an empty turn, which the
+    // provider's compiler must refuse (`currentChatUserMessage`). `sanitizeConversationText` is the
+    // one owner of what host context is, so this selection and that compiler agree by construction.
+    let current = -1;
     for (let index = conversational.length - 1; index >= 0; index -= 1) {
-      if (conversational[index]!.role === "user") { lastUser = index; break; }
+      const message = conversational[index]!;
+      if (message.role === "user" && sanitizeConversationText(message.content) !== "") {
+        current = index;
+        break;
+      }
     }
-    if (lastUser < 0) {
-      throw new Error("The request carries no user message; a session-addressed turn needs one.");
+    if (current < 0) {
+      throw new Error(
+        "The request carries no user message with content; a session-addressed turn is answered from its newest user message, so the instruction has to arrive as one.",
+      );
     }
     return {
       mode: "session",
       conversationIdentity: sessionId,
-      messages: [conversational[lastUser]!],
+      messages: [conversational[current]!],
       droppedRoles,
-      droppedTurns: lastUser,
+      droppedTurns: current,
     };
   }
 

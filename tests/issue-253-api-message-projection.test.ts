@@ -45,6 +45,20 @@ const FIRST_USER_WITH_CONTEXT: ApiConversationMessage = {
 
 const ASSISTANT_TURN: ApiConversationMessage = { role: "assistant", content: "¿En qué te ayudo?" };
 
+/**
+ * The harness's own runtime snapshot, sent as one more `user` message after the human turn (the time
+ * plugin's rendered text, verbatim). `sanitizeConversationText` strips every line of it, so this
+ * message carries no human content: it is context, never a turn (issue #307).
+ */
+const RUNTIME_SNAPSHOT: ApiConversationMessage = {
+  role: "user",
+  content: [
+    "Time sampled while preparing turn 1, step 1: 2026-10-18T12:17:11+02:00[Europe/Madrid]",
+    "Browser time zone for this request: unavailable. Ask the user to clarify otherwise-unqualified dates and times.",
+    "Elapsed since the preceding model-visible message: unavailable.",
+  ].join("\n"),
+};
+
 const REAL_QUESTION: ApiConversationMessage = {
   role: "user",
   content: "Añade un test para el analizador de rutas.",
@@ -87,6 +101,34 @@ describe("issue #253 — a session identity selects the strict rule", () => {
     expect(() => projectApiConversation({ messages: [SYSTEM_PROMPT], sessionId: "s" }))
       .toThrow(/no user message/);
   });
+
+  test("the turn is the newest user message that carries content, not the last user-role message", () => {
+    // A harness that owns its clock appends a runtime snapshot after the human turn: selecting by
+    // role alone would transmit that snapshot — an empty turn the provider's compiler must refuse.
+    const projected = projectApiConversation({
+      messages: [REAL_QUESTION, RUNTIME_SNAPSHOT],
+      sessionId: "harness-session-snapshot",
+    });
+
+    expect(projected.mode).toBe("session");
+    expect(projected.messages).toEqual([REAL_QUESTION]);
+    expect(projected.droppedTurns).toBe(0);
+
+    // The same when the human turn is not the first message of the request.
+    const later = projectApiConversation({
+      messages: [FIRST_USER_WITH_CONTEXT, ASSISTANT_TURN, REAL_QUESTION, RUNTIME_SNAPSHOT],
+      sessionId: "harness-session-snapshot",
+    });
+    expect(later.messages).toEqual([REAL_QUESTION]);
+    expect(later.droppedTurns).toBe(2);
+  });
+
+  test("a session-addressed request whose user messages carry no content is refused, not emptied", () => {
+    expect(() => projectApiConversation({ messages: [RUNTIME_SNAPSHOT], sessionId: "s" }))
+      .toThrow(/no user message with content/);
+    expect(() => projectApiConversation({ messages: [SYSTEM_PROMPT, RUNTIME_SNAPSHOT], sessionId: "s" }))
+      .toThrow(/no user message with content/);
+  });
 });
 
 describe("issue #253 — without a session identity the request is stateless", () => {
@@ -119,6 +161,15 @@ describe("issue #253 — without a session identity the request is stateless", (
     // silently pretend the API removes it.
     const projected = projectApiConversation({ messages: [FIRST_USER_WITH_CONTEXT] });
     expect(projected.messages[0]!.content).toContain("<session_context>");
+  });
+
+  test("stateless keeps every conversational message; deciding the human turn is the compiler's", () => {
+    // The stateless rule carries the whole conversation, so a trailing runtime snapshot travels with
+    // it — and the provider's compiler is what ignores it when it picks the human turn. This owner
+    // only selects the turn in session mode, where exactly one message is transmitted.
+    const projected = projectApiConversation({ messages: [REAL_QUESTION, RUNTIME_SNAPSHOT] });
+    expect(projected.mode).toBe("stateless");
+    expect(projected.messages).toEqual([REAL_QUESTION, RUNTIME_SNAPSHOT]);
   });
 
   test("a request whose last message is not from the user is refused", () => {

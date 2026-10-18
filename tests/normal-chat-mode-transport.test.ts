@@ -76,6 +76,24 @@ describe("normal Chat Mode request contract", () => {
     expect(() => compileChatGptWebInstall(compaction)).toThrow("normal Chat Mode install");
     expect(() => compileChatGptWebContinuation(compaction)).toThrow("normal Chat Mode continuation");
   });
+
+  test("a genuinely human-less install is still refused by both install compilers", () => {
+    // Host context is not a turn. The refusals stay exactly as they were: an install that carries no
+    // human message fails, whatever surface produced it (issue #307 keeps this invariant while the
+    // projection stops handing these compilers the harness's runtime snapshot in the first place).
+    const runtimeSnapshot = [
+      "Time sampled while preparing turn 1, step 1: 2026-10-18T12:17:11+02:00[Europe/Madrid]",
+      "Browser time zone for this request: unavailable. Ask the user to clarify otherwise-unqualified dates and times.",
+      "Elapsed since the preceding model-visible message: unavailable.",
+    ].join("\n");
+
+    expect(() => compileChatGptWebInstall(parsed([user(runtimeSnapshot)])))
+      .toThrow("A normal Chat Mode install must carry a human message");
+    expect(() => compileChatGptWebInstall(parsed([user("  ")])))
+      .toThrow("A normal Chat Mode install must carry a human message");
+    expect(() => compileRetainedChatGptWebInstall(parsed([user(runtimeSnapshot)]), {}))
+      .toThrow("A retained composer install must carry at least one human message");
+  });
 });
 
 describe("deterministic repository identity", () => {

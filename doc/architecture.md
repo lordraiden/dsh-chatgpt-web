@@ -2205,12 +2205,18 @@ provenance metadata, so this cannot be a per-harness rule: it has to be structur
 already uses (§20.1 — only the current user message crosses, and the provider conversation
 is the history). The rule is implemented in `src/web-chat/host/api-projection.ts`, structural and never
 per-harness: a client-provided session identity (OpenAI's `user`, or the `session_id` extension) makes
-the API transmit **only the current user message** with the provider conversation as the history;
-without one the request is stateless and every non-conversational role (`system`, `developer`, `tool`,
-unknown) is dropped. That is universal in the only sense the protocol allows — a generic client carries
-no provenance — and its limit is explicit rather than papered over: harness text placed *inside* the
-current user message cannot be distinguished structurally and does cross. Content heuristics are
-deliberately **not** the mechanism, because they are per-harness and per-version (issue #253).
+the API transmit **only the current turn** — the newest user message that still carries human content,
+because a harness may express one turn as several user messages and append its own runtime snapshot after
+the human one (a role-only rule transmitted the snapshot, and the prompt compiler is required to refuse an
+install that carries no human message: issue #307's regression) — with the provider conversation as the
+history; without one the request is stateless and every non-conversational role (`system`, `developer`,
+`tool`, unknown) is dropped. What counts as human content is decided by the product's one owner of host
+context (`sanitizeConversationText`), never by a heuristic that guesses the caller's session from its text,
+so the projection and the compiler agree by construction, and a session-addressed request whose user
+messages carry no human content is refused with a typed `400` that names the rule. The remaining limit is
+explicit rather than papered over: harness text placed *inside* the current user message cannot be
+distinguished structurally and does cross. Content heuristics for the **identity** remain deliberately
+**not** the mechanism, because they are per-harness and per-version (issue #253).
 
 **The same projection decides the provider conversation identity.** An API caller is not a DSH thread and
 carries no native turn metadata, so the surface must choose the conversation key itself instead of

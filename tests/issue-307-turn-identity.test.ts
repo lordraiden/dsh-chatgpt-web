@@ -678,6 +678,205 @@ describe("issue #307 — a declared OpenAI-wire identity and purpose are read, n
   });
 });
 
+/**
+ * The runtime-context snapshot the harness appends as its own trailing `user` message (the time
+ * plugin's rendered text, verbatim). It is host context only: `sanitizeConversationText` strips every
+ * line of it, so it carries no human content at all.
+ *
+ * This is the shape that broke once the caller's identity started arriving: a session-addressed turn
+ * transmits only "the user message this request is asking", and picking that message by **role alone**
+ * picks the snapshot — an empty turn the install compiler must refuse.
+ */
+const TIME_CONTEXT_SNAPSHOT = [
+  "Time sampled while preparing turn 1, step 1: 2026-10-18T12:17:11+02:00[Europe/Madrid]",
+  "Browser time zone for this request: unavailable. Ask the user to clarify otherwise-unqualified dates and times.",
+  "Elapsed since the preceding model-visible message: unavailable.",
+].join("\n");
+
+describe("issue #307 — an identity must not detach the human turn from its runtime snapshot", () => {
+  test("a session-addressed turn ending in the runtime snapshot installs the human message", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "dos" });
+    const target = adapter(surface);
+
+    const turn = await runTurn(target, channelApiTurn({
+      promptCacheKey: "snapshot-307-a",
+      messages: [
+        { role: "user", content: "pregunta uno" },
+        { role: "user", content: TIME_CONTEXT_SNAPSHOT },
+      ],
+    }));
+
+    // The human turn is answered: the runtime snapshot is not a turn and must never replace one.
+    expect(errors(turn)).toEqual([]);
+    expect(finalText(turn)).toBe("uno");
+    expect(surface.runs).toHaveLength(1);
+    expect(surface.runs[0]!.prompt).toContain(INSTALL_HEADER);
+    expect(surface.runs[0]!.prompt).toContain("pregunta uno");
+    // Host context still never reaches the provider.
+    expect(surface.runs[0]!.prompt).not.toContain("Time sampled while preparing turn");
+
+    // The next turn of the same session continues the conversation the first turn installed.
+    const next = await runTurn(target, channelApiTurn({
+      promptCacheKey: "snapshot-307-a",
+      messages: [
+        { role: "user", content: "pregunta uno" },
+        { role: "assistant", content: "uno" },
+        { role: "user", content: "pregunta dos" },
+        { role: "user", content: TIME_CONTEXT_SNAPSHOT },
+      ],
+    }));
+    expect(errors(next)).toEqual([]);
+    expect(finalText(next)).toBe("dos");
+    expect(surface.runs[1]!.prompt).toBe("pregunta dos");
+  });
+
+  test("a replacement-epoch install still carries the human message, not the trailing snapshot", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "dos" });
+    const target = adapter(surface);
+
+    // The session's first turn installs generation 1.
+    const first = await runTurn(target, channelApiTurn({
+      promptCacheKey: "snapshot-307-b",
+      messages: [{ role: "user", content: "pregunta uno" }],
+    }));
+    expect(errors(first)).toEqual([]);
+    const conversationKey = surface.runs[0]!.turn.conversationKey;
+    expect(conversationKey).toBeDefined();
+
+    // A replay/replacement epoch (the production log's "the current generation is 2"): the prefix has
+    // no fingerprint in the new generation, so the retained conversation installs again — from a
+    // request that ends with the runtime snapshot.
+    chatGptTurnSessions.setConversationGeneration(conversationKey!, 2);
+    const reinstalled = await runTurn(target, channelApiTurn({
+      promptCacheKey: "snapshot-307-b",
+      messages: [
+        { role: "user", content: "pregunta dos" },
+        { role: "user", content: TIME_CONTEXT_SNAPSHOT },
+      ],
+    }));
+
+    expect(errors(reinstalled)).toEqual([]);
+    expect(finalText(reinstalled)).toBe("dos");
+    expect(surface.runs[1]!.turn.conversationKey).toBe(conversationKey);
+    expect(surface.runs[1]!.prompt).toContain("pregunta dos");
+    expect(surface.runs[1]!.prompt).not.toContain("Time sampled while preparing turn");
+  });
+
+  test("the same payload without an identity keeps working, and the snapshot is never a turn", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const target = adapter(surface);
+
+    const stateless = await runTurn(target, plainApiTurn([
+      { role: "user", content: "pregunta uno" },
+      { role: "user", content: TIME_CONTEXT_SNAPSHOT },
+    ]));
+    expect(errors(stateless)).toEqual([]);
+    expect(finalText(stateless)).toBe("uno");
+    expect(surface.runs[0]!.prompt).toContain("pregunta uno");
+    expect(surface.runs[0]!.prompt).not.toContain("Time sampled while preparing turn");
+  });
+
+  test("a session-addressed request with no human content is refused at the surface, not by the installer", () => {
+    // Failing closed stays, but it fails where the caller can act on it: the surface refuses the
+    // request before any provider work, with a message that names the rule — never the installer's
+    // "must carry a human message", which the caller can only read as an internal defect.
+    expect(() => translateChatCompletionsRequest({
+      model: LUNA,
+      prompt_cache_key: "snapshot-307-c",
+      messages: [{ role: "user", content: TIME_CONTEXT_SNAPSHOT }],
+    })).toThrow(/no user message with content/);
+
+    // And the snapshot is not rescued by role alone: the same request *with* the human message is the
+    // one that gets answered (proven above), so the refusal is about content, not about the snapshot's
+    // presence.
+    const human = translateChatCompletionsRequest({
+      model: LUNA,
+      prompt_cache_key: "snapshot-307-c",
+      messages: [
+        { role: "user", content: "pregunta uno" },
+        { role: "user", content: TIME_CONTEXT_SNAPSHOT },
+      ],
+    });
+    expect(human.mode).toBe("session");
+    expect(JSON.stringify(human.body.input)).toContain("pregunta uno");
+    expect(JSON.stringify(human.body.input)).not.toContain("Time sampled while preparing turn");
+  });
+
+  test("the auxiliary route stays safe with the same snapshot: answered, retained nowhere", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "un titulo" });
+    surface.enqueue({ answer: "dos" });
+    const target = adapter(surface);
+
+    const human = await runTurn(target, channelApiTurn({
+      headers: { "x-session-affinity": "snapshot-307-aux" },
+      messages: [{ role: "user", content: "pregunta uno" }],
+    }));
+    expect(errors(human)).toEqual([]);
+    const humanRun = surface.runs[0]!;
+    expect(humanRun.prompt).toContain(INSTALL_HEADER);
+
+    // The housekeeping call on the auxiliary route: the same wire session, the route's static purpose
+    // header, and the harness's runtime snapshot appended after the human message.
+    const titleRequest = channelApiTurn({
+      headers: { "x-session-affinity": "snapshot-307-aux", "x-dsh-turn-purpose": "session-title" },
+      messages: [
+        { role: "user", content: "pregunta uno" },
+        { role: "user", content: TIME_CONTEXT_SNAPSHOT },
+      ],
+    });
+    const title = await runTurn(target, titleRequest);
+
+    expect(errors(title)).toEqual([]);
+    expect(finalText(title)).toBe("un titulo");
+    expect(shouldRetainChatGptWebConversation(titleRequest, { localTools: false })).toBe(false);
+    expect(surface.runs[1]!.turn.conversationKey).toBeUndefined();
+    // A turn with no conversation to continue compiles through the envelope transport, so its human
+    // message travels inside that context; what this test owns is that the turn is answered, claims
+    // nothing and leaves the session's own chat intact.
+    expect(surface.runs[1]!.prompt).toContain("pregunta uno");
+
+    // The session's own conversation is untouched: the next turn is a true continuation.
+    const after = await runTurn(target, channelApiTurn({
+      headers: { "x-session-affinity": "snapshot-307-aux" },
+      messages: [{ role: "user", content: "pregunta dos" }],
+    }));
+    expect(errors(after)).toEqual([]);
+    expect(finalText(after)).toBe("dos");
+    expect(surface.runs[2]!.turn.conversationKey).toBe(humanRun.turn.conversationKey);
+    expect(surface.runs[2]!.prompt).toBe("pregunta dos");
+  });
+
+  test("the Responses surface still refuses a human-less install: the refusals are not weakened", async () => {
+    // This surface has no message projection to select a turn (its caller sends no session identity
+    // there), so a request whose only content is host context still reaches the install compiler —
+    // which is exactly the invariant the projection fix must not have deleted. Nothing is submitted.
+    const surface = new ControlledSurface();
+    const target = adapter(surface);
+    const parsed = parseRequest({
+      model: LUNA,
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: TIME_CONTEXT_SNAPSHOT }],
+      }],
+      client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ dsh_session_id: "snapshot-307-responses" }),
+      },
+    });
+    routeChatGptWebRequest(parsed, defaultConfig());
+
+    await expect(runTurn(target, parsed)).rejects.toThrow(/must carry a human message/);
+    expect(surface.runs).toHaveLength(0);
+  });
+});
+
 describe("issue #307 — a caller that sends nothing keeps today's content-derived behaviour", () => {
   test("identical content is one conversation, different content is isolated, nothing is retained twice", async () => {
     const surface = new ControlledSurface();
