@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Refuse a session-addressed turn whose only human content is the host's own context, at the surface,
+  before the turn exists (issue #307 follow-up). The message projection already transmitted the newest
+  `user` message that still carries human content, so a request ending with the harness's runtime
+  snapshot no longer sent the snapshot in place of the human turn; when *no* `user` message carried
+  human content the refusal was one flat error, indistinguishable from "you sent no user message". The
+  projection now throws one typed refusal (`ApiProjectionRefusalError`) with two stable codes —
+  `host_context_only_turn` (a `user` message was there, but every one of them was host context: the
+  message tells the caller to send the user's actual instruction as one) and `no_user_message` (none was
+  there at all) — and `/v1/chat/completions` publishes the code on its typed `400` (`error.code`) instead
+  of leaving the caller to match prose. The refusal happens before the turn exists: no provider run,
+  nothing sent to the browser, no conversation state written — the durable store stays byte-identical,
+  the conversation's generation does not move, and the next real turn still continues the same
+  conversation. Recognition of housekeeping by text stays out of scope: the only notion of host context
+  is `sanitizeConversationText`. The stateless branch, the capability/content policy, the install
+  compiler refusals, authority, retention bounds, #301/#302/#305 behaviour and the ephemeral path are
+  unchanged.
+
 - Make conversation admission survive a short-lived conflict, and stop a refusal from poisoning the
   conversation (#305 follow-up). Measured in a real deployment: a DSH harness's session-title call and
   the user's first message share one provider conversation (identity = session id), the title wins the

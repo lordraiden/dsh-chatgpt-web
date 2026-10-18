@@ -73,7 +73,16 @@ export function isClientClosedMessage(text: string): boolean {
   );
 }
 
-export function classifyError(status: number, type: string, message: string): CodexErrorPayload {
+/**
+ * Build the published error payload for a status and type.
+ *
+ * `code` is optional and belongs to an owner that has already classified the failure in its own
+ * vocabulary (a surface refusing a request up front, for example). When supplied it is authoritative:
+ * it is published verbatim with the caller's `type`, instead of being re-inferred from the message
+ * text — a refusal must not have its meaning re-derived downstream from prose.
+ */
+export function classifyError(status: number, type: string, message: string, code?: string): CodexErrorPayload {
+  if (code !== undefined) return { message, type, code };
   const text = message.toLowerCase();
   // Preserve explicit cancel types; unify message-inferred client closes onto
   // client_closed_request for /api/logs.

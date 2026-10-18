@@ -1090,8 +1090,13 @@ export function buildResponseJSON(
   };
 }
 
-export function formatErrorResponse(status: number, type: string, message: string): Response {
-  return new Response(JSON.stringify({ error: classifyError(status, type, message) }), {
+/**
+ * One error body for every local refusal. `code` is optional: pass it when the refusing owner has its
+ * own stable code (it wins over the message-based inference in `classifyError`), and omit it for the
+ * generic status/type refusals that keep their existing classification.
+ */
+export function formatErrorResponse(status: number, type: string, message: string, code?: string): Response {
+  return new Response(JSON.stringify({ error: classifyError(status, type, message, code) }), {
     status, headers: { "Content-Type": "application/json" },
   });
 }

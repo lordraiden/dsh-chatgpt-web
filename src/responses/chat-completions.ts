@@ -39,6 +39,7 @@ import {
   type WebChatCapabilityFeature,
 } from "../web-chat/core";
 import {
+  ApiProjectionRefusalError,
   projectApiConversation,
   normalizeApiSessionId,
   type ApiConversationMessage,
@@ -53,9 +54,18 @@ import {
 
 /** A request the surface cannot serve. The server maps it to a typed 400. */
 export class ChatCompletionsRequestError extends Error {
-  constructor(message: string) {
+  /**
+   * A stable refusal code, when this surface (or an owner it delegates to) has one. The server
+   * publishes it as the response's `error.code`, so a caller can act on the refusal without matching
+   * message text. Absent for the surface's generic validation refusals, which keep the existing
+   * `invalid_request_error` code.
+   */
+  readonly code?: string;
+
+  constructor(message: string, code?: string) {
     super(message);
     this.name = "ChatCompletionsRequestError";
+    if (code !== undefined) this.code = code;
   }
 }
 
@@ -196,7 +206,10 @@ function applyTopLevelAdmission(body: Record<string, unknown>): readonly WebChat
  *   (`prompt_cache_key`) still applies.
  *
  * @throws {ChatCompletionsRequestError} for anything the surface refuses — always before any provider
- * work, so a refused request submits nothing.
+ * work, so a refused request submits nothing. A refusal the message projection owns keeps that
+ * owner's stable `code` (`host_context_only_turn`, `no_user_message`), so a caller can tell a turn
+ * made only of host context from a request that carried no user message; every other refusal keeps
+ * the generic invalid-request code.
  */
 export function translateChatCompletionsRequest(
   raw: unknown,
@@ -245,6 +258,13 @@ export function translateChatCompletionsRequest(
       ...(resolved.threadId !== undefined ? { sessionId: resolved.threadId } : {}),
     });
   } catch (error) {
+    // A projection refusal is the projection's own typed decision (which `user` message is the turn,
+    // and whether one exists at all); its code travels to the caller so "you sent only the host's own
+    // context" is actionable instead of another generic invalid request. Everything else this surface
+    // refuses keeps its existing shape.
+    if (error instanceof ApiProjectionRefusalError) {
+      throw new ChatCompletionsRequestError(error.message, error.code);
+    }
     throw new ChatCompletionsRequestError(error instanceof Error ? error.message : String(error));
   }
 

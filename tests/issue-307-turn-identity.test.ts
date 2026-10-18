@@ -1,14 +1,25 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { closeNativeChatGptContinuityStores, createChatGptWebAdapter, shouldRetainChatGptWebConversation } from "../src/adapters/chatgpt-web/index";
+import {
+  closeNativeChatGptContinuityStores,
+  createChatGptWebAdapter,
+  resolveNativeChatGptContinuityStore,
+  shouldRetainChatGptWebConversation,
+} from "../src/adapters/chatgpt-web/index";
 import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
+import type { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { defaultConfig, saveConfig } from "../src/config";
-import { translateChatCompletionsRequest } from "../src/responses/chat-completions";
+import { ChatCompletionsRequestError, translateChatCompletionsRequest } from "../src/responses/chat-completions";
 import { parseRequest } from "../src/responses/parser";
 import { routeChatGptWebRequest, startServer, type RunningServer } from "../src/server";
 import { isEphemeralWebChatTurn, webChatTurnDeliveryFor } from "../src/web-chat/core";
+import {
+  API_PROJECTION_HOST_CONTEXT_ONLY_CODE,
+  API_PROJECTION_NO_USER_MESSAGE_CODE,
+} from "../src/web-chat/host/api-projection";
 import {
   nativeTurnMetadataFromBody,
   resolveNativeTurnIdentity,
@@ -783,13 +794,35 @@ describe("issue #307 — an identity must not detach the human turn from its run
 
   test("a session-addressed request with no human content is refused at the surface, not by the installer", () => {
     // Failing closed stays, but it fails where the caller can act on it: the surface refuses the
-    // request before any provider work, with a message that names the rule — never the installer's
-    // "must carry a human message", which the caller can only read as an internal defect.
-    expect(() => translateChatCompletionsRequest({
-      model: LUNA,
-      prompt_cache_key: "snapshot-307-c",
-      messages: [{ role: "user", content: TIME_CONTEXT_SNAPSHOT }],
-    })).toThrow(/no user message with content/);
+    // request before any provider work, with a typed code and a message that names the rule — never
+    // the installer's "must carry a human message", which the caller can only read as an internal
+    // defect.
+    let refusal: unknown;
+    try {
+      translateChatCompletionsRequest({
+        model: LUNA,
+        prompt_cache_key: "snapshot-307-c",
+        messages: [{ role: "user", content: TIME_CONTEXT_SNAPSHOT }],
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(ChatCompletionsRequestError);
+    expect((refusal as ChatCompletionsRequestError).code).toBe(API_PROJECTION_HOST_CONTEXT_ONLY_CODE);
+    expect((refusal as Error).message).toMatch(/only host context/);
+    expect((refusal as Error).message).not.toMatch(/must carry a human message/);
+    // The distinct case is not folded into it: a request with no user message at all keeps its own code.
+    let noUserMessage: unknown;
+    try {
+      translateChatCompletionsRequest({
+        model: LUNA,
+        prompt_cache_key: "snapshot-307-c",
+        messages: [{ role: "system", content: "harness instructions" }],
+      });
+    } catch (error) {
+      noUserMessage = error;
+    }
+    expect((noUserMessage as ChatCompletionsRequestError).code).toBe(API_PROJECTION_NO_USER_MESSAGE_CODE);
 
     // And the snapshot is not rescued by role alone: the same request *with* the human message is the
     // one that gets answered (proven above), so the refusal is about content, not about the snapshot's
@@ -913,5 +946,165 @@ describe("issue #307 — a caller that sends nothing keeps today's content-deriv
     expect(extractChatGptTurnIdentity(perSessionNext).threadId).toBe(extractChatGptTurnIdentity(perSession).threadId);
     expect(extractChatGptTurnIdentity(plainApiTurn([{ role: "user", content: "beta" }])).threadId)
       .toMatch(/^dsh-chat-[0-9a-f]{16}$/);
+  });
+});
+
+/**
+ * The owner's decision (A), driven through the **real HTTP route** a `/v1/chat/completions` caller
+ * takes: the listener, the OpenAI translation, the shared Responses parser, the catalogue route and
+ * the real adapter, with only the browser I/O replaced by a controlled surface.
+ *
+ * A session-addressed turn whose only human content is the harness's runtime-context snapshot must not
+ * be sent at all. It is refused up front — at the surface, before the turn exists — with the
+ * projection's own typed code, so nothing reaches the browser and nothing is written: the durable
+ * store stays byte-identical, the conversation's generation does not move, and the next real turn
+ * still continues the same conversation instead of finding it poisoned.
+ */
+function serveControlled(surface: ControlledSurface): RunningServer {
+  const server = startServer(
+    {
+      ...defaultConfig(),
+      port: 0,
+      host: "127.0.0.1",
+      controlToken: "issue-307-host-context-control-token-0123456789",
+      webChat: { conversationStorePath: join(home, "conversations.json") },
+    },
+    {
+      adapterFactory: (_provider: unknown, providerCore: ChatGptWebProviderCore) => createChatGptWebAdapter(
+        controlledProviderConfig(home),
+        { providerCore, surfaceTransport: surface.transport },
+      ),
+    } as never,
+  );
+  listeners.push(server);
+  return server;
+}
+
+interface ChatHttpResult {
+  readonly status: number;
+  readonly body: {
+    readonly error?: { readonly message?: string; readonly type?: string; readonly code?: string };
+  };
+}
+
+async function postChat(server: RunningServer, body: Record<string, unknown>): Promise<ChatHttpResult> {
+  const response = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json() as ChatHttpResult["body"];
+  return { status: response.status, body: payload };
+}
+
+describe("issue #307 — a session turn that carries only host context is refused before it exists", () => {
+  test("the refusal is typed and write-free, and the next real turn still continues the conversation", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "dos" });
+    const server = serveControlled(surface);
+    const store = resolveNativeChatGptContinuityStore();
+    const file = join(home, "conversations.json");
+
+    // The session's own first turn: it installs the conversation and writes its durable continuity
+    // record, which is the state the refusal below must leave untouched.
+    const first = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "snapshot-307-refusal",
+      messages: [{ role: "user", content: "pregunta uno" }],
+    });
+    expect(first.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    expect(surface.runs[0]!.prompt).toContain(INSTALL_HEADER);
+    const conversationKey = surface.runs[0]!.turn.conversationKey!;
+    expect(conversationKey).toBeDefined();
+
+    const beforeBytes = readFileSync(file, "utf8");
+    const beforeRecords = await store.list();
+    const generationBefore = chatGptTurnSessions.conversationGeneration(conversationKey);
+
+    // The harness's runtime-context snapshot alone, session-addressed on the same conversation. The
+    // product's one owner of "what is host context" empties it, so this turn has no human content and
+    // must not be sent at all.
+    const refused = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "snapshot-307-refusal",
+      messages: [{ role: "user", content: TIME_CONTEXT_SNAPSHOT }],
+    });
+
+    // Typed and actionable, in caller terms — never the installer's "must carry a human message".
+    expect(refused.status).toBe(400);
+    expect(refused.body.error?.code).toBe(API_PROJECTION_HOST_CONTEXT_ONLY_CODE);
+    expect(refused.body.error?.type).toBe("invalid_request_error");
+    expect(refused.body.error?.message).toMatch(/only host context/);
+    expect(refused.body.error?.message).toMatch(/`user` message/);
+    expect(refused.body.error?.message).not.toMatch(/must carry a human message/);
+
+    // Nothing reached the browser: the refused request ran no provider turn.
+    expect(surface.runs).toHaveLength(1);
+    // Nothing was written, and nothing that a later turn could read as "the last attempt was never
+    // confirmed" was left behind: the durable store is byte-identical, its records are unchanged, and
+    // the conversation's generation did not move.
+    expect(readFileSync(file, "utf8")).toBe(beforeBytes);
+    expect(await store.list()).toEqual(beforeRecords);
+    expect(chatGptTurnSessions.conversationGeneration(conversationKey)).toBe(generationBefore);
+
+    // The next real turn still continues the same conversation: same provider conversation, and a true
+    // delta (a fork or a re-install would send the header again).
+    const after = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "snapshot-307-refusal",
+      messages: [
+        { role: "user", content: "pregunta uno" },
+        { role: "assistant", content: "uno" },
+        { role: "user", content: "pregunta dos" },
+      ],
+    });
+    expect(after.status).toBe(200);
+    expect(surface.runs).toHaveLength(2);
+    expect(surface.runs[1]!.turn.conversationKey).toBe(conversationKey);
+    expect(surface.runs[1]!.prompt).toBe("pregunta dos");
+    expect(surface.runs[1]!.prompt).not.toContain(INSTALL_HEADER);
+  });
+
+  test("the snapshot plus a real human message still travels: the human message is sent, the snapshot is not", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "snapshot-307-refusal-human",
+      messages: [
+        { role: "user", content: "pregunta uno" },
+        { role: "user", content: TIME_CONTEXT_SNAPSHOT },
+      ],
+    });
+
+    // Existing behaviour preserved: the presence of host context beside a real turn changes nothing.
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    expect(surface.runs[0]!.prompt).toContain("pregunta uno");
+    expect(surface.runs[0]!.prompt).not.toContain("Time sampled while preparing turn");
+  });
+
+  test("a stateless turn (no identity) with only host context is unchanged: sent to the compiler, which refuses it", async () => {
+    // Stated plainly because it is deliberately NOT part of this decision: with no identity the request
+    // is stateless by design, the projection transmits the whole conversation (the structural rule's
+    // documented limit), and host context still never reaches the provider because the install compiler
+    // refuses a human-less install. That path is unchanged here.
+    const translated = translateChatCompletionsRequest({
+      model: LUNA,
+      messages: [{ role: "user", content: TIME_CONTEXT_SNAPSHOT }],
+    });
+    expect(translated.mode).toBe("stateless");
+    expect(JSON.stringify(translated.body.input)).toContain("Time sampled while preparing turn");
+
+    const surface = new ControlledSurface();
+    const target = adapter(surface);
+    const parsed = parseRequest(translated.body);
+    routeChatGptWebRequest(parsed, defaultConfig());
+    await expect(runTurn(target, parsed)).rejects.toThrow(/must carry a human message/);
+    expect(surface.runs).toHaveLength(0);
   });
 });
