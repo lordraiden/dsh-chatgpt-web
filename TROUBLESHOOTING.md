@@ -377,6 +377,15 @@ Attached **content** is data the caller meant the model to see, so it is always 
 request fails, read the error before assuming the capability policy caused it — an image or file part is
 a content refusal, and it is not configurable.
 
+A turn whose only content is the **host's own context** is refused too, with `code:
+host_context_only_turn` and a message naming the rule: the service strips the host-injected blocks it
+recognizes before deciding which message is the turn, and when no `user` message still carries human
+content there is nothing to send. Send the user's actual instruction as its own `user` message; the
+harness's own context (runtime snapshots, environment or memory blocks, transport text) does not need to
+be sent. The refusal happens before the turn exists — nothing reaches the browser and no conversation
+state is written, so the next real turn still continues the same conversation. A request that carries no
+`user` message at all keeps its own code, `no_user_message`.
+
 ## 15. A turn waits for a stuck previous turn (`settlement_wait_timeout`)
 
 ### Symptom

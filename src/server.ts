@@ -50,6 +50,7 @@ import {
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import {
   buildOpenAiModelsData,
+  ChatCompletionsRequestError,
   responseFailure,
   toChatCompletion,
   toChatCompletionStream,
@@ -1976,7 +1977,13 @@ export function startServer(
       } catch (error) {
         const tooLarge = requestBodyFailure(error);
         if (tooLarge) return tooLarge;
-        return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : "Invalid request body");
+        // A typed surface refusal (the message projection's "only host context" / "no user message")
+        // keeps its own stable code so a caller can act on it; every other refusal keeps the generic
+        // invalid-request classification. Either way this happens before the turn exists: no provider
+        // run, no conversation state written, nothing sent to the browser.
+        const message = error instanceof Error ? error.message : "Invalid request body";
+        const code = error instanceof ChatCompletionsRequestError ? error.code : undefined;
+        return formatErrorResponse(400, "invalid_request_error", message, code);
       }
       // An unknown model names the accepted ids instead of falling through to the native passthrough.
       const accepted = buildOpenAiModelsData(buildChatGptWebModelCatalog(config)).map((entry) => entry.id);

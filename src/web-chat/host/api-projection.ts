@@ -30,6 +30,20 @@
  * owner agrees with the compiler by construction instead of keeping a second marker list. The
  * messages themselves are transmitted unchanged; the compiler still sanitizes what it sends.
  *
+ * When **no** user message carries human content the session branch refuses here, before the turn
+ * exists: a session-addressed turn whose only human content is host context must not be sent at all.
+ * The refusal is typed and names the rule in caller terms (`ApiProjectionRefusalError`), and it is
+ * deliberately two codes, not one, because the two situations need different fixes from the caller:
+ *
+ * - `host_context_only_turn` — a `user` message was there, but every one of them was host context
+ *   (the harness's own runtime snapshot alone). The message tells the caller to phrase a real turn.
+ * - `no_user_message` — the request carried no `user` message at all.
+ *
+ * Both refuse at the same point, before any provider work and before any conversation state is
+ * written, so a refused request leaves the durable store byte-identical and cannot poison the
+ * conversation a later, real turn continues. Recognition of housekeeping by *text* stays out of this
+ * owner: the only notion of host context is `sanitizeConversationText`.
+ *
  * Documented limit, deliberately not papered over: in the stateless mode, context that the harness
  * puts *inside* the current user message still crosses. Removing that would require content
  * heuristics, which are per-harness and per-version and therefore cannot be the primary rule; the
@@ -76,6 +90,47 @@ const CONVERSATIONAL_ROLES = new Set(["user", "assistant"]);
 const CONTENT_IDENTITY_PREFIX = "dsh-chat-";
 /** Hexadecimal characters of the content digest kept in the identity (64 bits). */
 const CONTENT_IDENTITY_HASH_CHARS = 16;
+
+/** Stable refusal code: the request carried no `user` message to answer. */
+export const API_PROJECTION_NO_USER_MESSAGE_CODE = "no_user_message";
+/** Stable refusal code: the request's `user` messages carried host context only. */
+export const API_PROJECTION_HOST_CONTEXT_ONLY_CODE = "host_context_only_turn";
+
+/** The refusals this projection owns; each one is a different fix for the caller. */
+export type ApiProjectionRefusalCode =
+  | typeof API_PROJECTION_NO_USER_MESSAGE_CODE
+  | typeof API_PROJECTION_HOST_CONTEXT_ONLY_CODE;
+
+/**
+ * A request this projection cannot turn into a provider turn.
+ *
+ * It is thrown **before** the turn exists — before any provider work and before any conversation
+ * state is written — so the surface can publish a typed `400` that leaves the conversation exactly as
+ * it was. The message is written for the caller, not for the installer: it names the rule and what a
+ * real turn has to look like.
+ */
+export class ApiProjectionRefusalError extends Error {
+  readonly code: ApiProjectionRefusalCode;
+
+  constructor(code: ApiProjectionRefusalCode, message: string) {
+    super(message);
+    this.name = "ApiProjectionRefusalError";
+    this.code = code;
+  }
+}
+
+/** Caller-facing message for a request whose only human content was host context. */
+const HOST_CONTEXT_ONLY_MESSAGE =
+  "The request carried only host context: no `user` message carried human content once the "
+  + "host-injected context this service recognizes (runtime snapshots, environment and memory blocks, "
+  + "harness transport text) was removed, so there is no turn to send. A session-addressed turn is "
+  + "answered from its newest `user` message — send the user's actual instruction as one; the "
+  + "harness's own context does not need to be sent.";
+
+/** Caller-facing message for a request with no `user` message at all. */
+const NO_USER_MESSAGE_MESSAGE =
+  "The request carries no user message; a session-addressed turn is answered from its newest user "
+  + "message, so the instruction has to arrive as one.";
 
 /** One message as it arrives on the wire. `content` is already reduced to text by the caller. */
 export interface ApiConversationMessage {
@@ -157,9 +212,10 @@ export function contentConversationIdentity(messages: readonly ApiConversationMe
 /**
  * Apply the message-only rule.
  *
- * @throws {Error} when the projection would leave nothing to say — no conversational message at all,
- * or (session mode) no user message that still carries human content. The caller must turn that into
- * a typed 400 rather than submitting an empty turn.
+ * @throws {ApiProjectionRefusalError} when the projection would leave nothing to say — no
+ * conversational message at all, or (session mode) no user message that still carries human content.
+ * The code tells the two apart, and the caller must turn either into a typed 400 rather than
+ * submitting an empty turn. Nothing is written and no provider work is started for a refusal.
  */
 export function projectApiConversation(input: ApiProjectionInput): ApiProjectionResult {
   const droppedRoles: string[] = [];
@@ -181,17 +237,23 @@ export function projectApiConversation(input: ApiProjectionInput): ApiProjection
     // provider's compiler must refuse (`currentChatUserMessage`). `sanitizeConversationText` is the
     // one owner of what host context is, so this selection and that compiler agree by construction.
     let current = -1;
+    let sawUserMessage = false;
     for (let index = conversational.length - 1; index >= 0; index -= 1) {
       const message = conversational[index]!;
-      if (message.role === "user" && sanitizeConversationText(message.content) !== "") {
+      if (message.role !== "user") continue;
+      sawUserMessage = true;
+      if (sanitizeConversationText(message.content) !== "") {
         current = index;
         break;
       }
     }
     if (current < 0) {
-      throw new Error(
-        "The request carries no user message with content; a session-addressed turn is answered from its newest user message, so the instruction has to arrive as one.",
-      );
+      // A turn whose only human content is host context must not be sent at all. The two refusals are
+      // deliberately distinct: "you sent only the host's own context" and "you sent no user message"
+      // are different mistakes, and a caller can only act on the first if it is told which one it made.
+      throw sawUserMessage
+        ? new ApiProjectionRefusalError(API_PROJECTION_HOST_CONTEXT_ONLY_CODE, HOST_CONTEXT_ONLY_MESSAGE)
+        : new ApiProjectionRefusalError(API_PROJECTION_NO_USER_MESSAGE_CODE, NO_USER_MESSAGE_MESSAGE);
     }
     return {
       mode: "session",

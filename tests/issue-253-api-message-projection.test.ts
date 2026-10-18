@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  API_PROJECTION_HOST_CONTEXT_ONLY_CODE,
+  API_PROJECTION_NO_USER_MESSAGE_CODE,
+  ApiProjectionRefusalError,
   normalizeApiSessionId,
   projectApiConversation,
   type ApiConversationMessage,
@@ -98,8 +101,18 @@ describe("issue #253 — a session identity selects the strict rule", () => {
   });
 
   test("a session-addressed request with no user message is refused instead of sending nothing", () => {
-    expect(() => projectApiConversation({ messages: [SYSTEM_PROMPT], sessionId: "s" }))
-      .toThrow(/no user message/);
+    let refusal: unknown;
+    try {
+      projectApiConversation({ messages: [SYSTEM_PROMPT], sessionId: "s" });
+    } catch (error) {
+      refusal = error;
+    }
+    // The refusal is typed, and this case keeps its own code: "you sent no user message" is a
+    // different mistake from "you sent only the host's own context" (asserted below), and a caller can
+    // only act on one if it is told which.
+    expect(refusal).toBeInstanceOf(ApiProjectionRefusalError);
+    expect((refusal as ApiProjectionRefusalError).code).toBe(API_PROJECTION_NO_USER_MESSAGE_CODE);
+    expect((refusal as Error).message).toMatch(/no user message/);
   });
 
   test("the turn is the newest user message that carries content, not the last user-role message", () => {
@@ -123,11 +136,33 @@ describe("issue #253 — a session identity selects the strict rule", () => {
     expect(later.droppedTurns).toBe(2);
   });
 
-  test("a session-addressed request whose user messages carry no content is refused, not emptied", () => {
-    expect(() => projectApiConversation({ messages: [RUNTIME_SNAPSHOT], sessionId: "s" }))
-      .toThrow(/no user message with content/);
-    expect(() => projectApiConversation({ messages: [SYSTEM_PROMPT, RUNTIME_SNAPSHOT], sessionId: "s" }))
-      .toThrow(/no user message with content/);
+  test("a session-addressed turn whose only human content is host context is refused, not emptied", () => {
+    // The owner's rule (issue #307 follow-up): a turn whose entire content is the harness's own
+    // runtime snapshot must not be sent at all. It is refused here — before the turn exists — with the
+    // code that says exactly that, and never with the "no user message" code, because a `user` message
+    // was there: it simply carried nothing human.
+    for (const messages of [
+      [RUNTIME_SNAPSHOT],
+      [SYSTEM_PROMPT, RUNTIME_SNAPSHOT],
+    ] as const) {
+      let refusal: unknown;
+      try {
+        projectApiConversation({ messages: [...messages], sessionId: "s" });
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(ApiProjectionRefusalError);
+      expect((refusal as ApiProjectionRefusalError).code).toBe(API_PROJECTION_HOST_CONTEXT_ONLY_CODE);
+      // Caller terms: the message says what happened and how to phrase a real turn.
+      expect((refusal as Error).message).toMatch(/only host context/);
+      expect((refusal as Error).message).toMatch(/user.*message/);
+    }
+
+    // Host context added around a real human turn never triggers it: the human turn is the turn.
+    expect(projectApiConversation({
+      messages: [SYSTEM_PROMPT, RUNTIME_SNAPSHOT, REAL_QUESTION],
+      sessionId: "s",
+    }).messages).toEqual([REAL_QUESTION]);
   });
 });
 

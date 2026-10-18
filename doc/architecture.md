@@ -2229,8 +2229,13 @@ history; without one the request is stateless and every non-conversational role 
 `tool`, unknown) is dropped. What counts as human content is decided by the product's one owner of host
 context (`sanitizeConversationText`), never by a heuristic that guesses the caller's session from its text,
 so the projection and the compiler agree by construction, and a session-addressed request whose user
-messages carry no human content is refused with a typed `400` that names the rule. The remaining limit is
-explicit rather than papered over: harness text placed *inside* the current user message cannot be
+messages carry no human content is refused **before the turn exists**, with a typed `400` that names the
+rule in caller terms and publishes a stable `error.code`: `host_context_only_turn` when a `user` message
+was present but every one of them was host context, and `no_user_message` when none was present at all.
+The refusal is write-free — no provider run, nothing sent to the browser, the durable store byte-identical,
+the conversation's generation unmoved — so a refused turn cannot poison the conversation a later real turn
+continues, and the two codes stay distinct because they need different fixes from the caller. The remaining
+limit is explicit rather than papered over: harness text placed *inside* the current user message cannot be
 distinguished structurally and does cross. Content heuristics for the **identity** remain deliberately
 **not** the mechanism, because they are per-harness and per-version (issue #253).
 
