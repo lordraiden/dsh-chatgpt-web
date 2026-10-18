@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Make conversation admission survive a short-lived conflict, and stop a refusal from poisoning the
+  conversation (#305 follow-up). Measured in a real deployment: a DSH harness's session-title call and
+  the user's first message share one provider conversation (identity = session id), the title wins the
+  race, and the user's turn was refused in ~0 ms with `retained_surface_busy` — the first message of
+  *every* new session. The refusal was correct but the conflict was transient, and the refusal left the
+  conversation unusable: the next attempt failed with "the last attempt on this conversation was never
+  confirmed; the provider must reconcile it before it can be resumed", because the refused turn's
+  continuity decision had already run (a replay advances the generation and writes an unconfirmed
+  record) before admission refused it. Two owners are fixed. **Admission** (`ChatGptWebProviderCore`)
+  now takes one slot per native DSH thread and waits for a busy conversation to be released before
+  refusing: bounded by `DEFAULT_CONVERSATION_BUSY_WAIT_MS` (30 s — 2× the measured 13.3–13.4 s
+  competing turn and 2× the 15 s launcher turn-end acknowledgement, below the 60 s settlement-wait
+  grace of #301), cancellable by the caller's abort, event-driven with no polling and no held timer or
+  lease once it ends, and still failing closed with #305's own category and message when the bound
+  expires. **Ordering**: the admission decision now precedes the continuity decision
+  (`webChatContinuity.resolveRecovery`), so a turn refused at admission has written nothing: a retry
+  after a pure refusal proceeds, and the poisoned state is not reachable from one. #305's category and
+  message, #302 continuation, #301's bounded settlement, retention bounds, capability/content policy,
+  authority and auth are unchanged; no dependency was added and no provider-specific rule was pushed
+  into Core.
+
 - Honour the caller identity the service already understands on `/v1/chat/completions`, and answer a
   harness housekeeping turn without claiming a provider conversation (issue #307). A DSH harness that
   reaches this service through an OpenAI-compatible provider adapter sends no identity at all, so the

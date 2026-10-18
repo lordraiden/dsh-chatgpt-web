@@ -274,7 +274,7 @@ Exclusivity is per logical conversation and per physical transport resource:
 
 Read the refusal to tell the two apart:
 
-- `retained_surface_busy` / `TRANSPORT_UNAVAILABLE` means the *same* provider conversation already has an active turn (the per-conversation guards above);
+- `retained_surface_busy` / `TRANSPORT_UNAVAILABLE` means the *same* provider conversation already has an active turn (the per-conversation guards above). Admission waits for that turn first, bounded by `DEFAULT_CONVERSATION_BUSY_WAIT_MS` (30 s, `ChatGptWebProviderCore`): a short overlap — typically a harness session-title call racing the user's own first message — is waited out instead of failing, and only a conflict still unresolved at the end of the bound is refused. A refused turn never ran, so it leaves the conversation's continuity untouched and a retry proceeds normally;
 - `retained_surface_lost` / `CONVERSATION_LOST` means the retained conversation was retired (its page died, or it was idle past the retention window / past the retention cap) and is deliberately **not** auto-replayed: re-send the canonical history as an explicit replay to re-establish it (`doc/architecture.md` §19.1);
 - the bounded fan-out sentence means the authenticated account is at its 5-turn ceiling — wait for a browser turn to finish, then retry;
 - `ChatGPT Web has no recorded account identity for this deployment, ... sign in again at the operator sign-in surface (/v1/control/auth/)` means nothing recorded *which* account this deployment signed in as, so no physical account could be verified against it. Sign in again (or run `login`) to record it;

@@ -143,10 +143,26 @@ class GatedSurface {
   }
 }
 
+/**
+ * The conversation-admission bound this suite injects.
+ *
+ * Admission now waits for a busy conversation before refusing (the #305 follow-up), so the assertion
+ * that the second request is refused *while the first is still held* needs a deterministic bound
+ * rather than the production 30 s. Every assertion below is unchanged: same refusal, same category,
+ * same message, same point — only *when* it is decided moved to the end of the bound.
+ */
+const ADMISSION_BOUND_MS = 250;
+
 function serve(surface: GatedSurface): RunningServer {
   const server = startServer(
     { ...defaultConfig(), port: 0, host: "127.0.0.1" } as never,
     {
+      providerCore: new ChatGptWebProviderCore(
+        "chatgpt-web",
+        new BrowserAccountLeaseRegistry(),
+        5_000,
+        ADMISSION_BOUND_MS,
+      ),
       adapterFactory: (_provider: unknown, providerCore: ChatGptWebProviderCore) => createChatGptWebAdapter(
         controlledProviderConfig(home),
         { providerCore, surfaceTransport: surface.transport },
