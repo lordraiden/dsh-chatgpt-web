@@ -137,10 +137,12 @@ curl -fsS http://127.0.0.1:17841/v1/responses \
 turn — there is no second execution engine.
 
 **Only messages are transmitted.** With a stable session identity (OpenAI's `user` field, or
-`session_id`) the API transmits only the **current user message** and the provider conversation holds
-the history; without one the request is stateless and every non-conversational role (`system`,
-`developer`, `tool`, unknown) is dropped. Harness text written *inside* the current user message cannot
-be distinguished structurally and does cross — a documented, test-asserted limit.
+`session_id`) the API transmits only the **current turn** — the newest user message that still carries
+human content, so a harness that appends its own runtime snapshot after the human message is answered
+from the human message rather than from an empty turn — and the provider conversation holds the history;
+without one the request is stateless and every non-conversational role (`system`, `developer`, `tool`,
+unknown) is dropped. Harness text written *inside* the current user message cannot be distinguished
+structurally and does cross — a documented, test-asserted limit.
 
 **That identity also selects the provider conversation.** A caller that sends `user`/`session_id` gets
 exactly that conversation: stable across its turns and distinct from every other caller. A caller that

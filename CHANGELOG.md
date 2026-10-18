@@ -27,6 +27,26 @@
   sends nothing, this change cannot fuse its turns, and `contentConversationIdentity`'s documented
   behaviour (and its newly explicit limit) is unchanged.
 
+- Answer a session-addressed turn that ends with the harness's own runtime snapshot (issue #307
+  regression). Once the caller's identity started arriving on `/v1/chat/completions` (a profile with
+  `cacheRetention: "long"` puts the harness session id in `prompt_cache_key`), the message-only
+  projection took its session branch and transmitted "the last `user` message" **by role alone**. The
+  DSH time-context plugin appends its rendered snapshot — `Time sampled while preparing turn …`, the
+  browser-time-zone line, the elapsed line — as one more `user` message *after* the human turn, so that
+  branch transmitted a message whose sanitized text is empty, and every turn was refused with
+  `A normal Chat Mode install must carry a human message` (generation 1) or `A retained composer install
+  must carry at least one human message` (after a replacement epoch). The projection now transmits the
+  newest user message that still carries human content, decided by the product's one owner of "what is
+  host context" (`sanitizeConversationText`), so the projected turn and the provider's prompt compiler
+  agree by construction; the projection's selection and the compiler's rule are the same rule, and host
+  context still never reaches the provider. The ephemeral-turn classification is unchanged and was never
+  the cause — an ephemeral turn sends no identity, so it already took the stateless branch, which is why
+  the auxiliary route was never the broken path. A session-addressed request whose user messages carry no
+  human content is now refused at the surface with a typed `400` naming the rule instead of failing deep
+  inside the provider, and both install refusals are unchanged for a genuinely human-less install
+  (asserted). No capability/content policy, authority, retention bound or #301/#302/#305 behaviour is
+  touched.
+
 - Report a concurrent-turn refusal on one conversation as its own category (issue #305). Two overlapping
   requests on the same identity used to answer `200` and, in ~0 ms, `502 upstream_server_error` with
   `ChatGPT Web cannot synchronously start a second provider turn for an active native DSH thread`. The
