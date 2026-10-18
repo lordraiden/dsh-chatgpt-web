@@ -8,6 +8,19 @@
  *
  * This is deliberately a small, provider-neutral, text-only owner: every caller that must strip the
  * same blocks uses this one source of truth rather than keeping its own marker list.
+ *
+ * ## The harness's runtime-context snapshot
+ *
+ * The harness opens a turn with one prose snapshot, introduced by a preamble line and then a run of
+ * blank-line-separated sections, each keyed by a `Current <thing>:` / `Approval …:` line — the working
+ * directory, the DSH file policy, the approval policy, the implementation checkout, the Web GUI URL,
+ * and whatever section the harness adds next. It has no delimiters, so it is recognized
+ * **structurally**: the preamble names the snapshot, and everything from it through the contiguous run
+ * of blank separators and section-key lines belongs to it. The first line that is neither ends the
+ * block, so a human instruction placed after the snapshot in the same text is kept.
+ *
+ * The trigger is the preamble and never a lone section line: a human message that merely mentions a
+ * "current working directory" in prose carries no preamble and is left untouched.
  */
 const TRANSPORT_BLOCKS = [
   // The harness's own skills catalogue arrives as one system reminder; it is host context, never
@@ -27,17 +40,31 @@ const OPERATIONAL_LINE_PREFIXES = [
   "Elapsed since the preceding model-visible message:",
 ] as const;
 
+/**
+ * Opening line of the harness's runtime-context snapshot. Anchored to the stable phrase, not to the
+ * whole current sentence, so the harness can reword its explanation without the block leaking.
+ */
+const RUNTIME_CONTEXT_PREAMBLE = /^Current runtime context\b/;
+
+/**
+ * Section keys the snapshot introduces: `Current ….`, `Approval …` (the approval policy and the
+ * "approval prompts are disabled" note) and `Delegation depth …` (the sub-agent variant of the same
+ * snapshot). A line that is none of these and not blank ends the block.
+ */
+const RUNTIME_CONTEXT_SECTION_LINE = /^(?:Current\b|Approval\b|Delegation depth\b)/;
+
 const PRIVATE_CHECKPOINT_MARKER = "CODEXLUNAPRIVATECHECKPOINTV1A7F3C9D2";
 
 /**
  * Remove internal transport blocks (Hindsight, environment, Aegis bootstrap,
- * transport resume markers), private checkpoint tails, and operational line
- * prefixes from one piece of conversational text. Shared by the prompt compiler
- * and the retained composer transport so both strip the same blocks from the
- * same source of truth.
+ * transport resume markers), the harness's runtime-context snapshot, private
+ * checkpoint tails, and operational line prefixes from one piece of
+ * conversational text. Shared by the prompt compiler and the retained composer
+ * transport so both strip the same blocks from the same source of truth.
  */
 export function sanitizeConversationText(text: string): string {
   let sanitized = stripTaggedBlocks(text);
+  sanitized = stripRuntimeContextSnapshot(sanitized);
 
   if (sanitized.includes(PRIVATE_CHECKPOINT_MARKER)) {
     sanitized = sanitized.slice(0, sanitized.indexOf(PRIVATE_CHECKPOINT_MARKER));
@@ -49,6 +76,36 @@ export function sanitizeConversationText(text: string): string {
     .join("\n");
 
   return sanitized.trim();
+}
+
+/**
+ * Remove the harness's runtime-context snapshot (see the module contract). The block is recognized by
+ * its preamble plus the contiguous run of blank separators and `Current …:` / `Approval …:` section
+ * lines it introduces; the first line outside that family ends it, so a human instruction that
+ * follows the snapshot in the same piece of text survives.
+ */
+function stripRuntimeContextSnapshot(text: string): string {
+  const kept: string[] = [];
+  let inSnapshot = false;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!inSnapshot) {
+      if (RUNTIME_CONTEXT_PREAMBLE.test(line.trimStart())) {
+        inSnapshot = true;
+        continue;
+      }
+      kept.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    if (trimmed === "" || RUNTIME_CONTEXT_SECTION_LINE.test(trimmed)) continue;
+
+    inSnapshot = false;
+    kept.push(line);
+  }
+
+  return kept.join("\n");
 }
 
 function stripTaggedBlocks(text: string): string {
