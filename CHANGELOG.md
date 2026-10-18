@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Recognize the harness's runtime-context snapshot in `sanitizeConversationText`, so a session-addressed
+  turn whose only `user` message is that block is refused instead of answered (issue #307 follow-up,
+  proven against the deployed service). The previous refusal test used the shorter time-snapshot text,
+  which the operational-line filter already emptied; the block the harness actually sends — the
+  `Current runtime context. …` preamble followed by its `Current <thing>:` / `Approval …:` sections —
+  survived as human content and reached ChatGPT Web. The rule stays in the sanitizer, the product's one
+  owner of "what is host context": the preamble marks the block and the contiguous run of blank
+  separators and section-key lines is consumed with it, so the block empties, a human instruction in the
+  same message survives, and prose that merely mentions a phrase like "current working directory" is
+  left untouched. No per-call-site special case and no second marker list; the stateless branch, the
+  capability/content policy, authority/auth, retention bounds, #301/#302/#305 and the ephemeral path are
+  unchanged.
+
 - Refuse a session-addressed turn whose only human content is the host's own context, at the surface,
   before the turn exists (issue #307 follow-up). The message projection already transmitted the newest
   `user` message that still carries human content, so a request ending with the harness's runtime

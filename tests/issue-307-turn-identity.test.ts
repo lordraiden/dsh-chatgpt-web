@@ -12,6 +12,7 @@ import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environm
 import type { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { defaultConfig, saveConfig } from "../src/config";
+import { sanitizeConversationText } from "../src/conversation-sanitizer";
 import { ChatCompletionsRequestError, translateChatCompletionsRequest } from "../src/responses/chat-completions";
 import { parseRequest } from "../src/responses/parser";
 import { routeChatGptWebRequest, startServer, type RunningServer } from "../src/server";
@@ -1106,5 +1107,191 @@ describe("issue #307 — a session turn that carries only host context is refuse
     routeChatGptWebRequest(parsed, defaultConfig());
     await expect(runTurn(target, parsed)).rejects.toThrow(/must carry a human message/);
     expect(surface.runs).toHaveLength(0);
+  });
+});
+
+/**
+ * The harness's runtime-context snapshot, **verbatim** from the live probe that failed against the
+ * deployed service: it was sent as a session-addressed turn's *only* user message, and instead of the
+ * expected `400 host_context_only_turn` the provider answered it ("Contexto del proyecto … recibido…").
+ *
+ * The previous refusal test used the shorter time-snapshot text (`TIME_CONTEXT_SNAPSHOT`), which the
+ * operational-line filter already emptied — which is why it passed while this block leaked. This one
+ * is the block the harness actually prepends: a preamble line plus a run of `Current <thing>:` /
+ * `Approval …:` sections, no delimiters, and no trailing operational lines to hide behind.
+ *
+ * The recognition is structural and lives in `sanitizeConversationText`, the product's one owner of
+ * "what is host context": the preamble marks the block, its section-key family is consumed with it,
+ * and the first line outside that family ends it (so a human instruction after the snapshot survives).
+ */
+const RUNTIME_CONTEXT_SNAPSHOT = [
+  "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.",
+  "",
+  'Current working directory: "/home/raiden/Documents/dsh-chatgpt-web".',
+  "",
+  'Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: "/home/raiden/Documents/dsh-chatgpt-web". Some platform temporary areas may also be writable.',
+  "",
+  "Approval policy: ask. Operations that require approval may ask through the configured answerers; without an available answerer, the request fails closed.",
+  "",
+  'Current DeepSeek Harness implementation checkout: "/home/raiden/.nvm/versions/node/v24.21.0/lib/node_modules/@deepseek-ai/dsh/".',
+  "",
+  'Current DeepSeek Harness Web GUI URL: "http://127.0.0.1:3080".',
+].join("\n");
+
+describe("issue #307 — the harness's runtime-context snapshot is host context, recognized by its one owner", () => {
+  test("the sanitizer empties the verbatim snapshot and keeps whatever human text follows it", () => {
+    // The exact block the probe sent: nothing of it is human content.
+    expect(sanitizeConversationText(RUNTIME_CONTEXT_SNAPSHOT)).toBe("");
+
+    // The family is the preamble plus its `Current …:` / `Approval …:` sections, never one literal
+    // sentence: a section the harness adds next is consumed with the block.
+    expect(sanitizeConversationText([
+      "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.",
+      "",
+      'Current DSH file policy: danger-full-access.',
+      "",
+      'Current DeepSeek Harness Web GUI URL: "http://127.0.0.1:3080".',
+      "",
+      "Current something the harness adds next: a value.",
+    ].join("\n"))).toBe("");
+
+    // The known blocks the harness appends to the same turn still pair with it: the snapshot plus a
+    // Hindsight reminder, plus the time-sampled/elapsed lines, is still no human content.
+    expect(sanitizeConversationText(`${RUNTIME_CONTEXT_SNAPSHOT}\n\n<hindsight_knowledge>\nremember x\n</hindsight_knowledge>`)).toBe("");
+    expect(sanitizeConversationText(`${RUNTIME_CONTEXT_SNAPSHOT}\n${TIME_CONTEXT_SNAPSHOT}`)).toBe("");
+
+    // The block ends at the first non-section line: a human instruction after it survives, and so does
+    // the same instruction placed before it.
+    expect(sanitizeConversationText(`${RUNTIME_CONTEXT_SNAPSHOT}\n\nque tal?`)).toBe("que tal?");
+    expect(sanitizeConversationText(`que tal?\n\n${RUNTIME_CONTEXT_SNAPSHOT}`)).toBe("que tal?");
+
+    // Guard against over-matching: prose that merely mentions the phrase carries no preamble and is
+    // never touched.
+    const prose = "Explícame qué es un «current working directory» cuando el proyecto vive en otra ruta.";
+    expect(sanitizeConversationText(prose)).toBe(prose);
+  });
+
+  test("the probe shape — the snapshot alone, with an identity — is refused host_context_only_turn, write-free", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    surface.enqueue({ answer: "dos" });
+    const server = serveControlled(surface);
+    const store = resolveNativeChatGptContinuityStore();
+    const file = join(home, "conversations.json");
+
+    // A real first turn installs the conversation and its durable continuity record.
+    const first = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "runtime-context-307",
+      messages: [{ role: "user", content: "pregunta uno" }],
+    });
+    expect(first.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    expect(surface.runs[0]!.prompt).toContain(INSTALL_HEADER);
+    const conversationKey = surface.runs[0]!.turn.conversationKey!;
+    expect(conversationKey).toBeDefined();
+
+    const beforeBytes = readFileSync(file, "utf8");
+    const beforeRecords = await store.list();
+    const generationBefore = chatGptTurnSessions.conversationGeneration(conversationKey);
+
+    // THE PROBE: the verbatim block as the only user message, on the same session identity.
+    const refused = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "runtime-context-307",
+      messages: [{ role: "user", content: RUNTIME_CONTEXT_SNAPSHOT }],
+    });
+
+    expect(refused.status).toBe(400);
+    expect(refused.body.error?.code).toBe(API_PROJECTION_HOST_CONTEXT_ONLY_CODE);
+    expect(refused.body.error?.type).toBe("invalid_request_error");
+    expect(refused.body.error?.message).toMatch(/only host context/);
+    expect(refused.body.error?.message).not.toMatch(/must carry a human message/);
+
+    // Zero provider runs: nothing reached the browser.
+    expect(surface.runs).toHaveLength(1);
+    // The refusal is write-free: byte-identical store, unchanged records, unmoved generation.
+    expect(readFileSync(file, "utf8")).toBe(beforeBytes);
+    expect(await store.list()).toEqual(beforeRecords);
+    expect(chatGptTurnSessions.conversationGeneration(conversationKey)).toBe(generationBefore);
+
+    // And it did not poison the conversation: the next real turn continues it as a true delta.
+    const after = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "runtime-context-307",
+      messages: [
+        { role: "user", content: "pregunta uno" },
+        { role: "assistant", content: "uno" },
+        { role: "user", content: "pregunta dos" },
+      ],
+    });
+    expect(after.status).toBe(200);
+    expect(surface.runs).toHaveLength(2);
+    expect(surface.runs[1]!.turn.conversationKey).toBe(conversationKey);
+    expect(surface.runs[1]!.prompt).toBe("pregunta dos");
+    expect(surface.runs[1]!.prompt).not.toContain(INSTALL_HEADER);
+  });
+
+  test("the snapshot plus a real instruction: the compiled prompt carries the instruction and none of the block", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+
+    // One user message carrying the block and, after it, the actual instruction — the hardest shape
+    // for the sanitizer, because the projection has only this message to select.
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "runtime-context-307-human",
+      messages: [{ role: "user", content: `${RUNTIME_CONTEXT_SNAPSHOT}\n\nque tal?` }],
+    });
+
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    // Asserted on what the provider actually received, not on the response body.
+    const compiled = surface.runs[0]!.prompt;
+    expect(compiled).toContain("que tal?");
+    expect(compiled).not.toContain("Current runtime context");
+    expect(compiled).not.toContain("Current working directory");
+    expect(compiled).not.toContain("Approval policy");
+  });
+
+  test("the harness's split shape — the snapshot as a trailing user message — transmits the human message", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+
+    // The shape the harness actually produces: the human turn, then the snapshot as its own message.
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "runtime-context-307-split",
+      messages: [
+        { role: "user", content: "que tal?" },
+        { role: "user", content: RUNTIME_CONTEXT_SNAPSHOT },
+      ],
+    });
+
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    const compiled = surface.runs[0]!.prompt;
+    expect(compiled).toContain("que tal?");
+    expect(compiled).not.toContain("Current runtime context");
+    expect(compiled).not.toContain("Current working directory");
+  });
+
+  test("prose that merely mentions the phrase is not stripped on the wire", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+    const prose = "Explícame qué es un «current working directory» cuando el proyecto vive en otra ruta.";
+
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "runtime-context-307-prose",
+      messages: [{ role: "user", content: prose }],
+    });
+
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    expect(surface.runs[0]!.prompt).toContain(prose);
   });
 });
