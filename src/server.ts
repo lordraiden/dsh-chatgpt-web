@@ -1468,6 +1468,14 @@ export function startServer(
      */
     adapterFactory?: (provider: CodexProviderConfig, providerCore: ChatGptWebProviderCore) => ProviderAdapter;
     /**
+     * Test/in-process override for the shared execution authority.
+     *
+     * The production server constructs its own ProviderCore; a caller that needs a different (for
+     * example a deterministic, short) conversation-admission bound passes one instead. Everything else
+     * about the listener is unchanged.
+     */
+    providerCore?: ChatGptWebProviderCore;
+    /**
      * The interactive sign-in providers this listener serves (issue #276).
      *
      * The host composes them, exactly like the provider catalogue: this listener never invents a
@@ -1495,7 +1503,7 @@ export function startServer(
   const startedAt = Date.now();
   // The sidecar is the single ChatGPT Web execution authority. Responses requests and
   // native DSH turns routed through the sidecar must share this lifecycle owner.
-  const sharedProviderCore = new ChatGptWebProviderCore();
+  const sharedProviderCore = dependencies.providerCore ?? new ChatGptWebProviderCore();
   const adapterFactory: ChatGptWebAdapterFactory = dependencies.adapterFactory
     ? provider => dependencies.adapterFactory!(provider, sharedProviderCore)
     : provider => createChatGptWebAdapter(provider, { providerCore: sharedProviderCore });

@@ -27,7 +27,7 @@ import { parseDataUrl } from "../image";
 import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
 import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface, type WebSurfaceRetainedAnswer } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
-import { createChatGptContinuity } from "./chatgpt-continuity";
+import { createChatGptContinuity, type ChatGptContinuity } from "./chatgpt-continuity";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { compileChatGptWebPrompt, compileChatGptWebContinuation, compileChatGptWebInstall, compileRetainedChatGptWebContinuation, compileRetainedChatGptWebInstall, type CompiledChatGptWebPrompt } from "./prompt";
@@ -1700,6 +1700,22 @@ export function createChatGptWebAdapter(
         if (contextExhaustion) {
           await providerCore.waitForRetirement(executionKey);
         }
+        // Cancellation takes precedence over continuity: an already-aborted turn fails with the
+        // cancellation error, before any continuity decision is made (issue #192 review).
+        if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
+        // Admission comes *before* the continuity decision, because that decision has side effects: a
+        // replay advances the conversation generation and a first turn records a new, unconfirmed
+        // conversation. A turn refused at admission never ran, so those writes must not happen for it —
+        // otherwise the next attempt is refused with "the last attempt on this conversation was never
+        // confirmed" even though nothing was ever attempted. The wait is bounded and cancellable
+        // (ProviderCore owns the one slot per native DSH thread), so a transient overlap — the
+        // harness's session-title call racing the user's first message — is absorbed, while a genuine
+        // concurrency violation still fails closed with #305's own refusal when the bound expires.
+        await providerCore.acquireConversationAdmission(
+          executionKey,
+          nativeIdentity.threadId,
+          incoming.abortSignal,
+        );
         const previousProviderTurn = providerCore.get(executionKey);
         const retired = providerCore.wasRetired(executionKey);
         const legacyRecovery: ProviderRecovery = contextExhaustion
@@ -1709,38 +1725,44 @@ export function createChatGptWebAdapter(
             : retired
               ? "REPLAY"
               : "NEW";
-        // Cancellation takes precedence over continuity: an already-aborted turn fails with the
-        // cancellation error, before any continuity decision is made (issue #192 review).
-        if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
-        // The core owns the continuity decision (issue #192): the provider states its intent and the
-        // core applies the shared rules, mapping the outcome back to the provider's vocabulary. The
-        // store is resolved here, at the point of use, from the effective configuration (#193), so a
-        // chat's conversation survives across the turns of a session — and across a restart when the
-        // deployment configured a durable location.
-        const webChatContinuity = createChatGptContinuity({
-          provider,
-          affinity: { providerId: CHATGPT_WEB_DRIVER_ID, bindingId: chatGptWebChatBindingIdFor(provider) },
-          namespace: executionNamespace,
-          binding: chatGptWebChatAccountBindingFor(provider),
-          sessions: chatGptTurnSessions,
-          store: resolveNativeChatGptContinuityStore(),
-        });
-        const recovery = await webChatContinuity.resolveRecovery({
-          parsed,
-          legacyRecovery,
-          contextExhausted: Boolean(contextExhaustion),
-          retired,
-        });
-        const providerTurn = providerCore.begin({
-          executionKey,
-          traceId,
-          nativeTurnId,
-          ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
-          ...browserAccountLeaseInput(provider, traceId),
-          capabilitySnapshot,
-          retryPolicy: parsed._compactionRequest ? "side_effect_free" : "strict",
-          recovery,
-        });
+        let providerTurn: ProviderTurnLifecycle;
+        let webChatContinuity: ChatGptContinuity;
+        try {
+          // The core owns the continuity decision (issue #192): the provider states its intent and the
+          // core applies the shared rules, mapping the outcome back to the provider's vocabulary. The
+          // store is resolved here, at the point of use, from the effective configuration (#193), so a
+          // chat's conversation survives across the turns of a session — and across a restart when the
+          // deployment configured a durable location.
+          webChatContinuity = createChatGptContinuity({
+            provider,
+            affinity: { providerId: CHATGPT_WEB_DRIVER_ID, bindingId: chatGptWebChatBindingIdFor(provider) },
+            namespace: executionNamespace,
+            binding: chatGptWebChatAccountBindingFor(provider),
+            sessions: chatGptTurnSessions,
+            store: resolveNativeChatGptContinuityStore(),
+          });
+          const recovery = await webChatContinuity.resolveRecovery({
+            parsed,
+            legacyRecovery,
+            contextExhausted: Boolean(contextExhaustion),
+            retired,
+          });
+          providerTurn = providerCore.begin({
+            executionKey,
+            traceId,
+            nativeTurnId,
+            ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
+            ...browserAccountLeaseInput(provider, traceId),
+            capabilitySnapshot,
+            retryPolicy: parsed._compactionRequest ? "side_effect_free" : "strict",
+            recovery,
+          });
+        } catch (error) {
+          // Nothing was begun: give the conversation's admission slot back, so a refusal leaves no
+          // trace and the next attempt can take it.
+          providerCore.releaseConversationAdmission(executionKey, nativeIdentity.threadId);
+          throw error;
+        }
         let session: ChatGptTurnSession;
         if (contextExhaustion) {
           let replaySession: ChatGptTurnSession | undefined;

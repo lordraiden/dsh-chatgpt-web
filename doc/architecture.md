@@ -1149,6 +1149,22 @@ This prevents:
 - page/composer races;
 - response misattribution.
 
+**The refusal is a decision at the end of a bounded wait, and admission precedes the continuity
+decision.** A conflict on one conversation is usually *transient* — a harness housekeeping round (a
+session title) sharing the session's conversation with the user's own first message — so admission
+waits for the holder to be released before it refuses, bounded like every other wait in this provider
+(`DEFAULT_CONVERSATION_BUSY_WAIT_MS`, `ChatGptWebProviderCore`). The wait is event-driven and
+cancellable, the holder remains the only authority on when the conversation frees, and a bound that
+expires publishes exactly the same conversation-busy refusal as before: admission strictness is
+unchanged, only *when* it is decided moved to the end of the bound.
+
+Admission also comes **before** the continuity decision, because that decision has side effects — a
+replay advances the conversation generation and a first turn records an unconfirmed conversation. A
+turn that is refused at admission never ran, so it must not leave those writes behind; otherwise the
+next attempt is refused with "the last attempt on this conversation was never confirmed" for an attempt
+that never happened. A refused turn therefore leaves continuity exactly as it was, and the retry
+proceeds on the state the admitted turns established.
+
 ### 15.2 Account sharing
 
 One authenticated provider account may serve multiple DSH sessions.
