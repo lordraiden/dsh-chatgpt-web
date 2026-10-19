@@ -179,7 +179,7 @@ describe("issue #249 — `auth import` fails closed", () => {
 
     const unknown = runCli(["auth", "import", "--provider", "qwen-web", "--from", join(home, "x.json")], home);
     expect(unknown.code).not.toBe(0);
-    expect(unknown.err).toContain('the only supported provider is "chatgpt-web"');
+    expect(unknown.err).toContain("supported providers are chatgpt-web, qwen-code");
 
     const missing = runCli(["auth", "import"], home);
     expect(missing.code).not.toBe(0);

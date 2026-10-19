@@ -2,11 +2,12 @@
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, rmSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { stdin, stdout } from "node:process";
-import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt, storeProviderSession, verifyStoredSession } from "./browser-login";
-import { CHATGPT_CONNECTOR_NAME, defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup, providerStorageStatePath, saveConfig } from "./config";
+import { authImportProvider, importProviderSession } from "./auth-import";
+import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt } from "./browser-login";
+import { CHATGPT_CONNECTOR_NAME, DEFAULT_CREDENTIAL_PROVIDER_ID, defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup, saveConfig } from "./config";
 import {
   inspectLauncherBrowserHost,
   inspectLauncherBrowserHostLiveness,
@@ -38,7 +39,7 @@ Containerised ChatGPT Web sidecar: an authenticated ChatGPT Web session exposed 
 Usage:
   dsh-chatgpt-web setup [options]
   dsh-chatgpt-web login
-  dsh-chatgpt-web auth import --provider chatgpt-web --from <file|dir>
+  dsh-chatgpt-web auth import --provider <chatgpt-web|qwen-code> --from <file|dir>
   dsh-chatgpt-web doctor [--json]
   dsh-chatgpt-web serve [--host HOST] [--port PORT]
   dsh-chatgpt-web browser check
@@ -192,56 +193,26 @@ function launcherLoginContinuation(): { promise: Promise<void>; close: () => voi
 }
 
 /**
- * `auth import` (issue #249): adopt an existing Playwright storage state.
+ * `auth import` (issues #249 and #299): adopt an existing Playwright storage state.
  *
- * The capture is **verified against the provider's login surface before it is accepted** and both files
- * are written atomically by the single session owner. A capture that cannot be verified writes nothing
- * and exits non-zero: an unverifiable session must never look like a working one.
+ * The pipeline lives in `src/auth-import.ts` — read the file, let the provider validate it, run the
+ * provider's authenticated predicate, and only then write both files through the single session owner.
+ * A capture that cannot be verified writes nothing and exits non-zero: an unverifiable session must
+ * never look like a working one.
  */
 async function authCommand(args: string[]): Promise<void> {
   const action = args.shift();
   if (action !== "import") {
-    throw new Error('auth expects a subcommand: "import" (dsh-chatgpt-web auth import --provider chatgpt-web --from <file|dir>)');
+    throw new Error('auth expects a subcommand: "import" (dsh-chatgpt-web auth import --provider <provider> --from <file|dir>)');
   }
-  const provider = takeOption(args, "--provider") ?? "chatgpt-web";
-  if (provider !== "chatgpt-web") {
-    throw new Error(`Unknown provider ${JSON.stringify(provider)}; the only supported provider is "chatgpt-web"`);
-  }
+  const providerId = takeOption(args, "--provider") ?? DEFAULT_CREDENTIAL_PROVIDER_ID;
   const from = takeOption(args, "--from");
   if (!from) throw new Error("auth import requires --from <file|dir>");
   assertNoArgs(args);
 
-  const source = resolve(from);
-  if (!existsSync(source)) throw new Error(`--from does not exist: ${source}`);
-  // A directory is the natural way to hand over a Playwright capture directory.
-  const sourceFile = statSync(source).isDirectory() ? join(source, "storage-state.json") : source;
-  if (!existsSync(sourceFile)) throw new Error(`no storage-state.json in ${source}`);
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(sourceFile, "utf8"));
-  } catch (error) {
-    throw new Error(`${sourceFile} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const state = parsed as { cookies?: unknown; origins?: unknown };
-  if (!state || typeof state !== "object" || (!Array.isArray(state.cookies) && !Array.isArray(state.origins))) {
-    throw new Error(`${sourceFile} does not look like a Playwright storage state (expected a "cookies" or "origins" array)`);
-  }
-
-  const config = loadConfig();
-  let capabilities;
-  try {
-    capabilities = await verifyStoredSession(config, parsed as NonNullable<Parameters<typeof verifyStoredSession>[1]>);
-  } catch (error) {
-    throw new Error(
-      `The capture could not be verified against the ChatGPT Web login surface, so nothing was written: `
-      + `${error instanceof Error ? error.message : String(error)}. `,
-    );
-  }
-  const written = storeProviderSession(parsed as NonNullable<Parameters<typeof verifyStoredSession>[1]>, capabilities);
-  stdout.write(`Session verified and stored at ${written}\n`);
-  stdout.write(`Account surface: ${capabilities.url}\n`);
-  void providerStorageStatePath(provider);
+  const result = await importProviderSession({ provider: authImportProvider(providerId), from });
+  stdout.write(`Session verified and stored at ${result.path}\n`);
+  stdout.write(`${result.detail}\n`);
 }
 
 async function loginCommand(args: string[]): Promise<void> {
