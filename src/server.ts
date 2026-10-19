@@ -4,6 +4,11 @@ import {
   createChatGptWebAuthController,
   type ChatGptWebAuthStoredIdentity,
 } from "./adapters/chatgpt-web/auth-controller";
+import {
+  QWEN_CODE_AUTH_PROVIDER_LABEL,
+  QWEN_CODE_PROVIDER_ID,
+  createQwenCodeAuthController,
+} from "./adapters/qwen-code";
 import { CHATGPT_WEB_DRIVER_ID } from "./web-chat/host/provider-host";
 import { createChatGptWebProviderRuntime } from "./adapters/chatgpt-web/provider-runtime";
 import {
@@ -1586,6 +1591,19 @@ export function startServer(
         },
         afterSessionStored: (_stored, identity) => {
           refreshChatGptWebProviderFacts(config, identity);
+        },
+      }),
+    }, {
+      // The second provider's sign-in (issue #299, slice 1). Registration is all this slice needs: the
+      // neutral page, relay and authority are unchanged, and the provider becomes available there by
+      // being registered (`doc/provider-onboarding.md` §2.5). Nothing Qwen-specific enters
+      // `src/web-chat/core/**`, and the controller starts no browser until an operator opens a session.
+      providerId: QWEN_CODE_PROVIDER_ID,
+      label: QWEN_CODE_AUTH_PROVIDER_LABEL,
+      controller: createQwenCodeAuthController({
+        config: {
+          chromeExecutablePath: config.chromeExecutablePath,
+          authBrowserMode: config.authBrowserMode,
         },
       }),
     }],

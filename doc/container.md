@@ -415,6 +415,15 @@ detects the authenticated surface with the same checks `login` already uses, and
 through the single session owner, verifying it *first* — into `providers/chatgpt-web/`, the layout
 above.
 
+**Qwen Code** (`qwen-code`, issue #299 slice 1) is registered on the same page, and its controller
+launches the same headless shape on its own temporary profile. It decides completion **structurally**
+with an authenticated API call (`GET /coder/api/v2/task/list` must answer `success:true`; an anonymous
+caller gets HTTP 200 with `success:false`, so the status code cannot decide it) and captures into
+`providers/qwen-code/` with the same verified marker. Headless was measured against the live service on
+2026-10-19 and is **not** rejected — the sign-in form renders and is operable through the relayed page —
+so no user-agent override or other workaround is applied; see [`qwen-code.md`](./qwen-code.md). This
+provider currently serves **sign-in only**: it has no driver or turn route yet (slice 2).
+
 **Nothing is restarted after a successful capture.** The running service re-derives the account
 identity and the resolved credentials path from the sign-in's own completion, so the next turn uses the
 new session. Before that fix the process kept serving the picture it resolved at startup, which is why
