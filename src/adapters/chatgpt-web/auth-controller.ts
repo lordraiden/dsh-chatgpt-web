@@ -52,6 +52,7 @@ import {
   detectChatGptAuthenticatedAccountIdentity,
 } from "../../chatgpt-session";
 import { sanitizeBrowserLoginStorageState, storeProviderSession } from "../../browser-login";
+import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import type { ChatGptWebAccountCapabilities } from "../../chatgpt-web-models";
 import {
   isWebChatError,
@@ -254,32 +255,13 @@ export interface ChatGptWebAuthControllerOptions {
 }
 
 /**
- * A URL, absolute or bare enough to carry a query string, that must never reach a diagnostic.
- *
- * A sign-in redirect routinely puts a one-time code in the query; a Playwright navigation failure
- * quotes the whole URL back in its own message. Both are removed before any error crosses the
- * provider boundary.
- */
-const DIAGNOSTIC_URL_PATTERNS = [
-  /https?:\/\/[^\s"'<>]+/gi,
-  /\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\/[^\s"'<>]*/gi,
-] as const;
-
-/**
  * Turn any failure into a non-secret, bounded one-line diagnostic.
  *
- * Never returns a cookie, a storage state, or a full URL with query parameters: URLs are rewritten to
- * `[url]` before the message is used anywhere.
+ * The behaviour is the neutral diagnostics owner's (`src/lib/safe-diagnostics.ts`), re-exported here
+ * under the name this module has always used so the ChatGPT sign-in detail has exactly one
+ * implementation and the next provider cannot fork a second copy of the URL scrub.
  */
-export function nonSecretAuthDetail(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  let sanitized = raw;
-  for (const pattern of DIAGNOSTIC_URL_PATTERNS) sanitized = sanitized.replace(pattern, "[url]");
-  sanitized = sanitized.replace(/\s+/g, " ").trim();
-  return sanitized.length > 0
-    ? sanitized.slice(0, 300)
-    : "The sign-in browser reported an unknown failure";
-}
+export const nonSecretAuthDetail = nonSecretDiagnosticText;
 
 const defaultSleep = (ms: number): Promise<void> => new Promise<void>(resolve => {
   const timer = setTimeout(resolve, ms);

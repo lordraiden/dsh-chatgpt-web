@@ -1,0 +1,716 @@
+/**
+ * Qwen Code interactive sign-in controller (issue #299, slice 1).
+ *
+ * The provider-side half of the optional interactive-authentication capability
+ * (`src/web-chat/core/auth.ts`): it launches a disposable headless Chromium on a temporary profile,
+ * navigates to `coder.qwen.ai`, relays the operator's inputs into it, and decides — **structurally,
+ * through the provider's own API** — whether the browser now holds an authenticated session. It then
+ * captures `storageState()` and owns where that capture lands.
+ *
+ * The host (`src/web-chat/host/auth-surface.ts`) is unchanged: it relays pixels and input and hands
+ * the opaque capture back to this controller's `storeCapture`. No new surface, no second authority.
+ *
+ * Ownership boundaries (identical to the neutral contract's intent, not copied DOM logic):
+ *
+ * - **One temporary profile per sign-in.** Created under this provider's own credentials directory,
+ *   never the managed runtime profile, and removed on *every* exit path: capture, cancel, timeout,
+ *   input failure, and a launch that never came up.
+ * - **The completion decision is an authenticated API call, not a page scrape.** `GET
+ *   /coder/api/v2/task/list` through the browser context: an anonymous caller gets HTTP 200 with
+ *   `{ success: false, data: { code: "Unauthorized" } }`, so the check inspects `success`, not the
+ *   status code. Text scraping was rejected — the SPA's signed-in and signed-out shells differ by
+ *   more than a string this module should own.
+ * - **No stealth.** The launch uses the repository's established headless shape (`--headless=new` in
+ *   `args`, never `headless: true`) and the anti-automation pair both existing launch sites use. It
+ *   deliberately does **not** override the user agent: a live probe of this provider showed the plain
+ *   headless `HeadlessChrome` user agent reaching the full app shell and the login form (see
+ *   `doc/qwen-code.md`), so a spoof would be an unearned workaround, and if this provider ever rejects
+ *   headless the answer is `authBrowserMode: "display"` with an operator-supplied display, not a
+ *   disguise.
+ * - **Nothing here executes a turn.** This module signs in and stops; the turn-level proof lives in
+ *   `network-turn.ts`.
+ */
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { chromium, type Page } from "playwright-core";
+
+import { providerCredentialsDir, type AppConfig } from "../../config";
+import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
+import {
+  isWebChatError,
+  webChatError,
+  type AuthCapture,
+  type AuthInput,
+  type AuthSessionState,
+  type ProviderAuthController,
+  type ProviderAuthSession,
+  type ProviderAuthStoreResult,
+  type ProviderAuthView,
+} from "../../web-chat/core";
+import {
+  QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
+  QWEN_CODE_AUTH_POLL_INTERVAL_MS,
+  QWEN_CODE_AUTH_POLL_TIMEOUT_MS,
+  QWEN_CODE_AUTH_PROBE_TIMEOUT_MS,
+  QWEN_CODE_AUTH_VIEWPORT,
+  QWEN_CODE_PROVIDER_ID,
+  QWEN_CODE_ROOT_URL,
+  QWEN_CODE_TASK_LIST_PATH,
+  qwenCodeApiHeaders,
+  qwenCodeUrl,
+} from "./provider";
+import { sanitizeQwenStorageState, storeQwenSession } from "./session-store";
+
+/** The frame geometry the sign-in browser is launched with (re-exported for the surface). */
+export type QwenCodeAuthViewport = { readonly width: number; readonly height: number };
+
+/** Everything the browser launcher needs, and nothing it does not. */
+export interface QwenCodeAuthBrowserLaunch {
+  /** The configured Chrome executable. */
+  readonly executablePath: string;
+  /** `true` for the `--headless=new` launch; `false` for `display` (operator-supplied display). */
+  readonly headless: boolean;
+  /** The disposable profile directory this session owns. */
+  readonly profileDir: string;
+  /** The frame geometry the page must report. */
+  readonly viewport: QwenCodeAuthViewport;
+  /** The page to open (the public app shell). */
+  readonly url: string;
+}
+
+/**
+ * One live sign-in browser, as the controller uses it.
+ *
+ * The handle owns the browser transport; the controller owns the profile directory around it.
+ * `storageState()` is the opaque capture read at the moment the authenticated check succeeds.
+ */
+export interface QwenCodeAuthBrowserHandle {
+  readonly page: Page;
+  storageState(): Promise<unknown>;
+  close(): Promise<void>;
+}
+
+/** Starts one sign-in browser. Injected by tests so the suite never needs a real browser. */
+export type QwenCodeAuthBrowserLauncher =
+  (launch: QwenCodeAuthBrowserLaunch) => Promise<QwenCodeAuthBrowserHandle>;
+
+/** What an authenticated probe found. Credential-free by construction. */
+export interface QwenCodeSessionProbeResult {
+  /** Always `true` when the probe resolves; an unauthenticated session rejects instead. */
+  readonly authenticated: true;
+  /** The endpoint that proved it, for diagnostics. */
+  readonly probe: "task-list";
+  /** The HTTP status the endpoint answered. */
+  readonly status: number;
+}
+
+/**
+ * Reads the authenticated session.
+ *
+ * Resolves once an authenticated API call succeeds; rejects (with no state change) while the operator
+ * still has to sign in, or when the browser is gone. Rejections are turned into a sanitized detail by
+ * the session, so a probe may throw freely.
+ */
+export type QwenCodeSessionProbe = (page: Page) => Promise<QwenCodeSessionProbeResult>;
+
+/** Persists one captured session; returns where it landed. */
+export type QwenCodeSessionStore = (storageState: unknown) => string;
+
+/** One-shot completion seam: a session is on disk. */
+export type QwenCodeAuthSessionStored = (location: string) => void;
+
+/** Construction options for {@link createQwenCodeAuthController}. */
+export interface QwenCodeAuthControllerOptions {
+  /** The deployment facts this controller needs: the executable and the launch mode. */
+  readonly config: Pick<AppConfig, "chromeExecutablePath" | "authBrowserMode">;
+  /** Where a disposable profile is created. Defaults to this provider's credentials directory. */
+  readonly profileRoot?: string;
+  /** The frame geometry. Defaults to {@link QWEN_CODE_AUTH_VIEWPORT}. */
+  readonly viewport?: QwenCodeAuthViewport;
+  /** Poll cadence while the operator works. Defaults to {@link QWEN_CODE_AUTH_POLL_INTERVAL_MS}. */
+  readonly pollIntervalMs?: number;
+  /** How long a sign-in may take before it reports `failed`. Default 8 minutes. */
+  readonly pollTimeoutMs?: number;
+  /** Optional hard cap on polling attempts, independent of the time bound. */
+  readonly maxPolls?: number;
+  /** Navigation timeout. Defaults to {@link QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS}. */
+  readonly navigationTimeoutMs?: number;
+  /** Clock seam; tests inject one so the time bound needs no real time. */
+  readonly now?: () => number;
+  /** Sleep seam; tests inject one that resolves immediately. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** Existence seam for the configured executable; tests inject one. */
+  readonly fileExists?: (path: string) => boolean;
+  /** Profile-directory creation seam; tests inject one so no filesystem is touched. */
+  readonly createProfile?: (root: string) => string;
+  /** Profile-directory removal seam; tests spy on it. */
+  readonly removeProfile?: (dir: string) => void;
+  /** Browser launcher. Defaults to a headless Chromium persistent context. */
+  readonly openBrowser?: QwenCodeAuthBrowserLauncher;
+  /** Authenticated-session probe. Defaults to the real task-list API call. */
+  readonly probeSession?: QwenCodeSessionProbe;
+  /** Session store. Defaults to {@link storeQwenSession}. */
+  readonly storeSession?: QwenCodeSessionStore;
+  /** The one-shot completion hook, called once the session is on disk. */
+  readonly afterSessionStored?: QwenCodeAuthSessionStored;
+}
+
+const defaultSleep = (ms: number): Promise<void> => new Promise<void>(resolve => {
+  const timer = setTimeout(resolve, ms);
+  // Never a reason for the process to stay alive: the listener socket or the operator's stream is.
+  timer.unref?.();
+});
+
+const defaultCreateProfile = (root: string): string => {
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  try { chmodSync(root, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
+  const dir = mkdtempSync(join(root, "qwen-auth-browser-"));
+  try { chmodSync(dir, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
+  return dir;
+};
+
+const defaultRemoveProfile = (dir: string): void => {
+  rmSync(dir, { recursive: true, force: true });
+};
+
+/**
+ * The exact Chromium switches the sign-in launch uses.
+ *
+ * Pure and exported so the flag set is asserted without a browser. `--headless=new` is requested in
+ * `args` (the repository's established shape), `display` mode simply drops it, and **no user agent is
+ * overridden** — a live probe showed the plain headless user agent is served the full app shell and
+ * the login form, so there is nothing to disguise.
+ */
+export function qwenCodeAuthLaunchArgs(
+  launch: Pick<QwenCodeAuthBrowserLaunch, "headless" | "viewport">,
+): string[] {
+  return [
+    ...(launch.headless ? ["--headless=new"] : []),
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    `--window-size=${launch.viewport.width},${launch.viewport.height}`,
+  ];
+}
+
+/**
+ * The default launch: a persistent Chromium context on the disposable profile.
+ *
+ * `headless: false` plus `--headless=new` is the repository's established headless shape (see
+ * `ensureManagedBrowser` and the ChatGPT sign-in controller); Playwright's own `headless: true` is
+ * deliberately not used so the flag set stays identical to the other launch sites.
+ */
+async function defaultOpenBrowser(launch: QwenCodeAuthBrowserLaunch): Promise<QwenCodeAuthBrowserHandle> {
+  const context = await chromium.launchPersistentContext(launch.profileDir, {
+    executablePath: launch.executablePath,
+    headless: false,
+    viewport: { width: launch.viewport.width, height: launch.viewport.height },
+    args: qwenCodeAuthLaunchArgs(launch),
+  });
+  try {
+    const page = context.pages()[0] ?? await context.newPage();
+    await page.goto(launch.url, {
+      waitUntil: "domcontentloaded",
+      timeout: QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
+    });
+    return {
+      page,
+      // The profile only ever had a reason to hold Qwen Code state; the same filter the capture
+      // writer applies is applied here too, so no IdP cookie can leak into the capture.
+      storageState: async () => sanitizeQwenStorageState(await context.storageState()),
+      close: async () => { await context.close(); },
+    };
+  } catch (error) {
+    await context.close().catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Whether a `task/list` payload means "authenticated".
+ *
+ * The captured service answers an anonymous caller HTTP **200** with `success:false` and
+ * `data.code: "Unauthorized"`, so the HTTP status alone cannot decide this. A signed-in caller gets
+ * `success:true` and a `data` array.
+ */
+export function qwenTaskListAuthenticated(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Record<string, unknown>;
+  return record["success"] === true && Array.isArray(record["data"]);
+}
+
+/** The non-secret reason a probe payload means "not authenticated" (diagnositics only). */
+export function qwenTaskListRefusal(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return "an unrecognised body";
+  const record = payload as Record<string, unknown>;
+  const data = (record["data"] && typeof record["data"] === "object" ? record["data"] : {}) as Record<string, unknown>;
+  const code = data["code"];
+  const details = data["details"];
+  if (typeof code === "string" && typeof details === "string") return `${code} ${details}`;
+  if (typeof code === "string") return code;
+  return "an unrecognised body";
+}
+
+/** The default probe: one authenticated endpoint, through the browser context's request facility. */
+async function defaultProbeSession(page: Page): Promise<QwenCodeSessionProbeResult> {
+  const response = await page.request.get(qwenCodeUrl(QWEN_CODE_TASK_LIST_PATH, { page: "1" }), {
+    headers: qwenCodeApiHeaders(),
+    timeout: QWEN_CODE_AUTH_PROBE_TIMEOUT_MS,
+  });
+  const status = response.status();
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = undefined;
+  }
+  if (!qwenTaskListAuthenticated(payload)) {
+    throw new Error(
+      `the task list answered HTTP ${status} with ${qwenTaskListRefusal(payload)}`,
+    );
+  }
+  return { authenticated: true, probe: "task-list", status };
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`A Qwen Code sign-in controller requires a positive ${label}`);
+  }
+  return value;
+}
+
+function assertViewport(viewport: QwenCodeAuthViewport): QwenCodeAuthViewport {
+  if (!viewport || !Number.isSafeInteger(viewport.width) || viewport.width < 1
+    || !Number.isSafeInteger(viewport.height) || viewport.height < 1) {
+    throw new TypeError("A Qwen Code sign-in controller requires a positive viewport");
+  }
+  return { width: viewport.width, height: viewport.height };
+}
+
+/** The controller-internal view of the shared configuration the session needs. */
+interface QwenCodeAuthControllerOwner {
+  readonly now: () => number;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly viewport: QwenCodeAuthViewport;
+  readonly pollIntervalMs: number;
+  readonly pollTimeoutMs: number;
+  readonly maxPolls: number;
+  readonly navigationTimeoutMs: number;
+  readonly removeProfile: (dir: string) => void;
+  readonly probeSession: QwenCodeSessionProbe;
+  storageState(handle: QwenCodeAuthBrowserHandle): Promise<unknown>;
+  /** Remember the capture so `storeCapture` can prove this controller produced it. */
+  recordCapture(storageState: unknown): void;
+}
+
+/** One Qwen Code sign-in. Owns the browser, the temporary profile and the completion decision. */
+class QwenCodeAuthSession implements ProviderAuthSession {
+  readonly providerId = QWEN_CODE_PROVIDER_ID;
+
+  #state: AuthSessionState = "starting";
+  #failureDetail: string | undefined;
+  #page: Page | undefined;
+  #handle: QwenCodeAuthBrowserHandle | undefined;
+  #profileDir: string | undefined;
+  #storageState: unknown;
+  #settled = false;
+  #teardownRun: Promise<void> | undefined;
+  #polls = 0;
+  #deadline = 0;
+  /** The last failed probe's sanitized reason; surfaced only when the session hits its bound. */
+  #lastProbeDetail: string | undefined;
+
+  constructor(private readonly owner: QwenCodeAuthControllerOwner) {}
+
+  /** Called by the controller once the browser is up, to begin the interactive lifecycle. */
+  begin(handle: QwenCodeAuthBrowserHandle, profileDir: string): void {
+    this.#handle = handle;
+    this.#page = handle.page;
+    this.#profileDir = profileDir;
+    this.#deadline = this.owner.now() + this.owner.pollTimeoutMs;
+    this.#state = "awaiting_input";
+    void this.#poll();
+  }
+
+  state(): AuthSessionState {
+    return this.#state;
+  }
+
+  detail(): string | undefined {
+    return this.#failureDetail;
+  }
+
+  async view(): Promise<ProviderAuthView> {
+    const page = this.#livePage("relay a frame");
+    const size = this.#viewportOf(page);
+    // `caret: "initial"` keeps the focused-field caret visible in the relayed pixels, exactly like the
+    // ChatGPT sign-in: without it the operator cannot tell that a click focused the email field.
+    const png = await page.screenshot({ type: "png", caret: "initial" });
+    return { png, width: size.width, height: size.height };
+  }
+
+  async input(event: AuthInput): Promise<void> {
+    const page = this.#livePage("accept input");
+    try {
+      await this.#relayInput(page, event);
+    } catch (error) {
+      throw this.#inputFailure(page, error);
+    }
+  }
+
+  /**
+   * Relay one validated input into the page.
+   *
+   * The refused intent (`UNSUPPORTED_OPTION`), the malformed event (`TypeError`) and the failed
+   * navigation intent (`TRANSPORT_UNAVAILABLE`) are decided here and rethrown unchanged by
+   * {@link #inputFailure}; only an interaction that throws something else is an unexpected page or
+   * browser failure.
+   */
+  async #relayInput(page: Page, event: AuthInput): Promise<void> {
+    switch (event.type) {
+      case "click": {
+        const size = this.#viewportOf(page);
+        if (!Number.isFinite(event.x) || !Number.isFinite(event.y)
+          || event.x < 0 || event.y < 0 || event.x >= size.width || event.y >= size.height) {
+          // Never click at random: an out-of-frame coordinate is refused, not clamped.
+          throw webChatError(
+            "UNSUPPORTED_OPTION",
+            `The sign-in click (${event.x}, ${event.y}) is outside the ${size.width}x${size.height} viewport`,
+            { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_CLICK_OUT_OF_VIEWPORT" },
+          );
+        }
+        await page.mouse.click(event.x, event.y);
+        return;
+      }
+      case "type":
+        await page.keyboard.type(event.text);
+        return;
+      case "key":
+        await page.keyboard.press(event.key);
+        return;
+      case "scroll":
+        await page.mouse.wheel(0, event.dy);
+        return;
+      case "navigate":
+        try {
+          await page.goto(event.url, {
+            waitUntil: "domcontentloaded",
+            timeout: this.owner.navigationTimeoutMs,
+          });
+        } catch (error) {
+          throw webChatError(
+            "TRANSPORT_UNAVAILABLE",
+            `The sign-in browser could not follow the navigation intent: ${nonSecretDiagnosticText(error)}`,
+            {
+              providerId: QWEN_CODE_PROVIDER_ID,
+              providerCode: "AUTH_NAVIGATION_FAILED",
+              cause: error,
+            },
+          );
+        }
+        return;
+      default:
+        throw new TypeError("A WebChat auth input must be one of click, type, key, scroll or navigate");
+    }
+  }
+
+  /**
+   * Translate an unexpected interaction failure into the upstream category the surface maps to 502.
+   *
+   * A page or browser that dies while an input is relayed must not escape as a raw Playwright error:
+   * the interactive path has failed, no poll can recover it, so the session fails and releases the
+   * browser and the temporary profile through the one teardown.
+   */
+  #inputFailure(page: Page, error: unknown): Error {
+    if (isWebChatError(error) || error instanceof TypeError) return error;
+    const detail = nonSecretDiagnosticText(error);
+    if (page.isClosed()) {
+      this.#fail("The sign-in browser closed while an input was being relayed");
+      return webChatError(
+        "UPSTREAM_ERROR",
+        `The sign-in browser closed while an input was being relayed: ${detail}`,
+        { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_PAGE_CLOSED", cause: error },
+      );
+    }
+    this.#fail(`The sign-in browser could not relay an input: ${detail}`);
+    return webChatError(
+      "UPSTREAM_ERROR",
+      `The sign-in browser could not relay an input: ${detail}`,
+      { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_INPUT_FAILED", cause: error },
+    );
+  }
+
+  async capture(): Promise<AuthCapture> {
+    if (this.#state !== "captured") {
+      throw webChatError(
+        "CONVERSATION_STATE_MISMATCH",
+        `The ${QWEN_CODE_PROVIDER_ID} sign-in has not captured`,
+        { providerId: QWEN_CODE_PROVIDER_ID },
+      );
+    }
+    return { kind: "browser-storage", storageState: this.#storageState };
+  }
+
+  async cancel(): Promise<void> {
+    if (!this.#settled && this.#state !== "captured" && this.#state !== "failed") {
+      this.#state = "expired";
+    }
+    await this.#teardown();
+  }
+
+  /** The only place the browser and its temporary profile are released. Idempotent. */
+  #teardown(): Promise<void> {
+    if (!this.#teardownRun) {
+      this.#settled = true;
+      const handle = this.#handle;
+      const profileDir = this.#profileDir;
+      this.#page = undefined;
+      this.#handle = undefined;
+      this.#profileDir = undefined;
+      this.#teardownRun = (async () => {
+        if (handle) {
+          try { await handle.close(); } catch { /* the profile removal below still runs */ }
+        }
+        if (profileDir !== undefined) {
+          try { this.owner.removeProfile(profileDir); } catch { /* best effort */ }
+        }
+      })();
+    }
+    return this.#teardownRun;
+  }
+
+  #fail(detail: string): void {
+    if (this.#settled) return;
+    this.#failureDetail = detail;
+    this.#state = "failed";
+    void this.#teardown();
+  }
+
+  /** The live page, or a typed refusal when the session can no longer serve the request. */
+  #livePage(action: string): Page {
+    if (this.#settled || !this.#page) {
+      throw webChatError(
+        "TRANSPORT_UNAVAILABLE",
+        `The ${QWEN_CODE_PROVIDER_ID} sign-in browser is closed and cannot ${action}`,
+        { providerId: QWEN_CODE_PROVIDER_ID },
+      );
+    }
+    return this.#page;
+  }
+
+  #viewportOf(page: Page): QwenCodeAuthViewport {
+    const size = page.viewportSize();
+    if (size && size.width > 0 && size.height > 0) return { width: size.width, height: size.height };
+    return this.owner.viewport;
+  }
+
+  /**
+   * Bounded completion detection: sleep, then run the authenticated API probe once.
+   *
+   * The sleep is what keeps this off the CPU; the time/attempt bound is what makes a sign-in that
+   * never authenticates report `failed` instead of polling forever. When the browser dies the session
+   * fails immediately and tears down, so no poll can outlive its browser.
+   */
+  async #poll(): Promise<void> {
+    while (!this.#settled) {
+      await this.owner.sleep(this.owner.pollIntervalMs);
+      if (this.#settled) return;
+      if (this.#polls >= this.owner.maxPolls) {
+        this.#fail(this.#timeoutDetail(
+          `The Qwen Code session did not authenticate within ${this.owner.maxPolls} probes `
+          + `(${QWEN_CODE_TASK_LIST_PATH})`,
+        ));
+        return;
+      }
+      if (this.owner.now() >= this.#deadline) {
+        this.#fail(this.#timeoutDetail(
+          `The Qwen Code session did not authenticate within ${this.owner.pollTimeoutMs}ms `
+          + `(${QWEN_CODE_TASK_LIST_PATH})`,
+        ));
+        return;
+      }
+      this.#polls += 1;
+      const page = this.#page;
+      if (!page || page.isClosed()) {
+        this.#fail("The sign-in browser closed before the sign-in completed");
+        return;
+      }
+      this.#state = "verifying";
+      try {
+        await this.owner.probeSession(page);
+      } catch (error) {
+        if (this.#settled) return;
+        if (page.isClosed()) {
+          this.#fail("The sign-in browser closed before the sign-in completed");
+          return;
+        }
+        // Not authenticated yet is the expected answer while the operator works; the loop simply
+        // goes back to `awaiting_input` and waits again.
+        this.#state = "awaiting_input";
+        // The last probe's reason is kept: a session that never authenticates reports *why* (e.g. a
+        // still-anonymous task list) instead of a bare timeout.
+        this.#lastProbeDetail = nonSecretDiagnosticText(error);
+        continue;
+      }
+      if (this.#settled) return;
+      let storageState: unknown;
+      try {
+        storageState = await this.owner.storageState(this.#handle!);
+      } catch (error) {
+        this.#fail(`The sign-in completed but the session could not be read: ${nonSecretDiagnosticText(error)}`);
+        return;
+      }
+      if (this.#settled) return;
+      this.#storageState = storageState;
+      this.owner.recordCapture(storageState);
+      this.#state = "captured";
+      await this.#teardown();
+      return;
+    }
+  }
+
+  /** The reason a bounded session reports: its own bound plus the last probe's answer. */
+  #timeoutDetail(detail: string): string {
+    return this.#lastProbeDetail === undefined ? detail : `${detail}; last probe: ${this.#lastProbeDetail}`;
+  }
+}
+
+/**
+ * Create the Qwen Code interactive sign-in controller.
+ *
+ * Construction is inert: no browser is started and no profile is created here. Only `startAuth()`
+ * launches anything, so a listener can register this controller and still start with no browser.
+ */
+export function createQwenCodeAuthController(
+  options: QwenCodeAuthControllerOptions,
+): ProviderAuthController {
+  if (!options || !options.config || typeof options.config.chromeExecutablePath !== "string") {
+    throw new TypeError("A Qwen Code sign-in controller requires the deployment configuration");
+  }
+  const config = options.config;
+  const profileRoot = options.profileRoot ?? providerCredentialsDir(QWEN_CODE_PROVIDER_ID);
+  const viewport = assertViewport(options.viewport ?? QWEN_CODE_AUTH_VIEWPORT);
+  const pollIntervalMs = positiveInteger(
+    options.pollIntervalMs ?? QWEN_CODE_AUTH_POLL_INTERVAL_MS,
+    "poll interval",
+  );
+  const pollTimeoutMs = positiveInteger(
+    options.pollTimeoutMs ?? QWEN_CODE_AUTH_POLL_TIMEOUT_MS,
+    "poll timeout",
+  );
+  const maxPolls = options.maxPolls === undefined
+    ? Number.POSITIVE_INFINITY
+    : positiveInteger(options.maxPolls, "probe attempt bound");
+  const navigationTimeoutMs = positiveInteger(
+    options.navigationTimeoutMs ?? QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
+    "navigation timeout",
+  );
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? defaultSleep;
+  const fileExists = options.fileExists ?? existsSync;
+  const createProfile = options.createProfile ?? defaultCreateProfile;
+  const removeProfile = options.removeProfile ?? defaultRemoveProfile;
+  const openBrowser = options.openBrowser ?? defaultOpenBrowser;
+  const probeSession = options.probeSession ?? defaultProbeSession;
+  const storeSession = options.storeSession ?? storeQwenSession;
+  const afterSessionStored = options.afterSessionStored;
+  const headless = (config.authBrowserMode ?? "headless") === "headless";
+
+  /**
+   * The captures this controller produced, keyed by the opaque state object the host will hand back
+   * to `storeCapture`. A WeakSet, so nothing outlives the capture it describes.
+   */
+  const captures = new WeakSet<object>();
+
+  const owner: QwenCodeAuthControllerOwner = {
+    now,
+    sleep,
+    viewport,
+    pollIntervalMs,
+    pollTimeoutMs,
+    maxPolls,
+    navigationTimeoutMs,
+    removeProfile,
+    probeSession,
+    async storageState(handle) {
+      return await handle.storageState();
+    },
+    recordCapture(storageState) {
+      if (storageState !== null && (typeof storageState === "object" || typeof storageState === "function")) {
+        captures.add(storageState as object);
+      }
+    },
+  };
+
+  return {
+    async startAuth(): Promise<ProviderAuthSession> {
+      if (!config.chromeExecutablePath.trim() || !fileExists(config.chromeExecutablePath)) {
+        // Fail closed from `startAuth`, not from startup: a listener may register this controller on a
+        // host that has no Chrome yet, and the operator gets the actionable error on the one request
+        // that needs a browser.
+        throw webChatError(
+          "TRANSPORT_UNAVAILABLE",
+          `The interactive sign-in browser could not start: Chrome was not found at `
+          + `${config.chromeExecutablePath.trim() || "(unset)"}`,
+          {
+            providerId: QWEN_CODE_PROVIDER_ID,
+            providerCode: "CHROME_EXECUTABLE_MISSING",
+          },
+        );
+      }
+      const profileDir = createProfile(profileRoot);
+      let handle: QwenCodeAuthBrowserHandle;
+      try {
+        handle = await openBrowser({
+          executablePath: config.chromeExecutablePath,
+          headless,
+          profileDir,
+          viewport,
+          url: QWEN_CODE_ROOT_URL,
+        });
+      } catch (error) {
+        // The profile is owned from the moment it exists, even when the browser never came up.
+        try { removeProfile(profileDir); } catch { /* the launch failure is the error being reported */ }
+        throw webChatError(
+          "TRANSPORT_UNAVAILABLE",
+          `The interactive sign-in browser could not start: ${nonSecretDiagnosticText(error)}`,
+          {
+            providerId: QWEN_CODE_PROVIDER_ID,
+            providerCode: "BROWSER_LAUNCH_FAILED",
+            cause: error,
+          },
+        );
+      }
+      const session = new QwenCodeAuthSession(owner);
+      session.begin(handle, profileDir);
+      return session;
+    },
+
+    async storeCapture(capture: AuthCapture): Promise<ProviderAuthStoreResult> {
+      if (capture.kind !== "browser-storage") {
+        // `opaque`/`none` are other providers' shapes; this controller produced nothing to write.
+        return { stored: false };
+      }
+      const state = capture.storageState;
+      if (state === null || typeof state !== "object" || !captures.has(state as object)) {
+        throw webChatError(
+          "CONVERSATION_STATE_MISMATCH",
+          `The ${QWEN_CODE_PROVIDER_ID} sign-in controller was asked to store a capture it did not produce`,
+          { providerId: QWEN_CODE_PROVIDER_ID },
+        );
+      }
+      const location = storeSession(state);
+      try {
+        afterSessionStored?.(location);
+      } catch (error) {
+        // A host hook must never turn a stored sign-in into a failed one: the session is already
+        // durable. It is still named, because a stale in-process fact is a real problem.
+        console.warn(
+          `[qwen-code] sign-in completion hook failed for ${QWEN_CODE_PROVIDER_ID} `
+          + `(${nonSecretDiagnosticText(error)}); the stored session is unaffected`,
+        );
+      }
+      return { stored: true, location };
+    },
+  };
+}

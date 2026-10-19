@@ -806,7 +806,7 @@ describe("issue #276 slice 2b — the real listener registers the controller laz
     }
   });
 
-  test("with no auth override the listener lists chatgpt-web and only fails when sign-in is asked to start", async () => {
+  test("with no auth override the listener lists both registered providers and only fails when sign-in is asked to start", async () => {
     // A missing executable is the whole point: if registration launched anything, the listener could
     // not start at all. It starts, serves the catalogue, and fails typed only on the opening request.
     const server = startServer({
@@ -824,9 +824,14 @@ describe("issue #276 slice 2b — the real listener registers the controller laz
 
     const providers = await fetch(`${base}/v1/control/auth/providers`, { headers: control });
     expect(providers.status).toBe(200);
+    // Two providers are registered in the production composition: ChatGPT Web (issue #276) and Qwen
+    // Code (issue #299). Registration is inert, so listing both still starts nothing.
     expect(await providers.json()).toEqual({
       ok: true,
-      providers: [{ providerId: CHATGPT_WEB_AUTH_PROVIDER_ID, label: CHATGPT_WEB_AUTH_PROVIDER_LABEL }],
+      providers: [
+        { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID, label: CHATGPT_WEB_AUTH_PROVIDER_LABEL },
+        { providerId: "qwen-code", label: "Qwen Code" },
+      ],
     });
 
     // The API key cannot open this surface, and the control token still opens it (authority unchanged).
