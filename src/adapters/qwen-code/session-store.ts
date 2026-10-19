@@ -24,6 +24,10 @@
 import type { BrowserContextOptions } from "playwright-core";
 import { storeProviderSession } from "../../browser-login";
 import { providerCredentialsDir } from "../../config";
+import {
+  AUTH_IMPORT_REFUSAL_CODES,
+  AuthImportRefusal,
+} from "../../auth-import-errors";
 import { QWEN_CODE_PROVIDER_ID } from "./provider";
 
 /** One cookie as a storage state carries it; only the fields this module reads are named. */
@@ -101,20 +105,23 @@ export function validateQwenCodeSessionStorageState(
   const sanitized = sanitizeQwenStorageState(storageState);
 
   if (rawCookies.length === 0) {
-    throw new Error(
+    throw new AuthImportRefusal(
+      AUTH_IMPORT_REFUSAL_CODES.empty,
       "the capture contains no cookies at all; open https://coder.qwen.ai in the browser you signed in with, "
       + `then export it again with ${IMPORT_SCRIPT}`,
     );
   }
   if (sanitized.cookies.length === 0) {
-    throw new Error(
+    throw new AuthImportRefusal(
+      AUTH_IMPORT_REFUSAL_CODES.foreignDomain,
       "the capture contains no coder.qwen.ai cookies (every cookie in it belongs to another domain); "
       + `open https://coder.qwen.ai in that browser, sign in, then export it again with ${IMPORT_SCRIPT}`,
     );
   }
   const usable = sanitized.cookies.filter(cookie => !cookieExpired(cookie, now));
   if (usable.length === 0) {
-    throw new Error(
+    throw new AuthImportRefusal(
+      AUTH_IMPORT_REFUSAL_CODES.expired,
       "every coder.qwen.ai cookie in the capture has expired; sign in again at https://coder.qwen.ai, "
       + `export a fresh capture with ${IMPORT_SCRIPT}, and re-run the import`,
     );

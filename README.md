@@ -280,8 +280,9 @@ It needs no display and no second container, and it uses the same loopback port 
 **control token only**, so the API key does not open it (and the control token still does not open
 `/v1/*`). **Nothing needs to be restarted once the session is captured:** the running service
 re-derives the account identity and the credentials path from the sign-in itself, so the very next
-turn uses the new session. (The `auth import` route below is the exception — it runs in its own
-process, so restart the service after adopting a capture that way.)
+turn uses the new session. (The two *capture handoff* routes below are the exception — they write the
+provider layout without driving the sign-in controller, so restart the service after adopting a
+capture that way.)
 
 ### Adopt a capture (`auth import`)
 
@@ -303,6 +304,52 @@ engine refuses relayed (synthesised) input: sign in on your own PC with a real b
 cookies with the dependency-free `scripts/qwen-storage-state.mjs` (it attaches to your own Chrome on
 `--remote-debugging-port=9222`), then import the file. Both commands, the checks and the expiry
 symptoms are in [`doc/qwen-code.md` §6](./doc/qwen-code.md#6-signing-in-on-the-operators-own-machine-then-importing-the-session-issue-299).
+
+### Hand a capture to a running service (`POST /v1/control/auth/import`)
+
+The same pipeline is available over the operator control surface, for a tool (a Harness plugin, a
+script) that already holds a Playwright `storageState` object. **Control token only**, exactly like
+the rest of `/v1/control/*`; the API key is refused. The request body is
+`{ "provider": "chatgpt-web" | "qwen-code" | "deepseek-web", "storageState": { ... } }` and is capped
+at 512 KiB (an oversized body is refused before it is buffered):
+
+```bash
+curl -sS -X POST http://127.0.0.1:17841/v1/control/auth/import \
+  -H "Authorization: Bearer $CONTROL_TOKEN" \
+  -H 'content-type: application/json' \
+  --data '{"provider":"qwen-code","storageState":{"cookies":[...],"origins":[...]}}'
+```
+
+A verified session answers exactly:
+
+```json
+{"ok":true,"provider":"qwen-code","verified":true,"verifiedAt":"2026-10-19T21:00:00.000Z","storedAt":"/data/providers/qwen-code/storage-state.json"}
+```
+
+`deepseek-web` has **no adapter yet**, so its capture is stored but not usable. It answers
+`verified: false`, `verifiedAt: null` and a `message` saying so; no `.verified.json` marker is written,
+so nothing can mistake it for a working session. Every capture refusal is a 4xx with the existing
+control error shape and a stable code:
+
+| code | status | meaning |
+| --- | --- | --- |
+| `import_empty` | 400 | the capture has no cookies or `localStorage` at all |
+| `import_malformed` | 400 | the body is not valid JSON (its text is never quoted) |
+| `import_shape_invalid` | 400 | JSON, but not a Playwright storage state |
+| `import_foreign_domain` | 400 | the provider's own cookies are absent |
+| `import_expired` | 400 | the provider's cookies are all expired |
+| `import_predicate_failed` | 400 | the provider's authenticated predicate refused it |
+| `import_provider_unknown` | 404 | that provider is not registered for import |
+| `import_invalid_request` | 400 | missing `provider`/`storageState` |
+| `request_too_large` | 413 | the body exceeds 512 KiB |
+
+A failure to write an already-accepted capture is an operator-side 500 (`import_store_failed`), not a
+capture refusal.
+
+Nothing in a response or a log is captured material: no cookie value, name or count. The import
+writes the same layout as `auth import` (and, for a verified provider, the same `.verified.json`
+marker), and — like the CLI route — it does not refresh the running process's startup-resolved
+account facts, so restart the service when the next turn must pick the capture up immediately.
 
 ### Fallback when a flow rejects headless
 
