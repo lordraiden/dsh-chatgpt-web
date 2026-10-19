@@ -375,7 +375,7 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
       const entry = entries.get(id);
       if (!entry) return undefined;
       if (!isAuthInput(event)) {
-        throw new TypeError("A WebChat auth input must be one of click, type, key, scroll or navigate");
+        throw new TypeError("A WebChat auth input must be one of click, drag, type, key, scroll or navigate");
       }
       await entry.handle.input(event);
       entry.inputEpoch += 1;

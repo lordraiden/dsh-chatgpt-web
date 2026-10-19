@@ -64,6 +64,19 @@ import { sanitizeQwenStorageState, storeQwenSession } from "./session-store";
 /** The frame geometry the sign-in browser is launched with (re-exported for the surface). */
 export type QwenCodeAuthViewport = { readonly width: number; readonly height: number };
 
+/**
+ * The longest wait the relay will take between two samples of one drag.
+ *
+ * The operator's page samples a gesture every few milliseconds, so a real drag needs no long wait.
+ * The one long interval a human gesture can contain is a pause with the pointer held still, whose
+ * release sample then lands seconds later. The relay is a synchronous request, so that pause is
+ * bounded here instead of stalling the sign-in, and one drag may not spend more than
+ * {@link AUTH_DRAG_RELAY_BUDGET_MS} waiting in total. Every sampled position is still delivered, in
+ * order, with the same spacing up to the bound: the path is never altered or thinned.
+ */
+const AUTH_DRAG_MAX_GAP_MS = 1_000;
+const AUTH_DRAG_RELAY_BUDGET_MS = 5_000;
+
 /** Everything the browser launcher needs, and nothing it does not. */
 export interface QwenCodeAuthBrowserLaunch {
   /** The configured Chrome executable. */
@@ -382,6 +395,60 @@ class QwenCodeAuthSession implements ProviderAuthSession {
         await page.mouse.click(event.x, event.y);
         return;
       }
+      case "drag": {
+        const size = this.#viewportOf(page);
+        const points = event.points;
+        if (!Array.isArray(points) || points.length < 2) {
+          // A drag is a pressed pointer moved along a path: one point (or none) is not one, and
+          // pressing somewhere to guess at the rest would be motion the operator never made.
+          throw new TypeError("A drag input must carry an ordered path of at least two points");
+        }
+        let previousAtMs = 0;
+        for (const point of points) {
+          if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)
+            || point.x < 0 || point.y < 0 || point.x >= size.width || point.y >= size.height) {
+            // Never clamp a sample: a clamped path is a different gesture than the one drawn, so an
+            // out-of-frame point refuses the whole drag exactly like an out-of-frame click.
+            throw webChatError(
+              "UNSUPPORTED_OPTION",
+              `The sign-in drag point (${point?.x}, ${point?.y}) is outside the `
+              + `${size.width}x${size.height} viewport`,
+              { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_DRAG_OUT_OF_VIEWPORT" },
+            );
+          }
+          if (!Number.isFinite(point.atMs) || point.atMs < previousAtMs) {
+            throw new TypeError("A drag path must carry ordered, finite sample times");
+          }
+          previousAtMs = point.atMs;
+        }
+        // Press at the operator's own start, replay every sampled point in the order it was drawn,
+        // and release at the end. The samples themselves are the motion: no interpolation, no
+        // synthetic path, and `page.mouse.move` is called once per sample with no `steps`.
+        const start = points[0]!;
+        let budget = AUTH_DRAG_RELAY_BUDGET_MS;
+        let pressed = false;
+        try {
+          await page.mouse.move(start.x, start.y);
+          await page.mouse.down();
+          pressed = true;
+          for (let index = 1; index < points.length; index += 1) {
+            const point = points[index]!;
+            const pause = Math.min(point.atMs - points[index - 1]!.atMs, AUTH_DRAG_MAX_GAP_MS, budget);
+            if (pause > 0) {
+              budget -= pause;
+              await this.owner.sleep(pause);
+            }
+            await page.mouse.move(point.x, point.y);
+          }
+        } finally {
+          // The button is down from `down()` until here, so it is released on every path — a failed
+          // replay must not leave the provider's page with a held button that poisons later inputs.
+          if (pressed) {
+            try { await page.mouse.up(); } catch { /* the failure being reported is the real one */ }
+          }
+        }
+        return;
+      }
       case "type":
         await page.keyboard.type(event.text);
         return;
@@ -410,7 +477,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
         }
         return;
       default:
-        throw new TypeError("A WebChat auth input must be one of click, type, key, scroll or navigate");
+        throw new TypeError("A WebChat auth input must be one of click, drag, type, key, scroll or navigate");
     }
   }
 

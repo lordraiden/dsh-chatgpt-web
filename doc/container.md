@@ -407,7 +407,7 @@ rest of `/v1/control/*`: the API key does not open it, and the control token sti
 | `POST /v1/control/auth/sessions` | open one: `{"providerId":"chatgpt-web"}` (409 when that provider is already signing in) |
 | `GET /v1/control/auth/sessions/<id>` | the session view: state, TTL, viewport — never a cookie, a storage state or a page URL |
 | `GET /v1/control/auth/sessions/<id>/stream` | SSE frame/state relay (~2.5 fps, plus an immediate frame after every input) |
-| `POST /v1/control/auth/sessions/<id>/input` | one `click` / `type` / `key` / `scroll` / `navigate` intent |
+| `POST /v1/control/auth/sessions/<id>/input` | one `click` / `drag` / `type` / `key` / `scroll` / `navigate` intent (`drag` carries the ordered sampled path) |
 | `DELETE /v1/control/auth/sessions/<id>` | cancel, idempotently; it also acknowledges a capture |
 
 The ChatGPT controller launches a **headless** Chromium (`--headless=new`) on a temporary profile,

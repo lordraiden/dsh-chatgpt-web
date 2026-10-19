@@ -482,6 +482,9 @@ describe("issue #276 slice 2a — input, cancellation and expiry", () => {
 
     const malformed: unknown[] = [
       { type: "drag", x: 1, y: 1 },
+      { type: "drag", points: [] },
+      { type: "drag", points: [{ x: 1, y: 2, atMs: 0 }] },
+      { type: "drag", points: [{ x: 1, y: 2, atMs: 20 }, { x: 3, y: 4, atMs: 10 }] },
       { type: "click", x: 1 },
       { type: "click", x: Number.NaN, y: 2 },
       { type: "type", text: "" },
@@ -869,3 +872,85 @@ describe("issue #276 — the keyboard relay: server ordering and the page's publ
     expect(html).toMatch(/fallback/i);
   });
 });
+
+/**
+ * Issue #276 — the pointer relay: a click, or the drag path the operator actually drew.
+ *
+ * The report that produced this: a provider presented a "drag to complete the puzzle" verification
+ * during sign-in, and the page turned every `pointerdown` into a click and nothing else, so the drag
+ * could not exist. The split is the same as the keyboard relay's: the server side proves that one
+ * ordered path reaches the provider byte-for-byte, and the served page proves that its script is the
+ * capture-and-send relay the contract names — that it samples `pointermove`, carries the per-sample
+ * offsets, and has no other motion source. Whether a browser's pointer events and a real captcha
+ * accept the relayed path is a real-browser question, listed as uncovered in the change report.
+ */
+describe("issue #276 — the pointer relay: an ordered drag path", () => {
+  test("one drag reaches the provider as the same ordered samples, and later clicks still work", async () => {
+    const fake = fakeProvider({ providerId: PIXEL_PROVIDER, label: "Pixel Web", pixels: true });
+    const server = serve([fake], { frameIntervalMs: 5_000, session: { sweepIntervalMs: 0 } });
+    const session = await openSession(server, PIXEL_PROVIDER);
+
+    // A deliberately non-linear, jittery path: y rises, dips and rises again. If any layer collapsed
+    // it into the straight line between its endpoints — or re-derived it with interpolation — this
+    // equality fails.
+    const path = [
+      { x: 20, y: 300, atMs: 0 },
+      { x: 41, y: 296, atMs: 11 },
+      { x: 78, y: 291, atMs: 23 },
+      { x: 96, y: 299, atMs: 38 },
+      { x: 143, y: 292, atMs: 52 },
+      { x: 210, y: 284, atMs: 69 },
+    ];
+    const relayed = await postInput(server, session.id, { type: "drag", points: path });
+    expect(relayed.status).toBe(200);
+    expect((await relayed.json() as { state: string }).state).toBe("awaiting_input");
+    expect(fake.inputs.at(-1)).toEqual({ type: "drag", points: path });
+
+    // A drag is an ordinary input: it neither ends nor wedges the session, and the gesture that was
+    // a tap still arrives as a click right after it.
+    expect((await postInput(server, session.id, { type: "click", x: 210, y: 284 })).status).toBe(200);
+    expect(inputOrder(fake)).toEqual(["drag", "click"]);
+  });
+
+  test("the served page publishes its drag sampling contract and relays pointerdown/move/up", async () => {
+    const server = serve([]);
+    const html = await (await fetch(url(server, "/v1/control/auth/"))).text();
+
+    // 1. The sampling rate and the tap threshold are the document's, read back by its own script: a
+    // drag is sampled on movement, at a cadence in the 8-16 ms band, and a press that moves less than
+    // the threshold stays the click it always was.
+    const sample = /data-drag-sample-ms="(\d+)"/.exec(html);
+    expect(sample).not.toBeNull();
+    expect(Number(sample![1])).toBeGreaterThanOrEqual(8);
+    expect(Number(sample![1])).toBeLessThanOrEqual(16);
+    const threshold = /data-drag-move-threshold-px="(\d+)"/.exec(html);
+    expect(threshold).not.toBeNull();
+    expect(Number(threshold![1])).toBeGreaterThanOrEqual(1);
+
+    // 2. The operator can see the gesture being relayed, before and while it happens.
+    expect(html).toContain('id="pointer-relay"');
+    expect(html).toContain('data-pointer-relay="idle"');
+    expect(html).toMatch(/press and <em>drag<\/em>|press and drag/i);
+
+    // 3. The script is a real pointer path capture: it starts on `pointerdown`, samples on
+    // `pointermove`, ends on `pointerup`, captures the pointer so a release off the picture is still
+    // seen, and sends the samples it collected — with their own offsets — as one `drag` input.
+    const script = html.slice(html.indexOf("<script>"));
+    for (const handler of ['"pointerdown"', '"pointermove"', '"pointerup"', '"pointercancel"']) {
+      expect(script, `the page must listen for ${handler}`).toContain(handler);
+    }
+    expect(script).toContain("setPointerCapture");
+    expect(script).toContain("releasePointerCapture");
+    expect(script).toContain('"data-drag-sample-ms"');
+    expect(script).toContain('"data-drag-move-threshold-px"');
+    expect(script).toContain('type: "drag"');
+    expect(script).toContain("points: drag.points");
+    expect(script).toContain("atMs");
+
+    // 4. Touch must reach the page as pointer events instead of being eaten by a scroll gesture, and
+    // no part of this interaction depends on hover.
+    expect(html).toMatch(/touch-action:\s*none/);
+    expect(html).not.toMatch(/:hover|mouseenter|mouseover/);
+  });
+});
+

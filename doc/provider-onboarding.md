@@ -98,7 +98,10 @@ in [`src/web-chat/core/auth.ts`](../src/web-chat/core/auth.ts). This is optional
 - Session: `providerId`, `state(): AuthSessionState`, optional `detail()`, `view()`, `input(event)`,
   `capture()`, `cancel()`.
 - The state vocabulary is exactly `starting | awaiting_input | verifying | captured | failed | expired`.
-- `AuthInput` is exactly `click | type | key | scroll | navigate` — intents, not browser commands.
+- `AuthInput` is exactly `click | drag | type | key | scroll | navigate` — intents, not browser commands.
+  A `drag` is an ordered path of sampled points (`{x, y, atMs}[]`, press first, release last) in the
+  same coordinate space as a `click`, so a slider-style verification is expressed as the gesture the
+  operator made rather than as a synthetic straight line.
 - `view()` is **optional in practice**: the host must accept a provider that reaches `captured`
   without ever producing a frame (device code, OTP, API-key paste). A frame failure is never a session
   failure.

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Relay a **drag** through the interactive sign-in surface, so a slider/puzzle verification can be
+  answered at all (found while signing in to Qwen Code, issue #299). Two independent gaps blocked it:
+  the neutral `AuthInput` vocabulary had no way to express a pressed pointer moved along a path, and
+  the relayed page turned every `pointerdown` into a click with no pointer-move path. `AuthInput` now
+  carries `{type:"drag", points:[{x,y,atMs}]}` — an ordered sampled path in the same frame
+  coordinates as `click`, press first and release last, with each sample's own offset — validated
+  like every other input (finite coordinates, at least two points, non-negative and non-decreasing
+  timestamps; no clamping). The page captures the operator's real `pointerdown` → throttled
+  `pointermove` samples → `pointerup` (pointer capture included, so a release off the picture is
+  still seen), publishes `data-drag-sample-ms` / `data-drag-move-threshold-px`, shows
+  `#pointer-relay[data-pointer-relay]` while the gesture is live, and sends one drag input; a press
+  that does not travel is still relayed as the click it always was. Both controllers replay the
+  samples in order with `page.mouse.move/down/up` (one move per sample, no interpolation), pace the
+  moves by the carried offsets within a bounded relay budget, and release the button on every failure
+  path. No stealth, no UA change, no synthetic motion, no new dependency. What a real captcha does
+  with a relayed human drag is unverified; a rejection there is a finding to report, not to disguise.
+
 - Recognize the harness's runtime-context snapshot in `sanitizeConversationText`, so a session-addressed
   turn whose only `user` message is that block is refused instead of answered (issue #307 follow-up,
   proven against the deployed service). The previous refusal test used the shorter time-snapshot text,
