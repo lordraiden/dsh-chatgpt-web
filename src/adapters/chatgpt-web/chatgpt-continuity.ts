@@ -9,7 +9,8 @@
  * The provider translates the outcome back into its own recovery vocabulary, so the rest of the turn
  * (and its consumers) keep working unchanged.
  */
-import { createChatGptWebDriver } from "./chatgpt-driver";
+import { createChatGptWebDriver, type ChatGptRetainedCoherenceProbe } from "./chatgpt-driver";
+import { chatGptRetainedSurfaceLostError } from "./adapter-error";
 import { chatGptAffinitySessionId, chatGptConversationKey } from "./conversation-key";
 import { extractChatGptTurnIdentity } from "./environment";
 import type { ProviderRecovery } from "./provider-core";
@@ -41,6 +42,15 @@ export interface ChatGptContinuityDeps {
   readonly sessions?: ChatGptTurnSessions;
   /** Durable continuity. A process-lifetime store unless the host wires another one (#193). */
   readonly store?: WebChatConversationStore;
+  /**
+   * The provider's structural reconciliation probe (issue #314 stage 3).
+   *
+   * It receives provider state only — the retained conversation's key — never the caller's text, and
+   * it is what lets the core re-confirm a conversation whose last attempt was never confirmed when
+   * the retained conversation provably still holds that attempt's reply. Without it (a launcher
+   * surface this process cannot read, an injected harness), the honest refusal is unchanged.
+   */
+  readonly proveRetainedCoherence?: ChatGptRetainedCoherenceProbe;
 }
 
 /** The provider facts that used to decide recovery by itself. */
@@ -98,6 +108,7 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
     provider: deps.provider,
     namespace: deps.namespace,
     ...(deps.sessions ? { sessions: deps.sessions } : {}),
+    ...(deps.proveRetainedCoherence ? { proveRetainedCoherence: deps.proveRetainedCoherence } : {}),
   });
   const store = deps.store ?? createMemoryConversationStore();
 
@@ -223,6 +234,14 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
           // The core refused continuity: the turn fails here, before any provider turn, transport or
           // browser session is created, and the typed failure reaches the caller. Continuing with a
           // recovery flag would be the silent fork the contract forbids.
+          //
+          // One refusal is this provider's own continuity loss in disguise (issue #314 stage 3): the
+          // core reports a provider-neutral `CONVERSATION_LOST` when the provider established that
+          // the retained conversation is gone, and this provider already has the error its consumers
+          // handle for exactly that, carrying the reason the retiring operation published.
+          if (plan.error?.category === "CONVERSATION_LOST") {
+            throw chatGptRetainedSurfaceLostError(plan.error.providerCode);
+          }
           throw plan.error ?? webChatError(
             "CONVERSATION_STATE_MISMATCH",
             "The WebChat Core refused continuity for this turn",

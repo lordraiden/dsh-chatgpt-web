@@ -785,14 +785,34 @@ same honest continuity error (`retained_surface_lost`, 409) with its reason expr
 housekeeping turn is deliberately **not** part of the rule: this build has no reliable marker for one, so
 no failure is classified by prompt text.
 
-That rule owns the *physical surface* only. A failed turn still leaves its durable continuity record
+That rule owns the *physical surface* only. A failed turn also leaves its durable continuity record
 unconfirmed, so in an established conversation (one whose initialization is installed) the WebChat Core
-keeps refusing a plain continuation — "the last attempt on this conversation was never confirmed; the
-provider must reconcile it before it can be resumed" (`src/web-chat/core/continuation.ts`, issue #190).
-That is the core's own reconciliation demand, not a surface loss, and satisfying it honestly needs the
-structural inspection of the retained conversation (does it actually hold the reply?) that stage 3 of
-the same plan owns: adopting the conversation merely because its page is alive would be the inference
-the no-silent-fork contract forbids.
+refuses a plain continuation — "the last attempt on this conversation was never confirmed; the provider
+must reconcile it before it can be resumed" (`src/web-chat/core/continuation.ts`, issue #190). That
+refusal is the core's own reconciliation demand, and it is satisfied by a **provider verdict**, never by
+inference.
+
+**Reconcile before resuming (issue #314 stage 3).** Where the core would otherwise refuse an
+unconfirmed attempt, it asks the driver once (`WebChatProviderDriver.reconcileConversation`,
+`src/web-chat/core/provider.ts`) for a verdict: the provider is the only owner of remote state, so only
+it can say whether that attempt left the conversation coherent. The verdict is a closed set of
+provider-neutral statuses (`reconciled`, `unprovable`, `lost`) plus a diagnosis; no provider fact
+crosses the boundary, and the core decides what each status *means*. A `reconciled` verdict re-confirms
+the record **exactly as it stands** — the handle, generation, installed initialization state and last
+confirmed turn are the recorded ones — so the next turn is an `exact_resume` and nothing is replayed,
+adopted or resent. `unprovable` keeps the honest refusal. `lost` becomes the core's own continuity loss,
+carrying the provider's code.
+
+The ChatGPT verdict is **structural** (`src/adapters/chatgpt-web/retained-coherence.ts`): the retained
+conversation's own turn identities, recorded when the failed attempt's send was activated
+(`RetainedSurfaceRegistry.recordAttempt`), are compared against what the page holds now. A reply that
+appeared and is finalized reconciles the attempt; a conversation that was never submitted to reconciles
+because nothing reached the provider; a page that is closed is proof of death and retires with
+`surface-dead`; anything else cannot be proven, so the surface is retired with `reconciliation-exhausted`
+rather than carried forever. The rule never compares the caller's text, never waits on a timer, and never
+treats "the page is alive" as coherence — a provider that cannot inspect a retained conversation (an
+injected harness, a launcher surface this process cannot read) reports `unprovable` and keeps the honest
+refusal instead of guessing.
 
 ### 9.4 Retry authority
 

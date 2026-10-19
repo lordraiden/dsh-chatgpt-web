@@ -1733,6 +1733,10 @@ export function createChatGptWebAdapter(
           // store is resolved here, at the point of use, from the effective configuration (#193), so a
           // chat's conversation survives across the turns of a session — and across a restart when the
           // deployment configured a durable location.
+          // The reconciliation probe is captured before the decision: it is a read of this
+          // deployment's retained surface (issue #314 stage 3), and a transport that cannot inspect
+          // one leaves the core's honest refusal in place instead of reconciling on a guess.
+          const retainedCoherence = transport.proveRetainedCoherence;
           webChatContinuity = createChatGptContinuity({
             provider,
             affinity: { providerId: CHATGPT_WEB_DRIVER_ID, bindingId: chatGptWebChatBindingIdFor(provider) },
@@ -1740,6 +1744,13 @@ export function createChatGptWebAdapter(
             binding: chatGptWebChatAccountBindingFor(provider),
             sessions: chatGptTurnSessions,
             store: resolveNativeChatGptContinuityStore(),
+            ...(typeof retainedCoherence === "function"
+              ? {
+                proveRetainedCoherence: (input: { readonly conversationKey: string }) => (
+                  retainedCoherence.call(transport, input.conversationKey)
+                ),
+              }
+              : {}),
           });
           const recovery = await webChatContinuity.resolveRecovery({
             parsed,

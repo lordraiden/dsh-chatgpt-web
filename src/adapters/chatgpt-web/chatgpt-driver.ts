@@ -28,6 +28,8 @@ import {
   type WebChatConversationAssessmentInput,
   type WebChatConversationCreateInput,
   type WebChatConversationHandle,
+  type WebChatConversationReconciliation,
+  type WebChatConversationReconciliationInput,
   type WebChatConversationReplayInput,
   type WebChatConversationResumeInput,
   type WebChatModelDescriptor,
@@ -37,6 +39,18 @@ import {
 import { chatGptWebAccountFingerprint, chatGptWebExecutionNamespace } from "./index";
 import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/provider-host";
 import { chatGptTurnSessions, type ChatGptTurnSessions } from "./turn-execution";
+import type { RetainedConversationReconciliation } from "./retained-coherence";
+
+/**
+ * The provider's structural reconciliation probe (issue #314 stage 3).
+ *
+ * The driver asks it one question about one retained conversation and receives a verdict. It takes
+ * provider *state* only — never a message, never the caller's text — so no caller text can reach the
+ * comparison that produces the verdict; the ChatGPT implementation is
+ * {@link ChatGptBrowserWorker.proveRetainedCoherence}, which reads the retained page structurally.
+ */
+export type ChatGptRetainedCoherenceProbe =
+  (input: { readonly conversationKey: string }) => Promise<RetainedConversationReconciliation>;
 
 /** What the driver reads from the provider, all of it provider-local state. */
 export interface ChatGptWebDriverOptions {
@@ -51,6 +65,14 @@ export interface ChatGptWebDriverOptions {
    * provider's own execution namespace.
    */
   readonly namespace?: string;
+  /**
+   * The provider's structural reconciliation probe (issue #314 stage 3).
+   *
+   * Without it the driver cannot reconcile an unconfirmed attempt and says so, which is exactly the
+   * honest refusal the WebChat Core already produced: a deployment that cannot inspect a retained
+   * conversation never resolves one by inference.
+   */
+  readonly proveRetainedCoherence?: ChatGptRetainedCoherenceProbe;
 }
 
 /** The opaque handle this provider records for one physical conversation. */
@@ -206,6 +228,43 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
         status: "replay_required",
         reason: "the physical ChatGPT conversation must be established from canonical host history",
       };
+    },
+
+    /**
+     * Reconcile an unconfirmed attempt (issue #314 stage 3).
+     *
+     * This provider's answer is entirely structural, and it is the probe's: the retained
+     * conversation is read only through {@link ChatGptRetainedCoherenceProbe}, which receives the
+     * conversation key — provider state — and never any caller text, and which itself compares the
+     * page's turn structure against the record of the attempt. The driver adds no second rule: it
+     * maps the probe's verdict onto the core's vocabulary. A deployment without a probe (a launcher
+     * surface this process cannot read, or an injected harness) reports `unprovable`, which keeps the
+     * core's honest refusal rather than reconciling on a guess.
+     */
+    async reconcileConversation(
+      input: WebChatConversationReconciliationInput,
+    ): Promise<WebChatConversationReconciliation> {
+      const probe = options.proveRetainedCoherence;
+      if (!probe) {
+        return {
+          status: "unprovable",
+          reason: "this deployment cannot inspect a retained ChatGPT Web conversation",
+        };
+      }
+      const verdict = await probe({ conversationKey: input.conversation.key });
+      switch (verdict.kind) {
+        case "reconciled":
+          return { status: "reconciled", reason: verdict.reason };
+        case "lost":
+          return {
+            status: "lost",
+            reason: verdict.reason
+              ?? "the retained ChatGPT Web conversation is gone",
+            ...(verdict.reason !== undefined ? { providerCode: verdict.reason } : {}),
+          };
+        default:
+          return { status: "unprovable", reason: verdict.reason };
+      }
     },
 
     async createConversation(input: WebChatConversationCreateInput): Promise<WebChatConversation> {

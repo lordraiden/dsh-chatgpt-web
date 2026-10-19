@@ -525,18 +525,21 @@ describe("issue #314 — the real route: a failed turn does not kill the caller'
   });
 
   /**
-   * The boundary of stage 2, stated rather than implied.
+   * The boundary, stated rather than implied.
    *
    * In an *established* conversation the provider's verdict is `resumable` (its initialization fingerprint
    * is installed), so the turn asks the WebChat Core to `continue` — and the core refuses, because the last
    * attempt on that conversation was never confirmed and "the provider must reconcile it before it can be
    * resumed" (#190). That refusal is a **core continuity** decision, taken before the retained surface is
    * ever touched: stage 2 removes the surface-level 409, but it does not make an unconfirmed conversation
-   * resumable again. Doing that honestly needs stage 3's structural inspection (does the conversation
-   * actually hold the reply?) — the surface merely being alive is not proof that its content is coherent,
-   * and adopting it on that basis would be the inference the plan forbids.
+   * resumable again.
+   *
+   * This fixture's transport offers **no reconciliation probe**, so this remains exactly what such a
+   * deployment sees: the core keeps the honest refusal and nothing guesses at coherence. Stage 3
+   * (`issue-314-failed-turn-reconciliation-stage3.test.ts`) is what a transport that *can* inspect its
+   * retained conversation proves instead — the reply the failed attempt left behind, structurally.
    */
-  test("stated boundary: a failed turn in an ESTABLISHED conversation is still refused by the core, not by the surface", async () => {
+  test("stated boundary: without a reconciliation probe, a failed turn in an ESTABLISHED conversation stays refused by the core", async () => {
     const fixture = new ManagedSurfaceFixture();
     fixture.enqueue({ answer: "uno" });
     fixture.enqueue({ error: new Error("provider failed after submission") });

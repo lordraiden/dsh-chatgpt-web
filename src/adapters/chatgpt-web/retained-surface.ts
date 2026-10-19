@@ -42,8 +42,21 @@
  * to a resume turn, so a submission the provider confirmed is never repeated and a replacement
  * conversation is never created to stand in for the old one.
  *
+ * ## The attempt record (issue #314 stage 3)
+ *
+ * Marking a conversation is not enough to resume it: the WebChat Core refuses a plain continuation
+ * while the durable record's last attempt is unconfirmed, and only the provider can prove what that
+ * attempt left behind. The registry therefore also carries the **attempt record**: the provider's own
+ * structural snapshot of the conversation when the last attempt's send was activated
+ * ({@link RetainedSurfaceRegistry.recordAttempt}). It is provider-opaque — the registry stores it and
+ * never interprets it, exactly as it stores a page without interpreting a conversation — and it is
+ * what the provider's reconciliation probe reads back to decide whether the retained conversation
+ * still holds the attempt's reply. The registry owns only its lifetime: a new attempt invalidates the
+ * previous record (the acquire that starts it), and it dies with the entry that carries it.
+ *
  * The registry is generic over the concrete page type so callers keep their
- * full page capability (e.g. Playwright `Page`) without a widening cast.
+ * full page capability (e.g. Playwright `Page`) without a widening cast, and over the attempt record
+ * so a provider keeps its own structural type without a cast or an untyped payload.
  */
 import { createHash } from "node:crypto";
 
@@ -239,7 +252,7 @@ function retainedSurfaceDigest(conversationKey: string): string {
   return createHash("sha256").update(conversationKey).digest("hex").slice(0, 12);
 }
 
-interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
+interface RetainedSurfaceEntry<P extends RetainedSurfacePage, R> {
   page: P;
   busy: boolean;
   /**
@@ -265,10 +278,23 @@ interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
    * does, at the acquire that would carry it beyond the bound.
    */
   reconciliation?: { attempts: number };
+  /**
+   * The provider's structural record of the last attempt that was submitted through this surface
+   * (issue #314 stage 3).
+   *
+   * Provider-opaque: written by the provider turn when the attempt's send is activated and read back
+   * by the provider's reconciliation probe. It never holds a message: it is what the conversation
+   * *held* (its structural state), not what was said. The registry owns only its lifetime — a new
+   * attempt clears it ({@link RetainedSurfaceRegistry.acquire}), and it goes with the entry.
+   */
+  attempt?: R;
 }
 
-export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSurfacePage> {
-  private readonly surfaces = new Map<string, RetainedSurfaceEntry<P>>();
+export class RetainedSurfaceRegistry<
+  P extends RetainedSurfacePage = RetainedSurfacePage,
+  R = unknown,
+> {
+  private readonly surfaces = new Map<string, RetainedSurfaceEntry<P, R>>();
   private readonly maxSurfaces: number;
   private readonly idleTimeoutMs: number;
   private readonly maxReconciliationAttempts: number;
@@ -336,6 +362,40 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
   }
 
   /**
+   * Record the provider's structural snapshot of the attempt that is being submitted through this
+   * surface (issue #314 stage 3).
+   *
+   * The payload is provider-opaque and never holds a message: it is what the conversation *held*
+   * when the attempt's send was activated, which is what lets the provider's reconciliation probe
+   * decide, structurally, whether the attempt's reply is present. The write is a no-op for a key with
+   * no retained surface, and {@link acquire} clears the record when the next attempt starts.
+   */
+  recordAttempt(conversationKey: string, record: R): void {
+    const entry = this.surfaces.get(conversationKey);
+    if (entry) entry.attempt = record;
+  }
+
+  /** The recorded attempt of this conversation, when one was submitted through it. */
+  attemptRecord(conversationKey: string): R | undefined {
+    return this.surfaces.get(conversationKey)?.attempt;
+  }
+
+  /**
+   * The retained page for one read-only inspection (issue #314 stage 3), or `undefined` when it must
+   * not be read: the key is not retained, a turn holds it, its settlement is unpublished, or the page
+   * is closed.
+   *
+   * This never acquires, settles or retires anything. A caller that needs proof about a conversation
+   * reads it through here so that reading a page another turn owns — or a page whose operation may
+   * still produce output — is impossible by construction.
+   */
+  inspectablePage(conversationKey: string): P | undefined {
+    const entry = this.surfaces.get(conversationKey);
+    if (!entry || entry.busy || !entry.settled) return undefined;
+    return entry.page.isClosed() ? undefined : entry.page;
+  }
+
+  /**
    * Explicit recovery action for a lost key: continuity may start again. The
    * only way to clear a tombstone; there is no implicit fallback.
    */
@@ -386,6 +446,11 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
         throw new RetainedSurfaceLostError(conversationKey, "reconciliation-exhausted");
       }
       if (reconciliation) reconciliation.attempts += 1;
+      // This acquire is the next attempt of the conversation, so the previous attempt's structural
+      // record no longer describes the last submission: it is cleared here, before the new attempt
+      // takes the page (issue #314 stage 3). A conversation whose surface was reused without a new
+      // activation therefore has no record, which is exactly "nothing was submitted since".
+      delete existing.attempt;
       existing.busy = true;
       this.touch(conversationKey, existing);
       return { page: existing.page, created: false, reconciling: reconciliation !== undefined };
@@ -456,15 +521,21 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
    * back); `unreconciled` is the failed-turn settlement (issue #314): the operation is over, so the
    * surface is reusable, but the conversation's remote outcome is unknown and it becomes observable as
    * needing reconciliation instead of being retired. No settlement path resends anything.
+   *
+   * `reason` names why a `rejected` settlement declared the loss, when the operation that decided it
+   * can express one (issue #314): the page is physically gone, or the bounded reconciliation could not
+   * prove the conversation. It is published on the error the caller receives at that moment; the
+   * tombstone itself still records only that continuity is broken.
    */
   settle(
     conversationKey: string,
     outcome: RetainedSurfaceSettlementOutcome = "fulfilled",
+    reason?: RetainedSurfaceLossReason,
   ): void {
     const entry = this.surfaces.get(conversationKey);
     if (!entry) return;
     if (outcome === "rejected") {
-      this.retireWithLoss(conversationKey, entry, undefined);
+      this.retireWithLoss(conversationKey, entry, reason);
       return;
     }
     if (outcome === "unreconciled") {
@@ -573,7 +644,7 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
    */
   private retireWithLoss(
     conversationKey: string,
-    entry: RetainedSurfaceEntry<P>,
+    entry: RetainedSurfaceEntry<P, R>,
     reason: RetainedSurfaceLossReason | undefined,
   ): void {
     this.surfaces.delete(conversationKey);
@@ -587,7 +658,7 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
   }
 
   /** Move a key to the back of the LRU order (the Map's insertion order). */
-  private touch(conversationKey: string, entry: RetainedSurfaceEntry<P>): void {
+  private touch(conversationKey: string, entry: RetainedSurfaceEntry<P, R>): void {
     entry.lastUsedAt = this.now();
     this.surfaces.delete(conversationKey);
     this.surfaces.set(conversationKey, entry);
