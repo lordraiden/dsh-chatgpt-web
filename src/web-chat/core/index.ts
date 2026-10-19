@@ -31,19 +31,23 @@ export {
 } from "./errors";
 
 export {
+  AUTH_FRAME_MIME_TYPES,
   AUTH_SESSION_STATES,
   isAuthCapture,
+  isAuthFrameMimeType,
   isAuthInput,
   isAuthSessionState,
   isProviderAuthView,
   type AuthCapture,
   type AuthDragPoint,
+  type AuthFrameMimeType,
   type AuthInput,
   type AuthSessionState,
   type ProviderAuthController,
   type ProviderAuthSession,
   type ProviderAuthStoreResult,
   type ProviderAuthView,
+  type ProviderAuthViewOptions,
 } from "./auth";
 
 export {

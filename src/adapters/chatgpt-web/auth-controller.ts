@@ -55,6 +55,11 @@ import { sanitizeBrowserLoginStorageState, storeProviderSession } from "../../br
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import type { ChatGptWebAccountCapabilities } from "../../chatgpt-web-models";
 import {
+  AUTH_POINTER_GESTURE_TIMEOUT_MS,
+  createAuthPointerGesture,
+  type AuthPointerGesture,
+} from "../auth-pointer-gesture";
+import {
   isWebChatError,
   webChatError,
   type AuthCapture,
@@ -64,6 +69,7 @@ import {
   type ProviderAuthSession,
   type ProviderAuthStoreResult,
   type ProviderAuthView,
+  type ProviderAuthViewOptions,
 } from "../../web-chat/core";
 
 /**
@@ -213,6 +219,8 @@ export interface ChatGptWebAuthControllerOptions {
   readonly viewport?: ChatGptWebAuthViewport;
   /** Poll cadence while the operator works. Defaults to {@link CHATGPT_WEB_AUTH_POLL_INTERVAL_MS}. */
   readonly pollIntervalMs?: number;
+  /** How long a live pointer gesture may go silent before its button is released. Default 10 s. */
+  readonly gestureTimeoutMs?: number;
   /** How long a sign-in may take before it reports `failed`. Default 8 minutes. */
   readonly pollTimeoutMs?: number;
   /** Optional hard cap on polling attempts, independent of the time bound. */
@@ -384,6 +392,7 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
   #state: AuthSessionState = "starting";
   #failureDetail: string | undefined;
   #page: Page | undefined;
+  #pointer: AuthPointerGesture | undefined;
   #handle: ChatGptWebAuthBrowserHandle | undefined;
   #profileDir: string | undefined;
   #storageState: unknown;
@@ -400,6 +409,11 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
     this.#handle = handle;
     this.#page = handle.page;
     this.#profileDir = profileDir;
+    this.#pointer = createAuthPointerGesture({
+      move: (x, y) => handle.page.mouse.move(x, y),
+      down: () => handle.page.mouse.down(),
+      up: () => handle.page.mouse.up(),
+    }, { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID, timeoutMs: this.owner.gestureTimeoutMs });
     this.#deadline = this.owner.now() + this.owner.pollTimeoutMs;
     this.#state = "awaiting_input";
     void this.#poll();
@@ -413,9 +427,15 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
     return this.#failureDetail;
   }
 
-  async view(): Promise<ProviderAuthView> {
+  async view(options?: ProviderAuthViewOptions): Promise<ProviderAuthView> {
     const page = this.#livePage("relay a frame");
     const size = this.#viewportOf(page);
+    if (options?.quality === "fast") {
+      // A live drag is watched, not read: a low-quality JPEG costs a fraction of the PNG to encode.
+      // The idle frame keeps the lossless PNG, which is what an operator reads a code or error in.
+      const jpeg = await page.screenshot({ type: "jpeg", quality: 55, caret: "initial" });
+      return { png: jpeg, width: size.width, height: size.height, mimeType: "image/jpeg" };
+    }
     // `caret: "initial"` is load-bearing, not cosmetic: Playwright hides the blinking text caret in
     // screenshots by default ("hide"), which removed the operator's only visual confirmation that a
     // click had focused a field — the report that started this fix read as "the click is broken". With
@@ -520,6 +540,38 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
         }
         return;
       }
+      case "pointer-down":
+      case "pointer-move":
+      case "pointer-up": {
+        const size = this.#viewportOf(page);
+        if (!Number.isFinite(event.x) || !Number.isFinite(event.y)
+          || event.x < 0 || event.y < 0 || event.x >= size.width || event.y >= size.height) {
+          // Never clamp a sample: a clamped path is a different gesture than the one drawn.
+          throw webChatError(
+            "UNSUPPORTED_OPTION",
+            `The sign-in pointer (${event.x}, ${event.y}) is outside the `
+            + `${size.width}x${size.height} viewport`,
+            { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID, providerCode: "AUTH_POINTER_OUT_OF_VIEWPORT" },
+          );
+        }
+        // The gesture owns the pressed button across requests: press on `pointer-down`, apply each
+        // real `pointer-move` on arrival, and move to the exact release on `pointer-up`. Any failure
+        // lifts the button before it is reported, so a dead page cannot leave the mouse held down.
+        const pointer = this.#livePointer();
+        try {
+          if (event.type === "pointer-down") await pointer.down(event.x, event.y);
+          else if (event.type === "pointer-move") await pointer.move(event.x, event.y);
+          else await pointer.up(event.x, event.y);
+        } catch (error) {
+          await pointer.release();
+          throw error;
+        }
+        return;
+      }
+      case "pointer-cancel":
+        // A cancelled gesture lifts where the pointer is; it never invents a release coordinate.
+        await this.#livePointer().cancel();
+        return;
       case "type":
         await page.keyboard.type(event.text);
         return;
@@ -550,7 +602,7 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
         }
         return;
       default:
-        throw new TypeError("A WebChat auth input must be one of click, drag, type, key, scroll or navigate");
+        throw new TypeError("A WebChat auth input must be one of click, drag, pointer-down, pointer-move, pointer-up, pointer-cancel, type, key, scroll or navigate");
     }
   }
 
@@ -612,10 +664,22 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
       this.#settled = true;
       const handle = this.#handle;
       const profileDir = this.#profileDir;
+      const pointer = this.#pointer;
       this.#page = undefined;
       this.#handle = undefined;
       this.#profileDir = undefined;
+      this.#pointer = undefined;
       this.#teardownRun = (async () => {
+        // Capture, timeout, cancellation and failure all pass through here: a gesture still open is
+        // released before the browser closes, so no exit path can leave the provider's button down.
+        // A closed gesture has nothing to lift, and waiting on it would only delay the teardown.
+        if (pointer) {
+          if (pointer.pressed()) {
+            try { await pointer.dispose(); } catch { /* the teardown below still runs */ }
+          } else {
+            void pointer.dispose();
+          }
+        }
         if (handle) {
           try { await handle.close(); } catch { /* the profile removal below still runs */ }
         }
@@ -650,6 +714,18 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
     const size = page.viewportSize();
     if (size && size.width > 0 && size.height > 0) return { width: size.width, height: size.height };
     return this.owner.viewport;
+  }
+
+  /** The one gesture helper, or a typed refusal if this session somehow has no live page. */
+  #livePointer(): AuthPointerGesture {
+    if (!this.#pointer) {
+      throw webChatError(
+        "TRANSPORT_UNAVAILABLE",
+        `The ${CHATGPT_WEB_AUTH_PROVIDER_ID} sign-in browser is closed and cannot relay a pointer gesture`,
+        { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID },
+      );
+    }
+    return this.#pointer;
   }
 
   /**
@@ -743,6 +819,7 @@ interface ChatGptWebAuthControllerOwner {
   readonly pollTimeoutMs: number;
   readonly maxPolls: number;
   readonly navigationTimeoutMs: number;
+  readonly gestureTimeoutMs: number;
   readonly removeProfile: (dir: string) => void;
   readonly inspectSurface: ChatGptWebAuthSurfaceInspector;
   storageState(handle: ChatGptWebAuthBrowserHandle): Promise<unknown>;
@@ -789,6 +866,10 @@ export function createChatGptWebAuthController(
   const navigationTimeoutMs = positiveInteger(
     options.navigationTimeoutMs ?? CHATGPT_WEB_AUTH_NAVIGATION_TIMEOUT_MS,
     "navigation timeout",
+  );
+  const gestureTimeoutMs = positiveInteger(
+    options.gestureTimeoutMs ?? AUTH_POINTER_GESTURE_TIMEOUT_MS,
+    "pointer gesture timeout",
   );
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
@@ -882,6 +963,7 @@ export function createChatGptWebAuthController(
     pollTimeoutMs,
     maxPolls,
     navigationTimeoutMs,
+    gestureTimeoutMs,
     removeProfile,
     inspectSurface,
     async storageState(handle) {

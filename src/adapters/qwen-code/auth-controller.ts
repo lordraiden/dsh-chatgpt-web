@@ -37,6 +37,11 @@ import { chromium, type Page } from "playwright-core";
 import { providerCredentialsDir, type AppConfig } from "../../config";
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import {
+  AUTH_POINTER_GESTURE_TIMEOUT_MS,
+  createAuthPointerGesture,
+  type AuthPointerGesture,
+} from "../auth-pointer-gesture";
+import {
   isWebChatError,
   webChatError,
   type AuthCapture,
@@ -46,6 +51,7 @@ import {
   type ProviderAuthSession,
   type ProviderAuthStoreResult,
   type ProviderAuthView,
+  type ProviderAuthViewOptions,
 } from "../../web-chat/core";
 import {
   QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
@@ -148,6 +154,8 @@ export interface QwenCodeAuthControllerOptions {
   readonly viewport?: QwenCodeAuthViewport;
   /** Poll cadence while the operator works. Defaults to {@link QWEN_CODE_AUTH_POLL_INTERVAL_MS}. */
   readonly pollIntervalMs?: number;
+  /** How long a live pointer gesture may go silent before its button is released. Default 10 s. */
+  readonly gestureTimeoutMs?: number;
   /** How long a sign-in may take before it reports `failed`. Default 8 minutes. */
   readonly pollTimeoutMs?: number;
   /** Optional hard cap on polling attempts, independent of the time bound. */
@@ -315,6 +323,7 @@ interface QwenCodeAuthControllerOwner {
   readonly pollTimeoutMs: number;
   readonly maxPolls: number;
   readonly navigationTimeoutMs: number;
+  readonly gestureTimeoutMs: number;
   readonly removeProfile: (dir: string) => void;
   readonly probeSession: QwenCodeSessionProbe;
   storageState(handle: QwenCodeAuthBrowserHandle): Promise<unknown>;
@@ -329,6 +338,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
   #state: AuthSessionState = "starting";
   #failureDetail: string | undefined;
   #page: Page | undefined;
+  #pointer: AuthPointerGesture | undefined;
   #handle: QwenCodeAuthBrowserHandle | undefined;
   #profileDir: string | undefined;
   #storageState: unknown;
@@ -346,6 +356,11 @@ class QwenCodeAuthSession implements ProviderAuthSession {
     this.#handle = handle;
     this.#page = handle.page;
     this.#profileDir = profileDir;
+    this.#pointer = createAuthPointerGesture({
+      move: (x, y) => handle.page.mouse.move(x, y),
+      down: () => handle.page.mouse.down(),
+      up: () => handle.page.mouse.up(),
+    }, { providerId: QWEN_CODE_PROVIDER_ID, timeoutMs: this.owner.gestureTimeoutMs });
     this.#deadline = this.owner.now() + this.owner.pollTimeoutMs;
     this.#state = "awaiting_input";
     void this.#poll();
@@ -359,9 +374,16 @@ class QwenCodeAuthSession implements ProviderAuthSession {
     return this.#failureDetail;
   }
 
-  async view(): Promise<ProviderAuthView> {
+  async view(options?: ProviderAuthViewOptions): Promise<ProviderAuthView> {
     const page = this.#livePage("relay a frame");
     const size = this.#viewportOf(page);
+    if (options?.quality === "fast") {
+      // A live drag is watched, not read: a JPEG at low quality costs a fraction of the PNG to encode,
+      // which is what makes 10-15 frames per second affordable. The idle frame stays lossless — the
+      // sign-in page is also where the operator reads a one-time code or an error message.
+      const jpeg = await page.screenshot({ type: "jpeg", quality: 55, caret: "initial" });
+      return { png: jpeg, width: size.width, height: size.height, mimeType: "image/jpeg" };
+    }
     // `caret: "initial"` keeps the focused-field caret visible in the relayed pixels, exactly like the
     // ChatGPT sign-in: without it the operator cannot tell that a click focused the email field.
     const png = await page.screenshot({ type: "png", caret: "initial" });
@@ -461,6 +483,40 @@ class QwenCodeAuthSession implements ProviderAuthSession {
         }
         return;
       }
+      case "pointer-down":
+      case "pointer-move":
+      case "pointer-up": {
+        const size = this.#viewportOf(page);
+        if (!Number.isFinite(event.x) || !Number.isFinite(event.y)
+          || event.x < 0 || event.y < 0 || event.x >= size.width || event.y >= size.height) {
+          // Never clamp a sample: a clamped path is a different gesture than the one drawn.
+          throw webChatError(
+            "UNSUPPORTED_OPTION",
+            `The sign-in pointer (${event.x}, ${event.y}) is outside the `
+            + `${size.width}x${size.height} viewport`,
+            { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_POINTER_OUT_OF_VIEWPORT" },
+          );
+        }
+        // The gesture owns the pressed button across requests: `down` presses, each `move` is one
+        // real sample applied on arrival, and `up` moves to the exact release and lifts. A move or
+        // release with no open gesture is the helper's typed refusal. Any failure lifts the button
+        // before it is reported, so a dead page can never leave the provider's mouse held down.
+        const pointer = this.#livePointer();
+        try {
+          if (event.type === "pointer-down") await pointer.down(event.x, event.y);
+          else if (event.type === "pointer-move") await pointer.move(event.x, event.y);
+          else await pointer.up(event.x, event.y);
+        } catch (error) {
+          await pointer.release();
+          throw error;
+        }
+        return;
+      }
+      case "pointer-cancel":
+        // A cancelled gesture (pointercancel, a lost capture) lifts where the pointer is; it never
+        // pretends a release happened at a position the operator did not choose.
+        await this.#livePointer().cancel();
+        return;
       case "type":
         await page.keyboard.type(event.text);
         return;
@@ -489,7 +545,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
         }
         return;
       default:
-        throw new TypeError("A WebChat auth input must be one of click, drag, type, key, scroll or navigate");
+        throw new TypeError("A WebChat auth input must be one of click, drag, pointer-down, pointer-move, pointer-up, pointer-cancel, type, key, scroll or navigate");
     }
   }
 
@@ -543,10 +599,22 @@ class QwenCodeAuthSession implements ProviderAuthSession {
       this.#settled = true;
       const handle = this.#handle;
       const profileDir = this.#profileDir;
+      const pointer = this.#pointer;
       this.#page = undefined;
       this.#handle = undefined;
       this.#profileDir = undefined;
+      this.#pointer = undefined;
       this.#teardownRun = (async () => {
+        // A gesture that was still open is released before the browser is closed: capture, timeout,
+        // cancellation and failure all pass through here, so no exit path can leave the button down.
+        // A closed gesture has nothing to lift, and waiting on it would only delay the teardown.
+        if (pointer) {
+          if (pointer.pressed()) {
+            try { await pointer.dispose(); } catch { /* the teardown below still runs */ }
+          } else {
+            void pointer.dispose();
+          }
+        }
         if (handle) {
           try { await handle.close(); } catch { /* the profile removal below still runs */ }
         }
@@ -581,6 +649,18 @@ class QwenCodeAuthSession implements ProviderAuthSession {
     const size = page.viewportSize();
     if (size && size.width > 0 && size.height > 0) return { width: size.width, height: size.height };
     return this.owner.viewport;
+  }
+
+  /** The one gesture helper, or a typed refusal if this session somehow has no live page. */
+  #livePointer(): AuthPointerGesture {
+    if (!this.#pointer) {
+      throw webChatError(
+        "TRANSPORT_UNAVAILABLE",
+        `The ${QWEN_CODE_PROVIDER_ID} sign-in browser is closed and cannot relay a pointer gesture`,
+        { providerId: QWEN_CODE_PROVIDER_ID },
+      );
+    }
+    return this.#pointer;
   }
 
   /**
@@ -684,6 +764,10 @@ export function createQwenCodeAuthController(
     options.navigationTimeoutMs ?? QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
     "navigation timeout",
   );
+  const gestureTimeoutMs = positiveInteger(
+    options.gestureTimeoutMs ?? AUTH_POINTER_GESTURE_TIMEOUT_MS,
+    "pointer gesture timeout",
+  );
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
   const fileExists = options.fileExists ?? existsSync;
@@ -709,6 +793,7 @@ export function createQwenCodeAuthController(
     pollTimeoutMs,
     maxPolls,
     navigationTimeoutMs,
+    gestureTimeoutMs,
     removeProfile,
     probeSession,
     async storageState(handle) {

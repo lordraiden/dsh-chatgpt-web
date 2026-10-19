@@ -98,16 +98,26 @@ in [`src/web-chat/core/auth.ts`](../src/web-chat/core/auth.ts). This is optional
 - Session: `providerId`, `state(): AuthSessionState`, optional `detail()`, `view()`, `input(event)`,
   `capture()`, `cancel()`.
 - The state vocabulary is exactly `starting | awaiting_input | verifying | captured | failed | expired`.
-- `AuthInput` is exactly `click | drag | type | key | scroll | navigate` — intents, not browser commands.
-  A `drag` is an ordered path of sampled points (`{x, y, atMs}[]`, press first, release last) in the
-  same coordinate space as a `click`, so a slider-style verification is expressed as the gesture the
-  operator made rather than as a synthetic straight line. The page may sample coarsely (it publishes
-  its interval and sample cap; a long gesture is thinned, never interpolated), the press and release
-  are the mapped `pointerdown`/`pointerup`, and a controller replays the offsets against the press's
-  clock within a bounded pacing budget rather than sleeping every delta again.
+- `AuthInput` is exactly `click | drag | pointer-down | pointer-move | pointer-up | pointer-cancel |
+  type | key | scroll | navigate` — intents, not browser commands. A slider-style verification is
+  relayed **live**, not as a batch the operator only sees after letting go:
+  `pointer-down` presses at its coordinate, each `pointer-move` is applied on arrival, `pointer-up`
+  moves to the exact mapped `pointerup` and lifts, and `pointer-cancel` lifts without inventing a
+  release. The session owns the open-gesture state between those requests; a move or release with no
+  open gesture is a typed `CONVERSATION_STATE_MISMATCH`, and a gesture left open is lifted by the
+  session's safety timeout, its cancellation or its teardown — the provider's mouse button is never
+  left down. Every sample is a position the browser reported (the page publishes its throttle
+  interval); nothing is interpolated, and the release is never the last throttled move. A one-shot
+  `drag` (`{x, y, atMs}[]`, press first, release last) remains in the contract for a client that can
+  only send a completed path, and a controller replays it within a bounded pacing budget; the
+  operator page itself always uses the live intents.
 - `view()` is **optional in practice**: the host must accept a provider that reaches `captured`
   without ever producing a frame (device code, OTP, API-key paste). A frame failure is never a session
-  failure.
+  failure. `view({quality:"fast"})` asks for a cheaper burst frame (a browser provider answers with a
+  low-quality JPEG and reports `mimeType`); the idle call keeps the provider's normal lossless frame.
+  The relay's idle cadence is 400 ms and its live-gesture cadence targets 80 ms (12.5 fps); each
+  stream event carries the frame's `frameAgeMs` and the last applied `release` coordinate, so the page
+  can say when the picture predates the operator's release instead of leaving the offset a mystery.
 - The captured material (`AuthCapture`) is opaque: `{kind:"browser-storage"}`, `{kind:"opaque"}` or
   `{kind:"none"}`. The host validates the envelope and never reads inside it.
 - `providerId` must be the catalogue/driver id — the ChatGPT controller asserts

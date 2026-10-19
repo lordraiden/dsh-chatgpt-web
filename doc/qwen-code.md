@@ -47,6 +47,19 @@ No synthetic motion, no stealth and no UA change were added, and **no one has so
 yet**: whether the provider's risk engine accepts a relayed human drag is exactly what a live attempt
 must still establish. See `doc/provider-onboarding.md` §1.3 for the contract shape.
 
+**Correction, later the same day, from the next real operator attempt.** The batched `drag` above was
+still wrong in a way the coordinate fix could not reach: the page accumulated the whole path and sent
+it at the release, so the remote browser only *started* moving the piece when the operator had already
+finished — slower frames could not fix that, and the operator reported "the image does not move with
+my mouse; when I let go it moves after a few seconds". The neutral contract gained a **live** gesture
+(`pointer-down` / `pointer-move` / `pointer-up` / `pointer-cancel`): the page sends each sample as it
+observes it, the controller presses on the first, applies one `mouse.move` per arriving sample and
+releases at the exact mapped `pointerup`, and the session owns the held button between requests with a
+safety timeout, cancellation and teardown release. The settled frame is forced after the release, the
+relay bursts at 12.5 fps (with cheap JPEG frames) while the gesture is live, and the page draws the
+operator's own pointer locally and publishes the frame's age. This removes the *application* delay;
+whether the provider accepts the relayed gesture is still the live question.
+
 What this measurement does **not** prove, and what remains for the operator: that entering real
 credentials — and clearing the slider if it appears — in that headless flow completes and the resulting
 session captures successfully. That needs an account; the exact command is in §5.

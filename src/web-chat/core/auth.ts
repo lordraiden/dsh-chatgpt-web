@@ -63,24 +63,56 @@ export interface AuthDragPoint {
  * own frame geometry, and `navigate` is a request the provider may honour, refuse or translate. The
  * host never inspects or rewrites them beyond relaying the recognized shape.
  *
- * `drag` is the pressed-pointer gesture a click cannot express (a slider or puzzle verification, for
+ * `drag` is a pressed-pointer gesture sent as one ordered path (a slider or puzzle verification, for
  * instance). Its `points` *are* the gesture: the first entry is the press, the last is the release,
  * and the ordered samples in between are the path the operator drew. A straight line between two
  * endpoints is a different input, so interpolated or synthetic motion cannot be expressed here by
  * construction.
+ *
+ * `pointer-down` / `pointer-move` / `pointer-up` / `pointer-cancel` are the **live** form of the same
+ * gesture, split across requests because a slider must follow the hand *while* it moves, not after the
+ * operator let go. The session owns the open-gesture state between those requests: `pointer-down`
+ * presses at its coordinate, each `pointer-move` is applied on arrival, `pointer-up` moves to the
+ * exact release and lifts, and `pointer-cancel` lifts without pretending a release happened. A move
+ * or release with no open gesture is refused, and a gesture left open is released by the session's
+ * own safety timeout, cancellation or terminal transition — never left holding the provider's mouse
+ * button down. The provider still sees only real samples: there is no interpolation, no synthetic
+ * path and no motion generator here.
  */
 export type AuthInput =
   | { type: "click"; x: number; y: number }
   | { type: "drag"; points: readonly AuthDragPoint[] }
+  | { type: "pointer-down"; x: number; y: number }
+  | { type: "pointer-move"; x: number; y: number }
+  | { type: "pointer-up"; x: number; y: number }
+  | { type: "pointer-cancel" }
   | { type: "type"; text: string }
   | { type: "key"; key: string }
   | { type: "scroll"; dy: number }
   | { type: "navigate"; url: string };
 
 /**
+ * The image encodings a relayed frame may use.
+ *
+ * `image/png` is the idle frame: lossless, so the operator can read the provider's text. `image/jpeg`
+ * is the burst frame: the same pixels at a much lower encoding cost, which is what makes a live drag
+ * possible. The host relays the reported type to the page and never decodes the bytes either way.
+ */
+export type AuthFrameMimeType = "image/png" | "image/jpeg";
+
+/** Every frame encoding, for exhaustive checks and diagnostics. */
+export const AUTH_FRAME_MIME_TYPES: readonly AuthFrameMimeType[] = ["image/png", "image/jpeg"];
+
+/** Whether a value names one of the relayable frame encodings. */
+export function isAuthFrameMimeType(value: unknown): value is AuthFrameMimeType {
+  return typeof value === "string" && (AUTH_FRAME_MIME_TYPES as readonly string[]).includes(value);
+}
+
+/**
  * One relayed frame.
  *
- * `png` is opaque bytes: the host relays them byte-for-byte and never decodes them. `width` and
+ * `png` is opaque bytes: the host relays them byte-for-byte and never decodes them. (The field name is
+ * historical — the encoding is `mimeType`, and it is PNG only when `mimeType` is absent.) `width` and
  * `height` exist so the page can map a click into the frame's coordinate space without the host
  * knowing how the frame was produced.
  */
@@ -88,6 +120,20 @@ export interface ProviderAuthView {
   png: Uint8Array;
   width: number;
   height: number;
+  /** The bytes' image encoding. Absent means `image/png`, which is what every provider always sent. */
+  mimeType?: AuthFrameMimeType;
+}
+
+/**
+ * A hint about how much the frame is worth encoding.
+ *
+ * `"fast"` asks for the cheapest frame the provider can produce — lower-quality encoding and, if the
+ * provider can do it, less image to encode — because it is being streamed during a live gesture. An
+ * absent `quality` is the idle frame and must keep the provider's normal lossless output: the sign-in
+ * page is also where an operator reads a one-time code.
+ */
+export interface ProviderAuthViewOptions {
+  readonly quality?: "fast";
 }
 
 /**
@@ -148,9 +194,11 @@ export interface ProviderAuthSession {
    * The current frame.
    *
    * A provider without a browser returns a static instruction image here; a provider whose sign-in
-   * needs no pixels may reject this call, which is why nothing in the manager requires a frame.
+   * needs no pixels may reject this call, which is why nothing in the manager requires a frame. A
+   * provider may honour {@link ProviderAuthViewOptions.quality} to make a burst frame cheaper; a
+   * provider that ignores the hint still serves a correct, if costlier, frame.
    */
-  view(): Promise<ProviderAuthView>;
+  view(options?: ProviderAuthViewOptions): Promise<ProviderAuthView>;
   /** Relay one operator input. The provider decides what it means. */
   input(event: AuthInput): Promise<void>;
   /**
@@ -230,19 +278,26 @@ function isAuthDragPath(value: unknown): value is readonly AuthDragPoint[] {
 }
 
 /**
- * Whether a value is one of the six relayable input events.
+ * Whether a value is one of the relayable input events.
  *
  * Structural and strict about the recognized shape: an unknown `type`, a missing field, a
  * non-finite coordinate, an empty string or a drag path that is not an ordered run of finite
  * samples is refused, so a malformed page event fails at the relay instead of reaching a provider as
- * half an instruction.
+ * half an instruction. The live pointer events are validated like `click`: a press, a move and a
+ * release each name one finite coordinate, and a cancel names nothing.
  */
 export function isAuthInput(value: unknown): value is AuthInput {
   if (!value || typeof value !== "object") return false;
   const event = value as { type?: unknown; [key: string]: unknown };
   switch (event.type) {
     case "click":
+    case "pointer-down":
+    case "pointer-move":
+    case "pointer-up":
       return Number.isFinite(event.x) && Number.isFinite(event.y);
+    case "pointer-cancel":
+      // A cancel carries no coordinate: it is the lift itself, not a release at a position.
+      return true;
     case "drag":
       return isAuthDragPath(event.points);
     case "type":
@@ -261,11 +316,12 @@ export function isAuthInput(value: unknown): value is AuthInput {
 /** Whether a value is a well-formed relayable frame. */
 export function isProviderAuthView(value: unknown): value is ProviderAuthView {
   if (!value || typeof value !== "object") return false;
-  const frame = value as { png?: unknown; width?: unknown; height?: unknown };
+  const frame = value as { png?: unknown; width?: unknown; height?: unknown; mimeType?: unknown };
   return frame.png instanceof Uint8Array
     && frame.png.length > 0
     && Number.isSafeInteger(frame.width) && (frame.width as number) > 0
-    && Number.isSafeInteger(frame.height) && (frame.height as number) > 0;
+    && Number.isSafeInteger(frame.height) && (frame.height as number) > 0
+    && (frame.mimeType === undefined || isAuthFrameMimeType(frame.mimeType));
 }
 
 /**

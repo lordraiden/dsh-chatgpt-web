@@ -177,6 +177,24 @@ describe("issue #276 — the auth vocabulary is pinned and total", () => {
     expect(isAuthInput("click")).toBe(false);
   });
 
+  test("the live pointer intents are relayable and each is strict", () => {
+    expect(isAuthInput({ type: "pointer-down", x: 3, y: 4 })).toBe(true);
+    expect(isAuthInput({ type: "pointer-move", x: 3.5, y: 4.25 })).toBe(true);
+    expect(isAuthInput({ type: "pointer-up", x: 9, y: 20 })).toBe(true);
+    expect(isAuthInput({ type: "pointer-cancel" })).toBe(true);
+    // A coordinate intent without its coordinate or with a non-finite coordinate is refused. A cancel
+    // names nothing; like every other intent, the recognised shape is what is validated.
+    expect(isAuthInput({ type: "pointer-down", x: 1 })).toBe(false);
+    expect(isAuthInput({ type: "pointer-move", x: Number.NaN, y: 1 })).toBe(false);
+    expect(isAuthInput({ type: "pointer-up", y: 1 })).toBe(false);
+  });
+
+  test("a frame may report a burst encoding, and only a recognized one", () => {
+    expect(isProviderAuthView({ png: ONE_BY_ONE_PNG, width: 1, height: 1, mimeType: "image/jpeg" })).toBe(true);
+    expect(isProviderAuthView({ png: ONE_BY_ONE_PNG, width: 1, height: 1, mimeType: "image/png" })).toBe(true);
+    expect(isProviderAuthView({ png: ONE_BY_ONE_PNG, width: 1, height: 1, mimeType: "image/svg+xml" })).toBe(false);
+  });
+
   test("a drag is an ordered sampled path: no points, a lone point, a non-finite sample or a backwards clock is refused", () => {
     const start = { x: 10, y: 40, atMs: 0 };
     const middle = { x: 60, y: 55, atMs: 12 };

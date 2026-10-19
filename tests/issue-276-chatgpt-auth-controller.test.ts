@@ -168,6 +168,7 @@ function makeController(options: {
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
   maxPolls?: number;
+  gestureTimeoutMs?: number;
   now?: () => number;
   /** Pacing seam of the drag relay; the poll loop shares it, so tests filter its interval out. */
   sleep?: (ms: number) => Promise<void>;
@@ -222,6 +223,7 @@ function makeController(options: {
     pollIntervalMs: options.pollIntervalMs ?? 1,
     pollTimeoutMs: options.pollTimeoutMs ?? 60_000,
     ...(options.maxPolls !== undefined ? { maxPolls: options.maxPolls } : {}),
+    ...(options.gestureTimeoutMs !== undefined ? { gestureTimeoutMs: options.gestureTimeoutMs } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
   });
@@ -364,6 +366,23 @@ describe("issue #276 slice 2b — the provider identity and the launch", () => {
 });
 
 describe("issue #276 slice 2b — input mapping", () => {
+  test("a live pointer gesture presses, follows every move and lifts at the exact release", async () => {
+    const { controller, page } = makeController({});
+    const session = await controller.startAuth();
+
+    await session.input({ type: "pointer-down", x: 10, y: 20 });
+    expect(page.calls.moves).toEqual([[10, 20]]);
+    expect(page.calls.downs).toBe(1);
+    expect(page.calls.ups).toBe(0);
+    await session.input({ type: "pointer-move", x: 14, y: 24 });
+    await session.input({ type: "pointer-move", x: 20, y: 30 });
+    expect(page.calls.moves).toEqual([[10, 20], [14, 24], [20, 30]]);
+    await session.input({ type: "pointer-up", x: 33, y: 44 });
+    expect(page.calls.moves.at(-1)).toEqual([33, 44]);
+    expect(page.calls.ups).toBe(1);
+    await session.cancel();
+  });
+
   test("each AuthInput maps to exactly the page call the contract names", async () => {
     const { controller, page } = makeController({});
     const session = await controller.startAuth();

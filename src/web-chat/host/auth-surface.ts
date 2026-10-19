@@ -14,9 +14,15 @@
  * - **No credential is examined.** Captured material travels from the provider's own session to the
  *   provider's own `storeCapture`, once. This module validates the *envelope* (`isAuthCapture`) and
  *   never reads `storageState`/`payload`, never stores it, and never serializes it.
- * - **Frames arrive when something changed.** The relay is a per-session wake signal plus a slow
- *   tick, not a busy poll: an operator input wakes the stream immediately and `invalidate()`s the
- *   manager's frame cache, so the frame after an input is freshly produced rather than replayed.
+ * - **Frames arrive when something changed.** The relay is a per-session wake signal plus a cadence,
+ *   not a busy poll: an operator input wakes the stream immediately and `invalidate()`s the manager's
+ *   frame cache, so the frame after an input is freshly produced rather than replayed.
+ * - **A gesture gets a burst, and a release gets a settled frame.** Idle remains 2.5 fps; while a
+ *   pointer gesture is live (or for a short tail after it) the relay wakes on every applied sample and
+ *   emits at the burst interval, asking the provider for its cheaper encoding. A released coordinate
+ *   is held in `settlePending` until a frame whose read began after the release was applied has been
+ *   emitted, so the last picture the operator sees is the post-release state. Every event publishes
+ *   the frame's age and the last release coordinate: a stale picture is explained, not mysterious.
  * - **A terminal session is eventually collected.** The manager collects it after its grace period
  *   (never before its capture handoff was released); this surface forgets its own reference in the
  *   same step, so a collected id answers exactly like an unknown one instead of being served from a
@@ -29,9 +35,11 @@ import {
   isAuthInput,
   webChatError,
   type AuthCapture,
+  type AuthFrameMimeType,
   type AuthInput,
   type AuthSessionState,
   type ProviderAuthController,
+  type ProviderAuthView,
 } from "../core";
 import {
   createWebChatAuthSessionManager,
@@ -57,8 +65,32 @@ export interface WebChatAuthSurfaceOptions {
   readonly providers?: readonly WebChatAuthProviderRegistration[];
   /** TTL, clock, sweep and terminal-grace seams, forwarded to the session manager; tests inject them. */
   readonly session?: WebChatAuthSessionManagerOptions;
-  /** Frame cadence of the relay in milliseconds. Default 400 (2-3 fps). */
+  /** Idle frame cadence of the relay in milliseconds. Default 400 (2.5 fps). */
   readonly frameIntervalMs?: number;
+  /**
+   * Frame cadence while a pointer gesture is live, in milliseconds. Default 80 (12.5 fps).
+   *
+   * A slider cannot be aimed at a stale picture, so the relay spends bandwidth during a gesture
+   * instead of latency: each applied sample wakes the stream, and this is the shortest interval at
+   * which a fresh frame is emitted. The provider may also answer with a cheaper encoding here.
+   */
+  readonly burstFrameIntervalMs?: number;
+  /**
+   * How long a gesture keeps the burst cadence after its last event, in milliseconds. Default 750.
+   *
+   * A live `pointer-move` re-arms this; it exists so a slow drag stays smooth between samples and so
+   * the first settled frames after a release are still fast. When it expires the idle cadence resumes.
+   */
+  readonly burstHoldMs?: number;
+  /**
+   * How long the burst cadence survives the release, in milliseconds. Default 500.
+   *
+   * The settling frame after a release must arrive quickly; this tail is what covers the provider
+   * applying the release before the next idle tick would have come.
+   */
+  readonly burstTailMs?: number;
+  /** Clock seam; tests inject one. Defaults to `Date.now`. */
+  readonly now?: () => number;
 }
 
 /** What the page needs to know about a provider's frame geometry. */
@@ -104,6 +136,14 @@ export interface WebChatAuthSessionView {
   readonly capture?: WebChatAuthCaptureReport;
 }
 
+/** The last pointer release a session applied, in the same clock as `frameCapturedAt`. */
+export interface WebChatAuthRelease {
+  readonly x: number;
+  readonly y: number;
+  /** Millisecond timestamp (the surface's clock) at which the release was applied. */
+  readonly at: number;
+}
+
 /** One relay event of {@link WebChatAuthSurface.stream}. */
 export interface WebChatAuthStreamEvent {
   /** Monotonic per stream. */
@@ -111,6 +151,20 @@ export interface WebChatAuthStreamEvent {
   readonly state: AuthSessionState;
   /** The provider's opaque frame bytes, when it relays one. Never decoded here. */
   readonly png?: Uint8Array;
+  /** The encoding of `png`. Absent means `image/png`. */
+  readonly frameMimeType?: AuthFrameMimeType;
+  /**
+   * How old the relayed pixels were when this event was emitted, in milliseconds.
+   *
+   * Measured from when the relay started obtaining that frame; a cached idle frame grows older on
+   * every event, which is exactly the signal the page needs to say "this picture is stale" instead
+   * of leaving the operator to guess why the piece does not match the pointer.
+   */
+  readonly frameAgeMs?: number;
+  /** Millisecond timestamp (same clock as {@link WebChatAuthRelease.at}) the pixels were obtained. */
+  readonly frameCapturedAt?: number;
+  /** The last release this session applied, so the page can tell release-before-frame apart. */
+  readonly release?: WebChatAuthRelease;
   readonly viewport?: WebChatAuthViewport;
   readonly capture?: WebChatAuthCaptureReport;
   readonly closeReason?: WebChatAuthSessionCloseReason;
@@ -147,7 +201,12 @@ export interface WebChatAuthSurface {
   close(): Promise<void>;
 }
 
-const DEFAULT_FRAME_INTERVAL_MS = 400;
+/** The idle cadence: 2.5 frames per second, the rate the sign-in page has always used. */
+export const WEB_CHAT_AUTH_FRAME_INTERVAL_MS = 400;
+/** The gesture cadence: 12.5 frames per second, the target the measured burst is scheduled against. */
+export const WEB_CHAT_AUTH_BURST_FRAME_INTERVAL_MS = 80;
+const DEFAULT_BURST_HOLD_MS = 750;
+const DEFAULT_BURST_TAIL_MS = 500;
 
 /** A one-shot wake signal: `signal()` releases every waiter, and a wake with no waiter is latched. */
 interface SessionWake {
@@ -214,6 +273,18 @@ interface SurfaceEntry {
    * input invalidated the cache, and without this the relay would serve that pre-input frame forever.
    */
   inputEpoch: number;
+  /** Until this timestamp (surface clock), the relay emits at the burst cadence. */
+  burstUntil: number;
+  /** Inputs applied after this timestamp still need a frame that started after them. */
+  lastInputAppliedAt: number;
+  /** A release whose settled frame has not been relayed yet, so the burst must not end before it. */
+  settlePending: boolean;
+  /** The last frame object obtained, so its bytes' age is measured from when it actually arrived. */
+  lastFrame?: ProviderAuthView;
+  /** When `lastFrame` was obtained (surface clock). */
+  frameCapturedAt?: number;
+  /** The last release this session applied, kept for every later event until the next one. */
+  release?: WebChatAuthRelease;
 }
 
 /**
@@ -223,10 +294,23 @@ interface SurfaceEntry {
  * @returns the surface.
  */
 export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}): WebChatAuthSurface {
-  const frameIntervalMs = options.frameIntervalMs ?? DEFAULT_FRAME_INTERVAL_MS;
+  const frameIntervalMs = options.frameIntervalMs ?? WEB_CHAT_AUTH_FRAME_INTERVAL_MS;
   if (!Number.isSafeInteger(frameIntervalMs) || frameIntervalMs < 1) {
     throw new TypeError("A WebChat auth surface requires a positive frame interval");
   }
+  const burstFrameIntervalMs = options.burstFrameIntervalMs ?? WEB_CHAT_AUTH_BURST_FRAME_INTERVAL_MS;
+  if (!Number.isSafeInteger(burstFrameIntervalMs) || burstFrameIntervalMs < 1) {
+    throw new TypeError("A WebChat auth surface requires a positive burst frame interval");
+  }
+  const burstHoldMs = options.burstHoldMs ?? DEFAULT_BURST_HOLD_MS;
+  if (!Number.isSafeInteger(burstHoldMs) || burstHoldMs < 0) {
+    throw new TypeError("A WebChat auth surface requires a non-negative burst hold");
+  }
+  const burstTailMs = options.burstTailMs ?? DEFAULT_BURST_TAIL_MS;
+  if (!Number.isSafeInteger(burstTailMs) || burstTailMs < 0) {
+    throw new TypeError("A WebChat auth surface requires a non-negative burst tail");
+  }
+  const now = options.now ?? Date.now;
   const manager: WebChatAuthSessionManager = createWebChatAuthSessionManager(options.session);
   const registrations = new Map<string, WebChatAuthProviderRegistration>();
   for (const registration of options.providers ?? []) {
@@ -357,6 +441,9 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
         controller: registration.controller,
         wake: createSessionWake(),
         inputEpoch: 0,
+        burstUntil: 0,
+        lastInputAppliedAt: 0,
+        settlePending: false,
       };
       entries.set(handle.id, entry);
       return sessionView(entry);
@@ -375,10 +462,44 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
       const entry = entries.get(id);
       if (!entry) return undefined;
       if (!isAuthInput(event)) {
-        throw new TypeError("A WebChat auth input must be one of click, drag, type, key, scroll or navigate");
+        throw new TypeError("A WebChat auth input must be one of click, drag, pointer-down, pointer-move, pointer-up, pointer-cancel, type, key, scroll or navigate");
       }
-      await entry.handle.input(event);
+      // A batched `drag` is replayed sample by sample before it returns, so the burst must already be
+      // live while that replay is happening; the live pointer events switch it on with pointer-down.
+      if (event.type === "drag") entry.burstUntil = now() + burstHoldMs;
+      try {
+        await entry.handle.input(event);
+      } catch (error) {
+        if (event.type === "drag") entry.burstUntil = 0;
+        throw error;
+      }
       entry.inputEpoch += 1;
+      const appliedAt = now();
+      entry.lastInputAppliedAt = appliedAt;
+      switch (event.type) {
+        case "pointer-down":
+        case "pointer-move":
+          // A live sample re-arms the burst: the provider just moved, so a fresh frame is worth
+          // emitting for as long as the hand keeps moving (or briefly after a held pause).
+          entry.burstUntil = appliedAt + burstHoldMs;
+          break;
+        case "pointer-up":
+        case "pointer-cancel":
+        case "click":
+        case "drag":
+          // The gesture is over; stay fast long enough for the settled frame, then return to idle.
+          entry.burstUntil = appliedAt + burstTailMs;
+          entry.settlePending = true;
+          break;
+      }
+      if (event.type === "pointer-up" || event.type === "click") {
+        // The coordinate the operator released at, published so the page can compare it with the
+        // frame it is showing: a frame obtained before this instant cannot contain the release.
+        entry.release = { x: event.x, y: event.y, at: appliedAt };
+      } else if (event.type === "drag" && event.points.length > 0) {
+        const last = event.points[event.points.length - 1]!;
+        entry.release = { x: last.x, y: last.y, at: appliedAt };
+      }
       // The manager already invalidated its cached frame; waking the relay paints the frame that
       // input produced instead of waiting for the next tick.
       entry.wake.signal();
@@ -398,6 +519,7 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
       if (!entry) return;
       let seq = 0;
       let observedEpoch = entry.inputEpoch;
+      let lastEmitAt = 0;
       try {
         for (;;) {
           if (signal?.aborted) return;
@@ -414,34 +536,82 @@ export function createWebChatAuthSurface(options: WebChatAuthSurfaceOptions = {}
             }
           }
           await sweepExpired();
+          const bursting = entry.settlePending || now() < entry.burstUntil;
+          // The burst is a cadence, not a free-running loop: an input wakes the stream immediately,
+          // but the next burst frame waits out the remaining interval. Without this cap a 32 ms
+          // sample rate would turn into a screenshot per sample and starve the burst entirely.
+          if (bursting && lastEmitAt !== 0) {
+            const remaining = lastEmitAt + burstFrameIntervalMs - now();
+            if (remaining > 0) {
+              await entry.wake.wait(remaining, signal);
+              continue;
+            }
+          }
           const state = entry.handle.state();
+          const terminal = state === "captured" || state === "failed" || state === "expired";
           let png: Uint8Array | undefined;
+          let frameMimeType: AuthFrameMimeType | undefined;
           let viewport: WebChatAuthViewport | undefined;
+          // When a gesture's own release frame may not come from the input (the session terminalized
+          // while the input was applied), ask the provider once more; the cached frame is the fallback.
+          const forceFresh = terminal && entry.settlePending;
+          // A frame's age is measured from when its read *started*: pixels produced by a read that
+          // began before an input cannot contain that input, which is the comparison the page needs.
+          const viewStartedAt = now();
           try {
-            const frame = await entry.handle.view();
+            const frame = await entry.handle.view({
+              ...(bursting ? { quality: "fast" as const } : {}),
+              ...(forceFresh ? { fresh: true } : {}),
+            });
             png = frame.png;
+            frameMimeType = frame.mimeType;
             viewport = { width: frame.width, height: frame.height };
             entry.viewport = viewport;
+            if (entry.lastFrame !== frame) {
+              entry.lastFrame = frame;
+              entry.frameCapturedAt = viewStartedAt;
+            }
           } catch {
             // A provider with no display refuses `view()` by category, and a captured session that
             // relayed nothing refuses it too. Neither is a session failure: the state still streams.
           }
-          const terminal = state === "captured" || state === "failed" || state === "expired";
-          if (state === "captured") await storeOnce(entry);
-          const snapshot = terminal ? entry.handle.snapshot() : undefined;
-          const error = entry.storeError ?? (state === "failed" ? snapshot?.detail : undefined);
+          const emittedAt = now();
+          const stateNow = entry.handle.state();
+          const terminalNow = stateNow === "captured" || stateNow === "failed" || stateNow === "expired";
+          if (stateNow === "captured") await storeOnce(entry);
+          // A release is settled only by a frame whose read began after the release was applied. Until
+          // then the burst keeps running, so the operator always eventually sees the post-release state.
+          // A provider that relays no pixels has no frame to settle: its state is the whole answer, so
+          // waiting for one would keep the burst running forever.
+          if (entry.settlePending && png === undefined) entry.settlePending = false;
+          if (entry.settlePending && entry.frameCapturedAt !== undefined
+            && entry.frameCapturedAt >= entry.lastInputAppliedAt) {
+            entry.settlePending = false;
+          }
+          const snapshot = terminalNow ? entry.handle.snapshot() : undefined;
+          const error = entry.storeError ?? (stateNow === "failed" ? snapshot?.detail : undefined);
           yield {
             seq: seq++,
-            state,
+            state: stateNow,
             ...(png !== undefined ? { png } : {}),
+            ...(frameMimeType !== undefined ? { frameMimeType } : {}),
+            ...(entry.frameCapturedAt !== undefined
+              ? {
+                frameAgeMs: Math.max(0, emittedAt - entry.frameCapturedAt),
+                frameCapturedAt: entry.frameCapturedAt,
+              }
+              : {}),
+            ...(entry.release !== undefined ? { release: entry.release } : {}),
             ...(viewport !== undefined ? { viewport } : {}),
             ...(entry.capture !== undefined ? { capture: entry.capture } : {}),
             ...(snapshot?.closeReason !== undefined ? { closeReason: snapshot.closeReason } : {}),
             ...(error !== undefined ? { error } : {}),
-            terminal,
+            terminal: terminalNow,
           };
-          if (terminal) return;
-          await entry.wake.wait(frameIntervalMs, signal);
+          lastEmitAt = now();
+          if (terminalNow) return;
+          const stillBursting = entry.settlePending || now() < entry.burstUntil;
+          await entry.wake.wait(stillBursting ? burstFrameIntervalMs : frameIntervalMs, signal);
         }
       } catch {
         // The socket died or the provider could not be read at all: the stream ends here. Nothing of
