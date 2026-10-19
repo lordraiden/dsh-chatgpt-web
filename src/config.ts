@@ -537,18 +537,18 @@ export function storageStateMarkerPath(storageStatePath: string): string {
 }
 
 /**
- * The only provider with a credential layout today. Mirrors `CHATGPT_WEB_DRIVER_ID`; kept as a plain
- * string here to avoid a config -> provider import cycle.
+ * The default provider a credential path resolves for. Mirrors `CHATGPT_WEB_DRIVER_ID`; kept as a
+ * plain string here to avoid a config -> provider import cycle.
  */
-const CREDENTIAL_PROVIDER_ID = "chatgpt-web";
+export const DEFAULT_CREDENTIAL_PROVIDER_ID = "chatgpt-web";
 
 /** The directory holding one provider's credentials inside the data home (issue #249). */
-export function providerCredentialsDir(providerId: string = CREDENTIAL_PROVIDER_ID, home = getConfigDir()): string {
+export function providerCredentialsDir(providerId: string = DEFAULT_CREDENTIAL_PROVIDER_ID, home = getConfigDir()): string {
   return join(home, "providers", providerId);
 }
 
 /** Where a NEW session for this provider is written, by `login`, `setup` and `auth import`. */
-export function providerStorageStatePath(providerId: string = CREDENTIAL_PROVIDER_ID, home = getConfigDir()): string {
+export function providerStorageStatePath(providerId: string = DEFAULT_CREDENTIAL_PROVIDER_ID, home = getConfigDir()): string {
   return join(providerCredentialsDir(providerId, home), "storage-state.json");
 }
 
@@ -561,7 +561,7 @@ export function providerStorageStatePath(providerId: string = CREDENTIAL_PROVIDE
  */
 export function resolveProviderStorageStatePath(
   configuredPath?: string,
-  providerId: string = CREDENTIAL_PROVIDER_ID,
+  providerId: string = DEFAULT_CREDENTIAL_PROVIDER_ID,
   home = getConfigDir(),
 ): string {
   const scoped = providerStorageStatePath(providerId, home);

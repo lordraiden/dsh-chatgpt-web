@@ -3,7 +3,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } f
 import { dirname, join } from "node:path";
 import { chromium, type BrowserContext, type BrowserContextOptions, type Page } from "playwright-core";
 import type { AppConfig } from "./config";
-import { atomicWriteFile, providerCredentialsDir, providerStorageStatePath, storageStateMarkerPath } from "./config";
+import {
+  atomicWriteFile,
+  DEFAULT_CREDENTIAL_PROVIDER_ID,
+  getConfigDir,
+  providerCredentialsDir,
+  providerStorageStatePath,
+  storageStateMarkerPath,
+} from "./config";
 import {
   assertAuthenticatedChatGptPage,
   assertChatGptPage,
@@ -139,17 +146,34 @@ export function loginVerificationMarkerPath(storageStatePath: string): string {
   return storageStateMarkerPath(storageStatePath);
 }
 
+/** The provider a capture is stored for, plus an optional explicit data home (tests). */
+export interface ProviderSessionTarget {
+  /** Provider whose credential directory owns the session. Defaults to `chatgpt-web`. */
+  readonly providerId?: string;
+  /** Data home override; the deployment's own `DSH_CHATGPT_WEB_HOME` is the normal source. */
+  readonly home?: string;
+}
+
 /**
  * Write a *verified* session into the provider's credential layout (issue #249).
  *
- * One owner for "store a session": `login`, the system-browser capture and `auth import` all land here,
- * so the two files can never be split across locations.
+ * One owner for "store a session": `login`, the system-browser capture, `auth import` and every
+ * provider adapter land here, so the two files can never be split across locations and a second
+ * provider cannot grow a second writer. The provider only chooses *which* directory; the file names,
+ * the atomic write and the `.verified.json` marker stay this function's business.
+ *
+ * `capabilities` is ChatGPT-specific account evidence and is optional: a provider that has no such
+ * concept (Qwen Code) stores the identical layout with an empty marker payload.
  */
 export function storeProviderSession(
   storageState: NonNullable<BrowserContextOptions["storageState"]>,
-  capabilities: ChatGptWebAccountCapabilities,
+  capabilities: Partial<ChatGptWebAccountCapabilities> = {},
+  slot: ProviderSessionTarget = {},
 ): string {
-  const target = providerStorageStatePath();
+  const target = providerStorageStatePath(
+    slot.providerId ?? DEFAULT_CREDENTIAL_PROVIDER_ID,
+    slot.home ?? getConfigDir(),
+  );
   atomicWriteFile(target, `${JSON.stringify(storageState)}\n`);
   writeVerificationMarker(target, capabilities);
   return target;
@@ -165,7 +189,7 @@ export async function verifyStoredSession(
 
 function writeVerificationMarker(
   storageStatePath: string,
-  capabilities: ChatGptWebAccountCapabilities,
+  capabilities: Partial<ChatGptWebAccountCapabilities>,
 ): void {
   const marker: LoginVerificationMarker = {
     version: 1,

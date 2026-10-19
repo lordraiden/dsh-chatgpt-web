@@ -198,3 +198,107 @@ report, not something to disguise.
 - **Proven instead**: the round trip against a recorded-shape fixture with synthetic content
   (`tests/issue-299-qwen-code-sse.test.ts`), including all three termination signals and the typed
   refusal paths.
+
+## 6. Signing in on the operator's own machine, then importing the session (issue #299)
+
+This is the **alternative sign-in path** for this provider, and it exists for one measured reason:
+`coder.qwen.ai` presents an Access Verification slider during sign-in, and its risk engine **refuses
+relayed input** — the relayed path now reproduces the operator's real gesture sample by sample and
+still does not pass the challenge. The remaining obstacle is *synthesised input*, not coordinates, so
+the honest fix is to sign in with real input in a real browser and adopt the resulting session. Do
+not "simplify" this away by making the relayed flow stealthier: no user-agent trick and no stealth flag
+is added here, and the relayed path stays as it is.
+
+The capture script is `scripts/qwen-storage-state.mjs`. It is plain ESM using only Node's built-in
+`fetch` and global `WebSocket` (Node ≥ 22.19): **nothing is installed, on either side** — no npm
+package, no Playwright, no browser download. It runs on the operator's machine, not in the container.
+
+### Step 1 — on your own PC: sign in with a real browser, capture the session
+
+Quit Chrome completely first: a running Chrome with the default profile will not open a debugging
+port. Then start Chrome with the DevTools port and sign in normally:
+
+```bash
+# Linux
+google-chrome --remote-debugging-port=9222
+# macOS
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+
+# In that Chrome window: open https://coder.qwen.ai and sign in as usual (real typing, real drag),
+# then leave the window open and run, from a checkout of this repository:
+node scripts/qwen-storage-state.mjs --out ~/qwen-storage-state.json
+```
+
+The script is one file with no imports beyond Node's built-ins, so if the checkout lives on another
+machine, copy just that file to the machine that runs Chrome. It attaches to `http://127.0.0.1:9222`,
+reads the browser's cookies over the DevTools protocol (`Storage.getCookies`, with a page-target fallback), keeps only the `qwen.ai` / `aliyun.com`
+domain family, drops cookies Chrome already considers expired and third-party-partitioned ones, and
+writes a Playwright-compatible `storageState` with **mode 0600**. It prints the absolute file path, the
+cookie count and the (non-secret) domains — **never a cookie name or value**. Re-running it replaces
+the file atomically, so a partial write can never be mistaken for a capture.
+
+If Chrome answers `403` to the DevTools handshake, restart it with
+`--remote-debugging-port=9222 --remote-allow-origins=*`; the script says so in its error.
+
+### Step 2 — in the container: import, verify, and store
+
+```bash
+# copy the capture into the running service container (service name: chatgpt-web)
+docker compose cp ~/qwen-storage-state.json chatgpt-web:/tmp/qwen-storage-state.json
+
+# validate + run the SAME authenticated predicate the controller uses:
+#   GET /coder/api/v2/task/list  must answer success:true
+docker compose exec chatgpt-web node lib/cli.js auth import \
+  --provider qwen-code --from /tmp/qwen-storage-state.json
+
+# the capture is a credential: remove it from the container's /tmp
+docker compose exec chatgpt-web rm /tmp/qwen-storage-state.json
+```
+
+On a local install (no container), the second step is simply
+`dsh-chatgpt-web auth import --provider qwen-code --from ~/qwen-storage-state.json`.
+
+What the import validates, and what it refuses **before anything is written**:
+
+| Situation | Refusal (actionable text, no cookie value) |
+| --- | --- |
+| empty file | `… is empty; export the session again from the browser where the provider is signed in` |
+| not JSON | `… is not valid JSON; export the session again …` |
+| not a storage state | `… does not look like a Playwright storage state (expected a "cookies" or "origins" array)` |
+| no cookies at all | `the capture contains no cookies at all; open https://coder.qwen.ai …` |
+| cookies, but none for this provider (renamed/missing domain) | `the capture contains no coder.qwen.ai cookies (every cookie in it belongs to another domain)` |
+| the provider's cookies all expired | `every coder.qwen.ai cookie in the capture has expired; sign in again …` |
+| `task/list` answers anything but `success:true` (including HTTP 200 + `success:false`, which is what an anonymous caller gets) | `The capture could not be verified against the Qwen Code login surface, so nothing was written: the task list answered HTTP 200 with Unauthorized 401 Unauthorized; sign in to Qwen Code again …` |
+
+A file that passes every step is stored through `storeProviderSession`, the deployment's single
+session writer, exactly like a sign-in through the page: `providers/qwen-code/storage-state.json`
+(inside the container, `/data/providers/qwen-code/storage-state.json`) plus
+`storage-state.json.verified.json`, both written atomically with mode 0600. The sanitizer keeps only
+`qwen.ai` / `aliyun.com` cookies and the `coder.qwen.ai` / `auth.qwen.ai` storage origins.
+
+`auth import` runs in its own short-lived process. Nothing consumes this file yet — the Qwen driver
+and turn route are slice 2 (§4) — so there is no process to restart today; once the route exists, the
+same rule as every other provider applies (restart the service after importing).
+
+### When the session expires
+
+A session does not "fail loudly" on its own: the provider simply stops accepting it. What you will see:
+
+- `auth import` refuses the file with `every coder.qwen.ai cookie in the capture has expired` (the
+  cookie's own expiry), or with the `task list answered … Unauthorized` refusal (the account/session
+  was revoked server-side before the cookie expired);
+- once slice 2 serves the route, a turn that used to stream starts failing `AUTH_REQUIRED` /
+  `QWEN_SESSION_UNAUTHORIZED` — the transport already classifies that refusal
+  (`runQwenNetworkTurn`), so it is a diagnosis, not a mystery.
+
+Recovery is the same two steps: sign in again at `https://coder.qwen.ai` in Chrome, re-run the capture
+script, re-run `auth import`. There is no refresh token to renew and nothing else to reset.
+
+### What still needs a human (nothing is "fully automatic" here)
+
+- A human signs in and completes the slider if the provider shows one: that is the whole point of this
+  path.
+- Chrome must be **quit and restarted** with the debugging port; a profile already in use cannot be
+  attached to.
+- The import needs a browser in the container for the `task/list` check, exactly like the sign-in
+  page does; it uses the configured `chromeExecutablePath` and the repository's headless launch shape.

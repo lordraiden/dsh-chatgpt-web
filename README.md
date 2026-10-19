@@ -290,11 +290,19 @@ Scripted or offline-from-desktop provisioning: on a machine where you can sign i
 
 ```bash
 docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture
+# Qwen Code: capture on your own PC first — scripts/qwen-storage-state.mjs (doc/qwen-code.md §6)
+docker compose exec chatgpt-web node lib/cli.js auth import --provider qwen-code --from /capture
 ```
 
 `auth import` is **fail-closed by construction**: the capture is verified against the provider's login
 surface *first*, and both files are written atomically *afterwards*. A capture that cannot be verified
 exits non-zero and writes **nothing**. Cookie values are never printed.
+
+Qwen Code (`--provider qwen-code`) uses the same command, and is the route for a provider whose risk
+engine refuses relayed (synthesised) input: sign in on your own PC with a real browser, capture the
+cookies with the dependency-free `scripts/qwen-storage-state.mjs` (it attaches to your own Chrome on
+`--remote-debugging-port=9222`), then import the file. Both commands, the checks and the expiry
+symptoms are in [`doc/qwen-code.md` §6](./doc/qwen-code.md#6-signing-in-on-the-operators-own-machine-then-importing-the-session-issue-299).
 
 ### Fallback when a flow rejects headless
 

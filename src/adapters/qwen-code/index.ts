@@ -54,7 +54,23 @@ export {
   type QwenCodeSessionStore,
 } from "./auth-controller";
 
-export { qwenCodeCredentialsDir, sanitizeQwenStorageState, storeQwenSession } from "./session-store";
+export {
+  QWEN_CODE_COOKIE_DOMAINS,
+  QWEN_CODE_STORAGE_ORIGINS,
+  qwenCodeCredentialsDir,
+  sanitizeQwenStorageState,
+  storeQwenSession,
+  validateQwenCodeSessionStorageState,
+  type QwenCodeSessionStorageState,
+} from "./session-store";
+
+export {
+  verifyQwenCodeImportedSession,
+  type QwenCodeImportedSessionOptions,
+  type QwenCodeImportedSessionProbe,
+  type QwenCodeImportedSessionProbeResult,
+  type QwenCodeImportedSessionVerification,
+} from "./session-import";
 
 export {
   QWEN_COMPLETION_TERMINATIONS,

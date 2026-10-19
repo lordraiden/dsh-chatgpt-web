@@ -424,6 +424,13 @@ caller gets HTTP 200 with `success:false`, so the status code cannot decide it) 
 so no user-agent override or other workaround is applied; see [`qwen-code.md`](./qwen-code.md). This
 provider currently serves **sign-in only**: it has no driver or turn route yet (slice 2).
 
+Qwen's slider challenge has so far **refused relayed input** even when the relay reproduces the
+operator's exact gesture, so the provider's page is not the only route: sign in on your own PC with a
+real browser, capture the cookies with `scripts/qwen-storage-state.mjs` (dependency-free, attaches to
+your own Chrome on `--remote-debugging-port=9222`), and `auth import --provider qwen-code` it. The two
+commands, the validations and the expiry symptoms are in
+[`qwen-code.md` §6](./qwen-code.md#6-signing-in-on-the-operators-own-machine-then-importing-the-session-issue-299).
+
 **Nothing is restarted after a successful capture.** The running service re-derives the account
 identity and the resolved credentials path from the sign-in's own completion, so the next turn uses the
 new session. Before that fix the process kept serving the picture it resolved at startup, which is why
@@ -449,8 +456,8 @@ It is **fail-closed by construction**: the capture is verified against the provi
 *first*, and both files are written atomically *afterwards* by the single session owner. A capture that
 cannot be verified — malformed, expired, or unverifiable without a browser — exits non-zero and writes
 **nothing**, so an unusable session can never masquerade as a working one. Cookie values are never
-printed. Unknown providers are refused (only `chatgpt-web` has a credential layout today; #250 owns the
-rest).
+printed. Unknown providers are refused: the supported values are `chatgpt-web` and `qwen-code` (the
+Qwen route is [`qwen-code.md` §6](./qwen-code.md#6-signing-in-on-the-operators-own-machine-then-importing-the-session-issue-299)).
 
 **Fallback: `authBrowserMode: "display"` (the operator supplies a display)**
 
