@@ -23,6 +23,25 @@
  * handed to a turn that expects the old one, and an evicted conversation never silently continues on
  * a fresh page as if its history were still installed.
  *
+ * ## A failed turn is not a death (issue #314)
+ *
+ * The measured incident: a turn failed *after* its submission was accepted, and that failure retired the
+ * conversation's surface, so every later turn of the session failed with `retained_surface_lost`. One
+ * failed turn — a housekeeping one, in the incident — killed the user's whole session, and the rule must
+ * not depend on recognising housekeeping, because this build has no reliable marker for it.
+ *
+ * A failed turn therefore publishes `"unreconciled"` instead of `"rejected"`: the surface stays exactly
+ * where it is, physically free and reusable, and the conversation is **observable as needing
+ * reconciliation** ({@link RetainedSurfaceRegistry.needsReconciliation}). The next turn of that key is the
+ * bounded reconciliation attempt — it resumes the conversation in place instead of being refused — and its
+ * success clears the mark. The conversation is retired only on **proof of death** (the page is closed,
+ * crashed or gone, or an explicit teardown such as a cancellation) or when the bounded reconciliation
+ * budget is spent ({@link DEFAULT_MAX_RETAINED_SURFACE_RECONCILIATION_ATTEMPTS}).
+ *
+ * Reconciliation never resends: it acquires the surface that already carries the conversation and hands it
+ * to a resume turn, so a submission the provider confirmed is never repeated and a replacement
+ * conversation is never created to stand in for the old one.
+ *
  * The registry is generic over the concrete page type so callers keep their
  * full page capability (e.g. Playwright `Page`) without a widening cast.
  */
@@ -53,9 +72,72 @@ export const DEFAULT_MAX_RETAINED_SURFACES = 16;
  * explicit replay, which is the documented recovery the no-silent-fork contract requires.
  */
 export const DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS = 30 * 60_000;
+/**
+ * How many turns may carry an unreconciled conversation before the bounded reconciliation gives up.
+ *
+ * The bound is what keeps "a failure is not a death" from becoming "a conversation can never be
+ * retired": a marked conversation is still handed to the next turn, but a key that reaches this many
+ * carried failures is retired instead, with the honest continuity-loss error, rather than being handed
+ * out for a fourth attempt. Three is deliberately above one — the single housekeeping failure that
+ * motivated the rule consumes none of the caller's own turns — and it is the same shape as the
+ * provider's other bounded retry budgets (page rebinds, tolerated observation faults).
+ */
+export const DEFAULT_MAX_RETAINED_SURFACE_RECONCILIATION_ATTEMPTS = 3;
 
 /** Why one retained surface was retired. */
 export type RetainedSurfaceEvictionReason = "idle-timeout" | "over-capacity";
+
+/**
+ * Why a conversation is now a continuity loss, when the operation that decided the retirement can
+ * express it (issue #314).
+ *
+ * The tombstone itself still records only that continuity is broken — it is not a journal — so this is
+ * published by the decision that retired the surface, on the error the caller receives at that moment.
+ * It keeps "the page is physically gone" apart from "the bounded reconciliation budget is spent".
+ */
+export type RetainedSurfaceLossReason = "surface-dead" | "reconciliation-exhausted";
+
+/**
+ * What a finished turn publishes about the operation that held the surface.
+ *
+ * `"unreconciled"` is the failed-turn settlement (issue #314): the operation ended, but what happened to
+ * the conversation's remote generation is unknown, so the surface stays in place and the conversation is
+ * marked for reconciliation instead of being retired.
+ */
+export type RetainedSurfaceSettlementOutcome =
+  | "fulfilled"
+  | "not_started"
+  | "pending"
+  | "rejected"
+  | "unreconciled";
+
+/** How a finished turn ended, as the retained-surface owner reads it (issue #314). */
+export type RetainedSurfaceTurnEnd = "completed" | "failed" | "torn-down";
+
+/**
+ * The settlement a finished turn publishes about the retained surface it held (issue #314).
+ *
+ * - `completed` — the turn reached its answer, so the conversation is settled and the reconciliation
+ *   mark (if any) is cleared.
+ * - `failed` — the turn ran and errored. A failure is not a death: the surface stays where it is and the
+ *   conversation becomes observable as needing reconciliation, so the next turn of the same key resumes
+ *   it instead of being refused as a lost surface. Nothing is resent; a later start-over has to be an
+ *   explicit decision taken by the turn's own continuity path.
+ * - `torn-down` — the turn was ended by an explicit teardown (caller cancellation, a closed tab, the
+ *   service retiring a wedged turn, or a page whose document was replaced by a rehydration). The
+ *   explicit-teardown contract is kept: no settlement was published for the operation, so the surface is
+ *   retired rather than trusted again.
+ */
+export function retainedSurfaceSettlementForTurn(end: RetainedSurfaceTurnEnd): RetainedSurfaceSettlementOutcome {
+  switch (end) {
+    case "completed":
+      return "fulfilled";
+    case "failed":
+      return "unreconciled";
+    case "torn-down":
+      return "rejected";
+  }
+}
 
 /** What one eviction did, for tests and for the caller's diagnostics. */
 export interface RetainedSurfaceEviction<P extends RetainedSurfacePage> {
@@ -73,6 +155,11 @@ export interface RetainedSurfaceRegistryOptions {
   readonly maxSurfaces?: number;
   /** Idle retirement window; see {@link DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS}. */
   readonly idleTimeoutMs?: number;
+  /**
+   * How many turns may carry an unreconciled conversation before it is retired instead of reused;
+   * see {@link DEFAULT_MAX_RETAINED_SURFACE_RECONCILIATION_ATTEMPTS}.
+   */
+  readonly maxReconciliationAttempts?: number;
   /** Clock seam; tests inject one so idle expiry needs no real time. */
   readonly now?: () => number;
 }
@@ -81,6 +168,12 @@ export interface RetainedSurfaceAcquired<P extends RetainedSurfacePage> {
   page: P;
   /** True when this turn created the surface; false when it reuses an existing one. */
   created: boolean;
+  /**
+   * True when this acquire is the bounded reconciliation attempt of a conversation whose previous turn
+   * failed (issue #314). The caller is resuming the retained conversation — never creating one and never
+   * resending a submission the provider already confirmed.
+   */
+  reconciling: boolean;
 }
 
 export interface RetainedSurfaceAcquireOptions<P extends RetainedSurfacePage> {
@@ -114,9 +207,16 @@ export class RetainedSurfaceMissingError extends Error {
 
 /** A previously retained surface died, breaking conversation continuity. */
 export class RetainedSurfaceLostError extends Error {
-  constructor(conversationKey: string) {
-    super(`The retained ChatGPT conversation for ${conversationKey} was lost`);
+  /**
+   * Why the continuity was declared lost, when the retiring operation could express it (issue #314):
+   * the physical page was gone, or the bounded reconciliation budget was spent.
+   */
+  readonly reason?: RetainedSurfaceLossReason;
+
+  constructor(conversationKey: string, reason?: RetainedSurfaceLossReason) {
+    super(`The retained ChatGPT conversation for ${conversationKey} was lost${reason ? ` (${reason})` : ""}`);
     this.name = "RetainedSurfaceLostError";
+    this.reason = reason;
   }
 }
 
@@ -156,12 +256,22 @@ interface RetainedSurfaceEntry<P extends RetainedSurfacePage> {
    * caller has left the conversation alone, not how long the registry has existed.
    */
   lastUsedAt: number;
+  /**
+   * Bounded reconciliation state of a conversation whose last turn failed (issue #314).
+   *
+   * Present while the conversation is observable as needing reconciliation; `attempts` counts the
+   * reconciliation turns already handed the surface. A turn that settles the conversation successfully
+   * removes the state, and the state never retires the surface by itself — only the exhausted budget
+   * does, at the acquire that would carry it beyond the bound.
+   */
+  reconciliation?: { attempts: number };
 }
 
 export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSurfacePage> {
   private readonly surfaces = new Map<string, RetainedSurfaceEntry<P>>();
   private readonly maxSurfaces: number;
   private readonly idleTimeoutMs: number;
+  private readonly maxReconciliationAttempts: number;
   private readonly now: () => number;
   /**
    * In-flight first creations, per key. A key that is being created is busy,
@@ -184,14 +294,20 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
   constructor(options: RetainedSurfaceRegistryOptions = {}) {
     const maxSurfaces = options.maxSurfaces ?? DEFAULT_MAX_RETAINED_SURFACES;
     const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_RETAINED_SURFACE_IDLE_TIMEOUT_MS;
+    const maxReconciliationAttempts = options.maxReconciliationAttempts
+      ?? DEFAULT_MAX_RETAINED_SURFACE_RECONCILIATION_ATTEMPTS;
     if (!Number.isSafeInteger(maxSurfaces) || maxSurfaces < 1) {
       throw new TypeError("The retained-surface cap must be a positive safe integer");
     }
     if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0) {
       throw new TypeError("The retained-surface idle timeout must be a positive finite number of milliseconds");
     }
+    if (!Number.isSafeInteger(maxReconciliationAttempts) || maxReconciliationAttempts < 1) {
+      throw new TypeError("The retained-surface reconciliation budget must be a positive safe integer");
+    }
     this.maxSurfaces = maxSurfaces;
     this.idleTimeoutMs = idleTimeoutMs;
+    this.maxReconciliationAttempts = maxReconciliationAttempts;
     this.now = options.now ?? Date.now;
   }
 
@@ -206,6 +322,17 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
   /** True when the key's continuity is broken until an explicit reset. */
   isLost(conversationKey: string): boolean {
     return this.lostSurfaces.has(conversationKey);
+  }
+
+  /**
+   * True when the conversation's last turn failed and the surface is still in place (issue #314).
+   *
+   * This is the explicit, observable "needs reconciliation" state: the physical conversation was kept,
+   * and the next acquire for this key is the bounded reconciliation attempt that clears it on success.
+   * It is not a continuity loss and it does not refuse anything.
+   */
+  needsReconciliation(conversationKey: string): boolean {
+    return this.surfaces.get(conversationKey)?.reconciliation !== undefined;
   }
 
   /**
@@ -241,18 +368,27 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
       if (existing.busy) throw new RetainedSurfaceBusyError(conversationKey);
       if (existing.page.isClosed()) {
         // A dead page is a continuity loss whatever its settlement state, so this is decided first.
-        this.surfaces.delete(conversationKey);
-        this.lostSurfaces.add(conversationKey);
-        throw new RetainedSurfaceLostError(conversationKey);
+        // This is proof of death, which is what makes retirement honest here (issue #314).
+        this.retireWithLoss(conversationKey, existing, "surface-dead");
+        throw new RetainedSurfaceLostError(conversationKey, "surface-dead");
       }
       if (!existing.settled) {
         // A surface that was released without a published settlement may still produce output: it is
         // retained, but it is not handed to another turn (architecture §9.3, §15.3).
         throw new RetainedSurfaceBusyError(conversationKey);
       }
+      // Bounded reconciliation (issue #314): a conversation whose previous turn failed is handed to this
+      // turn as its reconciliation attempt, until the attempt budget is spent. Only the spent budget
+      // retires it — never the earlier turn's failure, which is why one failure no longer ends a session.
+      const reconciliation = existing.reconciliation;
+      if (reconciliation && reconciliation.attempts >= this.maxReconciliationAttempts) {
+        this.retireWithLoss(conversationKey, existing, "reconciliation-exhausted");
+        throw new RetainedSurfaceLostError(conversationKey, "reconciliation-exhausted");
+      }
+      if (reconciliation) reconciliation.attempts += 1;
       existing.busy = true;
       this.touch(conversationKey, existing);
-      return { page: existing.page, created: false };
+      return { page: existing.page, created: false, reconciling: reconciliation !== undefined };
     }
     if (this.pendingCreates.has(conversationKey)) {
       throw new RetainedSurfaceBusyError(conversationKey);
@@ -290,7 +426,7 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
       // The new surface is not a candidate for its own pass, so this only reclaims surfaces that have
       // gone idle while the registry was busy; it is what returns the registry to its cap.
       this.sweep(conversationKey);
-      return { page, created: true };
+      return { page, created: true, reconciling: false };
     } finally {
       this.pendingCreates.delete(conversationKey);
     }
@@ -314,20 +450,40 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
   /**
    * Publish the physical settlement of the operation that held this surface.
    *
-   * `fulfilled`/`not_started` make the retained surface reusable again and `pending` keeps it
-   * settling; `rejected` means settlement could not be proven, so the surface is dropped and the key
-   * tombstoned instead of being trusted again (an explicit `reset` is the only way back).
+   * `fulfilled`/`not_started` make the retained surface reusable again and clear any reconciliation mark;
+   * `pending` keeps it settling; `rejected` means settlement could not be proven, so the surface is
+   * dropped and the key tombstoned instead of being trusted again (an explicit `reset` is the only way
+   * back); `unreconciled` is the failed-turn settlement (issue #314): the operation is over, so the
+   * surface is reusable, but the conversation's remote outcome is unknown and it becomes observable as
+   * needing reconciliation instead of being retired. No settlement path resends anything.
    */
-  settle(conversationKey: string, outcome: "fulfilled" | "not_started" | "pending" | "rejected" = "fulfilled"): void {
+  settle(
+    conversationKey: string,
+    outcome: RetainedSurfaceSettlementOutcome = "fulfilled",
+  ): void {
     const entry = this.surfaces.get(conversationKey);
     if (!entry) return;
     if (outcome === "rejected") {
-      this.surfaces.delete(conversationKey);
-      this.lostSurfaces.add(conversationKey);
-      void entry.page.close().catch(() => {});
+      this.retireWithLoss(conversationKey, entry, undefined);
+      return;
+    }
+    if (outcome === "unreconciled") {
+      if (entry.page.isClosed()) {
+        // The page died during the turn: that is proof of death, so the conversation is retired instead
+        // of being marked as reconcilable (issue #314).
+        this.retireWithLoss(conversationKey, entry, "surface-dead");
+        return;
+      }
+      entry.settled = true;
+      // The first failed turn opens the mark; a failed reconciliation attempt keeps the attempts it has
+      // already consumed, so the budget counts consecutive carries, not failures inside one carry.
+      entry.reconciliation ??= { attempts: 0 };
+      this.touch(conversationKey, entry);
       return;
     }
     entry.settled = outcome !== "pending";
+    // A published settlement that proved the operation reconciles the conversation: the mark is cleared.
+    if (entry.settled) delete entry.reconciliation;
     this.touch(conversationKey, entry);
   }
 
@@ -405,6 +561,29 @@ export class RetainedSurfaceRegistry<P extends RetainedSurfacePage = RetainedSur
     );
     evictions.push({ conversationKey, reason, page: entry.page, settled: entry.settled });
     void entry.page.close().catch(() => {});
+  }
+
+  /**
+   * Retire one surface because its continuity is broken: tombstone its key and close its page once.
+   *
+   * This is the *evidence* path, not the eviction path — a dead page, a settlement that could not be
+   * proven, or a spent reconciliation budget — so it deliberately does not consult the eviction guard:
+   * a surface whose continuity is broken must not be handed out again even while a turn still holds it
+   * (issue #314). A page that has already reported itself closed is not closed a second time.
+   */
+  private retireWithLoss(
+    conversationKey: string,
+    entry: RetainedSurfaceEntry<P>,
+    reason: RetainedSurfaceLossReason | undefined,
+  ): void {
+    this.surfaces.delete(conversationKey);
+    this.lostSurfaces.add(conversationKey);
+    if (reason !== undefined) {
+      console.info(
+        `[chatgpt-web] retained surface retired key=${retainedSurfaceDigest(conversationKey)} reason=${reason}`,
+      );
+    }
+    if (!entry.page.isClosed()) void entry.page.close().catch(() => {});
   }
 
   /** Move a key to the back of the LRU order (the Map's insertion order). */

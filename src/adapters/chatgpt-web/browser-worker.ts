@@ -103,6 +103,7 @@ import {
   RetainedSurfaceLostError,
   RetainedSurfaceMissingError,
   RetainedSurfaceRegistry,
+  retainedSurfaceSettlementForTurn,
   type RetainedSurfacePage,
 } from "./retained-surface";
 import {
@@ -1282,6 +1283,36 @@ export function remainingStageBudgetMs(
 export const CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS = 15_000;
 export const MAX_CHATGPT_BROWSER_PAGE_REBINDS = 2;
 
+/**
+ * How one ChatGPT browser turn ended, as the turn itself reports it: an explicit teardown (the caller
+ * cancelled, the tab was closed, or the service retired a wedged turn) or an ordinary failure.
+ *
+ * This is the one classification both the launcher turn-end notification and the retained-surface
+ * settlement read (issue #314). It deliberately keeps the pre-existing meaning of an abort: an explicit
+ * teardown publishes no settlement for the operation that held the surface, so the surface is retired and
+ * never reused (issues #301/#305). A plain failure is *not* a teardown — that is the rule issue #314
+ * changes: the surface stays and the conversation is reconciled by the next turn.
+ */
+export function chatGptBrowserTurnTerminal(error: unknown): "aborted" | "failed" {
+  return (error instanceof DOMException && error.name === "AbortError")
+    || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")
+    ? "aborted"
+    : "failed";
+}
+
+/**
+ * Whether a failed turn's end retires the retained conversation it was using (issue #314).
+ *
+ * Two kinds of end prove that the operation left the conversation in an unknown — and untrusted — state
+ * rather than merely failing: an explicit teardown (cancellation, a closed tab, the service retiring a
+ * wedged turn), and a page whose document was replaced by a rehydration, which means the conversation the
+ * surface carried is gone. Everything else is an ordinary failure: the surface stays exactly where it is
+ * and the conversation is marked for reconciliation instead of being retired.
+ */
+export function chatGptBrowserTurnRetiresRetainedSurface(error: unknown): boolean {
+  return chatGptBrowserTurnTerminal(error) === "aborted" || error instanceof ChatGptSurfaceStaleError;
+}
+
 export class ChatGptBrowserObservationTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`ChatGPT browser DOM observation did not respond within ${timeoutMs}ms`);
@@ -2358,7 +2389,7 @@ export class ChatGptBrowserWorker {
         },
       });
     } catch (error) {
-      if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError();
+      if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError(error.reason);
       if (error instanceof RetainedSurfaceBusyError) throw chatGptRetainedSurfaceBusyError();
       if (error instanceof RetainedSurfaceMissingError) throw chatGptRetainedConversationUnavailableError();
       throw error;
@@ -2369,7 +2400,7 @@ export class ChatGptBrowserWorker {
       for (;;) {
         if (options.signal?.aborted) throw new DOMException("ChatGPT answer recovery aborted", "AbortError");
         const page = retained.page;
-        if (page.isClosed()) throw chatGptRetainedSurfaceLostError();
+        if (page.isClosed()) throw chatGptRetainedSurfaceLostError("surface-dead");
         const turns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
         const count = await turns.count().catch(() => 0);
         if (count > 0) {
@@ -4636,10 +4667,7 @@ export class ChatGptBrowserWorker {
       return await this.runBrowserTurn(turn, surfaceId, undefined, reused);
     } catch (error) {
       originalError = error;
-      terminal = (error instanceof DOMException && error.name === "AbortError")
-        || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")
-        ? "aborted"
-        : "failed";
+      terminal = chatGptBrowserTurnTerminal(error);
       terminalMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
       throw error;
     } finally {
@@ -4719,6 +4747,14 @@ export class ChatGptBrowserWorker {
     let diagnosticPage: Page | undefined;
     /** Whether this browser turn reached its completion or failed: the surface's settlement follows. */
     let turnFailed = false;
+    /**
+     * Whether the failure was an explicit teardown (issue #314): a cancellation or closed tab, or a page
+     * whose document was replaced (a stale/rehydrated surface, which is proof that the conversation the
+     * surface carried is gone). A teardown keeps its established meaning — no settlement was published,
+     * so the surface is retired and never reused — while an ordinary failure marks the conversation for
+     * reconciliation and leaves the surface in place.
+     */
+    let turnTornDown = false;
     let retainedCreated = false;
     let retainedPage: Page | undefined;
     // Send activation is the ambiguity boundary (issue #171): before it, ChatGPT has seen
@@ -4829,12 +4865,20 @@ export class ChatGptBrowserWorker {
                 create: () => this.pageForNewTurn(),
               });
             } catch (error) {
-              if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError();
+              if (error instanceof RetainedSurfaceLostError) throw chatGptRetainedSurfaceLostError(error.reason);
               if (error instanceof RetainedSurfaceBusyError) throw chatGptRetainedSurfaceBusyError();
               if (error instanceof RetainedSurfaceMissingError) throw chatGptRetainedConversationUnavailableError();
               throw error;
             }
             retainedCreated = retained.created;
+            if (retained.reconciling) {
+              // Issue #314: the previous turn of this conversation failed, and this turn is its bounded
+              // reconciliation attempt. It resumes the surface in place — it never creates a replacement
+              // conversation and never resends the failed turn's submission.
+              console.info(
+                `[chatgpt-web] browser turn ${turn.traceId} is reconciling the conversation after a failed turn`,
+              );
+            }
             if (abortSignal.aborted) {
               if (retained.created) {
                 // This turn created the surface and never used it: discard it so no orphaned page
@@ -5541,6 +5585,10 @@ export class ChatGptBrowserWorker {
       return finalText;
     } catch (error) {
       turnFailed = true;
+      // A cancelled turn, a closed tab, or a surface whose document was replaced (a stale/rehydrated
+      // page) publishes no settlement for the operation that held the retained conversation, so the
+      // surface is retired; every ordinary failure only marks it (issue #314).
+      turnTornDown = chatGptBrowserTurnRetiresRetainedSurface(error);
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${safeErrorDescriptor(error)}`,
@@ -5555,10 +5603,17 @@ export class ChatGptBrowserWorker {
       // the next turn of the same conversationKey can continue, keeping the page itself open.
       if (managedRetained) {
         this.retainedSurfaces.release(turn.conversationKey!);
-        // The settlement is what this turn actually reached: a failed turn proves nothing about the
-        // remote generation, so the surface is retired (an explicit reset is the way back) instead of
-        // being handed to the next turn as if the operation had finished.
-        this.retainedSurfaces.settle(turn.conversationKey!, turnFailed ? "rejected" : "fulfilled");
+        // What the turn publishes about the operation it held (issue #314): a completed turn settles
+        // the conversation; a failed turn marks it as needing reconciliation and leaves the physical
+        // surface exactly where it is, so the next turn resumes it instead of being refused as a lost
+        // surface; an explicit teardown still retires it. A failure must not, by itself, kill the
+        // conversation the caller is using.
+        this.retainedSurfaces.settle(
+          turn.conversationKey!,
+          retainedSurfaceSettlementForTurn(
+            !turnFailed ? "completed" : turnTornDown ? "torn-down" : "failed",
+          ),
+        );
         // A surface that this turn created is discarded only if the send never activated: before
         // that boundary ChatGPT has seen nothing, so no conversation exists to preserve. Once the
         // send is activated (or submission is proven), irreversible activity exists and a later
