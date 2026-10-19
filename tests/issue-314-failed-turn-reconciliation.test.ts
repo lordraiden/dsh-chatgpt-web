@@ -47,8 +47,12 @@ import { controlledIncoming, controlledProviderConfig } from "./support/chatgpt-
  *
  * The approved rule, in code terms:
  *
- * - a failed turn **marks the conversation as needing reconciliation** (`needsReconciliation`) and leaves
- *   the physical surface in place — a failure, by itself, retires nothing;
+ * - a failed turn whose submission was **confirmed** marks the conversation as needing reconciliation
+ *   (`needsReconciliation`) and leaves the physical surface in place — a failure, by itself, retires
+ *   nothing. (Stage 1, `#317`, refines *which* failure that is: a failure before the submission was
+ *   confirmed marks nothing and spends no reconciliation budget. This suite's failures are all
+ *   post-submission, so it supplies that phase explicitly at every settlement call rather than
+ *   leaving it to a default.)
  * - the **next turn resumes** that surface (the acquisition reports `reconciling`), so the caller's session
  *   survives;
  * - retirement happens only on **proof of death** (the page is closed/gone) or an **explicit teardown**
@@ -104,7 +108,10 @@ function physicalConversation(name: string): PhysicalConversation {
 /** The end of a failed managed-chrome turn, in the worker's own order: release, then settle. */
 function failedTurn(registry: RetainedSurfaceRegistry<PhysicalConversation>): void {
   registry.release(KEY);
-  registry.settle(KEY, retainedSurfaceSettlementForTurn("failed"));
+  // Every failure this suite drives is post-submission: the submission was accepted, then the turn
+  // failed (issue #314). The phase is therefore `confirmed` (issue #317 stage 1) — the same fact the
+  // production worker reads back from its attempt record.
+  registry.settle(KEY, retainedSurfaceSettlementForTurn("failed", "confirmed"));
 }
 
 describe("issue #314 — a failed turn marks the conversation instead of retiring it", () => {
@@ -148,7 +155,7 @@ describe("issue #314 — a failed turn marks the conversation instead of retirin
 
     // The settled successful turn clears the mark.
     registry.release(KEY);
-    registry.settle(KEY, retainedSurfaceSettlementForTurn("completed"));
+    registry.settle(KEY, retainedSurfaceSettlementForTurn("completed", "confirmed"));
     expect(registry.needsReconciliation(KEY)).toBe(false);
     expect(registry.isLost(KEY)).toBe(false);
     expect(registry.isReusable(KEY)).toBe(true);
@@ -189,7 +196,7 @@ describe("issue #314 — a failed turn marks the conversation instead of retirin
     expect(second.reconciling).toBe(true);
     second.page.submit("pregunta tres");
     registry.release(KEY);
-    registry.settle(KEY, retainedSurfaceSettlementForTurn("completed"));
+    registry.settle(KEY, retainedSurfaceSettlementForTurn("completed", "confirmed"));
     expect(registry.needsReconciliation(KEY)).toBe(false);
     expect(created).toBe(1);
     expect(page.closeCount).toBe(0);
@@ -294,8 +301,8 @@ describe("issue #314 — a failed turn marks the conversation instead of retirin
     expect(chatGptBrowserTurnRetiresRetainedSurface(new DOMException("cancelled", "AbortError"))).toBe(true);
     expect(chatGptBrowserTurnRetiresRetainedSurface(new ChatGptSurfaceStaleError("rehydrated"))).toBe(true);
     expect(chatGptBrowserTurnRetiresRetainedSurface(new Error("provider failed after submission"))).toBe(false);
-    expect(retainedSurfaceSettlementForTurn("torn-down")).toBe("rejected");
-    registry.settle(KEY, retainedSurfaceSettlementForTurn("torn-down"));
+    expect(retainedSurfaceSettlementForTurn("torn-down", "confirmed")).toBe("rejected");
+    registry.settle(KEY, retainedSurfaceSettlementForTurn("torn-down", "confirmed"));
 
     expect(registry.isLost(KEY)).toBe(true);
     expect(page.isClosed()).toBe(true);
@@ -377,6 +384,14 @@ class ManagedSurfaceFixture {
     retained?.page.submit(compiled.text);
     let failed = false;
     let tornDown = false;
+    /**
+     * Whether this simulated turn confirmed its submission (issue #317 stage 1).
+     *
+     * It is set at the same boundary the production worker sets its own send activation: the attempt's
+     * send was activated, so ChatGPT may hold output this process never observed. The classifier below
+     * therefore classifies this fixture's failures exactly as the worker classifies its own.
+     */
+    let submitted = false;
     try {
       await turn.onPhysicalSurfaceBound?.({
         resourceId: `surface:${key ?? turn.traceId}`,
@@ -386,6 +401,7 @@ class ManagedSurfaceFixture {
         accountId: "chatgpt-account:controlled-surface-account",
       });
       await turn.onSurfaceReady?.();
+      submitted = true;
       await turn.onSendActivated?.();
       turn.onSubmitted?.();
       if (plan.error) throw plan.error;
@@ -402,7 +418,10 @@ class ManagedSurfaceFixture {
         this.registry.release(key);
         this.registry.settle(
           key,
-          retainedSurfaceSettlementForTurn(!failed ? "completed" : tornDown ? "torn-down" : "failed"),
+          retainedSurfaceSettlementForTurn(
+            !failed ? "completed" : tornDown ? "torn-down" : "failed",
+            submitted ? "confirmed" : "unconfirmed",
+          ),
         );
       }
     }

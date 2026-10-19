@@ -9,6 +9,7 @@ import {
 import {
   RetainedSurfaceLostError,
   RetainedSurfaceRegistry,
+  retainedSurfaceSettlementForTurn,
   type RetainedSurfacePage,
 } from "../src/adapters/chatgpt-web/retained-surface";
 import {
@@ -77,6 +78,9 @@ import { controlledIncoming, controlledProviderConfig } from "./support/chatgpt-
  *   message, and the conversation is **retired** with the distinguishable loss reason instead of
  *   being carried forever;
  * - a retained page that is gone is a **continuity error** with the `surface-dead` reason;
+ * - the failure's **phase** decides the surface mark (stage 1, `#317`): a failure that never reached the
+ *   provider is an ordinary retry and marks nothing, while a confirmed submission is marked and
+ *   reconciled — the verdict below reads the same structural fact (the attempt record);
  * - the seam receives **state** (the conversation key), so no caller text can even reach it.
  *
  * The first blocks are browser-free and drive the real rule, the real retained-surface owner and the
@@ -802,13 +806,19 @@ class ManagedSurfaceFixture {
     } finally {
       compiled.release();
       if (retained !== undefined && key !== undefined) {
-        // The worker's own order (issue #171/#314): release, then publish the settlement this turn
-        // reached. A failure publishes `unreconciled` — the surface stays and is marked — and a page
-        // that died during the turn is retired by the registry itself.
+        // The worker's own order (issue #171/#314) and its own classifier (issue #317 stage 1):
+        // release, then publish the settlement this turn reached. The phase is the registry's own
+        // structural fact — the attempt record exists exactly when this turn's send was activated — so
+        // a pre-activation failure settles as `not_started` (nothing was sent, nothing to reconcile) and
+        // a post-activation failure as `unreconciled` (the surface stays and is marked). A page that died
+        // during the turn is retired by the registry itself.
         this.registry.release(key);
         this.registry.settle(
           key,
-          !failed ? "fulfilled" : tornDown ? "rejected" : "unreconciled",
+          retainedSurfaceSettlementForTurn(
+            !failed ? "completed" : tornDown ? "torn-down" : "failed",
+            this.registry.submissionConfirmed(key) ? "confirmed" : "unconfirmed",
+          ),
         );
       }
     }
@@ -1049,7 +1059,13 @@ describe("issue #314 stage 3 — the real route: an established conversation sur
     ])).catch((error: unknown) => error);
     expect(failed).toBeInstanceOf(Error);
     const key = fixture.surfaceKey!;
-    expect(fixture.registry.needsReconciliation(key)).toBe(true);
+    // Changed by issue #317 stage 1: this failure never reached the provider, so it marks nothing and
+    // spends no reconciliation budget. Before stage 1 this assertion was `true` — it encoded the
+    // old "every failed turn marks" behaviour, which is exactly the gap stage 1 closes. The stage-3
+    // verdict below is unaffected: the durable attempt is still unconfirmed, so the provider probe
+    // still reconciles it (no attempt record ⇒ nothing was sent), and the session still survives.
+    expect(fixture.registry.needsReconciliation(key)).toBe(false);
+    expect(fixture.registry.submissionConfirmed(key)).toBe(false);
 
     const third = await runTurn(target, apiTurn([
       { role: "user", content: "pregunta uno" },
