@@ -101,7 +101,10 @@ in [`src/web-chat/core/auth.ts`](../src/web-chat/core/auth.ts). This is optional
 - `AuthInput` is exactly `click | drag | type | key | scroll | navigate` — intents, not browser commands.
   A `drag` is an ordered path of sampled points (`{x, y, atMs}[]`, press first, release last) in the
   same coordinate space as a `click`, so a slider-style verification is expressed as the gesture the
-  operator made rather than as a synthetic straight line.
+  operator made rather than as a synthetic straight line. The page may sample coarsely (it publishes
+  its interval and sample cap; a long gesture is thinned, never interpolated), the press and release
+  are the mapped `pointerdown`/`pointerup`, and a controller replays the offsets against the press's
+  clock within a bounded pacing budget rather than sleeping every delta again.
 - `view()` is **optional in practice**: the host must accept a provider that reaches `captured`
   without ever producing a frame (device code, OTP, API-key paste). A frame failure is never a session
   failure.

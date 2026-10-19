@@ -271,7 +271,8 @@ Clicks on the provider's screen are relayed as clicks, and a click also routes y
 remote browser: the indicator under the screen always says where your keys go. Press `Escape`, or click
 any field on the page, to get the keyboard back. If the provider asks for a slider or a puzzle, press
 and **drag** on the screen: the path you draw is relayed as the points you actually moved through (the
-indicator says so while it happens), not as a straight line between its ends. The *Send text* field is
+indicator says so while it happens), not as a straight line between its ends, and the gesture ends at
+the point where you released. The *Send text* field is
 the paste/long-text fallback and the only way to type from a phone, whose on-screen keyboard cannot
 drive the remote browser.
 

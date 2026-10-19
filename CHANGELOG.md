@@ -19,6 +19,19 @@
   path. No stealth, no UA change, no synthetic motion, no new dependency. What a real captcha does
   with a relayed human drag is unverified; a rejection there is a finding to report, not to disguise.
 
+- Correct the drag relay's replay timing, sample count and release point (issue #299 follow-up, from an
+  operator report on a live slider captcha). A 3 s gesture previously took ~4.2 s to replay because each
+  `page.mouse.move` already costs about a frame (~17 ms measured) and the controller then slept the
+  sample's full delta on top of it. The page now samples at 32 ms — a coarser sampled real path, capped
+  at 64 samples by doubling the interval and thinning to every other real point when full — and both
+  controllers schedule against the press's own clock, sleeping only the remainder of each offset inside
+  a 1 s pacing budget. The same 3 s gesture now replays in ~1.5 s, and a 1 s gesture in ~1 s. The release
+  is the mapped `pointerup`, always appended and never the last throttled `pointermove`; mapping keeps
+  the exact fractional displayed scale with no integer truncation before scaling, so a screen point has
+  one provider coordinate through both the click and drag paths. No stealth, no UA change, no
+  interpolation and no new dependency; whether the captcha accepts the relayed path is still a
+  live-only question.
+
 - Recognize the harness's runtime-context snapshot in `sanitizeConversationText`, so a session-addressed
   turn whose only `user` message is that block is refused instead of answered (issue #307 follow-up,
   proven against the deployed service). The previous refusal test used the shorter time-snapshot text,
