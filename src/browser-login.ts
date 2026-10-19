@@ -152,10 +152,19 @@ export interface ProviderSessionTarget {
   readonly providerId?: string;
   /** Data home override; the deployment's own `DSH_CHATGPT_WEB_HOME` is the normal source. */
   readonly home?: string;
+  /**
+   * Whether the caller's authenticated predicate already proved this session.
+   *
+   * Defaults to `true`, the historical contract. A provider that has no adapter/predicate yet stores
+   * its capture with `false`: the storage state is written, but the `.verified.json` marker is
+   * **omitted** (and a stale marker removed), so every reader that gates on it keeps treating the
+   * session as unverified. That is the honest representation of "captured, not usable".
+   */
+  readonly verified?: boolean;
 }
 
 /**
- * Write a *verified* session into the provider's credential layout (issue #249).
+ * Write a session into the provider's credential layout (issue #249).
  *
  * One owner for "store a session": `login`, the system-browser capture, `auth import` and every
  * provider adapter land here, so the two files can never be split across locations and a second
@@ -174,8 +183,15 @@ export function storeProviderSession(
     slot.providerId ?? DEFAULT_CREDENTIAL_PROVIDER_ID,
     slot.home ?? getConfigDir(),
   );
+  const marker = loginVerificationMarkerPath(target);
   atomicWriteFile(target, `${JSON.stringify(storageState)}\n`);
-  writeVerificationMarker(target, capabilities);
+  if (slot.verified === false) {
+    // An unverified capture must not inherit an earlier marker: the marker is the deployment-wide
+    // promise "this session works", and a stale one would make the new capture look verified.
+    rmSync(marker, { force: true });
+  } else {
+    writeVerificationMarker(target, capabilities);
+  }
   return target;
 }
 

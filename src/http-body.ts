@@ -39,15 +39,67 @@ function assertWithinLimit(bytes: number, limit: number, label: string): void {
   if (bytes > limit) throw new RequestBodyTooLargeError(label, limit);
 }
 
-export async function readJsonRequestBody(request: Request): Promise<unknown> {
-  const limits = requestBodyLimits();
+/** A per-request ceiling for endpoints whose payload has a stricter natural bound. */
+export interface RequestBodyReadOptions {
+  /** Encoded ceiling in bytes; defaults to the process-wide encoded limit. */
+  readonly encodedLimitBytes?: number;
+  /** Decoded ceiling in bytes; defaults to twice the effective encoded limit. */
+  readonly decodedLimitBytes?: number;
+}
+
+/**
+ * Read at most `limit` bytes from a request body.
+ *
+ * The declared `Content-Length` is checked first, so a wildly oversized body is refused before any
+ * of it is buffered. When the header is absent (chunked transfer), the read stops the moment the
+ * running total would exceed the limit and cancels the stream — the caller never pays for a body it
+ * cannot accept.
+ */
+async function readEncodedBody(request: Request, limit: number): Promise<Uint8Array> {
   const declaredLength = Number(request.headers.get("content-length"));
   if (Number.isFinite(declaredLength)) {
-    assertWithinLimit(declaredLength, limits.encoded, "Encoded request body");
+    assertWithinLimit(declaredLength, limit, "Encoded request body");
   }
+  if (!request.body) return new Uint8Array();
 
-  const encoded = new Uint8Array(await request.arrayBuffer());
-  assertWithinLimit(encoded.byteLength, limits.encoded, "Encoded request body");
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      total += value.byteLength;
+      // Stop exactly at the ceiling rather than buffering the rest and checking afterwards.
+      assertWithinLimit(total, limit, "Encoded request body");
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  reader.releaseLock();
+
+  if (chunks.length === 1) return chunks[0]!;
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+export async function readJsonRequestBody(
+  request: Request,
+  options: RequestBodyReadOptions = {},
+): Promise<unknown> {
+  const limits = requestBodyLimits();
+  const encodedLimit = options.encodedLimitBytes ?? limits.encoded;
+  const decodedLimit = options.decodedLimitBytes ?? encodedLimit * 2;
+
+  const encoded = await readEncodedBody(request, encodedLimit);
 
   const contentEncoding = (request.headers.get("content-encoding") ?? "identity").trim().toLowerCase();
   let decoded: Uint8Array;
@@ -64,7 +116,7 @@ export async function readJsonRequestBody(request: Request): Promise<unknown> {
   } else {
     throw new Error(`Unsupported Content-Encoding: ${contentEncoding}`);
   }
-  assertWithinLimit(decoded.byteLength, limits.decoded, "Decoded request body");
+  assertWithinLimit(decoded.byteLength, decodedLimit, "Decoded request body");
 
   const text = new TextDecoder("utf-8", { fatal: true }).decode(decoded);
   return JSON.parse(text) as unknown;

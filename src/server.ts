@@ -22,6 +22,13 @@ import {
   type AdvisorHost,
 } from "./advisor";
 import type { WebChatProviderRuntime } from "./web-chat/host/text-turn";
+import {
+  AUTH_IMPORT_PROVIDER_IDS,
+  authImportProvider,
+  importProviderStorageState,
+  type AuthImportProvider,
+} from "./auth-import";
+import { AUTH_IMPORT_REFUSAL_CODES, isAuthImportRefusal } from "./auth-import-errors";
 import { WEB_CHAT_AUTH_PAGE_HTML, WEB_CHAT_AUTH_PAGE_PATHS } from "./web-chat/host/auth-page";
 import {
   createWebChatAuthSurface,
@@ -1167,6 +1174,9 @@ async function advisorRecoverRequest(
  * never runs one.
  *
  * - `GET    /v1/control/auth/providers`            — the providers exposing an auth controller
+ * - `POST   /v1/control/auth/import`               — hand an already-captured `storageState` to the
+ *                                                    same pipeline `auth import` uses; a capture-only
+ *                                                    provider is stored with `verified: false`
  * - `POST   /v1/control/auth/sessions`             — open one (409 when that provider is busy)
  * - `GET    /v1/control/auth/sessions/<id>`        — the session view: no cookie, no storage state,
  *                                                    no frame bytes and no page URL
@@ -1414,6 +1424,136 @@ function authPageResponse(): Response {
 }
 
 /**
+ * The import endpoint's body ceiling (512 KiB).
+ *
+ * A Playwright storage state is a few cookies plus a little `localStorage` — tens of KB in practice,
+ * a few hundred KB at the outside. The API's generous default (64 MiB) exists for canonical
+ * conversation contexts and is the wrong shape here: this route refuses a wildly oversized body
+ * before buffering it instead of accepting a payload a browser capture can never be.
+ */
+export const AUTH_IMPORT_MAX_BODY_BYTES = 512 * 1024;
+
+/** One control-surface refusal: the existing `{ ok: false, code, message }` shape plus a status. */
+function authImportErrorResponse(code: string, message: string, status: number): Response {
+  return Response.json(
+    { ok: false, code, message },
+    { status, headers: controlCorsHeaders() },
+  );
+}
+
+/**
+ * `POST /v1/control/auth/import` — hand a captured browser session to the same pipeline the CLI uses.
+ *
+ * This handler owns only the HTTP envelope: strict body size, the `{ provider, storageState }`
+ * member check, and the mapping from `AuthImportRefusal` to a 4xx. It performs **no capture
+ * validation of its own** — `importProviderStorageState` owns the shape check and the provider's
+ * `accept`/`authenticate`/`store` steps, exactly as `auth import --from` does. A capture problem is
+ * never a 500; only a failure to write an already-accepted capture is operator-side.
+ *
+ * The body never reaches a log or a response: the successful answer names the provider and where the
+ * session landed, and a refusal is the pipeline's own actionable message, reduced by the non-secret
+ * diagnostics helper wherever a provider error is quoted.
+ */
+async function authImportRequest(
+  req: Request,
+  providers: ReadonlyMap<string, AuthImportProvider>,
+  now: () => number,
+): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await readJsonRequestBody(req, {
+      encodedLimitBytes: AUTH_IMPORT_MAX_BODY_BYTES,
+      decodedLimitBytes: AUTH_IMPORT_MAX_BODY_BYTES * 2,
+    });
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return authImportErrorResponse(
+        "request_too_large",
+        `The import body exceeds the ${AUTH_IMPORT_MAX_BODY_BYTES}-byte limit for a browser storage state; `
+        + "send just the session you mean to import.",
+        413,
+      );
+    }
+    // A parser/decode error can quote the body, which is exactly where a cookie value would come
+    // from. Its own message is therefore deliberately not included.
+    return authImportErrorResponse(
+      AUTH_IMPORT_REFUSAL_CODES.malformed,
+      'The import body must be valid JSON with the shape {"provider":"...","storageState":{...}}; '
+      + "export the session again and retry.",
+      400,
+    );
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return authImportErrorResponse(
+      AUTH_IMPORT_REFUSAL_CODES.invalidRequest,
+      'The import body must be a JSON object with "provider" and "storageState".',
+      400,
+    );
+  }
+  const body = raw as { provider?: unknown; storageState?: unknown };
+  const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+  if (providerId.length === 0) {
+    return authImportErrorResponse(
+      AUTH_IMPORT_REFUSAL_CODES.invalidRequest,
+      'The import body requires a non-empty "provider" naming a registered import provider.',
+      400,
+    );
+  }
+  const provider = providers.get(providerId);
+  if (!provider) {
+    return authImportErrorResponse(
+      AUTH_IMPORT_REFUSAL_CODES.providerUnknown,
+      `No import provider is registered as "${providerId}". `
+      + `Available: ${[...providers.keys()].join(", ") || "none"}.`,
+      404,
+    );
+  }
+  if (!Object.prototype.hasOwnProperty.call(body, "storageState")) {
+    return authImportErrorResponse(
+      AUTH_IMPORT_REFUSAL_CODES.invalidRequest,
+      'The import body requires a "storageState" object carrying the captured Playwright storage state.',
+      400,
+    );
+  }
+
+  try {
+    const result = await importProviderStorageState({
+      provider,
+      storageState: body.storageState,
+      now,
+    });
+    // Never the capture, never a cookie: provider id and the one boolean the caller acts on.
+    console.info(
+      `[chatgpt-web] auth_import_stored ${JSON.stringify({ provider: providerId, verified: result.verified })}`,
+    );
+    return Response.json({
+      ok: true,
+      provider: providerId,
+      verified: result.verified,
+      verifiedAt: result.verifiedAt,
+      storedAt: result.path,
+      // A stored capture that cannot be used yet must say so in the answer; a verified session
+      // needs no additional prose.
+      ...(result.verified ? {} : { message: result.detail }),
+    }, { headers: controlCorsHeaders() });
+  } catch (error) {
+    if (isAuthImportRefusal(error)) {
+      return authImportErrorResponse(error.code, error.message, 400);
+    }
+    // The pipeline accepted the capture and the write (or an internal seam) failed. That is this
+    // service's problem, not the caller's, and it must not masquerade as a bad capture.
+    console.error(`[chatgpt-web] auth_import_failed ${safeErrorDescriptor(error)}`);
+    return authImportErrorResponse(
+      AUTH_IMPORT_REFUSAL_CODES.storeFailed,
+      "The capture passed the import pipeline but could not be stored on this service; "
+      + "check the data volume and retry.",
+      500,
+    );
+  }
+}
+
+/**
  * The one live-configuration refresh primitive (issue #287, slice 4b).
  *
  * A successful remote sign-in writes to the data volume, but the running process resolved its
@@ -1502,6 +1642,21 @@ export function startServer(
      * `providers` list) replaces the default entirely.
      */
     auth?: WebChatAuthSurfaceOptions;
+    /**
+     * The capture-import providers this listener serves (the generic
+     * `POST /v1/control/auth/import` endpoint).
+     *
+     * Production leaves this out and resolves the shared descriptor owner
+     * ({@link authImportProvider}) for every id in {@link AUTH_IMPORT_PROVIDER_IDS} with this
+     * listener's configuration. Tests inject deterministic descriptors (a fake ChatGPT predicate,
+     * the Qwen probe seam) so the route can be exercised without a browser; an explicit list
+     * replaces the default entirely, exactly like the sign-in surface above.
+     */
+    authImport?: {
+      readonly providers?: readonly AuthImportProvider[];
+      /** Clock seam for the freshness checks and the reported `verifiedAt`; defaults to `Date.now`. */
+      readonly now?: () => number;
+    };
   } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
@@ -1619,6 +1774,24 @@ export function startServer(
       }),
     }],
   });
+
+  /**
+   * The capture-import provider registry (the generic `/v1/control/auth/import` endpoint).
+   *
+   * One map for the life of this listener, built by the same `authImportProvider` owner the CLI
+   * uses, so a provider cannot be spelled one way in the command and another on the wire. An
+   * explicit test list replaces the defaults; an unknown id on the wire is refused by the handler,
+   * never silently defaulted.
+   */
+  const authImportProviders = new Map<string, AuthImportProvider>();
+  for (const provider of dependencies.authImport?.providers
+    ?? AUTH_IMPORT_PROVIDER_IDS.map(id => authImportProvider(id, config))) {
+    if (authImportProviders.has(provider.id)) {
+      throw new TypeError(`Import provider ${provider.id} is registered twice`);
+    }
+    authImportProviders.set(provider.id, provider);
+  }
+  const authImportNow = dependencies.authImport?.now ?? Date.now;
 
   /**
    * The port the listening socket is actually bound to.
@@ -1739,6 +1912,9 @@ export function startServer(
     }
     if (url.pathname === "/v1/control/auth/providers" && req.method === "GET") {
       return authProviderListResponse(authSurface);
+    }
+    if (url.pathname === "/v1/control/auth/import" && req.method === "POST") {
+      return authImportRequest(req, authImportProviders, authImportNow);
     }
     if (url.pathname === "/v1/control/auth/sessions" && req.method === "POST") {
       return authOpenRequest(req, authSurface);

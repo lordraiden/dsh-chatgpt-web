@@ -211,7 +211,11 @@ async function authCommand(args: string[]): Promise<void> {
   assertNoArgs(args);
 
   const result = await importProviderSession({ provider: authImportProvider(providerId), from });
-  stdout.write(`Session verified and stored at ${result.path}\n`);
+  // Never claim more than the pipeline proved: a capture-only provider (DeepSeek today) is stored
+  // and says so, while an authenticated predicate keeps the historical wording.
+  stdout.write(result.verified
+    ? `Session verified and stored at ${result.path}\n`
+    : `Session captured and stored, NOT verified, at ${result.path}\n`);
   stdout.write(`${result.detail}\n`);
 }
 

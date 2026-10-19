@@ -1,0 +1,554 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { defaultConfig } from "../src/config";
+import { AUTH_IMPORT_MAX_BODY_BYTES, startServer, type RunningServer } from "../src/server";
+import {
+  DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
+  chatGptWebAuthImportProvider,
+  deepSeekWebAuthImportProvider,
+  qwenCodeAuthImportProvider,
+  type AuthImportProvider,
+} from "../src/auth-import";
+import { CHATGPT_WEB_AUTH_PROVIDER_ID } from "../src/adapters/chatgpt-web/auth-controller";
+import { QWEN_CODE_PROVIDER_ID } from "../src/adapters/qwen-code/provider";
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+} from "./support/chatgpt-web-home";
+
+/**
+ * The generic session-import endpoint, `POST /v1/control/auth/import`.
+ *
+ * The contract is fixed by the Harness plugin being written against it:
+ *
+ *   body      { "provider": "chatgpt-web" | "qwen-code" | "deepseek-web", "storageState": {...} }
+ *   success   { "ok": true, "provider", "verified", "verifiedAt", "storedAt" }
+ *   refusal   4xx { "ok": false, "code", "message" }
+ *
+ * The suite runs the REAL listener with deterministic import descriptors (a fake ChatGPT
+ * predicate, the Qwen probe seam, the real capture-only DeepSeek descriptor): no browser, no
+ * network and no provider account. It proves the one-policy seam, the layout each provider lands
+ * in, the refusal codes, the authority boundary, and that no response body ever echoes a cookie.
+ */
+
+const API_KEY = "session-import-api-key-0123456789";
+const CONTROL_TOKEN = "session-import-control-token-0123456789";
+const NOW = Date.UTC(2026, 9, 19, 21, 0, 0);
+
+const SECRET_CHATGPT = "SECRET-CHATGPT-COOKIE-VALUE";
+const SECRET_QWEN = "SECRET-QWEN-COOKIE-VALUE";
+const SECRET_QWEN_LOCAL = "SECRET-QWEN-LOCAL-STORAGE-VALUE";
+const SECRET_DEEPSEEK = "SECRET-DEEPSEEK-COOKIE-VALUE";
+const SECRET_DEEPSEEK_LOCAL = "SECRET-DEEPSEEK-LOCAL-STORAGE-VALUE";
+const SECRET_FOREIGN = "SECRET-FOREIGN-COOKIE-VALUE";
+const SECRETS = [
+  SECRET_CHATGPT,
+  SECRET_QWEN,
+  SECRET_QWEN_LOCAL,
+  SECRET_DEEPSEEK,
+  SECRET_DEEPSEEK_LOCAL,
+  SECRET_FOREIGN,
+];
+
+const AUTHENTICATED_TASK_LIST = {
+  success: true,
+  request_id: "request-fixture",
+  data: [{ id: "chat-fixture" }],
+};
+
+const ANONYMOUS_TASK_LIST = {
+  success: false,
+  request_id: "request-fixture",
+  data: { code: "Unauthorized", details: "401 Unauthorized" },
+};
+
+function cookie(domain: string, value: string, expires = -1) {
+  return { name: "session", value, domain, path: "/", expires, httpOnly: true, secure: true, sameSite: "Lax" as const };
+}
+
+const CHATGPT_STATE = {
+  cookies: [cookie(".chatgpt.com", SECRET_CHATGPT)],
+  origins: [{ origin: "https://chatgpt.com", localStorage: [] }],
+};
+
+const QWEN_STATE = {
+  cookies: [
+    cookie(".qwen.ai", SECRET_QWEN, 1_893_456_000),
+    cookie(".doubleclick.net", SECRET_FOREIGN, 1_893_456_000),
+  ],
+  origins: [
+    { origin: "https://coder.qwen.ai", localStorage: [{ name: "token", value: SECRET_QWEN_LOCAL }] },
+    { origin: "https://example.invalid", localStorage: [] },
+  ],
+};
+
+const DEEPSEEK_STATE = {
+  cookies: [cookie(".deepseek.com", SECRET_DEEPSEEK)],
+  origins: [],
+};
+
+const savedHome = captureChatGptWebHome();
+const homes: string[] = [];
+const running: RunningServer[] = [];
+let home: string;
+
+beforeEach(() => {
+  process.env.DSH_CHATGPT_WEB_API_KEY = API_KEY;
+  home = useTemporaryChatGptWebHome("dsh-session-import-endpoint-");
+  homes.push(home);
+});
+
+afterEach(async () => {
+  delete process.env.DSH_CHATGPT_WEB_API_KEY;
+  while (running.length > 0) {
+    const server = running.pop()!;
+    await Promise.race([
+      Promise.resolve(server.stop(true)).catch(() => undefined),
+      new Promise(resolve => setTimeout(resolve, 2_000)),
+    ]);
+  }
+  while (homes.length > 0) {
+    try { rmSync(homes.pop()!, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  restoreChatGptWebHome(savedHome);
+});
+
+function serve(providers: readonly AuthImportProvider[], now: () => number = () => NOW): RunningServer {
+  const server = startServer(
+    { ...defaultConfig(), port: 0, host: "127.0.0.1", controlToken: CONTROL_TOKEN },
+    { authImport: { providers, now } },
+  );
+  running.push(server);
+  return server;
+}
+
+const url = (server: RunningServer, path: string) => `http://127.0.0.1:${server.port}${path}`;
+const bearer = (value: string) => ({ authorization: `Bearer ${value}` });
+const controlHeaders = { ...bearer(CONTROL_TOKEN), "content-type": "application/json" };
+
+/** ChatGPT with its browser predicate replaced by a deterministic fake; the real store remains. */
+function chatGptImport(options: { readonly failWith?: Error } = {}): AuthImportProvider {
+  const base = chatGptWebAuthImportProvider(defaultConfig());
+  return {
+    ...base,
+    authenticate: async state => {
+      if (options.failWith) throw options.failWith;
+      return {
+        storageState: state,
+        detail: "Account surface: https://chatgpt.com/",
+        evidence: {},
+        verified: true,
+      };
+    },
+  };
+}
+
+/** Qwen with the probe seam; its real capture validation and store remain. */
+function qwenImport(
+  payload: unknown = AUTHENTICATED_TASK_LIST,
+  options: { readonly onProbe?: () => void } = {},
+): AuthImportProvider {
+  return qwenCodeAuthImportProvider({
+    probe: async () => {
+      options.onProbe?.();
+      return { status: 200, payload };
+    },
+  });
+}
+
+/** Wrap one descriptor so a test can prove the single writer was (or was not) reached. */
+function tracked(provider: AuthImportProvider): { provider: AuthImportProvider; stores: () => number } {
+  let stores = 0;
+  return {
+    provider: {
+      ...provider,
+      store: authentication => {
+        stores += 1;
+        return provider.store(authentication);
+      },
+    },
+    stores: () => stores,
+  };
+}
+
+interface ImportResponse {
+  readonly status: number;
+  readonly text: string;
+  readonly json: () => Record<string, unknown>;
+}
+
+async function postImport(
+  server: RunningServer,
+  body: unknown,
+  headers: Record<string, string> = controlHeaders,
+): Promise<ImportResponse> {
+  const response = await fetch(url(server, "/v1/control/auth/import"), {
+    method: "POST",
+    headers,
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    text,
+    json: () => JSON.parse(text) as Record<string, unknown>,
+  };
+}
+
+function expectNoSecret(text: string): void {
+  for (const secret of SECRETS) expect(text).not.toContain(secret);
+}
+
+describe("session import — a verified provider lands in its own layout once", () => {
+  test("chatgpt-web: the capture is stored and the answer carries the verified shape", async () => {
+    const chatgpt = tracked(chatGptImport());
+    const server = serve([chatgpt.provider, qwenImport(), deepSeekWebAuthImportProvider()]);
+
+    const result = await postImport(server, {
+      provider: CHATGPT_WEB_AUTH_PROVIDER_ID,
+      storageState: CHATGPT_STATE,
+    });
+    const storedAt = join(home, "providers", CHATGPT_WEB_AUTH_PROVIDER_ID, "storage-state.json");
+
+    expect(result.status).toBe(200);
+    expect(result.json()).toEqual({
+      ok: true,
+      provider: CHATGPT_WEB_AUTH_PROVIDER_ID,
+      verified: true,
+      verifiedAt: new Date(NOW).toISOString(),
+      storedAt,
+    });
+    expect(chatgpt.stores()).toBe(1);
+    expect(existsSync(storedAt)).toBe(true);
+    expect(existsSync(`${storedAt}.verified.json`)).toBe(true);
+    expectNoSecret(result.text);
+  });
+
+  test("qwen-code: the capture is stored sanitized, in the provider's own layout, once", async () => {
+    const qwen = tracked(qwenImport());
+    const server = serve([chatGptImport(), qwen.provider, deepSeekWebAuthImportProvider()]);
+
+    const result = await postImport(server, {
+      provider: QWEN_CODE_PROVIDER_ID,
+      storageState: QWEN_STATE,
+    });
+    const storedAt = join(home, "providers", QWEN_CODE_PROVIDER_ID, "storage-state.json");
+
+    expect(result.status).toBe(200);
+    expect(result.json()).toEqual({
+      ok: true,
+      provider: QWEN_CODE_PROVIDER_ID,
+      verified: true,
+      verifiedAt: new Date(NOW).toISOString(),
+      storedAt,
+    });
+    expect(qwen.stores()).toBe(1);
+
+    const stored = JSON.parse(readFileSync(storedAt, "utf8")) as {
+      cookies: { domain: string }[];
+      origins: { origin: string }[];
+    };
+    // The importer's sanitizer is the same one the CLI applies: foreign domains/origins never land.
+    expect(stored.cookies.map(entry => entry.domain)).toEqual([".qwen.ai"]);
+    expect(stored.origins.map(entry => entry.origin)).toEqual(["https://coder.qwen.ai"]);
+
+    const marker = JSON.parse(readFileSync(`${storedAt}.verified.json`, "utf8")) as {
+      authenticated: boolean;
+    };
+    expect(marker.authenticated).toBe(true);
+    expectNoSecret(result.text);
+  });
+
+  test("deepseek-web: the capture is stored, but verified is false and the answer says it is unusable", async () => {
+    const deepseek = tracked(deepSeekWebAuthImportProvider());
+    const server = serve([chatGptImport(), qwenImport(), deepseek.provider]);
+
+    const result = await postImport(server, {
+      provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
+      storageState: DEEPSEEK_STATE,
+    });
+    const storedAt = join(home, "providers", DEEPSEEK_WEB_IMPORT_PROVIDER_ID, "storage-state.json");
+    const body = result.json();
+
+    expect(result.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
+      verified: false,
+      verifiedAt: null,
+      storedAt,
+    });
+    expect(typeof body.message).toBe("string");
+    expect(String(body.message)).toMatch(/not verified/i);
+    expect(String(body.message)).toMatch(/no adapter/i);
+    expect(String(body.message)).toMatch(/cannot be used/i);
+
+    expect(deepseek.stores()).toBe(1);
+    expect(existsSync(storedAt)).toBe(true);
+    // No verified marker: every reader that gates on it must keep treating this as unverified.
+    expect(existsSync(`${storedAt}.verified.json`)).toBe(false);
+    // The capture itself carries the cookie value; the response never does.
+    expect(readFileSync(storedAt, "utf8")).toContain(SECRET_DEEPSEEK);
+    expectNoSecret(result.text);
+  });
+
+  test("deepseek-web: an unverified capture cannot inherit a stale verified marker", async () => {
+    const server = serve([deepSeekWebAuthImportProvider()]);
+    const directory = join(home, "providers", DEEPSEEK_WEB_IMPORT_PROVIDER_ID);
+    const storedAt = join(directory, "storage-state.json");
+    const marker = `${storedAt}.verified.json`;
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(
+      marker,
+      `${JSON.stringify({ version: 1, authenticated: true, verifiedAt: new Date(NOW).toISOString() })}\n`,
+    );
+
+    const result = await postImport(server, {
+      provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
+      storageState: DEEPSEEK_STATE,
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.json()).toMatchObject({ verified: false, verifiedAt: null });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("deepseek-web: an origins-only capture is accepted because no adapter has declared where the token lives", async () => {
+    const server = serve([deepSeekWebAuthImportProvider()]);
+    const state = {
+      cookies: [],
+      origins: [{
+        origin: "https://chat.deepseek.com",
+        localStorage: [{ name: "token", value: SECRET_DEEPSEEK_LOCAL }],
+      }],
+    };
+
+    const result = await postImport(server, {
+      provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
+      storageState: state,
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.json()).toMatchObject({ verified: false, verifiedAt: null });
+    const storedAt = join(home, "providers", DEEPSEEK_WEB_IMPORT_PROVIDER_ID, "storage-state.json");
+    expect(JSON.parse(readFileSync(storedAt, "utf8"))).toEqual(state);
+    expectNoSecret(result.text);
+  });
+});
+
+describe("session import — caller capture problems are 4xx with the pipeline's own codes", () => {
+  test("a capture with no cookies is import_empty and writes nothing", async () => {
+    const qwen = tracked(qwenImport());
+    const server = serve([qwen.provider]);
+    const result = await postImport(server, {
+      provider: QWEN_CODE_PROVIDER_ID,
+      storageState: { cookies: [], origins: [] },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_empty" });
+    expect(qwen.stores()).toBe(0);
+    expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
+    expectNoSecret(result.text);
+  });
+
+  test("malformed JSON is import_malformed and never quotes the body", async () => {
+    const qwen = tracked(qwenImport());
+    const server = serve([qwen.provider]);
+    const result = await postImport(
+      server,
+      `{"provider":"${QWEN_CODE_PROVIDER_ID}","storageState":{"cookies":[{"value":"${SECRET_QWEN}`,
+    );
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_malformed" });
+    expect(result.text).not.toContain(SECRET_QWEN);
+    expect(qwen.stores()).toBe(0);
+  });
+
+  test("a value that is not a storage state is import_shape_invalid and writes nothing", async () => {
+    const qwen = tracked(qwenImport());
+    const server = serve([qwen.provider]);
+    const result = await postImport(server, {
+      provider: QWEN_CODE_PROVIDER_ID,
+      storageState: { nope: true },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_shape_invalid" });
+    expect(qwen.stores()).toBe(0);
+  });
+
+  test("a capture with only foreign cookies is import_foreign_domain and never reaches the probe", async () => {
+    let probed = false;
+    const qwen = tracked(qwenImport(AUTHENTICATED_TASK_LIST, { onProbe: () => { probed = true; } }));
+    const server = serve([qwen.provider]);
+    const result = await postImport(server, {
+      provider: QWEN_CODE_PROVIDER_ID,
+      storageState: { cookies: [cookie(".example.com", SECRET_FOREIGN)], origins: [] },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_foreign_domain" });
+    expect(probed).toBe(false);
+    expect(qwen.stores()).toBe(0);
+    expectNoSecret(result.text);
+  });
+
+  test("a capture whose provider cookies all expired is import_expired and writes nothing", async () => {
+    const qwen = tracked(qwenImport());
+    const server = serve([qwen.provider]);
+    const result = await postImport(server, {
+      provider: QWEN_CODE_PROVIDER_ID,
+      storageState: { cookies: [cookie(".qwen.ai", SECRET_QWEN, 1_000_000)], origins: [] },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_expired" });
+    expect(qwen.stores()).toBe(0);
+    expectNoSecret(result.text);
+  });
+
+  test("a predicate that answers unauthenticated is import_predicate_failed and writes nothing", async () => {
+    const qwen = tracked(qwenImport(ANONYMOUS_TASK_LIST));
+    const server = serve([qwen.provider]);
+    const result = await postImport(server, {
+      provider: QWEN_CODE_PROVIDER_ID,
+      storageState: QWEN_STATE,
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
+    expect(qwen.stores()).toBe(0);
+    expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
+  });
+
+  test("a ChatGPT predicate that fails is the same import_predicate_failed refusal", async () => {
+    const chatgpt = tracked(chatGptImport({ failWith: new Error("the account surface was not authenticated") }));
+    const server = serve([chatgpt.provider]);
+    const result = await postImport(server, {
+      provider: CHATGPT_WEB_AUTH_PROVIDER_ID,
+      storageState: CHATGPT_STATE,
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
+    expect(chatgpt.stores()).toBe(0);
+    expect(existsSync(join(home, "providers", CHATGPT_WEB_AUTH_PROVIDER_ID))).toBe(false);
+  });
+
+  test("an unregistered provider is a 404 naming one that exists, and no store runs", async () => {
+    const server = serve([chatGptImport(), deepSeekWebAuthImportProvider()]);
+    const result = await postImport(server, {
+      provider: "not-a-provider",
+      storageState: CHATGPT_STATE,
+    });
+
+    expect(result.status).toBe(404);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_provider_unknown" });
+    expect(String(result.json().message)).toContain(CHATGPT_WEB_AUTH_PROVIDER_ID);
+  });
+
+  test("a body missing provider or storageState is import_invalid_request", async () => {
+    const server = serve([deepSeekWebAuthImportProvider()]);
+
+    for (const body of [{}, { provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID }, { storageState: DEEPSEEK_STATE }]) {
+      const result = await postImport(server, body);
+      expect(result.status).toBe(400);
+      expect(result.json()).toMatchObject({ ok: false, code: "import_invalid_request" });
+    }
+  });
+});
+
+describe("session import — authority is the control token, exactly like the rest of /v1/control/*", () => {
+  const validBody = { provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID, storageState: DEEPSEEK_STATE };
+
+  test("anonymous, the API key and a wrong control token are refused; the control token opens it", async () => {
+    const server = serve([deepSeekWebAuthImportProvider()]);
+
+    const anonymous = await postImport(server, validBody, { "content-type": "application/json" });
+    expect(anonymous.status).toBe(401);
+
+    const apiKey = await postImport(server, validBody, { ...bearer(API_KEY), "content-type": "application/json" });
+    expect(apiKey.status).toBe(401);
+
+    const wrongControl = await postImport(server, validBody, {
+      ...bearer(`${CONTROL_TOKEN}-wrong`),
+      "content-type": "application/json",
+    });
+    expect(wrongControl.status).toBe(401);
+
+    const control = await postImport(server, validBody);
+    expect(control.status).toBe(200);
+  });
+
+  test("the endpoint does not exist under the API authority", async () => {
+    const server = serve([deepSeekWebAuthImportProvider()]);
+
+    // With the control token this is the public API surface, which refuses the non-API authority.
+    const withControl = await fetch(url(server, "/v1/auth/import"), {
+      method: "POST",
+      headers: controlHeaders,
+      body: JSON.stringify(validBody),
+    });
+    expect(withControl.status).toBe(401);
+
+    // With the API key the route still does not exist: there is no alias beside /v1/control/auth/import.
+    const withApiKey = await fetch(url(server, "/v1/auth/import"), {
+      method: "POST",
+      headers: { ...bearer(API_KEY), "content-type": "application/json" },
+      body: JSON.stringify(validBody),
+    });
+    expect(withApiKey.status).toBe(404);
+  });
+});
+
+describe("session import — the body ceiling is the capture's, not the API's", () => {
+  test("a wildly oversized body is 413 request_too_large and writes nothing", async () => {
+    const deepseek = tracked(deepSeekWebAuthImportProvider());
+    const server = serve([deepseek.provider]);
+    const oversized = {
+      provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
+      storageState: {
+        cookies: [cookie(".deepseek.com", "x".repeat(AUTH_IMPORT_MAX_BODY_BYTES))],
+        origins: [],
+      },
+    };
+    const payload = JSON.stringify(oversized);
+    expect(payload.length).toBeGreaterThan(AUTH_IMPORT_MAX_BODY_BYTES);
+
+    const result = await postImport(server, payload);
+
+    expect(result.status).toBe(413);
+    expect(result.json()).toMatchObject({ ok: false, code: "request_too_large" });
+    expect(deepseek.stores()).toBe(0);
+    expect(existsSync(join(home, "providers", DEEPSEEK_WEB_IMPORT_PROVIDER_ID))).toBe(false);
+  });
+});
+
+describe("session import — stored files are private and the response is never the capture", () => {
+  test("a stored session is mode 0600 and every response body is cookie-free", async () => {
+    if (process.platform === "win32") return;
+    const server = serve([chatGptImport(), qwenImport(), deepSeekWebAuthImportProvider()]);
+
+    const responses = [
+      await postImport(server, { provider: CHATGPT_WEB_AUTH_PROVIDER_ID, storageState: CHATGPT_STATE }),
+      await postImport(server, { provider: QWEN_CODE_PROVIDER_ID, storageState: QWEN_STATE }),
+      await postImport(server, { provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID, storageState: DEEPSEEK_STATE }),
+      await postImport(server, { provider: QWEN_CODE_PROVIDER_ID, storageState: { cookies: [], origins: [] } }),
+    ];
+
+    for (const response of responses) {
+      expectNoSecret(response.text);
+      expect(response.text).not.toContain(SECRET_CHATGPT);
+    }
+
+    for (const providerId of [CHATGPT_WEB_AUTH_PROVIDER_ID, QWEN_CODE_PROVIDER_ID, DEEPSEEK_WEB_IMPORT_PROVIDER_ID]) {
+      const storedAt = join(home, "providers", providerId, "storage-state.json");
+      expect(statSync(storedAt).mode & 0o777).toBe(0o600);
+    }
+  });
+});
