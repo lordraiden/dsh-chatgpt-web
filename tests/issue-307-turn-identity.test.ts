@@ -1295,3 +1295,201 @@ describe("issue #307 — the harness's runtime-context snapshot is host context,
     expect(surface.runs[0]!.prompt).toContain(prose);
   });
 });
+
+/**
+ * The Hindsight reminder the harness injects into the same turn as the human message — the knowledge
+ * preamble (`<hindsight_knowledge>`) followed by its `_refresh` sibling
+ * (`<hindsight_knowledge_refresh>`), both in one user message, verbatim in shape.
+ *
+ * It is host context and nothing else: once `sanitizeConversationText` removes the namespace, the
+ * message carries no human content. The recognition is structural — the `hindsight_…` family — so a
+ * sibling the harness adds next is covered without touching this list, and it never matches prose.
+ */
+const HINDSIGHT_REMINDER = [
+  "<hindsight_knowledge>",
+  "This repository has a Hindsight memory + knowledge base (curated, continuously-updated pages plus the raw memory behind them). The tools below are registered, but you must actually CALL them at the right moments:",
+  "- hindsight_search_knowledge_pages(query) — FIRST STOP, and the way IN to everything below.",
+  "- hindsight_read_knowledge_page(page_id) — read the full page the search ranks highest.",
+  "ALSO your correction tool: when you verify a Hindsight memory is wrong or stale, ingest a \"Correction: <topic>\" doc stating what memory claimed, what is true now, and the evidence.",
+  "13 knowledge pages cover this repository — architecture, conversations, past decisions and in-flight initiatives.",
+  "</hindsight_knowledge>",
+  "",
+  "<hindsight_knowledge_refresh>",
+  "13 knowledge pages cover this repository — architecture, conversations, past decisions and in-flight initiatives.",
+  "Reminder — this repo's Hindsight tools are available; call them at the right moments:",
+  "- hindsight_search_knowledge_pages(query) — FIRST STOP, and the way IN to everything below.",
+  "</hindsight_knowledge_refresh>",
+].join("\n");
+
+/**
+ * The same reminder with a newline inside each **opening** tag, as a template that re-renders the
+ * reminder into the conversation stream can produce it.
+ *
+ * This is the shape the previous recognition missed. It matched the tag name only in its exact
+ * one-line spelling (`<hindsight_knowledge>`), so `<hindsight_knowledge\n>` was not a tag at all and
+ * the whole 13 KB host block went to the provider as human content — exactly the turn the incident
+ * showed in the ChatGPT chat. The structural rule matches the family with the tag's own body
+ * tolerated.
+ */
+const HINDSIGHT_REMINDER_TOLERANT_TAGS = HINDSIGHT_REMINDER
+  .replace("<hindsight_knowledge>", "<hindsight_knowledge\n>")
+  .replace("<hindsight_knowledge_refresh>", "<hindsight_knowledge_refresh\n>");
+
+describe("issue #307 — the Hindsight reminder is host context, recognized as one family", () => {
+  test("the sanitizer empties the reminder whole, and only the reminder", () => {
+    // The verbatim shape: both tags, one message, no human content left.
+    expect(sanitizeConversationText(HINDSIGHT_REMINDER)).toBe("");
+    // The shape the previous matching missed: whitespace inside the opening tag.
+    expect(sanitizeConversationText(HINDSIGHT_REMINDER_TOLERANT_TAGS)).toBe("");
+    // The family, not today's spellings: a sibling the harness adds next is host context too, and a
+    // future name is covered without editing a literal list.
+    expect(sanitizeConversationText("<hindsight_page_list>\n13 pages\n</hindsight_page_list>")).toBe("");
+    // Repeated occurrences, in one message, at any position.
+    expect(sanitizeConversationText([
+      `${HINDSIGHT_REMINDER}`,
+      `${HINDSIGHT_REMINDER}`,
+    ].join("\n\n"))).toBe("");
+    expect(sanitizeConversationText(`${HINDSIGHT_REMINDER}\n${HINDSIGHT_REMINDER_TOLERANT_TAGS}`)).toBe("");
+    // An unterminated section still fails closed rather than leaking by default.
+    expect(sanitizeConversationText("<hindsight_knowledge>\nnever closed")).toBe("");
+
+    // The block is removed around the human text and never with it, in either order.
+    expect(sanitizeConversationText(`${HINDSIGHT_REMINDER}\n\nque tal?`)).toBe("que tal?");
+    expect(sanitizeConversationText(`${HINDSIGHT_REMINDER_TOLERANT_TAGS}\n\nque tal?`)).toBe("que tal?");
+    expect(sanitizeConversationText(`que tal?\n\n${HINDSIGHT_REMINDER}`)).toBe("que tal?");
+
+    // Guard against over-matching: prose that merely mentions the vocabulary carries no tag and is
+    // never touched.
+    const prose = "Explícame qué son las knowledge pages de Hindsight y cuándo merece la pena consultarlas.";
+    expect(sanitizeConversationText(prose)).toBe(prose);
+  });
+
+  test("the reminder alone, with an identity, is refused host_context_only_turn — nothing sent, nothing written", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+    const store = resolveNativeChatGptContinuityStore();
+    const file = join(home, "conversations.json");
+
+    // A real first turn installs the conversation and its durable continuity record.
+    const first = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "hindsight-reminder-307",
+      messages: [{ role: "user", content: "pregunta uno" }],
+    });
+    expect(first.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+
+    const beforeBytes = readFileSync(file, "utf8");
+    const beforeRecords = await store.list();
+
+    // THE INCIDENT SHAPE: the reminder, both tags, as the only user message on the same identity.
+    const refused = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "hindsight-reminder-307",
+      messages: [{ role: "user", content: HINDSIGHT_REMINDER }],
+    });
+
+    expect(refused.status).toBe(400);
+    expect(refused.body.error?.code).toBe(API_PROJECTION_HOST_CONTEXT_ONLY_CODE);
+    expect(refused.body.error?.type).toBe("invalid_request_error");
+    expect(refused.body.error?.message).toMatch(/only host context/);
+    expect(refused.body.error?.message).not.toMatch(/must carry a human message/);
+
+    // Zero provider runs: nothing reached the browser.
+    expect(surface.runs).toHaveLength(1);
+    // The refusal is write-free: byte-identical store and unchanged records.
+    expect(readFileSync(file, "utf8")).toBe(beforeBytes);
+    expect(await store.list()).toEqual(beforeRecords);
+  });
+
+  test("the reminder plus a real instruction: the compiled prompt carries the instruction and none of the reminder", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+
+    // One user message carrying the reminder and, after it, the actual instruction — the hardest
+    // shape for the sanitizer, because the projection has only this message to select.
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "hindsight-reminder-307-human",
+      messages: [{ role: "user", content: `${HINDSIGHT_REMINDER}\n\nque tal?` }],
+    });
+
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    // Asserted on what the provider actually received, not on the response body.
+    const compiled = surface.runs[0]!.prompt;
+    expect(compiled).toContain("que tal?");
+    expect(compiled).not.toContain("hindsight_knowledge");
+    expect(compiled).not.toContain("FIRST STOP");
+  });
+
+  test("the harness's split shape — the reminder as a trailing user message — still transmits the human message", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "hindsight-reminder-307-split",
+      messages: [
+        { role: "user", content: "que tal?" },
+        { role: "user", content: HINDSIGHT_REMINDER },
+      ],
+    });
+
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    const compiled = surface.runs[0]!.prompt;
+    expect(compiled).toContain("que tal?");
+    expect(compiled).not.toContain("hindsight_knowledge");
+    expect(compiled).not.toContain("FIRST STOP");
+  });
+
+  test("the shape the previous matching missed — whitespace inside the tag — is refused, not sent", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+
+    // Alone on a session identity: refused before the turn exists, exactly like the verbatim block.
+    const refused = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "hindsight-reminder-307-tolerant",
+      messages: [{ role: "user", content: HINDSIGHT_REMINDER_TOLERANT_TAGS }],
+    });
+    expect(refused.status).toBe(400);
+    expect(refused.body.error?.code).toBe(API_PROJECTION_HOST_CONTEXT_ONLY_CODE);
+    expect(surface.runs).toHaveLength(0);
+
+    // With a human instruction in the same message: the instruction is what is sent.
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "hindsight-reminder-307-tolerant-human",
+      messages: [{ role: "user", content: `${HINDSIGHT_REMINDER_TOLERANT_TAGS}\n\nque tal?` }],
+    });
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    const compiled = surface.runs[0]!.prompt;
+    expect(compiled).toContain("que tal?");
+    expect(compiled).not.toContain("hindsight_knowledge");
+    expect(compiled).not.toContain("FIRST STOP");
+  });
+
+  test("prose that merely mentions Hindsight or its knowledge pages is not stripped on the wire", async () => {
+    const surface = new ControlledSurface();
+    surface.enqueue({ answer: "uno" });
+    const server = serveControlled(surface);
+    const prose = "Explícame qué son las knowledge pages de Hindsight y cuándo merece la pena consultarlas.";
+
+    const answered = await postChat(server, {
+      model: LUNA,
+      prompt_cache_key: "hindsight-reminder-307-prose",
+      messages: [{ role: "user", content: prose }],
+    });
+
+    expect(answered.status).toBe(200);
+    expect(surface.runs).toHaveLength(1);
+    expect(surface.runs[0]!.prompt).toContain(prose);
+  });
+});

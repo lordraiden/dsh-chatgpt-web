@@ -21,18 +21,42 @@
  *
  * The trigger is the preamble and never a lone section line: a human message that merely mentions a
  * "current working directory" in prose carries no preamble and is left untouched.
+ *
+ * ## The Hindsight namespace
+ *
+ * Hindsight injects its knowledge preamble, its `_refresh` reminder and its recall results as tagged
+ * blocks (`<hindsight_knowledge>`, `<hindsight_knowledge_refresh>`, `<hindsight_memory>`, …). The whole
+ * `hindsight_…` namespace is host context, so it is recognized **structurally** — by the family prefix
+ * on an element's own opening tag, and by that element's own close tag — rather than by a list of
+ * literal tag names. A sibling the harness adds later is therefore stripped from the moment it
+ * appears, and a tag rendered with a stray space or newline inside it (`<hindsight_knowledge\n>`) is
+ * still host context. The prefix is required, so prose that merely mentions "hindsight" or "knowledge
+ * pages" is never touched.
  */
+// The whole `hindsight_…` namespace is host-private and is owned by `stripHindsightElements` below,
+// never by a literal pair here: the harness's knowledge preamble (`<hindsight_knowledge>`), its
+// `_refresh` sibling, its `<hindsight_memory>` recall and whatever name it adds next all belong to the
+// same family, so listing today's spellings would leak tomorrow's.
 const TRANSPORT_BLOCKS = [
   // The harness's own skills catalogue arrives as one system reminder; it is host context, never
   // part of the conversation (issue: normal chat must not carry DSH context to the provider).
   ["<system-reminder>", "</system-reminder>"],
-  ["<hindsight_knowledge>", "</hindsight_knowledge>"],
-  ["<hindsight_memory>", "</hindsight_memory>"],
-  ["<hindsight_knowledge_refresh>", "</hindsight_knowledge_refresh>"],
   ["<environment_context>", "</environment_context>"],
   ["<dsh_transport_resume>", "</dsh_transport_resume>"],
   ["<AEGIS_DSH_ROUTING_BOOTSTRAP>", "</AEGIS_DSH_ROUTING_BOOTSTRAP>"],
 ] as const;
+
+/**
+ * Opening tag of any element in the Hindsight namespace, matched **structurally** by the family prefix
+ * rather than by a list of literal tag names, so the sibling the harness adds next (`_refresh` today,
+ * something else tomorrow) is host context from the moment it appears.
+ *
+ * The tag body is tolerated because the reminder is assembled from templates and re-rendered into the
+ * conversation stream: attributes, an internal space or newline before `>` (`<hindsight_knowledge\n>`),
+ * and a self-closing form must not turn a host-private block into human content. The `hindsight_`
+ * prefix is required, so prose that merely mentions "hindsight" or "knowledge pages" is never matched.
+ */
+const HINDSIGHT_OPEN_TAG = /<(hindsight_[a-z0-9_-]+)(?:\s[^<>]*?)?\s*\/?>/i;
 
 const OPERATIONAL_LINE_PREFIXES = [
   "Time sampled while preparing turn ",
@@ -122,24 +146,38 @@ function stripTaggedBlocks(text: string): string {
     }
   }
 
-  // Hindsight may add new named sections over time. Treat the whole
-  // <hindsight_...> namespace as host-private and fail closed on an
-  // unterminated section so future memory formats cannot leak by default.
-  for (;;) {
-    const match = /<hindsight_[a-z0-9_-]+>/i.exec(current);
-    if (!match || match.index === undefined) break;
+  return stripHindsightElements(current);
+}
 
-    const open = match[0];
-    const start = match.index;
-    const tagName = open.slice(1, -1);
-    const closingTag = new RegExp(`</${tagName}>`, "i");
-    const closingMatch = closingTag.exec(current.slice(start + open.length));
-    if (!closingMatch || closingMatch.index === undefined) {
+/**
+ * Remove every element of the Hindsight namespace (see `HINDSIGHT_OPEN_TAG`), including repeated
+ * occurrences in one piece of text. Each opening tag is paired with its own close tag, tolerating the
+ * same internal whitespace on the way out (`</hindsight_knowledge >`); a body that mentions a tag
+ * cannot end a different block, because the close tag searched for is the one named by its own opening
+ * tag.
+ *
+ * An opening tag with no close tag is not a licence to keep the text: Hindsight may add new named
+ * sections over time, so the remainder is treated as part of the host-private block and removed — fail
+ * closed, exactly as before, so a future memory format cannot leak by default.
+ */
+function stripHindsightElements(text: string): string {
+  let current = text;
+
+  for (;;) {
+    const opening = HINDSIGHT_OPEN_TAG.exec(current);
+    if (!opening || opening.index === undefined) break;
+
+    // The capture is constrained to `[a-z0-9_-]`, so the name is safe to interpolate into a RegExp.
+    const tagName = opening[1]!;
+    const start = opening.index;
+    const closing = new RegExp(`</${tagName}\\s*>`, "i").exec(current.slice(start + opening[0].length));
+
+    if (!closing || closing.index === undefined) {
       current = current.slice(0, start);
       break;
     }
 
-    const end = start + open.length + closingMatch.index + closingMatch[0].length;
+    const end = start + opening[0].length + closing.index + closing[0].length;
     current = current.slice(0, start) + current.slice(end);
   }
 
