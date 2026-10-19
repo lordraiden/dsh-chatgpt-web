@@ -25,7 +25,9 @@
  * - **A frame cache.** A late subscriber gets the last frame immediately without touching the
  *   provider. `input()` invalidates the cache while the session can still change, and `invalidate()`
  *   is public, so the caller can paint a fresh frame right after an input without this module
- *   knowing anything about the mechanism behind it.
+ *   knowing anything about the mechanism behind it. `view({quality:"fast"})` forwards the encoding
+ *   hint; `view({fresh:true})` asks once more for a settling frame and keeps the cached frame as the
+ *   fallback (which matters once a `captured` session's mechanism is gone).
  *
  * What it deliberately does not own:
  *
@@ -67,6 +69,21 @@ export interface WebChatAuthSessionSnapshot {
   readonly detail?: string;
 }
 
+/** What a caller may ask of one frame read. */
+export interface WebChatAuthViewRequest {
+  /**
+   * Bypass the cache and ask the provider for a new frame even when one is cached — including on a
+   * `captured` session, where the mechanism may already be gone and the cached frame is the fallback.
+   *
+   * The relay uses this after a settling input whose own frame could not be guaranteed fresh (the
+   * provider terminalized while the input was applied); it is not a per-tick option, because a fresh
+   * read is what costs a screenshot.
+   */
+  readonly fresh?: boolean;
+  /** Encoding-cost hint forwarded to the provider's `view()`. Absent means the idle frame. */
+  readonly quality?: "fast";
+}
+
 /** One managed sign-in session. */
 export interface WebChatAuthSession {
   readonly id: string;
@@ -79,9 +96,10 @@ export interface WebChatAuthSession {
    * The current frame: the cache when one is valid, otherwise a fresh `view()` from the provider.
    *
    * A late subscriber therefore gets the last frame immediately. A `captured` session serves its
-   * cached frame without asking the provider again (its mechanism may already be gone).
+   * cached frame without asking the provider again (its mechanism may already be gone). With
+   * `fresh`, the provider is asked once more and the cached frame remains the fallback if it refuses.
    */
-  view(): Promise<ProviderAuthView>;
+  view(request?: WebChatAuthViewRequest): Promise<ProviderAuthView>;
   /**
    * Relay one input and invalidate the cached frame while the session is still interactive, so the
    * caller's next `view()` is fresh.
@@ -339,6 +357,24 @@ export function createWebChatAuthSessionManager(
     }
   };
 
+  /** Ask the provider for one frame and refuse a malformed answer, by category. */
+  const readFrame = async (
+    entry: AuthSessionEntry,
+    request: WebChatAuthViewRequest,
+  ): Promise<ProviderAuthView> => {
+    const frame = await entry.provider.view(
+      request.quality === undefined ? undefined : { quality: request.quality },
+    );
+    if (!isProviderAuthView(frame)) {
+      throw webChatError(
+        "UPSTREAM_ERROR",
+        `Provider ${entry.providerId} returned a malformed auth frame`,
+        { providerId: entry.providerId },
+      );
+    }
+    return frame;
+  };
+
   /** Refuse an operation that a terminal session cannot serve, by the semantic category. */
   const assertInteractive = (entry: AuthSessionEntry, action: string): void => {
     if (entry.state === "starting" || entry.state === "awaiting_input" || entry.state === "verifying") {
@@ -388,26 +424,32 @@ export function createWebChatAuthSessionManager(
         };
       },
 
-      async view() {
+      async view(request = {}) {
         const state = refresh(entry);
         if (state === "captured") {
-          if (entry.frame) return entry.frame;
-          throw webChatError(
-            "CONVERSATION_STATE_MISMATCH",
-            `The sign-in session for ${entry.providerId} already captured and relayed no frame`,
-            { providerId: entry.providerId },
-          );
+          if (!request.fresh) {
+            if (entry.frame) return entry.frame;
+            throw webChatError(
+              "CONVERSATION_STATE_MISMATCH",
+              `The sign-in session for ${entry.providerId} already captured and relayed no frame`,
+              { providerId: entry.providerId },
+            );
+          }
+          // A settling frame for a sign-in that completed during the gesture: ask once more, and fall
+          // back to the last relayed frame when the provider's mechanism is already gone.
+          try {
+            const frame = await readFrame(entry, request);
+            entry.frame = frame;
+            entry.frameValid = true;
+            return frame;
+          } catch (error) {
+            if (entry.frame) return entry.frame;
+            throw error;
+          }
         }
         assertInteractive(entry, "relay a frame");
-        if (entry.frameValid && entry.frame) return entry.frame;
-        const frame = await entry.provider.view();
-        if (!isProviderAuthView(frame)) {
-          throw webChatError(
-            "UPSTREAM_ERROR",
-            `Provider ${entry.providerId} returned a malformed auth frame`,
-            { providerId: entry.providerId },
-          );
-        }
+        if (!request.fresh && entry.frameValid && entry.frame) return entry.frame;
+        const frame = await readFrame(entry, request);
         // The provider may have finished while the frame was produced: a captured session still
         // relays this last frame, but a session that expired or failed underneath must not hand one
         // back as if it were live.
@@ -421,7 +463,7 @@ export function createWebChatAuthSessionManager(
         refresh(entry);
         assertInteractive(entry, "accept input");
         if (!isAuthInput(event)) {
-          throw new TypeError("A WebChat auth input must be one of click, drag, type, key, scroll or navigate");
+          throw new TypeError("A WebChat auth input must be one of click, drag, pointer-down, pointer-move, pointer-up, pointer-cancel, type, key, scroll or navigate");
         }
         await entry.provider.input(event);
         // The provider may have completed the sign-in while handling this very input.

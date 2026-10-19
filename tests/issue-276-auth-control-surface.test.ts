@@ -44,6 +44,8 @@ interface FakeProvider {
   readonly stores: AuthCapture[];
   readonly captureCalls: () => number;
   readonly counts: () => { starts: number; views: number; inputs: number; cancels: number };
+  /** Every `view()` quality the relay asked for, in order: a burst must ask for the cheap one. */
+  readonly viewQualities: Array<"fast" | undefined>;
 }
 
 /**
@@ -68,17 +70,25 @@ function fakeProvider(options: {
   let captureCalls = 0;
   const seen: AuthInput[] = [];
   const stores: AuthCapture[] = [];
+  const viewQualities: Array<"fast" | undefined> = [];
 
   const session: ProviderAuthSession = {
     providerId: options.providerId,
     state: () => state,
-    async view() {
+    async view(viewOptions?: { quality?: "fast" }) {
       views += 1;
+      viewQualities.push(viewOptions?.quality);
       if (!options.pixels) throw new Error("this provider relays no frames");
       const png = new Uint8Array(ONE_BY_ONE_PNG.length + 1);
       png.set(ONE_BY_ONE_PNG, 0);
       png[ONE_BY_ONE_PNG.length] = views;
-      return { png, width: 320, height: 480 };
+      return {
+        png,
+        width: 320,
+        height: 480,
+        // A real browser provider answers a burst with a cheaper encoding; the host only relays it.
+        ...(viewOptions?.quality === "fast" ? { mimeType: "image/jpeg" as const } : {}),
+      };
     },
     async input(event) {
       inputs += 1;
@@ -121,6 +131,7 @@ function fakeProvider(options: {
     stores,
     captureCalls: () => captureCalls,
     counts: () => ({ starts, views, inputs, cancels }),
+    viewQualities,
   };
 }
 
@@ -141,7 +152,13 @@ afterEach(async () => {
 
 function serve(
   providers: FakeProvider[],
-  auth: { frameIntervalMs?: number; session?: Record<string, unknown> } = {},
+  auth: {
+    frameIntervalMs?: number;
+    burstFrameIntervalMs?: number;
+    burstHoldMs?: number;
+    burstTailMs?: number;
+    session?: Record<string, unknown>;
+  } = {},
 ): RunningServer {
   const surfaceOptions = {
     providers: providers.map(provider => ({
@@ -150,6 +167,9 @@ function serve(
       controller: provider.controller,
     })),
     ...(auth.frameIntervalMs !== undefined ? { frameIntervalMs: auth.frameIntervalMs } : {}),
+    ...(auth.burstFrameIntervalMs !== undefined ? { burstFrameIntervalMs: auth.burstFrameIntervalMs } : {}),
+    ...(auth.burstHoldMs !== undefined ? { burstHoldMs: auth.burstHoldMs } : {}),
+    ...(auth.burstTailMs !== undefined ? { burstTailMs: auth.burstTailMs } : {}),
     ...(auth.session !== undefined ? { session: auth.session } : {}),
   };
   const server = startServer(
@@ -432,6 +452,84 @@ describe("issue #276 slice 2a — the frame relay", () => {
     expect(end.name).toBe("end");
     expect(end.data.state).toBe("captured");
     await expect(reader.next(1_000)).rejects.toThrow(/ended before/);
+  });
+
+  test("a live pointer gesture streams a cheap burst, publishes frame age and settles after release", async () => {
+    const fake = fakeProvider({ providerId: PIXEL_PROVIDER, label: "Pixel Web", pixels: true });
+    const server = serve([fake], {
+      // A deliberately slow idle cadence makes "burst" measurable against it: the burst event after
+      // each sample must arrive far sooner than one idle tick.
+      frameIntervalMs: 800,
+      burstFrameIntervalMs: 25,
+      burstHoldMs: 150,
+      // No post-release tail: the settle requirement alone must keep the burst alive until the
+      // release frame arrives, and then the very next event must be on the idle cadence.
+      burstTailMs: 0,
+      session: { sweepIntervalMs: 0 },
+    });
+    const session = await openSession(server, PIXEL_PROVIDER);
+    const response = await fetch(url(server, `/v1/control/auth/sessions/${session.id}/stream`), {
+      headers: control(),
+    });
+    const reader = sseReader(response);
+
+    const first = await readEvent(reader);
+    expect(first.data.frameType).toBeUndefined(); // idle frames are the provider's default PNG
+    expect(typeof first.data.frameAgeMs).toBe("number");
+    expect(typeof first.data.frameCapturedAt).toBe("number");
+    expect(fake.viewQualities.at(-1)).toBeUndefined();
+
+    // The press is a live remote gesture, and the relay leaves the 250 ms idle cadence for the burst.
+    const pressedAt = Date.now();
+    expect((await postInput(server, session.id, { type: "pointer-down", x: 60, y: 120 })).status).toBe(200);
+    const burstOne = await readEvent(reader, 1_000);
+    expect(Date.now() - pressedAt).toBeLessThan(300); // far sooner than the 800 ms idle tick
+    expect(burstOne.data.frameType).toBe("image/jpeg");
+    expect(typeof burstOne.data.frameAgeMs).toBe("number");
+    expect(fake.viewQualities).toContain("fast");
+
+    // Each move is applied immediately and invalidates the cached frame, so the burst event after it
+    // is a new picture rather than a replay of the press frame — on the burst cadence, not the 250 ms
+    // idle tick.
+    const movedAt = Date.now();
+    expect((await postInput(server, session.id, { type: "pointer-move", x: 120, y: 140 })).status).toBe(200);
+    const burstTwo = await readEvent(reader, 1_000);
+    expect(Date.now() - movedAt).toBeLessThan(300); // still the burst cadence, not the idle one
+    expect(burstTwo.data.frameType).toBe("image/jpeg");
+    expect(burstTwo.data.frame).not.toBe(burstOne.data.frame);
+    expect(typeof burstTwo.data.frameAgeMs).toBe("number");
+
+    // The release is the exact coordinate and is published.
+    expect((await postInput(server, session.id, { type: "pointer-up", x: 200, y: 161.5 })).status).toBe(200);
+
+    let release: { x: number; y: number; at: number } | undefined;
+    let settled: { data: Record<string, unknown> } | undefined;
+    for (let index = 0; index < 20 && !settled; index += 1) {
+      const event = await readEvent(reader, 1_000);
+      const published = event.data.release as { x: number; y: number; at: number } | undefined;
+      if (published) release = published;
+      if (release && typeof event.data.frameCapturedAt === "number"
+        && event.data.frameCapturedAt >= release.at) {
+        settled = event;
+      }
+    }
+    expect(release).toMatchObject({ x: 200, y: 161.5 });
+    expect(settled).toBeDefined();
+    // The settled frame is a burst frame: the last picture the operator sees contains the release.
+    expect(settled!.data.frameType).toBe("image/jpeg");
+    expect(fake.inputs.at(-1)).toEqual({ type: "pointer-up", x: 200, y: 161.5 });
+
+    // Once the release is settled, with no tail configured, the relay returns to the idle cadence.
+    const settledAt = Date.now();
+    const qualitiesAtSettle = fake.viewQualities.length;
+    const next = await readEvent(reader, 2_000);
+    expect(Date.now() - settledAt).toBeGreaterThanOrEqual(500);
+    // The idle tick may serve the last cached burst frame (no pointless screenshot); what proves the
+    // return to the idle cadence is that no burst-quality view was taken after the settled frame.
+    expect(fake.viewQualities.slice(qualitiesAtSettle).every(quality => quality === undefined)).toBe(true);
+    expect(typeof next.data.frameAgeMs).toBe("number");
+    expect(next.data.frameAgeMs as number).toBeGreaterThan(150);
+    reader.cancel();
   });
 
   test("a provider with no pixels streams state only, and that is not an error", async () => {
@@ -912,34 +1010,31 @@ describe("issue #276 — the pointer relay: an ordered drag path", () => {
     expect(inputOrder(fake)).toEqual(["drag", "click"]);
   });
 
-  test("the served page publishes its drag sampling contract and relays pointerdown/move/up", async () => {
+  test("the served page publishes its live sample interval and relays pointer events as they happen", async () => {
     const server = serve([]);
     const html = await (await fetch(url(server, "/v1/control/auth/"))).text();
 
-    // 1. The sampling rate, the sample cap and the tap threshold are the document's, read back by
-    // its own script: a drag is sampled on movement at a coarser cadence than the old 12 ms one (so a
-    // normal gesture yields a sane count), a long gesture is thinned rather than allowed to grow
-    // without bound, and a press that moves less than the threshold stays the click it always was.
+    // 1. The sampling interval is the document's, read back by its own script: a drag is sampled on
+    // movement at a sane cadence. The old sample cap and tap threshold are deliberately gone — the
+    // page no longer accumulates a path, so there is nothing to bound, and the press is a real live
+    // press rather than a deferred click.
     const sample = /data-drag-sample-ms="(\d+)"/.exec(html);
     expect(sample).not.toBeNull();
     expect(Number(sample![1])).toBeGreaterThanOrEqual(24);
     expect(Number(sample![1])).toBeLessThanOrEqual(48);
-    const maxPoints = /data-drag-max-points="(\d+)"/.exec(html);
-    expect(maxPoints).not.toBeNull();
-    expect(Number(maxPoints![1])).toBeGreaterThanOrEqual(32);
-    expect(Number(maxPoints![1])).toBeLessThanOrEqual(128);
-    const threshold = /data-drag-move-threshold-px="(\d+)"/.exec(html);
-    expect(threshold).not.toBeNull();
-    expect(Number(threshold![1])).toBeGreaterThanOrEqual(1);
+    expect(html).not.toContain("data-drag-max-points");
+    expect(html).not.toContain("data-drag-move-threshold-px");
 
-    // 2. The operator can see the gesture being relayed, before and while it happens.
+    // 2. The operator can see the gesture being relayed, and the page draws their own pointer.
     expect(html).toContain('id="pointer-relay"');
     expect(html).toContain('data-pointer-relay="idle"');
+    expect(html).toContain('id="pointer-marker"');
+    expect(html).toContain('id="frame-age"');
     expect(html).toMatch(/press and <em>drag<\/em>|press and drag/i);
 
-    // 3. The script is a real pointer path capture: it starts on `pointerdown`, samples on
-    // `pointermove`, ends on `pointerup`, captures the pointer so a release off the picture is still
-    // seen, and sends the samples it collected — with their own offsets — as one `drag` input.
+    // 3. The script is a live gesture relay: `pointerdown` posts the press immediately, every throttled
+    // `pointermove` posts its own sample, `pointerup` posts the exact release, and `pointercancel`
+    // lifts the held button. Nothing is accumulated into one batch.
     const script = html.slice(html.indexOf("<script>"));
     for (const handler of ['"pointerdown"', '"pointermove"', '"pointerup"', '"pointercancel"']) {
       expect(script, `the page must listen for ${handler}`).toContain(handler);
@@ -947,16 +1042,19 @@ describe("issue #276 — the pointer relay: an ordered drag path", () => {
     expect(script).toContain("setPointerCapture");
     expect(script).toContain("releasePointerCapture");
     expect(script).toContain('"data-drag-sample-ms"');
-    expect(script).toContain('"data-drag-max-points"');
-    expect(script).toContain('"data-drag-move-threshold-px"');
-    expect(script).toContain("type: \"drag\"");
-    expect(script).toContain("points: drag.points");
-    expect(script).toContain("atMs");
-    // The release is the mapped pointerup, appended unconditionally, not the last throttled move; and
-    // the path is thinned when it reaches the cap instead of growing without bound.
-    expect(script).toContain("var release = framePoint(event)");
-    expect(script).toContain("drag.points.push({ x: release.x, y: release.y");
-    expect(script).toContain("drag.sampleMs = drag.sampleMs * 2");
+    expect(script).toContain('type: "pointer-down"');
+    expect(script).toContain('type: "pointer-move"');
+    expect(script).toContain('type: "pointer-up"');
+    expect(script).toContain('type: "pointer-cancel"');
+    // The release is the mapped pointerup, never the last throttled move.
+    expect(script).toContain("var release = framePoint(event) || drag.lastPoint");
+    expect(script).toContain("type: \"pointer-up\", x: release.x, y: release.y");
+    expect(script).not.toContain("points: drag.points");
+    // The local marker follows the pointer with no round trip and the frame age is painted, so a
+    // stale picture is explained instead of left to the operator's guess.
+    expect(script).toContain("function paintMarker(");
+    expect(script).toContain("function paintFrameAge(");
+    expect(script).toContain("frameAgeMs");
 
     // 4. Touch must reach the page as pointer events instead of being eaten by a scroll gesture, and
     // no part of this interaction depends on hover.

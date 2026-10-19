@@ -34,6 +34,7 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   // is answered and kept nowhere". They are in the pinned surface because a provider asks this instead
   // of comparing purpose strings itself — that is what keeps "what makes a turn ephemeral" owned once,
   // in the common layer, rather than re-decided per provider.
+  "AUTH_FRAME_MIME_TYPES",
   "AUTH_SESSION_STATES",
   "WEB_CHAT_AUXILIARY_TURN_PURPOSES",
   "WEB_CHAT_CAPABILITY_FEATURES",
@@ -53,6 +54,7 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   "createWebChatDriverResolver",
   "decideWebChatRetry",
   "isAuthCapture",
+  "isAuthFrameMimeType",
   "isAuthInput",
   "isAuthSessionState",
   "isEphemeralWebChatTurn",

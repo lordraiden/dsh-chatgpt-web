@@ -3,15 +3,15 @@ import { describe, expect, test } from "bun:test";
 import { WEB_CHAT_AUTH_PAGE_HTML } from "../src/web-chat/host/auth-page";
 
 /**
- * Issue #299 — the pointer relay's coordinate contract, executed rather than pattern-matched.
+ * Issue #299 — the live pointer relay's coordinate contract, executed rather than pattern-matched.
  *
- * The operator reported that a relayed drag "never lands exactly on the target". A click and a drag
- * share one mapper, the frame may be displayed at a fractional CSS size, and the release is a mapped
- * `pointerup` rather than the last throttled `pointermove`; each of those is a place where a few
- * pixels can disappear silently. The served page is one self-contained script, so these tests run
- * that exact script against a minimal DOM, drive real pointer events through it, and inspect the
- * JSON the page would post. No browser and no new dependency: the arithmetic under test is the
- * page's own.
+ * The operator reported that a relayed drag "never lands exactly on the target", and then that the
+ * piece did not move at all while the pointer was still down: the page accumulated the whole path
+ * and sent it once, at the release. The relay is now live — `pointerdown` posts `pointer-down`, each
+ * throttled `pointermove` posts its own `pointer-move`, and `pointerup` posts `pointer-up` at the
+ * exact mapped release. These tests run the served page script against a minimal DOM, drive real
+ * pointer events through it, and inspect the JSON the page would post. No browser and no new
+ * dependency: the arithmetic and the ordering under test are the page's own.
  */
 
 interface ElementStub {
@@ -90,10 +90,11 @@ function attributesOf(tag: string): Map<string, string> {
 /**
  * Run the served page script exactly once against a tiny DOM stub and return the harness.
  *
- * `bodies` are the JSON bodies the page posted to `sessions/<id>/input`, in order; the stream is
- * parked on a never-resolving read because these tests only exercise the pointer relay.
+ * `bodies` are the JSON bodies the page posted to `sessions/<id>/input`, in order. The stream is
+ * parked on a never-resolving read unless `blocks` are supplied; those are fed one per read, which is
+ * how a frame's age and release metadata can be exercised without a provider.
  */
-function runPage() {
+function runPage(options: { blocks?: string[] } = {}) {
   const html = WEB_CHAT_AUTH_PAGE_HTML;
   const bodyTag = /<body([^>]*)>/.exec(html)?.[1] ?? "";
   const bodyAttributes = attributesOf(bodyTag);
@@ -121,6 +122,7 @@ function runPage() {
 
   const bodies: Array<Record<string, unknown>> = [];
   const clock = { value: 0 };
+  const blocks = options.blocks ?? [];
   const fetchStub = async (path: string, init?: { method?: string; body?: string }) => {
     if (path === "sessions" && init?.method === "POST") {
       return {
@@ -136,12 +138,16 @@ function runPage() {
       };
     }
     if (path.endsWith("/stream")) {
+      let block = 0;
+      const encoder = new TextEncoder();
       return {
         ok: true,
         status: 200,
         body: {
           getReader: () => ({
-            read: () => new Promise(() => {}),
+            read: () => block < blocks.length
+              ? Promise.resolve({ done: false, value: encoder.encode(blocks[block++]) })
+              : new Promise<never>(() => {}),
             cancel: () => {},
           }),
         },
@@ -174,11 +180,12 @@ function runPage() {
     bodies,
     clock,
     frame,
+    marker: elementFor("pointer-marker"),
+    frameAge: elementFor("frame-age"),
     async open() {
       select.value = "pixel-web";
       providerForm.dispatch("submit", { preventDefault: () => {} } as never);
-      // Let the POST, the state assignment and the parked stream read settle. The stream itself is
-      // deliberately never resolved; only `state.id`/`state.viewport` matter for pointer events.
+      // Let the POST, the state assignment and any supplied stream block settle.
       for (let index = 0; index < 20; index += 1) await Promise.resolve();
     },
     pointer(type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel", clientX: number, clientY: number) {
@@ -190,8 +197,9 @@ function runPage() {
       });
     },
     async settle() {
-      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+      for (let index = 0; index < 30; index += 1) await Promise.resolve();
       await new Promise(resolve => setTimeout(resolve, 0));
+      for (let index = 0; index < 30; index += 1) await Promise.resolve();
     },
   };
 }
@@ -209,8 +217,26 @@ const MID = { x: 511.25, y: 307.5 };
 const LAST_MOVE = { x: 711.75, y: 357.25 };
 const RELEASE = { x: 731.25, y: 369.5 };
 
-describe("issue #299 — the pointer mapping is one exact mapper for clicks and drags", () => {
-  test("a click maps the `pointerdown` point with the exact fractional display scale", async () => {
+interface Posted {
+  readonly type: string;
+  readonly x?: number;
+  readonly y?: number;
+}
+
+const posted = (page: ReturnType<typeof runPage>): Posted[] => page.bodies as unknown as Posted[];
+const moves = (page: ReturnType<typeof runPage>) => posted(page).filter(event => event.type === "pointer-move");
+const eventsOf = (page: ReturnType<typeof runPage>, type: string) =>
+  posted(page).filter(event => event.type === type);
+
+function expectMapped(actual: number | undefined, expected: number): void {
+  expect(actual).toBeCloseTo(expected, 12);
+  // No integer truncation before scaling and no rounding after it: the page's answer is the real
+  // number the exact scale produces.
+  expect(Number.isInteger(actual)).toBe(false);
+}
+
+describe("issue #299 — a press, its moves and its release use one exact mapper", () => {
+  test("a tap is one live press and one live release at the exact mapped point", async () => {
     const page = runPage();
     await page.open();
     page.clock.value = 10_000;
@@ -219,117 +245,212 @@ describe("issue #299 — the pointer mapping is one exact mapper for clicks and 
     page.pointer("pointerup", PRESS.x, PRESS.y);
     await page.settle();
 
-    expect(page.bodies).toHaveLength(1);
-    const click = page.bodies[0] as { type: string; x: number; y: number };
-    expect(click.type).toBe("click");
-    // No integer truncation before scaling and no rounding after it: the page's answer is the same
-    // real number the exact scale produces.
-    expect(click.x).toBeCloseTo(mapped(PRESS.x, PRESS.y).x, 12);
-    expect(click.y).toBeCloseTo(mapped(PRESS.x, PRESS.y).y, 12);
-    expect(Number.isInteger(click.x)).toBe(false);
-    expect(Number.isInteger(click.y)).toBe(false);
+    const types = posted(page).map(event => event.type);
+    expect(types).toEqual(["pointer-down", "pointer-up"]);
+    const down = eventsOf(page, "pointer-down")[0]!;
+    const up = eventsOf(page, "pointer-up")[0]!;
+    expectMapped(down.x, mapped(PRESS.x, PRESS.y).x);
+    expectMapped(down.y, mapped(PRESS.x, PRESS.y).y);
+    expectMapped(up.x, mapped(PRESS.x, PRESS.y).x);
+    expectMapped(up.y, mapped(PRESS.x, PRESS.y).y);
   });
 
-  test("the same screen point maps to the same coordinate through the click and drag paths", async () => {
-    const clickPage = runPage();
-    await clickPage.open();
-    clickPage.clock.value = 20_000;
-    clickPage.pointer("pointerdown", RELEASE.x, RELEASE.y);
-    clickPage.clock.value = 20_004;
-    clickPage.pointer("pointerup", RELEASE.x, RELEASE.y);
-    await clickPage.settle();
-    const click = clickPage.bodies[0] as { type: string; x: number; y: number };
-    expect(click.type).toBe("click");
+  test("the same screen point maps to the same coordinate on the press and on the release", async () => {
+    const page = runPage();
+    await page.open();
+    page.clock.value = 20_000;
+    page.pointer("pointerdown", PRESS.x, PRESS.y);
+    page.clock.value = 20_040;
+    page.pointer("pointermove", MID.x, MID.y);
+    await page.settle();
+    page.clock.value = 20_080;
+    page.pointer("pointermove", LAST_MOVE.x, LAST_MOVE.y);
+    await page.settle();
+    page.clock.value = 20_096;
+    page.pointer("pointerup", RELEASE.x, RELEASE.y);
+    await page.settle();
 
-    const dragPage = runPage();
-    await dragPage.open();
-    dragPage.clock.value = 30_000;
-    dragPage.pointer("pointerdown", PRESS.x, PRESS.y);
-    dragPage.clock.value = 30_040;
-    dragPage.pointer("pointermove", MID.x, MID.y);
-    dragPage.clock.value = 30_080;
-    dragPage.pointer("pointermove", LAST_MOVE.x, LAST_MOVE.y);
-    dragPage.clock.value = 30_096;
-    dragPage.pointer("pointerup", RELEASE.x, RELEASE.y);
-    await dragPage.settle();
+    const down = eventsOf(page, "pointer-down")[0]!;
+    expectMapped(down.x, mapped(PRESS.x, PRESS.y).x);
+    expectMapped(down.y, mapped(PRESS.x, PRESS.y).y);
 
-    expect(dragPage.bodies).toHaveLength(1);
-    const drag = dragPage.bodies[0] as {
-      type: string;
-      points: Array<{ x: number; y: number; atMs: number }>;
-    };
-    expect(drag.type).toBe("drag");
-    expect(drag.points.length).toBeGreaterThanOrEqual(3);
-
-    // The press is the mapped `pointerdown`, and the release is the mapped `pointerup`: one screen
-    // point, one provider coordinate, whichever gesture carried it. A regression here is exactly the
-    // "lands slightly off" report.
-    expect(drag.points[0]!.x).toBeCloseTo(mapped(PRESS.x, PRESS.y).x, 12);
-    expect(drag.points[0]!.y).toBeCloseTo(mapped(PRESS.x, PRESS.y).y, 12);
-    expect(drag.points.at(-1)!.x).toBeCloseTo(click.x, 12);
-    expect(drag.points.at(-1)!.y).toBeCloseTo(click.y, 12);
-
-    // The release is not the last throttled move: that point is a different, older position.
-    expect(drag.points.at(-1)!.x).not.toBeCloseTo(mapped(LAST_MOVE.x, LAST_MOVE.y).x, 6);
-    expect(drag.points.at(-2)).toMatchObject({
-      x: expect.any(Number),
-      y: expect.any(Number),
-    });
+    // Every sample is a position the browser actually reported; the last one is the exact release,
+    // never the last throttled move.
+    const mid = moves(page).find(event => event.x !== undefined
+      && Math.abs(event.x - mapped(MID.x, MID.y).x) < 1e-9);
+    expect(mid).toBeDefined();
+    const up = posted(page).at(-1)!;
+    expect(up.type).toBe("pointer-up");
+    expectMapped(up.x, mapped(RELEASE.x, RELEASE.y).x);
+    expectMapped(up.y, mapped(RELEASE.x, RELEASE.y).y);
+    expect(up.x).not.toBeCloseTo(mapped(LAST_MOVE.x, LAST_MOVE.y).x, 6);
   });
 
-  test("a release in the same millisecond as the last sample is still appended as the final point", async () => {
+  test("a move and a release observed in the same millisecond are both delivered, in order", async () => {
     const page = runPage();
     await page.open();
     page.clock.value = 35_000;
     page.pointer("pointerdown", PRESS.x, PRESS.y);
     page.clock.value = 35_040;
     page.pointer("pointermove", LAST_MOVE.x, LAST_MOVE.y);
-    // Same clock instant as the sampled move: the old condition (`elapsed > lastAtMs`) dropped this
-    // release, so the provider saw the move position and the gesture landed short.
+    await page.settle();
+    // Same clock instant as the sampled move: the release is not conditionally dropped.
     page.pointer("pointerup", RELEASE.x, RELEASE.y);
     await page.settle();
 
-    const drag = page.bodies[0] as {
-      type: string;
-      points: Array<{ x: number; y: number; atMs: number }>;
-    };
-    expect(drag.type).toBe("drag");
-    expect(drag.points.at(-1)!.x).toBeCloseTo(mapped(RELEASE.x, RELEASE.y).x, 12);
-    expect(drag.points.at(-1)!.y).toBeCloseTo(mapped(RELEASE.x, RELEASE.y).y, 12);
-    expect(drag.points.at(-1)!.atMs).toBe(drag.points.at(-2)!.atMs);
+    const order = posted(page).map(event => event.type);
+    expect(order[0]).toBe("pointer-down");
+    expect(order.at(-1)).toBe("pointer-up");
+    const up = posted(page).at(-1)!;
+    expectMapped(up.x, mapped(RELEASE.x, RELEASE.y).x);
+    expectMapped(up.y, mapped(RELEASE.x, RELEASE.y).y);
+    expect(order).toEqual(["pointer-down", "pointer-move", "pointer-up"]);
   });
 
-  test("a long gesture keeps a bounded, coarse, real path and always ends at the release", async () => {
+  test("a long live gesture sends real samples as they happen and always ends at the release", async () => {
     const page = runPage();
     await page.open();
     const start = 40_000;
     page.clock.value = start;
     page.pointer("pointerdown", PRESS.x, PRESS.y);
-    // A 5 s gesture, sampled far more often than the published interval: the effective interval grows
-    // so the relayed path stays bounded, and every point is still a position the pointer really had.
-    for (let elapsed = 10; elapsed <= 5_000; elapsed += 10) {
+    const sent: Array<{ x: number; y: number }> = [];
+    for (let elapsed = 40; elapsed <= 2_000; elapsed += 40) {
       page.clock.value = start + elapsed;
-      const fraction = elapsed / 5_000;
-      page.pointer("pointermove", PRESS.x + 500 * fraction, PRESS.y + 100 * fraction);
+      const fraction = elapsed / 2_000;
+      const point = { x: PRESS.x + 500 * fraction, y: PRESS.y + 100 * fraction };
+      page.pointer("pointermove", point.x, point.y);
+      await page.settle();
+      sent.push({ x: mapped(point.x, point.y).x, y: mapped(point.x, point.y).y });
     }
-    page.clock.value = start + 5_010;
+    page.clock.value = start + 2_040;
     page.pointer("pointerup", RELEASE.x, RELEASE.y);
     await page.settle();
 
-    expect(page.bodies).toHaveLength(1);
-    const drag = page.bodies[0] as {
-      type: string;
-      points: Array<{ x: number; y: number; atMs: number }>;
-    };
-    expect(drag.type).toBe("drag");
-    // Press + at most `data-drag-max-points` samples + the release.
-    expect(drag.points.length).toBeLessThanOrEqual(66);
-    expect(drag.points.length).toBeGreaterThan(8);
-    // Ordered, non-decreasing clock: the contract the controllers validate.
-    for (let index = 1; index < drag.points.length; index += 1) {
-      expect(drag.points[index]!.atMs).toBeGreaterThanOrEqual(drag.points[index - 1]!.atMs);
+    // Down first, release last, and nothing but real mapped samples in between: the page never
+    // accumulates a path into one `drag` input any more.
+    const all = posted(page);
+    expect(all[0]!.type).toBe("pointer-down");
+    expect(all.at(-1)!.type).toBe("pointer-up");
+    expect(all.some(event => event.type === "drag")).toBe(false);
+    const observed = moves(page);
+    expect(observed.length).toBeGreaterThan(20);
+    for (const move of observed) {
+      expect(sent.some(point => Math.abs(point.x - move.x!) < 1e-9 && Math.abs(point.y - move.y!) < 1e-9))
+        .toBe(true);
     }
-    expect(drag.points.at(-1)!.x).toBeCloseTo(mapped(RELEASE.x, RELEASE.y).x, 12);
-    expect(drag.points.at(-1)!.y).toBeCloseTo(mapped(RELEASE.x, RELEASE.y).y, 12);
+    const up = all.at(-1)!;
+    expectMapped(up.x, mapped(RELEASE.x, RELEASE.y).x);
+    expectMapped(up.y, mapped(RELEASE.x, RELEASE.y).y);
+  });
+
+  test("a cancelled gesture lifts the held button with a cancel and never invents a release", async () => {
+    const page = runPage();
+    await page.open();
+    page.clock.value = 50_000;
+    page.pointer("pointerdown", PRESS.x, PRESS.y);
+    page.clock.value = 50_040;
+    page.pointer("pointermove", MID.x, MID.y);
+    await page.settle();
+    page.pointer("pointercancel", MID.x, MID.y);
+    await page.settle();
+
+    const all = posted(page);
+    expect(all.map(event => event.type)).toEqual(["pointer-down", "pointer-move", "pointer-cancel"]);
+    expect(all.at(-1)).toEqual({ type: "pointer-cancel" });
+  });
+});
+
+describe("issue #299 — the page draws the operator's hand and explains frame age locally", () => {
+  test("the pointer marker follows the pointer without a round trip, and is not a hover effect", async () => {
+    const page = runPage();
+    await page.open();
+    page.clock.value = 60_000;
+    page.pointer("pointerdown", PRESS.x, PRESS.y);
+    await page.settle();
+    const pressedStyle = page.marker.getAttribute("style");
+    expect(pressedStyle).toContain("left:");
+    expect(page.marker.hidden).toBe(false);
+
+    page.clock.value = 60_040;
+    page.pointer("pointermove", MID.x, MID.y);
+    await page.settle();
+    const movedStyle = page.marker.getAttribute("style");
+    expect(movedStyle).not.toBe(pressedStyle);
+    // The marker moved with the hand, before any relayed frame or input response could have arrived.
+    expect(page.marker.getAttribute("data-marker")).toBe("pointer");
+
+    page.pointer("pointerup", MID.x, MID.y);
+    await page.settle();
+    expect(page.marker.getAttribute("data-marker")).toBe("release");
+
+    // Nothing in the page depends on hover, and the marker is drawn from pointer events only.
+    expect(WEB_CHAT_AUTH_PAGE_HTML).not.toMatch(/:hover|mouseenter|mouseover/);
+  });
+
+  test("a frame older than the operator's release is labelled as such with its age", async () => {
+    const staleFrame = Buffer.from("stale-frame").toString("base64");
+    const page = runPage({
+      blocks: [
+        `data: ${JSON.stringify({
+          seq: 0,
+          state: "awaiting_input",
+          terminal: false,
+          frame: staleFrame,
+          frameAgeMs: 380,
+          frameCapturedAt: 1_000,
+          release: { x: 210, y: 160, at: 2_000 },
+        })}\n\n`,
+      ],
+    });
+    await page.open();
+    await page.settle();
+
+    expect(page.frameAge.textContent).toContain("380 ms old");
+    expect(page.frameAge.textContent).toContain("captured before your release");
+    expect(page.frameAge.textContent).toContain("(210, 160)");
+    expect(page.frame.src).toBe("data:image/png;base64," + staleFrame);
+  });
+
+  test("a frame captured after the release is labelled as including it", async () => {
+    const settledFrame = Buffer.from("settled-frame").toString("base64");
+    const page = runPage({
+      blocks: [
+        `data: ${JSON.stringify({
+          seq: 0,
+          state: "awaiting_input",
+          terminal: false,
+          frame: settledFrame,
+          frameAgeMs: 20,
+          frameCapturedAt: 3_000,
+          release: { x: 210, y: 160, at: 2_000 },
+        })}\n\n`,
+      ],
+    });
+    await page.open();
+    await page.settle();
+
+    expect(page.frameAge.textContent).toContain("20 ms old");
+    expect(page.frameAge.textContent).toContain("includes your release");
+    expect(page.frame.src).toBe("data:image/png;base64," + settledFrame);
+  });
+
+  test("a JPEG burst frame is labelled with the type the relay reported", async () => {
+    const jpeg = Buffer.from("jpeg-burst").toString("base64");
+    const page = runPage({
+      blocks: [
+        `data: ${JSON.stringify({
+          seq: 0,
+          state: "awaiting_input",
+          terminal: false,
+          frame: jpeg,
+          frameType: "image/jpeg",
+          frameAgeMs: 5,
+          frameCapturedAt: 4_000,
+        })}\n\n`,
+      ],
+    });
+    await page.open();
+    await page.settle();
+    expect(page.frame.src).toBe("data:image/jpeg;base64," + jpeg);
   });
 });

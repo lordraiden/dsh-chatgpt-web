@@ -1170,7 +1170,11 @@ async function advisorRecoverRequest(
  * - `POST   /v1/control/auth/sessions`             — open one (409 when that provider is busy)
  * - `GET    /v1/control/auth/sessions/<id>`        — the session view: no cookie, no storage state,
  *                                                    no frame bytes and no page URL
- * - `GET    /v1/control/auth/sessions/<id>/stream` — SSE, `data: {"seq","state","frame"…}` at 2-3 fps
+ * - `GET    /v1/control/auth/sessions/<id>/stream` — SSE, `data: {"seq","state","frame"…}` at the
+ *                                                    idle cadence (2.5 fps) and the burst cadence
+ *                                                    (12.5 fps target) during a live gesture; each
+ *                                                    frame carries its type and age, and each event
+ *                                                    carries the last release coordinate
  * - `POST   /v1/control/auth/sessions/<id>/input`  — one `AuthInput`; the fresh state is the response
  *                                                    and the fresh frame arrives on the stream
  * - `DELETE /v1/control/auth/sessions/<id>`        — cancel, idempotently, and acknowledge a capture
@@ -1314,7 +1318,7 @@ async function authInputRequest(req: Request, surface: WebChatAuthSurface, id: s
       {
         ok: false,
         code: "invalid_auth_input",
-        message: "A sign-in input must be one of click, drag, type, key, scroll or navigate",
+        message: "A sign-in input must be one of click, drag, pointer-down, pointer-move, pointer-up, pointer-cancel, type, key, scroll or navigate",
       },
       { status: 400, headers: controlCorsHeaders() },
     );
@@ -1335,7 +1339,14 @@ function authStreamPayload(event: WebChatAuthStreamEvent): Record<string, unknow
     seq: event.seq,
     state: event.state,
     terminal: event.terminal,
-    ...(event.png !== undefined ? { frame: Buffer.from(event.png).toString("base64") } : {}),
+    ...(event.png !== undefined ? {
+      frame: Buffer.from(event.png).toString("base64"),
+      // Absent means PNG, which is what a provider that never reports an encoding always sends.
+      ...(event.frameMimeType !== undefined ? { frameType: event.frameMimeType } : {}),
+      ...(event.frameAgeMs !== undefined ? { frameAgeMs: event.frameAgeMs } : {}),
+      ...(event.frameCapturedAt !== undefined ? { frameCapturedAt: event.frameCapturedAt } : {}),
+    } : {}),
+    ...(event.release !== undefined ? { release: event.release } : {}),
     ...(event.viewport !== undefined ? { viewport: event.viewport } : {}),
     ...(event.capture !== undefined ? { capture: event.capture } : {}),
     ...(event.closeReason !== undefined ? { closeReason: event.closeReason } : {}),

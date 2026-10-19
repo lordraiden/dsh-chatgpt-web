@@ -90,7 +90,7 @@ interface FakePage {
     keys: string[];
     wheels: Array<[number, number]>;
     gotos: string[];
-    screenshots: Array<{ caret?: string; type?: string }>;
+    screenshots: Array<{ caret?: string; type?: string; quality?: number }>;
     probes: string[];
   };
 }
@@ -129,7 +129,7 @@ function fakePage(options: {
       },
       press: (key: string) => { calls.keys.push(key); },
     },
-    screenshot: async (screenshotOptions?: { caret?: string; type?: string }) => {
+    screenshot: async (screenshotOptions?: { caret?: string; type?: string; quality?: number }) => {
       calls.screenshots.push(screenshotOptions ?? {});
       return Buffer.from(ONE_BY_ONE_PNG);
     },
@@ -178,6 +178,7 @@ function makeController(options: {
   readonly pollIntervalMs?: number;
   readonly pollTimeoutMs?: number;
   readonly maxPolls?: number;
+  readonly gestureTimeoutMs?: number;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly createProfile?: (root: string) => string;
@@ -210,6 +211,7 @@ function makeController(options: {
     pollIntervalMs: options.pollIntervalMs ?? 1,
     pollTimeoutMs: options.pollTimeoutMs ?? 60_000,
     ...(options.maxPolls === undefined ? {} : { maxPolls: options.maxPolls }),
+    ...(options.gestureTimeoutMs === undefined ? {} : { gestureTimeoutMs: options.gestureTimeoutMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
   });
@@ -264,6 +266,24 @@ describe("issue #299 — provider identity and the launch", () => {
 
     await session.cancel();
     expect(harness.launched[0]?.url).toBe("https://coder.qwen.ai/");
+  });
+
+  test("a burst frame is a cheaper JPEG and an idle frame stays the lossless PNG", async () => {
+    const harness = makeController({ probe: neverAuthenticated, maxPolls: 1_000 });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+
+    const idle = await session.view();
+    expect(idle.mimeType).toBeUndefined();
+    expect(harness.fake.calls.screenshots[0]).toEqual({ type: "png", caret: "initial" });
+
+    const burst = await session.view({ quality: "fast" });
+    expect(burst.mimeType).toBe("image/jpeg");
+    expect(harness.fake.calls.screenshots[1]).toEqual({ type: "jpeg", quality: 55, caret: "initial" });
+    // The pixels are still the provider's own bytes, and the geometry is unchanged.
+    expect(isProviderAuthView(burst)).toBe(true);
+    expect(burst).toMatchObject({ width: 320, height: 480 });
+    await session.cancel();
   });
 
   test("the launch flags request old-style headless in args, and never spoof the user agent", () => {
@@ -401,6 +421,112 @@ describe("issue #299 — the state machine and the structural authenticated chec
     await waitForState(session, "failed");
     expect(session.detail?.()).toContain("[url]");
     expect(session.detail?.()).not.toContain("abc123");
+  });
+});
+
+describe("issue #299 — a live pointer gesture is pressed, moved and released across requests", () => {
+  test("the press happens on pointer-down, each move on arrival, and the exact release lifts it", async () => {
+    const harness = makeController({ probe: neverAuthenticated, maxPolls: 1_000 });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+
+    await session.input({ type: "pointer-down", x: 10, y: 20 });
+    // The press is physically down before any move exists: the provider starts following the hand.
+    expect(harness.fake.calls.moves).toEqual([[10, 20]]);
+    expect(harness.fake.calls.downs).toBe(1);
+    expect(harness.fake.calls.ups).toBe(0);
+
+    await session.input({ type: "pointer-move", x: 15.5, y: 22.25 });
+    await session.input({ type: "pointer-move", x: 30, y: 40 });
+    // One move per request, in the order the operator drew them. Nothing is interpolated and nothing
+    // is replayed after the fact.
+    expect(harness.fake.calls.moves).toEqual([[10, 20], [15.5, 22.25], [30, 40]]);
+    expect(harness.fake.calls.downs).toBe(1);
+    expect(harness.fake.calls.ups).toBe(0);
+
+    // The release moves to the exact mapped pointerup and only then lifts.
+    await session.input({ type: "pointer-up", x: 55, y: 60 });
+    expect(harness.fake.calls.moves).toEqual([[10, 20], [15.5, 22.25], [30, 40], [55, 60]]);
+    expect(harness.fake.calls.ups).toBe(1);
+    await session.cancel();
+  });
+
+  test("a move or release with no open gesture is a typed state refusal, never a held-button accident", async () => {
+    const harness = makeController({ probe: neverAuthenticated, maxPolls: 1_000 });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+
+    const move = await session.input({ type: "pointer-move", x: 1, y: 1 }).catch(error => error);
+    expect(isWebChatError(move)).toBe(true);
+    expect(move).toMatchObject({
+      category: "CONVERSATION_STATE_MISMATCH",
+      providerCode: "AUTH_POINTER_GESTURE_NOT_OPEN",
+    });
+    const up = await session.input({ type: "pointer-up", x: 1, y: 1 }).catch(error => error);
+    expect(up).toMatchObject({ category: "CONVERSATION_STATE_MISMATCH" });
+    expect(harness.fake.calls.moves).toEqual([]);
+    expect(harness.fake.calls.downs).toBe(0);
+    expect(harness.fake.calls.ups).toBe(0);
+    await session.cancel();
+  });
+
+  test("a gesture that goes silent is released by the safety timeout", async () => {
+    const harness = makeController({
+      probe: neverAuthenticated,
+      maxPolls: 1_000,
+      gestureTimeoutMs: 5,
+    });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+    await session.input({ type: "pointer-down", x: 10, y: 20 });
+    expect(harness.fake.calls.downs).toBe(1);
+
+    // The page stops talking: the button must not stay down.
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(harness.fake.calls.ups).toBe(1);
+    // The gesture is closed afterwards: a late move cannot move a button that is not held.
+    const late = await session.input({ type: "pointer-move", x: 12, y: 21 }).catch(error => error);
+    expect(late).toMatchObject({ category: "CONVERSATION_STATE_MISMATCH" });
+    await session.cancel();
+  });
+
+  test("a cancelled gesture lifts without inventing a release, and cancellation tears down safely", async () => {
+    const harness = makeController({ probe: neverAuthenticated, maxPolls: 1_000 });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+    await session.input({ type: "pointer-down", x: 10, y: 20 });
+    await session.input({ type: "pointer-move", x: 12, y: 22 });
+    await session.input({ type: "pointer-cancel" });
+    expect(harness.fake.calls.ups).toBe(1);
+    // A cancel does not move to a position the operator did not choose.
+    expect(harness.fake.calls.moves).toEqual([[10, 20], [12, 22]]);
+
+    // A still-open gesture is released by cancellation too.
+    await session.input({ type: "pointer-down", x: 30, y: 40 });
+    await session.cancel();
+    expect(harness.fake.calls.ups).toBe(2);
+    expect(harness.closes()).toBe(1);
+  });
+
+  test("out-of-viewport live coordinates are refused, never clamped, and do not press", async () => {
+    const harness = makeController({ probe: neverAuthenticated, maxPolls: 1_000 });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+
+    const failure = await session.input({ type: "pointer-down", x: 9999, y: 10 }).catch(error => error);
+    expect(failure).toMatchObject({
+      category: "UNSUPPORTED_OPTION",
+      providerCode: "AUTH_POINTER_OUT_OF_VIEWPORT",
+    });
+    expect(harness.fake.calls.moves).toEqual([]);
+    expect(harness.fake.calls.downs).toBe(0);
+
+    await session.input({ type: "pointer-down", x: 10, y: 20 });
+    const badMove = await session.input({ type: "pointer-move", x: 10, y: 9999 }).catch(error => error);
+    expect(badMove).toMatchObject({ category: "UNSUPPORTED_OPTION" });
+    // The refused move changed nothing: the gesture is still open and the button still held.
+    expect(harness.fake.calls.ups).toBe(0);
+    await session.cancel();
   });
 });
 
