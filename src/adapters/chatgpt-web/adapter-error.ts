@@ -164,10 +164,15 @@ export const CHATGPT_RETAINED_SURFACE_LOST_CODE = "retained_surface_lost";
  * A previously retained managed-chrome surface died, so the visible ChatGPT
  * conversation can no longer be continued. This is an explicit continuity
  * failure: the turn must not fall back to a silently created new conversation.
+ *
+ * `reason` is the retiring operation's own verdict, when it can express one (issue #314): the physical
+ * page was gone, or the bounded reconciliation budget was spent. The code, status and category are the
+ * same either way — it is the same honest continuity loss, only distinguishable to a reader.
  */
-export function chatGptRetainedSurfaceLostError(): ChatGptWebAdapterError {
+export function chatGptRetainedSurfaceLostError(reason?: string): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
-    "The retained ChatGPT Web conversation was lost and can no longer be continued.",
+    "The retained ChatGPT Web conversation was lost and can no longer be continued."
+    + (reason ? ` (${reason})` : ""),
     {
       status: 409,
       errorType: "invalid_request_error",

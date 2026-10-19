@@ -771,6 +771,29 @@ bound a turn's wait on its *own* in-flight physical operation: that lifetime bel
 driver's own stall budgets (`generationRunningStallMs`, the per-stage timeouts, and the opt-in
 `turnTimeoutMs`), which is why no absolute turn deadline is imposed here.
 
+**A failed turn is not a death (issue #314).** A turn that failed *after* its submission was accepted
+does not prove what happened to the conversation it was using, and it is not evidence that the
+conversation is gone. The retained surface therefore publishes `unreconciled` instead of `rejected`: the
+page stays exactly where it is, and the conversation becomes observable as needing reconciliation
+(`RetainedSurfaceRegistry.needsReconciliation`, `src/adapters/chatgpt-web/retained-surface.ts`). The
+next turn of that key is the bounded reconciliation attempt — it resumes the conversation in place,
+never creating a replacement and never resending a submission the provider confirmed — and a successful
+turn clears the mark. Only evidence retires: a page that is closed or gone, an explicit teardown (a
+cancellation, a closed tab, a rehydrated document, the service retiring a wedged turn), or the spent
+reconciliation budget (`DEFAULT_MAX_RETAINED_SURFACE_RECONCILIATION_ATTEMPTS`), which fails with the
+same honest continuity error (`retained_surface_lost`, 409) with its reason expressed. Recognising a
+housekeeping turn is deliberately **not** part of the rule: this build has no reliable marker for one, so
+no failure is classified by prompt text.
+
+That rule owns the *physical surface* only. A failed turn still leaves its durable continuity record
+unconfirmed, so in an established conversation (one whose initialization is installed) the WebChat Core
+keeps refusing a plain continuation — "the last attempt on this conversation was never confirmed; the
+provider must reconcile it before it can be resumed" (`src/web-chat/core/continuation.ts`, issue #190).
+That is the core's own reconciliation demand, not a surface loss, and satisfying it honestly needs the
+structural inspection of the retained conversation (does it actually hold the reply?) that stage 3 of
+the same plan owns: adopting the conversation merely because its page is alive would be the inference
+the no-silent-fork contract forbids.
+
 ### 9.4 Retry authority
 
 There are two different retry layers and they must never become competing execution authorities.
