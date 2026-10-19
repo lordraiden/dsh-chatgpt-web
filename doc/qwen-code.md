@@ -39,7 +39,10 @@ gap was in the neutral contract, not in this provider's controller — any provi
 during sign-in — so `AuthInput` gained a provider-neutral `drag` (`{type:"drag", points:[{x,y,atMs}]}`,
 an ordered sampled path in the same coordinates as `click`) and the relayed page now captures the
 operator's real `pointerdown`/`pointermove`/`pointerup` path and sends it as one input. Both controllers
-replay it with `page.mouse.move/down/up`, one move per sample, preserving the sampled order and pacing.
+replay it with `page.mouse.move/down/up`, one move per sample, preserving the sampled order. The page
+samples at a coarser interval than the first cut (and thins a long gesture instead of growing without
+bound), each controller schedules the replay against the press's clock so a move's own cost is not paid
+again as a sleep, and the release is the mapped `pointerup` — never the last throttled `pointermove`.
 No synthetic motion, no stealth and no UA change were added, and **no one has solved the Qwen slider
 yet**: whether the provider's risk engine accepts a relayed human drag is exactly what a live attempt
 must still establish. See `doc/provider-onboarding.md` §1.3 for the contract shape.

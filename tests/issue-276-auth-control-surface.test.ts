@@ -916,13 +916,18 @@ describe("issue #276 — the pointer relay: an ordered drag path", () => {
     const server = serve([]);
     const html = await (await fetch(url(server, "/v1/control/auth/"))).text();
 
-    // 1. The sampling rate and the tap threshold are the document's, read back by its own script: a
-    // drag is sampled on movement, at a cadence in the 8-16 ms band, and a press that moves less than
-    // the threshold stays the click it always was.
+    // 1. The sampling rate, the sample cap and the tap threshold are the document's, read back by
+    // its own script: a drag is sampled on movement at a coarser cadence than the old 12 ms one (so a
+    // normal gesture yields a sane count), a long gesture is thinned rather than allowed to grow
+    // without bound, and a press that moves less than the threshold stays the click it always was.
     const sample = /data-drag-sample-ms="(\d+)"/.exec(html);
     expect(sample).not.toBeNull();
-    expect(Number(sample![1])).toBeGreaterThanOrEqual(8);
-    expect(Number(sample![1])).toBeLessThanOrEqual(16);
+    expect(Number(sample![1])).toBeGreaterThanOrEqual(24);
+    expect(Number(sample![1])).toBeLessThanOrEqual(48);
+    const maxPoints = /data-drag-max-points="(\d+)"/.exec(html);
+    expect(maxPoints).not.toBeNull();
+    expect(Number(maxPoints![1])).toBeGreaterThanOrEqual(32);
+    expect(Number(maxPoints![1])).toBeLessThanOrEqual(128);
     const threshold = /data-drag-move-threshold-px="(\d+)"/.exec(html);
     expect(threshold).not.toBeNull();
     expect(Number(threshold![1])).toBeGreaterThanOrEqual(1);
@@ -942,10 +947,16 @@ describe("issue #276 — the pointer relay: an ordered drag path", () => {
     expect(script).toContain("setPointerCapture");
     expect(script).toContain("releasePointerCapture");
     expect(script).toContain('"data-drag-sample-ms"');
+    expect(script).toContain('"data-drag-max-points"');
     expect(script).toContain('"data-drag-move-threshold-px"');
-    expect(script).toContain('type: "drag"');
+    expect(script).toContain("type: \"drag\"");
     expect(script).toContain("points: drag.points");
     expect(script).toContain("atMs");
+    // The release is the mapped pointerup, appended unconditionally, not the last throttled move; and
+    // the path is thinned when it reaches the cap instead of growing without bound.
+    expect(script).toContain("var release = framePoint(event)");
+    expect(script).toContain("drag.points.push({ x: release.x, y: release.y");
+    expect(script).toContain("drag.sampleMs = drag.sampleMs * 2");
 
     // 4. Touch must reach the page as pointer events instead of being eaten by a scroll gesture, and
     // no part of this interaction depends on hover.

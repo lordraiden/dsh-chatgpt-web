@@ -138,6 +138,19 @@ function fakePage(options: {
   return { page, calls };
 }
 
+/**
+ * Advance the injected clock by `moveCostMs` every time the fake page moves, so a test can model the
+ * real CDP cost of `page.mouse.move` without a browser. The drag replay measures its schedule with the
+ * controller's `now` seam, so this is the exact signal it subtracts.
+ */
+function withMoveCost(fake: FakePage, clock: { value: number }, moveCostMs: number): void {
+  const move = fake.page.mouse.move.bind(fake.page.mouse);
+  fake.page.mouse.move = (async (x: number, y: number) => {
+    move(x, y);
+    clock.value += moveCostMs;
+  }) as typeof fake.page.mouse.move;
+}
+
 /** A never-resolving inspection: the poll loop parks in `verifying`, so input stays exercisable. */
 const neverAuthenticate = (): Promise<ChatGptWebAccountCapabilities> => new Promise(() => {});
 
@@ -398,17 +411,24 @@ describe("issue #276 slice 2b — input mapping", () => {
   });
 
   test("a drag is replayed as the operator's own sampled path, in order, with every intermediate move", async () => {
+    const clocks = { value: 0 };
     const sleeps: number[] = [];
-    const { controller, page } = makeController({ sleep: async ms => { sleeps.push(ms); } });
+    const { controller, page } = makeController({
+      now: () => clocks.value,
+      sleep: async ms => { sleeps.push(ms); clocks.value += ms; },
+    });
     const session = await controller.startAuth();
+    // A real `page.mouse.move` costs about a frame (~17 ms measured); 10 ms here makes the arithmetic
+    // exact and proves the wait is the REMAINDER of the delta, not the whole delta again.
+    withMoveCost(page, clocks, 10);
 
     // A deliberately uneven, non-linear path: the y coordinate rises, dips and rises again.
     const path = [
       { x: 24, y: 260, atMs: 0 },
-      { x: 47, y: 257, atMs: 12 },
-      { x: 83, y: 264, atMs: 25 },
-      { x: 118, y: 251, atMs: 39 },
-      { x: 176, y: 245, atMs: 58 },
+      { x: 47, y: 257, atMs: 32 },
+      { x: 83, y: 264, atMs: 64 },
+      { x: 118, y: 251, atMs: 96 },
+      { x: 176, y: 245, atMs: 128 },
     ];
     await session.input({ type: "drag", points: path });
 
@@ -419,14 +439,77 @@ describe("issue #276 slice 2b — input mapping", () => {
     expect(page.calls.moves.length).toBe(path.length);
     expect(page.calls.downs).toBe(1);
     expect(page.calls.ups).toBe(1);
-    // Timing belongs to the input: each wait is the delta the page carried, not an assumed constant.
-    // (The poll loop shares this seam; its 1 ms interval is filtered out.)
-    expect(sleeps.filter(ms => ms > 1)).toEqual([12, 13, 14, 19]);
+    // Timing belongs to the input AND to the press's clock: each sample's offset is 32 ms, the press
+    // itself costs 10 ms and each move costs 10 ms, so the wait before every sample is 32 - 10 = 22 ms.
+    // The old rule slept the full 32 ms on top of the 10 ms move (the double payment that stretched
+    // gestures into seconds). The poll loop shares this seam; its 1 ms interval is filtered out.
+    expect(sleeps.filter(ms => ms > 1)).toEqual([22, 22, 22, 22]);
 
-    // A held pause is bounded by the relay, but its release sample is still delivered.
+    // A held pause is bounded by the relay (250 ms, not seconds), but its release sample is delivered.
     await session.input({ type: "drag", points: [{ x: 5, y: 5, atMs: 0 }, { x: 6, y: 6, atMs: 60_000 }] });
-    expect(sleeps.filter(ms => ms > 1).at(-1)).toBe(1_000);
+    expect(sleeps.filter(ms => ms > 1).at(-1)).toBe(250);
     expect(page.calls.moves.at(-1)).toEqual([6, 6]);
+    await session.cancel();
+  });
+
+  test("when a move already costs more than the sample delta, no wait is paid, and no sample is lost", async () => {
+    const clocks = { value: 0 };
+    const sleeps: number[] = [];
+    const { controller, page } = makeController({
+      now: () => clocks.value,
+      sleep: async ms => { sleeps.push(ms); clocks.value += ms; },
+    });
+    const session = await controller.startAuth();
+    // 20 ms per move against a 12 ms cadence: the recorder is already behind, so every remainder is
+    // zero. Sleeping the delta anyway is exactly the "double payment" this test forbids.
+    withMoveCost(page, clocks, 20);
+
+    const path = [
+      { x: 30, y: 210, atMs: 0 },
+      { x: 52, y: 208, atMs: 12 },
+      { x: 88, y: 216, atMs: 25 },
+      { x: 121, y: 205, atMs: 39 },
+      { x: 190, y: 199, atMs: 58 },
+    ];
+    await session.input({ type: "drag", points: path });
+
+    expect(sleeps.filter(ms => ms > 1)).toEqual([]);
+    // The path is still exactly what the operator drew, every sample delivered once, in order.
+    expect(page.calls.moves).toEqual(path.map(point => [point.x, point.y]));
+    expect(page.calls.downs).toBe(1);
+    expect(page.calls.ups).toBe(1);
+    await session.cancel();
+  });
+
+  test("an exhausted replay budget stops pacing but still delivers every sample and the release", async () => {
+    const clocks = { value: 0 };
+    const sleeps: number[] = [];
+    const { controller, page } = makeController({
+      now: () => clocks.value,
+      sleep: async ms => { sleeps.push(ms); clocks.value += ms; },
+    });
+    const session = await controller.startAuth();
+    withMoveCost(page, clocks, 10);
+
+    // A long path: pacing alone would take ~6.4 s. The budget caps the waiting at 1 s, then the
+    // remaining samples are still moved in order, with no wait, and the last one is the release.
+    const points = Array.from({ length: 200 }, (_, index) => ({
+      x: 10 + (index % 200),
+      y: 20 + (index % 3),
+      atMs: index * 32,
+    }));
+    await session.input({ type: "drag", points });
+
+    const paced = sleeps.filter(ms => ms > 1);
+    expect(paced.reduce((sum, ms) => sum + ms, 0)).toBeLessThanOrEqual(1_000);
+    expect(paced.every(ms => ms <= 250)).toBe(true);
+    // Pacing stopped before the last samples: at least one sample was moved without a wait, which is
+    // the budget being enforced rather than the old per-delta sleep being paid to the end.
+    expect(paced.length).toBeLessThan(points.length - 1);
+    // Nothing was thinned by the budget: every sampled position reached the page, in order.
+    expect(page.calls.moves).toEqual(points.map(point => [point.x, point.y]));
+    expect(page.calls.downs).toBe(1);
+    expect(page.calls.ups).toBe(1);
     await session.cancel();
   });
 

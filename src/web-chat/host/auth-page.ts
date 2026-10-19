@@ -19,19 +19,24 @@
  * for the stream: it cannot carry an `Authorization` header, which would force the token into the
  * query string — exactly the leak the token handling exists to avoid.
  *
- * Clicks are mapped from the browser's pointer coordinates into the provider's own frame geometry
- * using the viewport the relay reports, so the page never guesses the ratio between the size the
- * screen is *displayed* at and the size the provider actually has.
+ * Every pointer coordinate is mapped from the browser's client space into the provider's own frame
+ * geometry with the exact, fractional scale the displayed rectangle actually has
+ * (`viewport.width / rect.width`, and never an integer-rounded ratio or a coordinate truncated before
+ * scaling). A click and a drag use the same mapper, so the same screen point has one answer through
+ * both, and the press is the mapped `pointerdown` while the release is the mapped `pointerup` — never
+ * the last throttled sample.
  *
  * A pointer that is pressed and moved is a **drag**, and it is relayed as the path the operator
  * actually drew, never as a straight line: `pointerdown` starts the gesture, `pointermove` samples it
- * (throttled by the document's published `data-drag-sample-ms`, and only on real movement) and
- * `pointerup` sends the whole ordered path as one `drag` input with each sample's own offset. The
- * movement threshold `data-drag-move-threshold-px` — the distance from the press, so a jittery tap
- * cannot accumulate its way into a drag — is what keeps a tap a `click`. While the gesture is live the
- * page says so (`#pointer-relay[data-pointer-relay]`), and because the frame captures the pointer, a
- * drag that ends outside the picture is still released instead of leaving the provider's mouse held
- * down.
+ * and `pointerup` sends the whole ordered path as one `drag` input with each sample's own offset.
+ * Sampling is throttled by the published `data-drag-sample-ms`; when a gesture reaches
+ * `data-drag-max-points` samples the recorded path is thinned to every other real sample and the
+ * interval doubles, so a long drag cannot accumulate an unbounded path. The result is a coarser
+ * sampled real path, never a synthesized one. The movement threshold
+ * `data-drag-move-threshold-px` — the distance from the press, so a jittery tap cannot accumulate its
+ * way into a drag — is what keeps a tap a `click`. While the gesture is live the page says so
+ * (`#pointer-relay[data-pointer-relay]`), and because the frame captures the pointer, a drag that ends
+ * outside the picture is still released instead of leaving the provider's mouse held down.
  *
  * Keyboard input is a relay too, and a stateful one. A click on the frame **routes** the keyboard to
  * the remote browser; while routed, `keydown` on the document posts to the same `input` endpoint —
@@ -99,7 +104,8 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
 </head>
 <body data-keyboard-flush-ms="70"
       data-keyboard-named-keys="Enter Tab Backspace Delete Escape ArrowUp ArrowDown ArrowLeft ArrowRight Home End"
-      data-drag-sample-ms="12"
+      data-drag-sample-ms="32"
+      data-drag-max-points="64"
       data-drag-move-threshold-px="8">
 <header>
   <h1>Interactive sign-in</h1>
@@ -167,20 +173,24 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
   var ROUTE_ATTR = "data-keyboard-routing";
   var FLUSH_MS_ATTR = "data-keyboard-flush-ms";
   var NAMED_KEYS_ATTR = "data-keyboard-named-keys";
-  // The pointer relay's published contract, read back the same way: how often a drag is sampled and
-  // how far the pointer must move before a press counts as a drag rather than a click.
+  // The pointer relay's published contract, read back the same way: how often a drag is sampled, how
+  // many samples it may accumulate, and how far the pointer must move before a press counts as a
+  // drag rather than a click.
   var DRAG_SAMPLE_ATTR = "data-drag-sample-ms";
+  var DRAG_MAX_POINTS_ATTR = "data-drag-max-points";
   var DRAG_THRESHOLD_ATTR = "data-drag-move-threshold-px";
   var ROUTE_LOCAL = "local";
   var ROUTE_REMOTE = "remote";
   var DEFAULT_FLUSH_MS = 70;
-  var DEFAULT_DRAG_SAMPLE_MS = 12;
+  var DEFAULT_DRAG_SAMPLE_MS = 32;
+  var DEFAULT_DRAG_MAX_POINTS = 64;
   var DEFAULT_DRAG_THRESHOLD_PX = 8;
   var NAMED_KEYS = {};
   var state = {
     token: "", id: null, viewport: null, seq: 0, sawFrame: false, reader: null,
     routing: ROUTE_LOCAL, pending: "", flushTimer: null, flushMs: DEFAULT_FLUSH_MS,
-    dragSampleMs: DEFAULT_DRAG_SAMPLE_MS, dragThresholdPx: DEFAULT_DRAG_THRESHOLD_PX,
+    dragSampleMs: DEFAULT_DRAG_SAMPLE_MS, dragMaxPoints: DEFAULT_DRAG_MAX_POINTS,
+    dragThresholdPx: DEFAULT_DRAG_THRESHOLD_PX,
     drag: null, ended: false, sendChain: Promise.resolve()
   };
 
@@ -197,6 +207,9 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
     state.flushMs = Number.isFinite(declared) && declared > 0 ? declared : DEFAULT_FLUSH_MS;
     var sample = Number(document.body.getAttribute(DRAG_SAMPLE_ATTR));
     state.dragSampleMs = Number.isFinite(sample) && sample > 0 ? sample : DEFAULT_DRAG_SAMPLE_MS;
+    var maxPoints = Number(document.body.getAttribute(DRAG_MAX_POINTS_ATTR));
+    state.dragMaxPoints = Number.isFinite(maxPoints) && maxPoints >= 2
+      ? Math.floor(maxPoints) : DEFAULT_DRAG_MAX_POINTS;
     var threshold = Number(document.body.getAttribute(DRAG_THRESHOLD_ATTR));
     state.dragThresholdPx = Number.isFinite(threshold) && threshold >= 0
       ? threshold : DEFAULT_DRAG_THRESHOLD_PX;
@@ -586,17 +599,20 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
       ? performance.now() : Date.now();
   }
 
-  // Map a pointer into the provider's own frame geometry. The displayed size is whatever CSS made it;
-  // the real viewport is what the relay reported, so the ratio is measured, never guessed. A point
-  // outside the frame is reported as no point — never clamped, because a clamped sample would be a
-  // gesture the operator did not draw.
+  // Map a pointer into the provider's own frame geometry. The displayed size is whatever CSS made it,
+  // and it may be fractional; the real viewport is what the relay reported, so the ratio is measured
+  // exactly, never guessed and never rounded before it is applied. The result keeps its fractional
+  // part: the provider's input space is not integer-quantized, and rounding here would move a point by
+  // up to half a pixel for no reason. A point outside the frame is reported as no point — never
+  // clamped, because a clamped sample would be a gesture the operator did not draw.
   function framePoint(event) {
     var viewport = state.viewport;
     if (!viewport || !viewport.width || !viewport.height) return null;
     var rect = el("frame").getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
-    var x = Math.round((event.clientX - rect.left) * (viewport.width / rect.width));
-    var y = Math.round((event.clientY - rect.top) * (viewport.height / rect.height));
+    var x = (event.clientX - rect.left) * (viewport.width / rect.width);
+    var y = (event.clientY - rect.top) * (viewport.height / rect.height);
+    if (!isFinite(x) || !isFinite(y)) return null;
     if (x < 0 || y < 0 || x >= viewport.width || y >= viewport.height) return null;
     return { x: x, y: y };
   }
@@ -613,12 +629,20 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
       setStatus("That gesture was interrupted, so nothing was relayed. Try again.");
       return;
     }
-    var elapsed = Math.round(nowMs() - drag.startedAt);
-    var last = framePoint(event);
-    if (last && elapsed > drag.lastAtMs) {
-      drag.points.push({ x: last.x, y: last.y, atMs: elapsed });
-      drag.lastAtMs = elapsed;
+    var elapsed = Math.max(0, Math.round(nowMs() - drag.startedAt));
+    var release = framePoint(event);
+    if (release) {
+      // The release is the mapped "pointerup" position and it is always the last point. The last
+      // throttled "pointermove" is an older position — the pointer may have travelled since it was
+      // sampled — so collapsing the release onto it is exactly how a slider stops a few pixels short.
+      // Timestamps only have to be non-decreasing, so a release in the same millisecond as the last
+      // sample is still delivered instead of being conditionally dropped.
+      var atMs = Math.max(elapsed, drag.lastAtMs);
+      drag.points.push({ x: release.x, y: release.y, atMs: atMs });
+      drag.lastAtMs = atMs;
     }
+    // If the pointer was released outside the picture there is no in-frame release to map; the last
+    // frame-local sample is the last position the provider could legitimately receive.
     if (drag.points.length < 2 || drag.movedPx < state.dragThresholdPx) {
       // A press that did not travel is still exactly the click this page has always relayed.
       var start = drag.points[0];
@@ -649,7 +673,8 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
     state.drag = {
       pointerId: event.pointerId, startedAt: nowMs(),
       points: [{ x: point.x, y: point.y, atMs: 0 }],
-      lastAtMs: 0, lastClientX: event.clientX, lastClientY: event.clientY,
+      lastAtMs: 0, sampleMs: state.dragSampleMs,
+      lastClientX: event.clientX, lastClientY: event.clientY,
       startClientX: event.clientX, startClientY: event.clientY, movedPx: 0
     };
     // Capture the pointer so the release still arrives when the operator drags off the picture;
@@ -674,13 +699,24 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
     );
     event.preventDefault();
     var elapsed = nowMs() - drag.startedAt;
-    // Sampled on real movement, throttled by the interval the document publishes: what is relayed is
-    // the operator's own cadence, not a uniform one this script would invent.
-    if (elapsed - drag.lastAtMs < state.dragSampleMs) return;
+    // Sampled on real movement, throttled by the interval this gesture is currently using. When the
+    // path reaches the published maximum, it is thinned to the press, every other real sample and the
+    // newest one, and the interval doubles: a long drag stays bounded while still covering the whole
+    // gesture with positions the browser actually reported. Nothing is interpolated.
+    if (elapsed - drag.lastAtMs < drag.sampleMs) return;
     var point = framePoint(event);
     if (!point) return;
     drag.lastAtMs = elapsed;
     drag.points.push({ x: point.x, y: point.y, atMs: Math.round(elapsed) });
+    if (drag.points.length >= state.dragMaxPoints) {
+      var kept = [drag.points[0]];
+      for (var index = 1; index < drag.points.length; index += 2) kept.push(drag.points[index]);
+      if (kept[kept.length - 1] !== drag.points[drag.points.length - 1]) {
+        kept.push(drag.points[drag.points.length - 1]);
+      }
+      drag.points = kept;
+      drag.sampleMs = drag.sampleMs * 2;
+    }
     paintPointer("drag");
   });
 

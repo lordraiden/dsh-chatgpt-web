@@ -359,17 +359,23 @@ function assertViewport(viewport: ChatGptWebAuthViewport): ChatGptWebAuthViewpor
 }
 
 /**
- * The longest wait the relay will take between two samples of one drag.
+ * The pacing bounds of one drag replay.
  *
- * The operator's page samples a gesture every few milliseconds, so a real drag needs no long wait.
- * The one long interval a human gesture can contain is a pause with the pointer held still, whose
- * release sample then lands seconds later. The relay is a synchronous request, so that pause is
- * bounded here instead of stalling the sign-in, and one drag may not spend more than
- * {@link AUTH_DRAG_RELAY_BUDGET_MS} waiting in total. Every sampled position is still delivered, in
- * order, with the same spacing up to the bound: the path is never altered or thinned.
+ * The operator's sampled path carries each point's offset from the press, so the replay is scheduled
+ * against the press's own clock: before moving to a sample, wait only what is LEFT of its offset after
+ * the time already spent (including every previous CDP move) is subtracted. Sleeping the raw delta
+ * again is the double payment that stretched a ~1 s gesture into several seconds, because one
+ * `page.mouse.move` already costs about a frame (measured at ~17 ms on the reference host).
+ *
+ * Two bounds keep a synchronous relay request finite. No single wait may exceed
+ * {@link AUTH_DRAG_MAX_GAP_MS}, so a held-still pause cannot stall the sign-in; and pacing stops once
+ * {@link AUTH_DRAG_REPLAY_BUDGET_MS} of wall time has been spent, after which the remaining samples
+ * are still delivered in order with no wait. Every sampled position is always delivered, and the
+ * release sample is always the last `mouse.move` before `mouse.up()` — the budget never skips a move,
+ * it only stops waiting.
  */
-const AUTH_DRAG_MAX_GAP_MS = 1_000;
-const AUTH_DRAG_RELAY_BUDGET_MS = 5_000;
+const AUTH_DRAG_MAX_GAP_MS = 250;
+const AUTH_DRAG_REPLAY_BUDGET_MS = 1_000;
 
 /** One ChatGPT Web sign-in. Owns the browser, the temporary profile and the completion decision. */
 class ChatGptWebAuthSession implements ProviderAuthSession {
@@ -484,7 +490,7 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
         // and release at the end. The samples themselves are the motion: no interpolation, no
         // synthetic path, and `page.mouse.move` is called once per sample with no `steps`.
         const start = points[0]!;
-        let budget = AUTH_DRAG_RELAY_BUDGET_MS;
+        const startedAt = this.owner.now();
         let pressed = false;
         try {
           await page.mouse.move(start.x, start.y);
@@ -492,11 +498,17 @@ class ChatGptWebAuthSession implements ProviderAuthSession {
           pressed = true;
           for (let index = 1; index < points.length; index += 1) {
             const point = points[index]!;
-            const pause = Math.min(point.atMs - points[index - 1]!.atMs, AUTH_DRAG_MAX_GAP_MS, budget);
-            if (pause > 0) {
-              budget -= pause;
-              await this.owner.sleep(pause);
-            }
+            // Schedule against the press, not against the previous sample: `elapsed` already includes
+            // every previous move's CDP cost, so `atMs - elapsed` is the remainder only. When moves are
+            // already slower than the operator's cadence this is zero and no time is paid twice; when
+            // they are faster, the wait restores the operator's rhythm.
+            const elapsed = this.owner.now() - startedAt;
+            const remainingBudget = Math.max(0, AUTH_DRAG_REPLAY_BUDGET_MS - elapsed);
+            const due = Math.max(0, point.atMs - elapsed);
+            const pause = Math.min(due, AUTH_DRAG_MAX_GAP_MS, remainingBudget);
+            if (pause > 0) await this.owner.sleep(pause);
+            // Every sample is delivered, in order; the last one is the release. The budget never
+            // skips a move — it only stops waiting — so an exhausted gesture still lands.
             await page.mouse.move(point.x, point.y);
           }
         } finally {
