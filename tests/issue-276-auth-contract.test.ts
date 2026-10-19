@@ -48,6 +48,7 @@ function createFakeProvider(options: { providerId: string; pixels: boolean }) {
   let views = 0;
   let inputs = 0;
   let cancels = 0;
+  const seen: AuthInput[] = [];
   const session: ProviderAuthSession = {
     providerId: options.providerId,
     state: () => state,
@@ -65,6 +66,7 @@ function createFakeProvider(options: { providerId: string; pixels: boolean }) {
     },
     async input(event: AuthInput): Promise<void> {
       inputs += 1;
+      seen.push(event);
       if (event.type === "type" && (event.text === "user@example.test" || event.text === "12345678")) {
         state = "verifying";
       } else if (event.type === "key" && event.key === "Enter") {
@@ -94,6 +96,7 @@ function createFakeProvider(options: { providerId: string; pixels: boolean }) {
       },
     } satisfies ProviderAuthController,
     session,
+    seenInputs: seen,
     counters: () => ({ views, inputs, cancels }),
   };
 }
@@ -156,8 +159,9 @@ describe("issue #276 — the auth vocabulary is pinned and total", () => {
     expect(isAuthSessionState(1)).toBe(false);
   });
 
-  test("only the five input intents are relayable, and each is strict", () => {
+  test("only the six input intents are relayable, and each is strict", () => {
     expect(isAuthInput({ type: "click", x: 3, y: 4 })).toBe(true);
+    expect(isAuthInput({ type: "drag", points: [{ x: 1, y: 2, atMs: 0 }, { x: 9, y: 20, atMs: 31 }] })).toBe(true);
     expect(isAuthInput({ type: "type", text: "hola" })).toBe(true);
     expect(isAuthInput({ type: "key", key: "Enter" })).toBe(true);
     expect(isAuthInput({ type: "scroll", dy: -20 })).toBe(true);
@@ -171,6 +175,51 @@ describe("issue #276 — the auth vocabulary is pinned and total", () => {
     expect(isAuthInput({ type: "navigate", url: "" })).toBe(false);
     expect(isAuthInput(null)).toBe(false);
     expect(isAuthInput("click")).toBe(false);
+  });
+
+  test("a drag is an ordered sampled path: no points, a lone point, a non-finite sample or a backwards clock is refused", () => {
+    const start = { x: 10, y: 40, atMs: 0 };
+    const middle = { x: 60, y: 55, atMs: 12 };
+    const end = { x: 140, y: 62, atMs: 27 };
+
+    // The path is the gesture: a press, the samples, the release. Two points is the minimum that can
+    // be a drag at all, and nothing is clamped, rounded or reordered here.
+    expect(isAuthInput({ type: "drag", points: [start, end] })).toBe(true);
+    expect(isAuthInput({ type: "drag", points: [start, middle, end] })).toBe(true);
+    expect(isAuthInput({ type: "drag", points: [] })).toBe(false);
+    expect(isAuthInput({ type: "drag", points: [start] })).toBe(false);
+    expect(isAuthInput({ type: "drag", points: "10,40" })).toBe(false);
+    expect(isAuthInput({ type: "drag", points: [start, { x: Number.NaN, y: 1, atMs: 5 }] })).toBe(false);
+    expect(isAuthInput({ type: "drag", points: [start, { x: 1, y: 1, atMs: Number.POSITIVE_INFINITY }] })).toBe(false);
+    expect(isAuthInput({ type: "drag", points: [start, { x: 1, y: 1 }] })).toBe(false);
+    // Timestamps must advance along the path. A backwards clock is not the gesture the page drew.
+    expect(isAuthInput({ type: "drag", points: [middle, start] })).toBe(false);
+    expect(isAuthInput({ type: "drag", points: [{ ...start, atMs: -1 }, end] })).toBe(false);
+  });
+
+  test("the manager relays a drag verbatim, sample by sample, and invalidates the frame after it", async () => {
+    const provider = createFakeProvider({ providerId: "drag-web", pixels: true });
+    const manager = createWebChatAuthSessionManager({ sweepIntervalMs: 0 });
+    const handle = await manager.open({ providerId: provider.providerId, controller: provider.controller });
+    const first = await handle.view();
+
+    const path = [
+      { x: 12, y: 200, atMs: 0 },
+      { x: 40, y: 197, atMs: 11 },
+      { x: 96, y: 186, atMs: 24 },
+      { x: 190, y: 188, atMs: 41 },
+    ];
+    await handle.input({ type: "drag", points: path });
+
+    // The provider's own session received exactly the ordered path, untouched: this layer is a relay,
+    // not a gesture generator, and it has no notion of a straight line to collapse the path into.
+    expect(provider.seenInputs).toEqual([{ type: "drag", points: path }]);
+    // Like every other input, a drag invalidates the cached frame so the next view is what the
+    // provider produces *after* the gesture.
+    const second = await handle.view();
+    expect(second).not.toBe(first);
+    expect(provider.counters().views).toBe(2);
+    await manager.close();
   });
 
   test("a frame is bytes plus a positive integer geometry, nothing else", () => {

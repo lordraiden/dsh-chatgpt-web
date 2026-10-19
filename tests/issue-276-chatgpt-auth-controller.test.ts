@@ -76,6 +76,9 @@ interface FakePage {
   readonly page: Page;
   readonly calls: {
     clicks: Array<[number, number]>;
+    moves: Array<[number, number]>;
+    downs: number;
+    ups: number;
     types: string[];
     keys: string[];
     wheels: Array<[number, number]>;
@@ -88,10 +91,15 @@ interface FakePage {
 function fakePage(options: {
   viewport?: { width: number; height: number };
   closed?: () => boolean;
+  /** Fail the Nth `mouse.move` (1-based), which is how a page that dies mid-drag is modelled. */
+  failMoveAt?: number;
 } = {}): FakePage {
   const viewport = options.viewport ?? { width: 320, height: 480 };
   const calls: FakePage["calls"] = {
     clicks: [],
+    moves: [],
+    downs: 0,
+    ups: 0,
     types: [],
     keys: [],
     wheels: [],
@@ -99,10 +107,20 @@ function fakePage(options: {
     screenshots: 0,
     screenshotOptions: [],
   };
+  let moves = 0;
   const page = {
     viewportSize: () => viewport,
     mouse: {
       click: (x: number, y: number) => { calls.clicks.push([x, y]); },
+      move: (x: number, y: number) => {
+        moves += 1;
+        if (options.failMoveAt !== undefined && moves === options.failMoveAt) {
+          throw new Error("Target page, context or browser has been closed");
+        }
+        calls.moves.push([x, y]);
+      },
+      down: () => { calls.downs += 1; },
+      up: () => { calls.ups += 1; },
       wheel: (x: number, y: number) => { calls.wheels.push([x, y]); },
     },
     keyboard: {
@@ -138,6 +156,8 @@ function makeController(options: {
   pollTimeoutMs?: number;
   maxPolls?: number;
   now?: () => number;
+  /** Pacing seam of the drag relay; the poll loop shares it, so tests filter its interval out. */
+  sleep?: (ms: number) => Promise<void>;
   authBrowserMode?: "headless" | "display";
   launched?: ChatGptWebAuthBrowserLaunch[];
 }) {
@@ -190,6 +210,7 @@ function makeController(options: {
     pollTimeoutMs: options.pollTimeoutMs ?? 60_000,
     ...(options.maxPolls !== undefined ? { maxPolls: options.maxPolls } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
   });
   return {
     controller,
@@ -374,6 +395,83 @@ describe("issue #276 slice 2b — input mapping", () => {
     await session.input({ type: "click", x: 319, y: 479 });
     expect(page.calls.clicks).toEqual([[319, 479]]);
     await session.cancel();
+  });
+
+  test("a drag is replayed as the operator's own sampled path, in order, with every intermediate move", async () => {
+    const sleeps: number[] = [];
+    const { controller, page } = makeController({ sleep: async ms => { sleeps.push(ms); } });
+    const session = await controller.startAuth();
+
+    // A deliberately uneven, non-linear path: the y coordinate rises, dips and rises again.
+    const path = [
+      { x: 24, y: 260, atMs: 0 },
+      { x: 47, y: 257, atMs: 12 },
+      { x: 83, y: 264, atMs: 25 },
+      { x: 118, y: 251, atMs: 39 },
+      { x: 176, y: 245, atMs: 58 },
+    ];
+    await session.input({ type: "drag", points: path });
+
+    // The anti-collapse assertion: exactly one `mouse.move` per sample, in the drawn order. A
+    // "move(start); move(end)" implementation yields two moves, and an interpolated path yields
+    // coordinates nobody drew.
+    expect(page.calls.moves).toEqual(path.map(point => [point.x, point.y]));
+    expect(page.calls.moves.length).toBe(path.length);
+    expect(page.calls.downs).toBe(1);
+    expect(page.calls.ups).toBe(1);
+    // Timing belongs to the input: each wait is the delta the page carried, not an assumed constant.
+    // (The poll loop shares this seam; its 1 ms interval is filtered out.)
+    expect(sleeps.filter(ms => ms > 1)).toEqual([12, 13, 14, 19]);
+
+    // A held pause is bounded by the relay, but its release sample is still delivered.
+    await session.input({ type: "drag", points: [{ x: 5, y: 5, atMs: 0 }, { x: 6, y: 6, atMs: 60_000 }] });
+    expect(sleeps.filter(ms => ms > 1).at(-1)).toBe(1_000);
+    expect(page.calls.moves.at(-1)).toEqual([6, 6]);
+    await session.cancel();
+  });
+
+  test("a drag that leaves the viewport is refused before any press, and the session keeps accepting input", async () => {
+    const { controller, page } = makeController({});
+    const session = await controller.startAuth();
+
+    for (const points of [
+      [{ x: -1, y: 10, atMs: 0 }, { x: 40, y: 40, atMs: 12 }],
+      [{ x: 10, y: 10, atMs: 0 }, { x: 40, y: 480, atMs: 12 }],
+      [{ x: 10, y: 10, atMs: 0 }, { x: 320, y: 40, atMs: 12 }],
+    ]) {
+      const failure = await session.input({ type: "drag", points }).catch(error => error);
+      expect(isWebChatError(failure)).toBe(true);
+      expect(failure).toMatchObject({ category: "UNSUPPORTED_OPTION", providerCode: "AUTH_DRAG_OUT_OF_VIEWPORT" });
+    }
+    // Refused before the first press: nothing is at random and nothing stays pressed.
+    expect(page.calls.moves).toEqual([]);
+    expect(page.calls.downs).toBe(0);
+    expect(page.calls.ups).toBe(0);
+
+    // A refused gesture does not wedge the session: the next inputs are relayed as usual.
+    await session.input({ type: "click", x: 10, y: 10 });
+    await session.input({ type: "type", text: "still-live" });
+    expect(page.calls.clicks).toEqual([[10, 10]]);
+    expect(page.calls.types).toContain("still-live");
+    await session.cancel();
+  });
+
+  test("a drag that fails while replaying still releases the button, and fails as upstream", async () => {
+    const page = fakePage({ failMoveAt: 3 });
+    const { controller } = makeController({ page });
+    const session = await controller.startAuth();
+
+    const failure = await session.input({
+      type: "drag",
+      points: [{ x: 10, y: 10, atMs: 0 }, { x: 20, y: 12, atMs: 12 }, { x: 30, y: 15, atMs: 25 }],
+    }).catch(error => error);
+    expect(failure).toMatchObject({ category: "UPSTREAM_ERROR", providerCode: "AUTH_INPUT_FAILED" });
+    // The press happened, the replay failed part-way, and the release still happened in the failure
+    // path: the provider's page is never left with a held mouse button.
+    expect(page.calls.downs).toBe(1);
+    expect(page.calls.ups).toBe(1);
+    expect(page.calls.moves).toEqual([[10, 10], [20, 12]]);
+    await waitForState(session, "failed");
   });
 
   test("a failed navigation intent is reported without leaking the URL and its query", async () => {

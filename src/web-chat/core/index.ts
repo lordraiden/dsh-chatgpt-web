@@ -37,6 +37,7 @@ export {
   isAuthSessionState,
   isProviderAuthView,
   type AuthCapture,
+  type AuthDragPoint,
   type AuthInput,
   type AuthSessionState,
   type ProviderAuthController,

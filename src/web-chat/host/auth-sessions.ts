@@ -421,7 +421,7 @@ export function createWebChatAuthSessionManager(
         refresh(entry);
         assertInteractive(entry, "accept input");
         if (!isAuthInput(event)) {
-          throw new TypeError("A WebChat auth input must be one of click, type, key, scroll or navigate");
+          throw new TypeError("A WebChat auth input must be one of click, drag, type, key, scroll or navigate");
         }
         await entry.provider.input(event);
         // The provider may have completed the sign-in while handling this very input.

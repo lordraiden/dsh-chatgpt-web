@@ -83,6 +83,9 @@ interface FakePage {
   readonly page: Page;
   readonly calls: {
     clicks: Array<[number, number]>;
+    moves: Array<[number, number]>;
+    downs: number;
+    ups: number;
     types: string[];
     keys: string[];
     wheels: Array<[number, number]>;
@@ -96,13 +99,27 @@ function fakePage(options: {
   readonly viewport?: { width: number; height: number };
   readonly closed?: () => boolean;
   readonly probeResponse?: unknown;
+  /** Fail the Nth `mouse.move` (1-based), which is how a page that dies mid-drag is modelled. */
+  readonly failMoveAt?: number;
 } = {}): FakePage {
   const viewport = options.viewport ?? { width: 320, height: 480 };
-  const calls: FakePage["calls"] = { clicks: [], types: [], keys: [], wheels: [], gotos: [], screenshots: [], probes: [] };
+  const calls: FakePage["calls"] = {
+    clicks: [], moves: [], downs: 0, ups: 0, types: [], keys: [], wheels: [], gotos: [], screenshots: [], probes: [],
+  };
+  let moves = 0;
   const page = {
     viewportSize: () => viewport,
     mouse: {
       click: (x: number, y: number) => { calls.clicks.push([x, y]); },
+      move: (x: number, y: number) => {
+        moves += 1;
+        if (options.failMoveAt !== undefined && moves === options.failMoveAt) {
+          throw new Error("Target page, context or browser has been closed");
+        }
+        calls.moves.push([x, y]);
+      },
+      down: () => { calls.downs += 1; },
+      up: () => { calls.ups += 1; },
       wheel: (x: number, y: number) => { calls.wheels.push([x, y]); },
     },
     keyboard: {
@@ -409,11 +426,101 @@ describe("issue #299 — input relay and typed refusals", () => {
     await session.cancel();
   });
 
+  test("a drag is replayed as the operator's own sampled path, in order, with every intermediate move", async () => {
+    const sleeps: number[] = [];
+    const defensiveProbe = () => new Promise<QwenCodeSessionProbeResult>(() => {});
+    const harness = makeController({ probe: defensiveProbe, sleep: async ms => { sleeps.push(ms); } });
+    const session = await harness.controller.startAuth();
+    // The poll loop parks in `verifying` on the never-resolving probe; inputs are accepted in that
+    // state too, and its single 1 ms poll wait is filtered out of the pacing assertions below.
+
+    // A deliberately uneven, non-linear path: the y coordinate rises, dips and rises again.
+    const path = [
+      { x: 30, y: 210, atMs: 0 },
+      { x: 52, y: 208, atMs: 11 },
+      { x: 88, y: 216, atMs: 23 },
+      { x: 121, y: 205, atMs: 37 },
+      { x: 190, y: 199, atMs: 54 },
+    ];
+    await session.input({ type: "drag", points: path });
+
+    // This is the anti-collapse assertion: exactly one `mouse.move` per sample, in the drawn order.
+    // "move(start); move(end)" yields two moves; an interpolated path yields different coordinates.
+    expect(harness.fake.calls.moves).toEqual(path.map(point => [point.x, point.y]));
+    expect(harness.fake.calls.moves.length).toBe(path.length);
+    expect(harness.fake.calls.downs).toBe(1);
+    expect(harness.fake.calls.ups).toBe(1);
+    // Timing is the input's, not an assumed constant: each wait is the delta the page carried.
+    expect(sleeps.filter(ms => ms > 1)).toEqual([11, 12, 14, 17]);
+
+    // A held pause is bounded (the relay is one request) but never dropped: one wait, then the
+    // release sample is still delivered.
+    await session.input({ type: "drag", points: [{ x: 5, y: 5, atMs: 0 }, { x: 6, y: 6, atMs: 60_000 }] });
+    expect(sleeps.filter(ms => ms > 1).at(-1)).toBe(1_000);
+    expect(harness.fake.calls.moves.at(-1)).toEqual([6, 6]);
+    await session.cancel();
+  });
+
+  test("a drag that leaves the viewport is refused before any press, and the session keeps accepting input", async () => {
+    const harness = makeController({ probe: neverAuthenticated, maxPolls: 1_000 });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+
+    // A refused coordinate is refused, never clamped into the viewport: clamping would replay a
+    // gesture the operator did not make.
+    for (const points of [
+      [{ x: -1, y: 10, atMs: 0 }, { x: 40, y: 40, atMs: 12 }],
+      [{ x: 10, y: 10, atMs: 0 }, { x: 40, y: 480, atMs: 12 }],
+      [{ x: 10, y: 10, atMs: 0 }, { x: 320, y: 40, atMs: 12 }],
+    ]) {
+      const failure = await session.input({ type: "drag", points }).catch(error => error);
+      expect(failure).toMatchObject({ category: "UNSUPPORTED_OPTION", providerCode: "AUTH_DRAG_OUT_OF_VIEWPORT" });
+    }
+    // The whole drag is refused before the first press: nothing was pressed, so nothing is stuck.
+    expect(harness.fake.calls.moves).toEqual([]);
+    expect(harness.fake.calls.downs).toBe(0);
+    expect(harness.fake.calls.ups).toBe(0);
+
+    // A refused gesture does not wedge the session: the next inputs are relayed as usual.
+    await session.input({ type: "click", x: 10, y: 10 });
+    await session.input({ type: "type", text: "still-live" });
+    expect(harness.fake.calls.clicks).toEqual([[10, 10]]);
+    expect(harness.fake.calls.types).toContain("still-live");
+    await session.cancel();
+  });
+
+  test("a drag that fails while replaying still releases the button, and fails as upstream", async () => {
+    const harness = makeController({
+      fake: fakePage({ failMoveAt: 3 }),
+      probe: neverAuthenticated,
+      maxPolls: 1_000,
+    });
+    const session = await harness.controller.startAuth();
+    await waitForState(session, "awaiting_input");
+
+    const failure = await session.input({
+      type: "drag",
+      points: [{ x: 10, y: 10, atMs: 0 }, { x: 20, y: 12, atMs: 12 }, { x: 30, y: 15, atMs: 25 }],
+    }).catch(error => error);
+    expect(failure).toMatchObject({ category: "UPSTREAM_ERROR", providerCode: "AUTH_INPUT_FAILED" });
+    // The press happened, the replay failed part-way, and the release still happened in the failure
+    // path: the provider's page is never left with a held mouse button.
+    expect(harness.fake.calls.downs).toBe(1);
+    expect(harness.fake.calls.ups).toBe(1);
+    expect(harness.fake.calls.moves).toEqual([[10, 10], [20, 12]]);
+    await waitForState(session, "failed");
+    expect(harness.closes()).toBe(1);
+  });
+
   test("an unknown input type is a programmer error, not an upstream failure", async () => {
     const harness = makeController({ probe: neverAuthenticated, maxPolls: 1_000 });
     const session = await harness.controller.startAuth();
     const failure = await session.input({ type: "drop" } as unknown as AuthInput).catch(error => error);
     expect(failure).toBeInstanceOf(TypeError);
+    // A drag without a path is the same class of programmer error: it is not an operator refusal and
+    // never reaches the page.
+    const pathless = await session.input({ type: "drag", points: [] }).catch(error => error);
+    expect(pathless).toBeInstanceOf(TypeError);
     await session.cancel();
   });
 

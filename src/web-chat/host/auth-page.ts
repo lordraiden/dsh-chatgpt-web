@@ -23,6 +23,16 @@
  * using the viewport the relay reports, so the page never guesses the ratio between the size the
  * screen is *displayed* at and the size the provider actually has.
  *
+ * A pointer that is pressed and moved is a **drag**, and it is relayed as the path the operator
+ * actually drew, never as a straight line: `pointerdown` starts the gesture, `pointermove` samples it
+ * (throttled by the document's published `data-drag-sample-ms`, and only on real movement) and
+ * `pointerup` sends the whole ordered path as one `drag` input with each sample's own offset. The
+ * movement threshold `data-drag-move-threshold-px` — the distance from the press, so a jittery tap
+ * cannot accumulate its way into a drag — is what keeps a tap a `click`. While the gesture is live the
+ * page says so (`#pointer-relay[data-pointer-relay]`), and because the frame captures the pointer, a
+ * drag that ends outside the picture is still released instead of leaving the provider's mouse held
+ * down.
+ *
  * Keyboard input is a relay too, and a stateful one. A click on the frame **routes** the keyboard to
  * the remote browser; while routed, `keydown` on the document posts to the same `input` endpoint —
  * printable characters as `type` (batched on a short timer, and flushed immediately before any named
@@ -32,9 +42,10 @@
  * the token field's" is a property of the document, not a hope. Focusing a local control flushes the
  * pending batch first, so the tail of a burst is never dropped.
  *
- * The two body attributes `data-keyboard-flush-ms` and `data-keyboard-named-keys` are the relay's
- * published contract: the script reads its batch timer and its named-key vocabulary from them, so what
- * the document says about its own keyboard handling and what it does cannot drift apart. The
+ * The body attributes `data-keyboard-flush-ms`, `data-keyboard-named-keys`, `data-drag-sample-ms`
+ * and `data-drag-move-threshold-px` are the relay's published contract: the script reads its batch
+ * timer, its named-key vocabulary, its drag sampling interval and its tap threshold from them, so
+ * what the document says about its own handling and what it does cannot drift apart. The
  * text field plus *Send text* stays as the paste/long-text path and as the only way to type from a
  * phone, where no hardware keyboard exists.
  *
@@ -72,7 +83,7 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
   .hint { color: var(--dim); font-size: .8rem; margin: 8px 0 0; }
   #screen { margin: 12px 0; background: #05070b; border: 1px solid var(--line); border-radius: 10px;
             overflow: hidden; }
-  #frame { display: block; width: 100%; height: auto; touch-action: manipulation; cursor: crosshair;
+  #frame { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair;
            user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   #no-frames { margin: 0; padding: 14px; color: var(--dim); }
   #stored { margin: 12px 0 0; padding: 12px; border-radius: 10px; background: rgba(63,191,127,.12);
@@ -81,10 +92,15 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
   #keyboard-route { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; font-size: .85rem;
                     font-weight: 600; border: 1px solid var(--line); background: #0c0f16; color: var(--dim); }
   #keyboard-route[data-keyboard-routing="remote"] { border-color: var(--ok); color: var(--ok); }
+  #pointer-relay { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; font-size: .85rem;
+                   font-weight: 600; border: 1px solid var(--line); background: #0c0f16; color: var(--dim); }
+  #pointer-relay[data-pointer-relay="drag"] { border-color: var(--accent); color: var(--ink); }
 </style>
 </head>
 <body data-keyboard-flush-ms="70"
-      data-keyboard-named-keys="Enter Tab Backspace Delete Escape ArrowUp ArrowDown ArrowLeft ArrowRight Home End">
+      data-keyboard-named-keys="Enter Tab Backspace Delete Escape ArrowUp ArrowDown ArrowLeft ArrowRight Home End"
+      data-drag-sample-ms="12"
+      data-drag-move-threshold-px="8">
 <header>
   <h1>Interactive sign-in</h1>
   <p id="status" role="status" aria-live="polite">Enter the operator control token.</p>
@@ -116,8 +132,11 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
   </div>
   <p class="hint">Click the screen once, then type on your keyboard: your keys go to the remote
     sign-in page for as long as the indicator below says so. Press Escape (or click any field on this
-    page) to type here again. On a phone, which has no hardware keyboard, use <em>Send text</em> below.</p>
+    page) to type here again. On a phone, which has no hardware keyboard, use <em>Send text</em> below.
+    To use a slider or puzzle, press and <em>drag</em> directly on the screen: the path you draw is
+    relayed sample by sample, so drag the way you would with a mouse.</p>
   <p id="keyboard-route" data-keyboard-routing="local" role="status" aria-live="polite">Keyboard → this page. Click the sign-in screen, then type on your keyboard.</p>
+  <p id="pointer-relay" data-pointer-relay="idle" role="status" aria-live="polite">Pointer → this page. Click the sign-in screen, or press and drag on it to relay that drag.</p>
   <form id="text-form">
     <label for="text">Paste text or send a long text (fallback — normally you just type on the screen above)</label>
     <input id="text" name="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
@@ -148,14 +167,21 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
   var ROUTE_ATTR = "data-keyboard-routing";
   var FLUSH_MS_ATTR = "data-keyboard-flush-ms";
   var NAMED_KEYS_ATTR = "data-keyboard-named-keys";
+  // The pointer relay's published contract, read back the same way: how often a drag is sampled and
+  // how far the pointer must move before a press counts as a drag rather than a click.
+  var DRAG_SAMPLE_ATTR = "data-drag-sample-ms";
+  var DRAG_THRESHOLD_ATTR = "data-drag-move-threshold-px";
   var ROUTE_LOCAL = "local";
   var ROUTE_REMOTE = "remote";
   var DEFAULT_FLUSH_MS = 70;
+  var DEFAULT_DRAG_SAMPLE_MS = 12;
+  var DEFAULT_DRAG_THRESHOLD_PX = 8;
   var NAMED_KEYS = {};
   var state = {
     token: "", id: null, viewport: null, seq: 0, sawFrame: false, reader: null,
     routing: ROUTE_LOCAL, pending: "", flushTimer: null, flushMs: DEFAULT_FLUSH_MS,
-    ended: false, sendChain: Promise.resolve()
+    dragSampleMs: DEFAULT_DRAG_SAMPLE_MS, dragThresholdPx: DEFAULT_DRAG_THRESHOLD_PX,
+    drag: null, ended: false, sendChain: Promise.resolve()
   };
 
   function el(id) { return document.getElementById(id); }
@@ -169,6 +195,11 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
     names.split(" ").forEach(function (name) { if (name) NAMED_KEYS[name] = true; });
     var declared = Number(document.body.getAttribute(FLUSH_MS_ATTR));
     state.flushMs = Number.isFinite(declared) && declared > 0 ? declared : DEFAULT_FLUSH_MS;
+    var sample = Number(document.body.getAttribute(DRAG_SAMPLE_ATTR));
+    state.dragSampleMs = Number.isFinite(sample) && sample > 0 ? sample : DEFAULT_DRAG_SAMPLE_MS;
+    var threshold = Number(document.body.getAttribute(DRAG_THRESHOLD_ATTR));
+    state.dragThresholdPx = Number.isFinite(threshold) && threshold >= 0
+      ? threshold : DEFAULT_DRAG_THRESHOLD_PX;
   }
 
   function isNamedKey(key) {
@@ -378,9 +409,11 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
       state.sawFrame = false;
       state.pending = "";
       state.ended = false;
+      state.drag = null;
       if (state.flushTimer !== null) { clearTimeout(state.flushTimer); state.flushTimer = null; }
       setRouting(ROUTE_LOCAL);
       paintRoute();
+      paintPointer("idle");
       el("session-state").textContent = session.state;
       el("session-expiry").textContent = expiryText(session.expiresAt);
       show("stored", false);
@@ -523,24 +556,136 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
   window.addEventListener("blur", flushPendingText);
   window.addEventListener("pagehide", flushPendingText);
 
-  // Map a pointer into the provider's own frame geometry. The displayed size is whatever CSS made
-  // it; the real viewport is what the relay reported, so the ratio is measured, never guessed.
-  el("frame").addEventListener("pointerdown", function (event) {
+  // ---- the pointer relay: a click, or the drag path the operator actually drew ----
+  // A press is not a click until the pointer is released, because the very same gesture may be a
+  // drag and the provider must never receive both. The press routes the keyboard either way.
+  var POINTER_IDLE = "Pointer → this page. Click the sign-in screen, or press and drag on it to relay that drag.";
+  var POINTER_PRESS = "Pointer down on the sign-in screen. Keep holding and drag to relay a drag; release without moving to click.";
+  var POINTER_DRAGGING = "Relaying your drag… keep holding and move as you normally would; release to send the path.";
+
+  function paintPointer(kind, text) {
+    var indicator = el("pointer-relay");
+    var previous = indicator.getAttribute("data-pointer-relay");
+    indicator.setAttribute("data-pointer-relay", kind);
+    if (kind === "press") { indicator.textContent = POINTER_PRESS; return; }
+    if (kind === "drag") {
+      // Painted once per gesture, not once per sample: the announcement must say "this is being
+      // relayed" without turning the live region into a stream of position updates.
+      if (previous !== "drag") indicator.textContent = text || POINTER_DRAGGING;
+      return;
+    }
+    if (kind === "sent-drag" || kind === "sent-click") {
+      indicator.textContent = text || "";
+      return;
+    }
+    indicator.textContent = POINTER_IDLE;
+  }
+
+  function nowMs() {
+    return typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now() : Date.now();
+  }
+
+  // Map a pointer into the provider's own frame geometry. The displayed size is whatever CSS made it;
+  // the real viewport is what the relay reported, so the ratio is measured, never guessed. A point
+  // outside the frame is reported as no point — never clamped, because a clamped sample would be a
+  // gesture the operator did not draw.
+  function framePoint(event) {
     var viewport = state.viewport;
-    if (!state.id || !viewport || !viewport.width || !viewport.height) return;
+    if (!viewport || !viewport.width || !viewport.height) return null;
     var rect = el("frame").getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
+    if (!rect.width || !rect.height) return null;
     var x = Math.round((event.clientX - rect.left) * (viewport.width / rect.width));
     var y = Math.round((event.clientY - rect.top) * (viewport.height / rect.height));
-    if (x < 0 || y < 0 || x >= viewport.width || y >= viewport.height) return;
+    if (x < 0 || y < 0 || x >= viewport.width || y >= viewport.height) return null;
+    return { x: x, y: y };
+  }
+
+  function finishDrag(event, cancelled) {
+    var drag = state.drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    state.drag = null;
+    try { el("frame").releasePointerCapture(event.pointerId); } catch (error) { /* never captured */ }
+    if (cancelled) {
+      // An interrupted gesture is neither a click nor a drag: relay nothing rather than invent one.
+      // No remote button was ever pressed — the path is sent once, at the release.
+      paintPointer("idle");
+      setStatus("That gesture was interrupted, so nothing was relayed. Try again.");
+      return;
+    }
+    var elapsed = Math.round(nowMs() - drag.startedAt);
+    var last = framePoint(event);
+    if (last && elapsed > drag.lastAtMs) {
+      drag.points.push({ x: last.x, y: last.y, atMs: elapsed });
+      drag.lastAtMs = elapsed;
+    }
+    if (drag.points.length < 2 || drag.movedPx < state.dragThresholdPx) {
+      // A press that did not travel is still exactly the click this page has always relayed.
+      var start = drag.points[0];
+      if (start) {
+        enqueue({ type: "click", x: start.x, y: start.y });
+        paintPointer("sent-click", "Click relayed at (" + start.x + ", " + start.y + ").");
+      }
+      return;
+    }
+    // The whole sampled path goes as one input, with each sample's own offset: nothing is
+    // interpolated here, and the straight line a click-and-drag synthesizer would send cannot be
+    // expressed by this relay because it only ever forwards points the browser reported.
+    enqueue({ type: "drag", points: drag.points });
+    paintPointer("sent-drag", "Your drag was relayed as " + drag.points.length
+      + " sampled points, in the order you drew them.");
+  }
+
+  el("frame").addEventListener("pointerdown", function (event) {
+    if (!state.id) return;
+    var point = framePoint(event);
+    if (!point) return;
     event.preventDefault();
     // A click on the remote view is the one gesture that routes the keyboard to the remote, so it is
     // also where the routing state moves. The frame (tabindex="0") takes focus, so a local field that
     // held it cannot keep it while the indicator says the keys are remote.
     routeToRemote();
     try { el("frame").focus({ preventScroll: true }); } catch (error) { el("frame").focus(); }
-    enqueue({ type: "click", x: x, y: y });
+    state.drag = {
+      pointerId: event.pointerId, startedAt: nowMs(),
+      points: [{ x: point.x, y: point.y, atMs: 0 }],
+      lastAtMs: 0, lastClientX: event.clientX, lastClientY: event.clientY,
+      startClientX: event.clientX, startClientY: event.clientY, movedPx: 0
+    };
+    // Capture the pointer so the release still arrives when the operator drags off the picture;
+    // without it a drag that ends elsewhere would leave the provider's mouse button held down.
+    try { el("frame").setPointerCapture(event.pointerId); } catch (error) { /* older event model */ }
+    paintPointer("press");
   });
+
+  el("frame").addEventListener("pointermove", function (event) {
+    var drag = state.drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    var dx = event.clientX - drag.lastClientX;
+    var dy = event.clientY - drag.lastClientY;
+    if (dx === 0 && dy === 0) return;
+    drag.lastClientX = event.clientX;
+    drag.lastClientY = event.clientY;
+    // Distance from the press, not a sum of per-event deltas: finger jitter must not add up into a
+    // drag, and a real drag is measured by how far it actually travelled.
+    drag.movedPx = Math.max(
+      drag.movedPx,
+      Math.hypot(event.clientX - drag.startClientX, event.clientY - drag.startClientY)
+    );
+    event.preventDefault();
+    var elapsed = nowMs() - drag.startedAt;
+    // Sampled on real movement, throttled by the interval the document publishes: what is relayed is
+    // the operator's own cadence, not a uniform one this script would invent.
+    if (elapsed - drag.lastAtMs < state.dragSampleMs) return;
+    var point = framePoint(event);
+    if (!point) return;
+    drag.lastAtMs = elapsed;
+    drag.points.push({ x: point.x, y: point.y, atMs: Math.round(elapsed) });
+    paintPointer("drag");
+  });
+
+  el("frame").addEventListener("pointerup", function (event) { finishDrag(event, false); });
+  el("frame").addEventListener("pointercancel", function (event) { finishDrag(event, true); });
 
   readKeyboardContract();
   paintRoute();

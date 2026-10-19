@@ -1199,8 +1199,8 @@ const AUTH_CLIENT_REFUSAL_CATEGORIES: ReadonlySet<WebChatErrorCategory> = new Se
 
 /** What a client should do about a refusal of its own making; appended to the provider's message. */
 const AUTH_CLIENT_REFUSAL_GUIDANCE =
-  "Relay one of the supported sign-in intents (click, type, key, scroll, navigate) with a click "
-  + "inside the viewport the stream reported.";
+  "Relay one of the supported sign-in intents (click, drag, type, key, scroll, navigate) with every "
+  + "coordinate inside the viewport the stream reported.";
 
 /**
  * The honest HTTP status of one sign-in refusal category.
@@ -1314,7 +1314,7 @@ async function authInputRequest(req: Request, surface: WebChatAuthSurface, id: s
       {
         ok: false,
         code: "invalid_auth_input",
-        message: "A sign-in input must be one of click, type, key, scroll or navigate",
+        message: "A sign-in input must be one of click, drag, type, key, scroll or navigate",
       },
       { status: 400, headers: controlCorsHeaders() },
     );

@@ -25,15 +25,28 @@ live `coder.qwen.ai`, with Playwright's Chromium 155 in `--headless=new` mode an
 | Authenticated API, anonymous caller | `GET /coder/api/v2/task/list?page=1` → **HTTP 200** with `{"success":false,"data":{"code":"Unauthorized","details":"401 Unauthorized"}}` |
 
 **Verdict: headless is not rejected.** A fresh headless profile reaches the complete, operable sign-in
-surface, and the neutral `AuthInput` vocabulary (`click`, `type`, `key`, `scroll`, `navigate`) is enough
-to drive it — which is exactly what the relayed `/v1/control/auth/` page does. No workaround, no user
-agent spoof and no stealth flag was added for Qwen; the launch is the repository's existing shape
-(`--headless=new` in `args` plus `--disable-blink-features=AutomationControlled`, `--no-first-run`,
-`--no-default-browser-check`) and it carries **no** `--user-agent=` override.
+surface, and the neutral `AuthInput` vocabulary drives it — which is exactly what the relayed
+`/v1/control/auth/` page does. No workaround, no user agent spoof and no stealth flag was added for
+Qwen; the launch is the repository's existing shape (`--headless=new` in `args` plus
+`--disable-blink-features=AutomationControlled`, `--no-first-run`, `--no-default-browser-check`) and it
+carries **no** `--user-agent=` override.
+
+**Correction, same day, from a real operator sign-in.** The claim that the then-five-intent vocabulary
+(`click`, `type`, `key`, `scroll`, `navigate`) was *enough* was too strong. Signing in through the
+relayed page, the provider presented an **Access Verification slider captcha** ("Drag to complete the
+puzzle"), and that is not expressible as a click: it needs a pressed pointer moved along a path. The
+gap was in the neutral contract, not in this provider's controller — any provider may present a drag
+during sign-in — so `AuthInput` gained a provider-neutral `drag` (`{type:"drag", points:[{x,y,atMs}]}`,
+an ordered sampled path in the same coordinates as `click`) and the relayed page now captures the
+operator's real `pointerdown`/`pointermove`/`pointerup` path and sends it as one input. Both controllers
+replay it with `page.mouse.move/down/up`, one move per sample, preserving the sampled order and pacing.
+No synthetic motion, no stealth and no UA change were added, and **no one has solved the Qwen slider
+yet**: whether the provider's risk engine accepts a relayed human drag is exactly what a live attempt
+must still establish. See `doc/provider-onboarding.md` §1.3 for the contract shape.
 
 What this measurement does **not** prove, and what remains for the operator: that entering real
-credentials in that headless flow completes and the resulting session captures successfully. That needs
-an account; the exact command is in §5.
+credentials — and clearing the slider if it appears — in that headless flow completes and the resulting
+session captures successfully. That needs an account; the exact command is in §5.
 
 ### Two findings worth keeping
 
@@ -145,7 +158,11 @@ To sign in through the real surface instead of the script: open
 `http://<listener>/v1/control/auth/`, paste the control token, choose **Qwen Code**, click **Log in** in
 the relayed frame, type the email, continue with the verification code (or "Log in with a password"), and
 wait for the session to be captured. The controller polls `task/list` and reports `captured` when the
-API answers `success:true`.
+API answers `success:true`. If an **Access Verification slider** appears, press on its handle in the
+relayed frame and drag it the way you would with a mouse: the page relays the path you actually drew
+(and says so while you drag), never a synthetic straight line. Whether the provider's risk engine
+accepts that relayed human drag is **not yet observed** — if it rejects it, that is a finding to
+report, not something to disguise.
 
 ### What was and was not executed in this environment
 

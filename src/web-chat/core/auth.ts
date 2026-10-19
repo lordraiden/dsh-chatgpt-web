@@ -43,14 +43,35 @@ export type AuthSessionState =
   | "expired";
 
 /**
+ * One sampled point of a dragged pointer path.
+ *
+ * `x`/`y` are the same viewport coordinates a `click` uses, in the provider's own frame geometry.
+ * `atMs` is the offset from the press at which the page observed this sample. Both the number of
+ * samples and the intervals between them therefore belong to the input, never to a constant this
+ * layer assumes: the relay carries the operator's own cadence instead of inventing a uniform one.
+ */
+export interface AuthDragPoint {
+  readonly x: number;
+  readonly y: number;
+  readonly atMs: number;
+}
+
+/**
  * One input event the operator produced.
  *
  * These are *intents*, not browser commands: `click` names viewport coordinates in the provider's
  * own frame geometry, and `navigate` is a request the provider may honour, refuse or translate. The
  * host never inspects or rewrites them beyond relaying the recognized shape.
+ *
+ * `drag` is the pressed-pointer gesture a click cannot express (a slider or puzzle verification, for
+ * instance). Its `points` *are* the gesture: the first entry is the press, the last is the release,
+ * and the ordered samples in between are the path the operator drew. A straight line between two
+ * endpoints is a different input, so interpolated or synthetic motion cannot be expressed here by
+ * construction.
  */
 export type AuthInput =
   | { type: "click"; x: number; y: number }
+  | { type: "drag"; points: readonly AuthDragPoint[] }
   | { type: "type"; text: string }
   | { type: "key"; key: string }
   | { type: "scroll"; dy: number }
@@ -185,11 +206,36 @@ export function isAuthSessionState(value: unknown): value is AuthSessionState {
 }
 
 /**
- * Whether a value is one of the five relayable input events.
+ * Whether a value is a well-formed drag path.
+ *
+ * A drag needs a press and a release, so fewer than two points is not a path. Every sample must be a
+ * finite coordinate pair with a finite, non-negative `atMs`, and the offsets must be ordered along
+ * the path: a path whose timestamps go backwards is not the gesture the page drew, and replaying it
+ * would invent a motion that never happened.
+ */
+function isAuthDragPath(value: unknown): value is readonly AuthDragPoint[] {
+  if (!Array.isArray(value) || value.length < 2) return false;
+  let previousAtMs = 0;
+  for (const sample of value as unknown[]) {
+    if (!sample || typeof sample !== "object") return false;
+    const point = sample as { x?: unknown; y?: unknown; atMs?: unknown };
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.atMs)) {
+      return false;
+    }
+    const atMs = point.atMs as number;
+    if (atMs < 0 || atMs < previousAtMs) return false;
+    previousAtMs = atMs;
+  }
+  return true;
+}
+
+/**
+ * Whether a value is one of the six relayable input events.
  *
  * Structural and strict about the recognized shape: an unknown `type`, a missing field, a
- * non-finite coordinate or an empty string is refused, so a malformed page event fails at the relay
- * instead of reaching a provider as half an instruction.
+ * non-finite coordinate, an empty string or a drag path that is not an ordered run of finite
+ * samples is refused, so a malformed page event fails at the relay instead of reaching a provider as
+ * half an instruction.
  */
 export function isAuthInput(value: unknown): value is AuthInput {
   if (!value || typeof value !== "object") return false;
@@ -197,6 +243,8 @@ export function isAuthInput(value: unknown): value is AuthInput {
   switch (event.type) {
     case "click":
       return Number.isFinite(event.x) && Number.isFinite(event.y);
+    case "drag":
+      return isAuthDragPath(event.points);
     case "type":
       return typeof event.text === "string" && event.text.length > 0;
     case "key":
