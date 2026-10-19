@@ -107,6 +107,11 @@ import {
   type RetainedSurfacePage,
 } from "./retained-surface";
 import {
+  reconcileRetainedConversation,
+  type ChatGptRetainedAttempt,
+  type RetainedConversationReconciliation,
+} from "./retained-coherence";
+import {
   detectChatGptContextExhaustion,
   type ChatGptContextExhaustionObservation,
 } from "./context-exhaustion";
@@ -2260,9 +2265,11 @@ export class ChatGptBrowserWorker {
   /**
    * Retained managed-chrome surfaces keyed by conversationKey (issue #171).
    * Physical resources only: the registry owns page lifetime and mutual
-   * exclusion. It never stores history and is not a second source of truth.
+   * exclusion. It never stores history and is not a second source of truth. Its second type
+   * parameter is the provider's own structural attempt record (issue #314 stage 3), which the
+   * registry stores and never interprets.
    */
-  private readonly retainedSurfaces = new RetainedSurfaceRegistry<Page>();
+  private readonly retainedSurfaces = new RetainedSurfaceRegistry<Page, ChatGptRetainedAttempt>();
   /**
    * Detaches the retained-surface idle sweep from the steady tick. Retention is enforced on
    * acquisition by the registry and — so a process that stops acquiring still releases its pages — on
@@ -2426,6 +2433,58 @@ export class ChatGptBrowserWorker {
       // surface is retired and only an explicit reset brings it back.
       this.retainedSurfaces.settle(conversationKey, recovered ? "fulfilled" : "rejected");
     }
+  }
+
+  /**
+   * Prove — structurally — whether the retained conversation for one key still holds the reply of
+   * the attempt that left its record unconfirmed, and give the surface up when it does not
+   * (issue #314 stage 3).
+   *
+   * This is a *read-only* inspection except for the two evidence paths that retire the surface: a
+   * page that is closed (proof of death, stage 2's `surface-dead`) and a settled conversation that
+   * cannot be shown to hold the attempt's reply (the bounded reconciliation gives up, stage 2's
+   * `reconciliation-exhausted`). It is bounded: at most one structural read of the conversation plus
+   * one completion read of its newest answer, each under the existing observation probe timeout
+   * (`CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS`, 15 s) — and after a retirement there is no
+   * retained conversation left to read at all.
+   *
+   * What it never does: submit, navigate, touch the composer, compare the caller's text, wait on a
+   * timer for a verdict, or treat "the page is alive" as coherence.
+   *
+   * @param conversationKey - the retained conversation to judge.
+   * @param options - cancellation for the bounded reads.
+   * @returns the provider's reconciliation verdict.
+   */
+  async proveRetainedCoherence(
+    conversationKey: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<RetainedConversationReconciliation> {
+    return reconcileRetainedConversation({
+      registry: this.retainedSurfaces,
+      conversationKey,
+      inspect: async page => {
+        const state = await this.submissionDomState(page, undefined, options.signal);
+        const running = state.visibleStopButtonCount > 0;
+        let replyFinalized = false;
+        if (!running && state.assistantTurnCount > 0) {
+          const snapshot = await withChatGptBrowserObservationTimeout(this.responseDomSnapshot(
+            page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).last(),
+          ));
+          replyFinalized = snapshot.responsePresent
+            && snapshot.visibleText.trim().length > 0
+            && snapshot.completionActionVisible;
+        }
+        return {
+          kind: "read",
+          state: {
+            userTurns: state.userIdentities,
+            responseTurns: state.responseIdentities,
+            generationRunning: running,
+          },
+          replyFinalized,
+        };
+      },
+    });
   }
 
   /** Sleep that settles early with an AbortError when the caller cancels the wait. */
@@ -4757,6 +4816,22 @@ export class ChatGptBrowserWorker {
     let turnTornDown = false;
     let retainedCreated = false;
     let retainedPage: Page | undefined;
+    /**
+     * The submission baseline of the send that is about to be activated (issue #314 stage 3).
+     *
+     * It is assigned immediately before each send — the multipart staging sends included, because
+     * each of them is a submission of its own — and what it describes is turned into the attempt's
+     * structural record at activation. A surface with no record is therefore one no send ever
+     * reached, which is exactly what makes the provider's verdict structural rather than a guess.
+     */
+    let activeSendBaseline: ChatGptSubmissionBaseline | undefined;
+    const recordAttempt = (): void => {
+      if (!managedRetained || !turn.conversationKey || !activeSendBaseline) return;
+      this.retainedSurfaces.recordAttempt(turn.conversationKey, {
+        userTurns: activeSendBaseline.initialUserTurnIdentities,
+        responseTurns: activeSendBaseline.initialResponseTurnIdentities,
+      });
+    };
     // Send activation is the ambiguity boundary (issue #171): before it, ChatGPT has seen
     // nothing, so a freshly created surface can be discarded if the turn fails. Once the send
     // is activated — or semantic submission evidence proves acceptance — irreversible activity
@@ -4768,10 +4843,15 @@ export class ChatGptBrowserWorker {
       onSendActivated: turn.onSendActivated
         ? async () => {
           sendActivated = true;
+          // Send activation is where this attempt may first have reached ChatGPT, so it is where the
+          // attempt's structural record belongs (issue #314 stage 3): a later failure is reconciled
+          // against it, and a surface with no record proves nothing was ever submitted.
+          recordAttempt();
           await turn.onSendActivated!();
         }
         : () => {
           sendActivated = true;
+          recordAttempt();
         },
       onSubmitted: turn.onSubmitted
         ? () => {
@@ -5096,6 +5176,9 @@ export class ChatGptBrowserWorker {
             true,
           );
           await diagnostics.capture(page, `multipart-stage-${index + 1}-attachment-complete`);
+          // A staging send is a submission of its own, so its baseline is the one the attempt record
+          // must describe if this turn fails before the final commit (issue #314 stage 3).
+          activeSendBaseline = stageBaseline;
           const evidence = await this.runStage(
             turn.traceId,
             `multipart_stage_${index + 1}_send`,
@@ -5242,6 +5325,10 @@ export class ChatGptBrowserWorker {
           () => this.attachFiles(page, prepared),
         );
         await diagnostics.capture(page, `${stagePrefix}file-attachment-complete`);
+        // The attempt's structural baseline (issue #314 stage 3): the conversation as it was
+        // immediately before this send. The baseline is captured before the prompt is attached, so
+        // the record always describes the state the submission started from.
+        activeSendBaseline = submissionBaseline;
         const finalSubmissionEvidence = await this.runStage(
           turn.traceId,
           `${stagePrefix}send`,

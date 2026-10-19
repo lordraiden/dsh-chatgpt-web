@@ -9,6 +9,7 @@ import {
   type BrowserTurn,
   type ChatGptBrowserPhysicalSurface,
 } from "./browser-worker";
+import type { RetainedConversationReconciliation } from "./retained-coherence";
 
 export interface WebSurfacePhysicalSurface {
   resourceId: string;
@@ -100,6 +101,17 @@ export interface WebSurfaceTransportBackend {
     conversationKey: string,
     options: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<WebSurfaceRetainedAnswer>;
+  /**
+   * Prove whether a retained conversation still holds the failed attempt's reply (issue #314
+   * stage 3); never creates, submits to or navigates a conversation.
+   *
+   * Optional: a backend that cannot inspect a retained conversation omits it and the caller keeps
+   * the honest continuity refusal instead of guessing.
+   */
+  proveRetainedCoherence?(
+    conversationKey: string,
+    options: { signal?: AbortSignal },
+  ): Promise<RetainedConversationReconciliation>;
   close(): Promise<void>;
 }
 
@@ -168,6 +180,13 @@ class ChatGptBrowserWorkerBackend implements WebSurfaceTransportBackend {
     return { text: answer.text, capturedAt: answer.capturedAt, waitedMs: answer.waitedMs };
   }
 
+  proveRetainedCoherence(
+    conversationKey: string,
+    options: { signal?: AbortSignal },
+  ): Promise<RetainedConversationReconciliation> {
+    return this.worker.proveRetainedCoherence(conversationKey, options);
+  }
+
   close(): Promise<void> {
     return this.worker.close();
   }
@@ -182,6 +201,17 @@ export interface WebSurfaceTransport {
     conversationKey: string,
     options: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<WebSurfaceRetainedAnswer>;
+  /**
+   * Prove whether a retained conversation still holds the failed attempt's reply (issue #314
+   * stage 3).
+   *
+   * Optional: a harness or transport that cannot inspect a retained conversation omits it, and the
+   * caller keeps the WebChat Core's honest continuity refusal instead of guessing.
+   */
+  proveRetainedCoherence?(
+    conversationKey: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<RetainedConversationReconciliation>;
   close(): Promise<void>;
 }
 
@@ -209,6 +239,19 @@ export class ChatGptWebSurfaceTransport implements WebSurfaceTransport {
     options: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<WebSurfaceRetainedAnswer> {
     return this.backend.recoverRetainedAnswer(conversationKey, options);
+  }
+
+  async proveRetainedCoherence(
+    conversationKey: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<RetainedConversationReconciliation> {
+    const prove = this.backend.proveRetainedCoherence;
+    if (typeof prove !== "function") {
+      // This transport cannot inspect a retained conversation. That is a verdict the caller can act
+      // on (it keeps failing closed), never a reason to guess at coherence.
+      return { kind: "unprovable", reason: "this transport cannot inspect a retained conversation" };
+    }
+    return prove.call(this.backend, conversationKey, options);
   }
 
   close(): Promise<void> {

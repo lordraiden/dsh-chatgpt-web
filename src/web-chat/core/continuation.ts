@@ -10,6 +10,10 @@
  * - **Provider-driven.** Whether a conversation can continue is the driver's verdict
  *   (`assessConversation`), because it may depend on provider model rules, reasoning selection,
  *   instructions or remote state. The core decides what that verdict *means* for continuity.
+ * - **Reconciled, never guessed.** A recorded attempt that was never confirmed stays unconfirmed
+ *   and no continuation may resume it — until the driver reconciles it (`reconcileConversation`),
+ *   which the core asks where it would otherwise refuse. A reconciled verdict re-confirms the
+ *   record as it stands: nothing is adopted, replaced or replayed.
  *
  * A handle is committed only after the driver has established it (architecture §7.3): if the driver
  * refuses or fails, the stored record does not change.
@@ -221,12 +225,13 @@ function failure(
   category: Parameters<typeof webChatError>[0],
   reason: string,
   record?: WebChatConversationRecord,
+  providerCode?: string,
 ): WebChatContinuationPlan {
   return {
     outcome: "failed",
     identity,
     reason,
-    error: webChatError(category, reason),
+    error: webChatError(category, reason, providerCode !== undefined ? { providerCode } : {}),
     ...(record ? { record } : {}),
   };
 }
@@ -393,16 +398,60 @@ async function resolveWebChatContinuationLocked(
       stored,
     );
   }
-  if (stored.checkpoint !== "confirmed") {
-    return failure(
-      identity,
-      "CONVERSATION_STATE_MISMATCH",
-      "The last attempt on this conversation was never confirmed; the provider must reconcile it before it can be resumed",
-      stored,
-    );
-  }
   if (!stored.handle) {
     return failure(identity, "CONVERSATION_STATE_MISMATCH", "A resumable conversation has no provider handle", stored);
+  }
+  if (stored.checkpoint !== "confirmed") {
+    // An unconfirmed attempt is not proof of anything, so it is never resumed by itself. It stops
+    // being a refusal only when the provider — the sole owner of remote state — reconciles it
+    // structurally (issue #314, architecture §7.3): the verdict decides whether the recorded
+    // conversation may continue, whether it is gone, or whether the honest refusal stands. The
+    // provider is asked exactly here, where the core would otherwise refuse, so no provider work
+    // happens for a conversation that needs none.
+    const reconciliation = await deps.driver.reconcileConversation?.({
+      dshSession: request.dshSession,
+      binding: request.binding,
+      affinity: { providerId: identity.providerId, bindingId: identity.bindingId, threadId: request.threadId },
+      model: request.model,
+      ...(request.reasoningMode !== undefined ? { reasoningMode: request.reasoningMode } : {}),
+      ...(request.systemInstructions !== undefined ? { systemInstructions: request.systemInstructions } : {}),
+      conversation: conversationOf(stored),
+    });
+    if (reconciliation?.status === "lost") {
+      return failure(
+        identity,
+        "CONVERSATION_LOST",
+        reconciliation.reason ?? "The provider conversation is lost",
+        stored,
+        reconciliation.providerCode,
+      );
+    }
+    if (reconciliation?.status !== "reconciled") {
+      return failure(
+        identity,
+        "CONVERSATION_STATE_MISMATCH",
+        "The last attempt on this conversation was never confirmed; the provider must reconcile it before it can be resumed",
+        stored,
+      );
+    }
+    // The provider proved the unconfirmed attempt is coherent, so the record is re-confirmed exactly
+    // as it stands: the handle, the generation, the installed initialization state and the last
+    // confirmed turn are the recorded ones — nothing is adopted, replaced or replayed.
+    const reconciled = await deps.store.update(identity, (current) => {
+      assertUnchangedSinceAssessment(current, stored);
+      return {
+        ...(current as WebChatConversationRecord),
+        status: "resumable",
+        checkpoint: "confirmed",
+      };
+    });
+    return {
+      outcome: "exact_resume",
+      identity,
+      record: reconciled,
+      conversation: conversationOf(reconciled),
+      reason: reconciliation.reason ?? "the provider reconciled the unconfirmed attempt",
+    };
   }
 
   // Exact resume: the same generation and the same opaque handle; using the conversation is an

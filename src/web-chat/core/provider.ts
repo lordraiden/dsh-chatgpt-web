@@ -76,6 +76,37 @@ export interface WebChatConversationSelection {
   readonly systemInstructions?: readonly string[];
 }
 
+/** What the driver needs in order to reconcile an unconfirmed attempt. */
+export interface WebChatConversationReconciliationInput extends WebChatConversationSelection {
+  /** The conversation as last recorded; the attempt is the one that left it unconfirmed. */
+  readonly conversation: WebChatConversation;
+}
+
+/**
+ * The driver's reconciliation verdict for an unconfirmed attempt (architecture §7.3).
+ *
+ * The core owns continuity, so it decides what the verdict *means*; the driver owns remote state, so
+ * it decides what is true. A verdict is only ever required for a conversation whose recorded last
+ * attempt was never confirmed, where the core would otherwise refuse a continuation.
+ *
+ * - `reconciled` — the driver established, from provider state, that the recorded conversation may be
+ *   continued: the attempt's outcome is coherent (its reply is present, or it never reached the
+ *   provider). The core re-confirms the record as it stands, and nothing is replayed.
+ * - `unprovable` — the driver cannot establish it. The core keeps failing closed.
+ * - `lost` — the driver established the provider conversation is gone. The core reports the
+ *   continuity loss, carrying the driver's own code when it has one.
+ *
+ * A verdict must never be derived from the caller's text, from a timer, or from the mere liveness of
+ * a provider resource: those would be guesses dressed as reconciliation.
+ */
+export interface WebChatConversationReconciliation {
+  readonly status: "reconciled" | "unprovable" | "lost";
+  /** Short provider-visible reason, for diagnostics. */
+  readonly reason?: string;
+  /** Provider-private loss code, when `status` is `lost`; kept for diagnosis, never interpreted. */
+  readonly providerCode?: string;
+}
+
 /** Open a new provider conversation for the affinity. */
 export type WebChatConversationCreateInput = WebChatConversationSelection;
 
@@ -115,6 +146,21 @@ export interface WebChatProviderDriver {
   resolveModel(model: string, reasoningMode?: WebChatReasoningMode): Promise<WebChatModelDescriptor | undefined>;
   /** Judge whether an existing conversation can serve the requested turn state. */
   assessConversation(input: WebChatConversationAssessmentInput): Promise<WebChatConversationAssessment>;
+  /**
+   * Reconcile the recorded conversation's unconfirmed last attempt (architecture §7.3).
+   *
+   * The core asks this only where it would otherwise refuse: a continuation whose recorded last
+   * attempt was never confirmed. An unknown remote checkpoint stays explicit until the provider can
+   * reconcile it, so this is the one question that can turn "unconfirmed" back into a resumable
+   * conversation — and a `reconciled` verdict is the driver's assertion that it established that
+   * structurally, without resending anything.
+   *
+   * Optional: a driver that cannot establish this omits it, and the core keeps failing closed. A
+   * driver that omits it can never make an unconfirmed conversation resumable.
+   */
+  reconcileConversation?(
+    input: WebChatConversationReconciliationInput,
+  ): Promise<WebChatConversationReconciliation>;
   /** Open a new conversation. */
   createConversation(input: WebChatConversationCreateInput): Promise<WebChatConversation>;
   /** Continue an existing conversation. */

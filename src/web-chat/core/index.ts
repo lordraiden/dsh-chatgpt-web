@@ -134,6 +134,8 @@ export {
   type WebChatConversationAssessment,
   type WebChatConversationAssessmentInput,
   type WebChatConversationCreateInput,
+  type WebChatConversationReconciliation,
+  type WebChatConversationReconciliationInput,
   type WebChatConversationReplayInput,
   type WebChatConversationResumeInput,
   type WebChatConversationSelection,
