@@ -773,7 +773,8 @@ driver's own stall budgets (`generationRunningStallMs`, the per-stage timeouts, 
 
 **A failed turn is not a death (issue #314).** A turn that failed *after* its submission was accepted
 does not prove what happened to the conversation it was using, and it is not evidence that the
-conversation is gone. The retained surface therefore publishes `unreconciled` instead of `rejected`: the
+conversation is gone. The retained surface therefore publishes `unreconciled` instead of `rejected` when
+that submission was confirmed: the
 page stays exactly where it is, and the conversation becomes observable as needing reconciliation
 (`RetainedSurfaceRegistry.needsReconciliation`, `src/adapters/chatgpt-web/retained-surface.ts`). The
 next turn of that key is the bounded reconciliation attempt — it resumes the conversation in place,
@@ -784,6 +785,22 @@ reconciliation budget (`DEFAULT_MAX_RETAINED_SURFACE_RECONCILIATION_ATTEMPTS`), 
 same honest continuity error (`retained_surface_lost`, 409) with its reason expressed. Recognising a
 housekeeping turn is deliberately **not** part of the rule: this build has no reliable marker for one, so
 no failure is classified by prompt text.
+
+**Classify a failure by its phase (issue #317 stage 1).** Marking *every* failure was wrong in the other
+direction: a turn that failed before its submission was confirmed never reached the provider, so there is
+nothing to reconcile and a retry is safe. Such a turn now settles as `not_started`
+(`retainedSurfaceSettlementForTurn("failed", "unconfirmed")`): the conversation is **not** marked, the
+bounded reconciliation budget is untouched, and the pre-existing retry layer governs the retry. A failure
+whose submission *was* confirmed keeps exactly the stage-2 behaviour above.
+
+The phase is structural and is the stage-3 attempt record's own presence
+(`RetainedSurfaceRegistry.submissionConfirmed`): the record is written at send activation and cleared by
+the acquire that starts the next attempt, so it answers "did this attempt reach ChatGPT?" from provider
+state. It is required at every settlement call site — never defaulted — so no caller can classify a
+failure by omission, and it is never derived from the failure's message, the caller's prompt, a timer or
+any other heuristic. The two outcomes stay distinguishable at the surface: a pre-submission failure
+leaves the conversation unmarked and reusable, while a confirmed failure is carried until it is
+reconciled or retired with `reconciliation-exhausted`.
 
 That rule owns the *physical surface* only. A failed turn also leaves its durable continuity record
 unconfirmed, so in an established conversation (one whose initialization is installed) the WebChat Core

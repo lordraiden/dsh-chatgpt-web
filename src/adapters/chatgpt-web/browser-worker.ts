@@ -1311,8 +1311,11 @@ export function chatGptBrowserTurnTerminal(error: unknown): "aborted" | "failed"
  * Two kinds of end prove that the operation left the conversation in an unknown — and untrusted — state
  * rather than merely failing: an explicit teardown (cancellation, a closed tab, the service retiring a
  * wedged turn), and a page whose document was replaced by a rehydration, which means the conversation the
- * surface carried is gone. Everything else is an ordinary failure: the surface stays exactly where it is
- * and the conversation is marked for reconciliation instead of being retired.
+ * surface carried is gone. Everything else is an ordinary failure: the surface stays exactly where it is,
+ * and the conversation is marked for reconciliation instead of being retired **when that failure's
+ * submission was confirmed** (issue #317 stage 1 classifies the phase; a failure that never reached the
+ * provider marks nothing and is an ordinary retry). This classification is about the *teardown* boundary
+ * only — the phase is the settlement rule's, and neither phase retires anything here.
  */
 export function chatGptBrowserTurnRetiresRetainedSurface(error: unknown): boolean {
   return chatGptBrowserTurnTerminal(error) === "aborted" || error instanceof ChatGptSurfaceStaleError;
@@ -5690,15 +5693,25 @@ export class ChatGptBrowserWorker {
       // the next turn of the same conversationKey can continue, keeping the page itself open.
       if (managedRetained) {
         this.retainedSurfaces.release(turn.conversationKey!);
-        // What the turn publishes about the operation it held (issue #314): a completed turn settles
-        // the conversation; a failed turn marks it as needing reconciliation and leaves the physical
-        // surface exactly where it is, so the next turn resumes it instead of being refused as a lost
-        // surface; an explicit teardown still retires it. A failure must not, by itself, kill the
-        // conversation the caller is using.
+        // What the turn publishes about the operation it held (issues #314, #317): a completed turn
+        // settles the conversation; a failed turn is classified by its *phase* — a confirmed submission
+        // marks it as needing reconciliation and leaves the physical surface exactly where it is, so the
+        // next turn resumes it instead of being refused as a lost surface, while a failure that never
+        // reached the provider is an ordinary retry, marks nothing and spends no reconciliation budget;
+        // an explicit teardown still retires it. A failure must not, by itself, kill the conversation
+        // the caller is using.
+        //
+        // The phase is structural — never the error, the prompt or a timer: the stage-3 attempt record
+        // exists exactly when this attempt's send was activated (recordAttempt writes it there, and the
+        // acquire that started this turn cleared the previous attempt's record), so the registry can
+        // answer "did this attempt reach ChatGPT?" from its own state.
         this.retainedSurfaces.settle(
           turn.conversationKey!,
           retainedSurfaceSettlementForTurn(
             !turnFailed ? "completed" : turnTornDown ? "torn-down" : "failed",
+            this.retainedSurfaces.submissionConfirmed(turn.conversationKey!)
+              ? "confirmed"
+              : "unconfirmed",
           ),
         );
         // A surface that this turn created is discarded only if the send never activated: before

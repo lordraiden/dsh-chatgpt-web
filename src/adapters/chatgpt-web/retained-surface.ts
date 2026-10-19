@@ -42,6 +42,22 @@
  * to a resume turn, so a submission the provider confirmed is never repeated and a replacement
  * conversation is never created to stand in for the old one.
  *
+ * ## The failure's phase decides the mark (issue #317 stage 1)
+ *
+ * What decides whether a failure marks a conversation is the **phase** of the failure, and the phase is
+ * structural: the attempt record (below) exists exactly when the attempt's send was activated, so "did
+ * this attempt reach the provider?" is read from provider state — never from the error, the prompt or a
+ * timer.
+ *
+ * - **Post-submission** (the attempt has a record): the conversation is marked and reconciled, as above.
+ *   The provider may hold output this process never observed, so nothing may be resent, and the bounded
+ *   reconciliation gives the conversation up with `reconciliation-exhausted` rather than carrying it
+ *   forever.
+ * - **Pre-submission** (no record): ChatGPT received nothing, so there is nothing to reconcile and a
+ *   retry is safe. The failure publishes `not_started` instead: the conversation is **not** marked and
+ *   spends no reconciliation budget, and the pre-existing retry layer governs the retry. Marking it
+ *   would spend the caller's bounded reconciliation budget on a conversation that needs none.
+ *
  * ## The attempt record (issue #314 stage 3)
  *
  * Marking a conversation is not enough to resume it: the WebChat Core refuses a plain continuation
@@ -116,6 +132,10 @@ export type RetainedSurfaceLossReason = "surface-dead" | "reconciliation-exhaust
  * `"unreconciled"` is the failed-turn settlement (issue #314): the operation ended, but what happened to
  * the conversation's remote generation is unknown, so the surface stays in place and the conversation is
  * marked for reconciliation instead of being retired.
+ *
+ * `"not_started"` is the same failure in its pre-submission phase (issue #317 stage 1): the operation
+ * never reached the provider, so the surface is reusable, the conversation is not marked and no
+ * reconciliation budget is spent — a retry is safe and there is nothing to reconcile.
  */
 export type RetainedSurfaceSettlementOutcome =
   | "fulfilled"
@@ -128,27 +148,55 @@ export type RetainedSurfaceSettlementOutcome =
 export type RetainedSurfaceTurnEnd = "completed" | "failed" | "torn-down";
 
 /**
+ * Whether a failed turn's submission was confirmed, as the retained-surface owner reads it (issue #317
+ * stage 1).
+ *
+ * `"confirmed"` means the attempt's send was activated — the stage-3 attempt record exists for it — so
+ * ChatGPT may hold output this process never observed. `"unconfirmed"` means the attempt never reached
+ * ChatGPT, so there is nothing to reconcile and a retry is safe.
+ *
+ * It is a closed structural fact, and it is never derived from the failure's message, the caller's
+ * prompt, a timer, or any other heuristic. It is required at every call site for exactly that reason: a
+ * caller cannot leave the phase to a default and accidentally classify a failure by omission.
+ */
+export type RetainedSurfaceSubmissionPhase = "confirmed" | "unconfirmed";
+
+/**
  * The settlement a finished turn publishes about the retained surface it held (issue #314).
  *
  * - `completed` — the turn reached its answer, so the conversation is settled and the reconciliation
  *   mark (if any) is cleared.
- * - `failed` — the turn ran and errored. A failure is not a death: the surface stays where it is and the
+ * - `failed` — the turn ran and errored, and *the phase decides what that means* (issue #317 stage 1).
+ *   Post-submission (`confirmed`) a failure is not a death: the surface stays where it is and the
  *   conversation becomes observable as needing reconciliation, so the next turn of the same key resumes
  *   it instead of being refused as a lost surface. Nothing is resent; a later start-over has to be an
- *   explicit decision taken by the turn's own continuity path.
+ *   explicit decision taken by the turn's own continuity path. Pre-submission (`unconfirmed`) nothing
+ *   reached the provider: the conversation is not marked and spends no reconciliation budget.
  * - `torn-down` — the turn was ended by an explicit teardown (caller cancellation, a closed tab, the
  *   service retiring a wedged turn, or a page whose document was replaced by a rehydration). The
  *   explicit-teardown contract is kept: no settlement was published for the operation, so the surface is
- *   retired rather than trusted again.
+ *   retired rather than trusted again, whatever the phase.
+ *
+ * @param end - how the turn ended.
+ * @param submission - whether that turn's attempt confirmed a submission; see
+ *   {@link RetainedSurfaceSubmissionPhase}.
+ * @returns the settlement the surface owner publishes.
  */
-export function retainedSurfaceSettlementForTurn(end: RetainedSurfaceTurnEnd): RetainedSurfaceSettlementOutcome {
+export function retainedSurfaceSettlementForTurn(
+  end: RetainedSurfaceTurnEnd,
+  submission: RetainedSurfaceSubmissionPhase,
+): RetainedSurfaceSettlementOutcome {
   switch (end) {
     case "completed":
       return "fulfilled";
-    case "failed":
-      return "unreconciled";
     case "torn-down":
       return "rejected";
+    case "failed":
+      // The phase decides a failure; nothing else does (issue #317 stage 1). Post-submission the
+      // provider may hold output this process never saw, so the conversation is marked and reconciled —
+      // and never resent. Pre-submission nothing reached the provider, so marking it would spend the
+      // caller's reconciliation budget on a conversation that needs none: it settles as `not_started`.
+      return submission === "confirmed" ? "unreconciled" : "not_started";
   }
 }
 
@@ -351,11 +399,14 @@ export class RetainedSurfaceRegistry<
   }
 
   /**
-   * True when the conversation's last turn failed and the surface is still in place (issue #314).
+   * True when the conversation's last turn failed **after its submission was confirmed** and the
+   * surface is still in place (issues #314, #317).
    *
    * This is the explicit, observable "needs reconciliation" state: the physical conversation was kept,
    * and the next acquire for this key is the bounded reconciliation attempt that clears it on success.
-   * It is not a continuity loss and it does not refuse anything.
+   * It is not a continuity loss and it does not refuse anything. A turn that failed *before* its
+   * submission was confirmed never reaches this state: nothing was sent, so there is nothing to
+   * reconcile (issue #317 stage 1).
    */
   needsReconciliation(conversationKey: string): boolean {
     return this.surfaces.get(conversationKey)?.reconciliation !== undefined;
@@ -378,6 +429,24 @@ export class RetainedSurfaceRegistry<
   /** The recorded attempt of this conversation, when one was submitted through it. */
   attemptRecord(conversationKey: string): R | undefined {
     return this.surfaces.get(conversationKey)?.attempt;
+  }
+
+  /**
+   * Whether the attempt that last ran through this conversation confirmed its submission (issue #317
+   * stage 1).
+   *
+   * This is the **structural phase fact** the settlement rule reads, and it is the attempt record's own
+   * presence: {@link recordAttempt} writes the record at send activation, and {@link acquire} clears the
+   * previous attempt's record when the next attempt starts — so a surface with no record is one whose
+   * last attempt never reached the provider. It is never derived from a message, a timer, or the
+   * failure's own error.
+   *
+   * A key with no retained surface answers `false`: nothing was submitted through this process's
+   * surface, which is the same statement the record's absence makes, and the safe one — it cannot mark a
+   * conversation this process never submitted to.
+   */
+  submissionConfirmed(conversationKey: string): boolean {
+    return this.surfaces.get(conversationKey)?.attempt !== undefined;
   }
 
   /**
@@ -521,6 +590,11 @@ export class RetainedSurfaceRegistry<
    * back); `unreconciled` is the failed-turn settlement (issue #314): the operation is over, so the
    * surface is reusable, but the conversation's remote outcome is unknown and it becomes observable as
    * needing reconciliation instead of being retired. No settlement path resends anything.
+   *
+   * `not_started` and `unreconciled` are the two phases of one failure (issue #317 stage 1): the
+   * classification happens where the turn's end is read ({@link retainedSurfaceSettlementForTurn}), and
+   * both are reusable settlements — the difference is that a confirmed submission leaves the
+   * reconciliation mark while a pre-submission failure clears it, because there is nothing to reconcile.
    *
    * `reason` names why a `rejected` settlement declared the loss, when the operation that decided it
    * can express one (issue #314): the page is physically gone, or the bounded reconciliation could not
