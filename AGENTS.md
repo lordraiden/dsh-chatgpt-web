@@ -22,7 +22,8 @@ private-npm-registry or `dsh plugin update` release contract. Do not reintroduce
 not describe the product as a DSH plugin.
 
 **Architectural direction:** a provider-neutral **WebChat Core** for authenticated, text-only
-consumer-web chat. ChatGPT Web and **Qwen Code** (`qwen-code/<model>`, issue #299 slice 2) are the
+consumer-web chat. ChatGPT Web, **Qwen Code** (`qwen-code/<model>`, issue #299 slice 2) and **Qwen
+Chat** (`qwen-chat/<model>`, a second Qwen product with many models and three reasoning modes) are the
 current providers; DeepSeek Chat is a planned provider and is not a current route.
 
 ## Source-of-truth hierarchy

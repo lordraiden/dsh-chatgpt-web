@@ -298,6 +298,14 @@ export function translateChatCompletionsRequest(
   if (typeof body.temperature === "number") internal.temperature = body.temperature;
   if (typeof body.max_tokens === "number") internal.max_output_tokens = body.max_tokens;
   if (typeof body.top_p === "number") internal.top_p = body.top_p;
+  // A reasoning selection is an ordinary OpenAI chat-completions field. It is preserved so a provider
+  // whose catalogue advertises reasoning levels can honour the caller's choice; a provider that has
+  // none ignores it exactly as it ignores any other unhandled option. Nothing provider-specific is
+  // interpreted here — the provider resolves the label against its own model abilities.
+  if (typeof body.reasoning_effort === "string") internal.reasoning_effort = body.reasoning_effort;
+  if (body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)) {
+    internal.reasoning = body.reasoning;
+  }
 
   return {
     body: internal,

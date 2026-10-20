@@ -31,6 +31,7 @@ import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 import { runDevCommand } from "./dev-chat/cli";
+import { refreshQwenChatModels, resolveQwenChatProviderConfig, QWEN_CHAT_PROVIDER_ID } from "./adapters/qwen-chat";
 
 const HELP = `dsh-chatgpt-web ${VERSION}
 
@@ -39,7 +40,8 @@ Containerised ChatGPT Web sidecar: an authenticated ChatGPT Web session exposed 
 Usage:
   dsh-chatgpt-web setup [options]
   dsh-chatgpt-web login
-  dsh-chatgpt-web auth import --provider <chatgpt-web|qwen-code> --from <file|dir>
+  dsh-chatgpt-web auth import --provider <chatgpt-web|qwen-code|qwen-chat> --from <file|dir>
+  dsh-chatgpt-web models refresh --provider qwen-chat
   dsh-chatgpt-web doctor [--json]
   dsh-chatgpt-web serve [--host HOST] [--port PORT]
   dsh-chatgpt-web browser check
@@ -217,6 +219,32 @@ async function authCommand(args: string[]): Promise<void> {
     ? `Session verified and stored at ${result.path}\n`
     : `Session captured and stored, NOT verified, at ${result.path}\n`);
   stdout.write(`${result.detail}\n`);
+}
+
+/**
+ * Refresh a provider's cached model list.
+ *
+ * Today only `qwen-chat` has a public endpoint to refresh from. The command is the documented
+ * refresh path: it performs the same unauthenticated read the provider module exposes, writes the
+ * cache atomically, and says plainly that the running service composes the list at startup — so a
+ * restart is required for the new list to be served.
+ */
+async function modelsCommand(args: string[]): Promise<void> {
+  const action = args.shift();
+  if (action !== "refresh") {
+    throw new Error('models expects a subcommand: "refresh" (dsh-chatgpt-web models refresh --provider qwen-chat)');
+  }
+  const providerId = takeOption(args, "--provider") ?? QWEN_CHAT_PROVIDER_ID;
+  assertNoArgs(args);
+  if (providerId !== QWEN_CHAT_PROVIDER_ID) {
+    throw new Error(`models refresh supports only ${JSON.stringify(QWEN_CHAT_PROVIDER_ID)}; ${JSON.stringify(providerId)} has no public model endpoint`);
+  }
+  const provider = resolveQwenChatProviderConfig(loadConfig());
+  // The endpoint is unauthenticated, so this carries no credential; the read is bounded in time and
+  // the cache write is atomic (the provider module owns both).
+  const models = await refreshQwenChatModels({ file: provider.modelsCachePath });
+  stdout.write(`Cached ${models.length} Qwen Chat model(s): ${models.map(model => model.id).join(", ")}\n`);
+  stdout.write("Restart the service to compose the refreshed list.\n");
 }
 
 async function loginCommand(args: string[]): Promise<void> {
@@ -559,6 +587,7 @@ async function main(): Promise<void> {
   else if (command === "setup") await setupCommand(args);
   else if (command === "login") await loginCommand(args);
   else if (command === "auth") await authCommand(args);
+  else if (command === "models") await modelsCommand(args);
   else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "route") await routeCommand(args);
   else if (command === "subagents") await subagentsCommand(args);
