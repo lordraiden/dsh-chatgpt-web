@@ -61,6 +61,25 @@ export interface QwenStreamPostResult {
   readonly bodyText?: string;
 }
 
+/** What the provider's answer looked like once its response head was known (issue #299, slice 2). */
+export interface QwenStreamOpened {
+  readonly status: number;
+  readonly contentType: string;
+}
+
+/**
+ * Options for one streaming POST.
+ *
+ * `onOpen` exists so the caller can report a **truthful submission phase**: the stream's promise only
+ * settles when the body ends, but the response head proves whether the provider accepted the turn.
+ * `signal` cancels the read from this side; the page's own `fetch` is aborted, so a cancelled turn
+ * stops reading instead of draining the stream.
+ */
+export interface QwenStreamPostOptions {
+  readonly onOpen?: (opened: QwenStreamOpened) => void;
+  readonly signal?: AbortSignal;
+}
+
 /**
  * The request facility one turn needs.
  *
@@ -81,6 +100,7 @@ export interface QwenTurnRequestFacility {
     path: string,
     body: unknown,
     onChunk: (chunk: string) => boolean,
+    options?: QwenStreamPostOptions,
   ): Promise<QwenStreamPostResult>;
 }
 
@@ -89,7 +109,7 @@ export interface QwenTurnRequestFacility {
  *
  * Cookies are the browser's, and the `authorization` header is the one the page's own token manager
  * holds — read from the page at call time, never from configuration or a constant. This module never
- * sees a cookie. The binding name is unique per call because Playwright refuses to expose the same
+ * sees a cookie. The binding names are unique per call because Playwright refuses to expose the same
  * binding name twice on one page, and a page may serve several turns over its life.
  */
 export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacility {
@@ -122,6 +142,7 @@ export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacili
       path: string,
       body: unknown,
       onChunk: (chunk: string) => boolean,
+      options: QwenStreamPostOptions = {},
     ): Promise<QwenStreamPostResult> {
       const headers = qwenCodeApiHeaders({
         accept: "text/event-stream",
@@ -129,55 +150,111 @@ export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacili
         "x-accel-buffering": "no",
         ...await qwenAuthorizationHeaderFromPage(page),
       });
-      const binding = `__dshQwenCodeChunk_${randomUUID().replace(/-/g, "")}`;
+      const suffix = randomUUID().replace(/-/g, "");
+      const binding = `__dshQwenCodeChunk_${suffix}`;
+      const openBinding = `__dshQwenCodeOpen_${suffix}`;
+      const abortKey = `__dshQwenCodeAbort_${suffix}`;
       await page.exposeBinding(binding, async (_source, chunk: unknown) => {
         return typeof chunk === "string" ? onChunk(chunk) : false;
       });
-      const result = await page.evaluate(async ({ url, payload, headers, binding }) => {
-        const response = await fetch(url, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(payload),
-          credentials: "same-origin",
-        });
-        const contentType = response.headers.get("content-type") ?? "";
-        type ChunkSink = (chunk: string) => Promise<boolean>;
-        const report = (window as unknown as Record<string, ChunkSink | undefined>)[binding];
-        if (typeof report !== "function") {
-          return { status: response.status, contentType, bodyText: "the page lost the stream binding" };
-        }
-        if (!contentType.includes("text/event-stream") || response.body === null) {
-          const text = await response.text();
-          return { status: response.status, contentType, bodyText: text.slice(0, 2_000) };
-        }
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (await report(decoder.decode(value, { stream: true }))) {
-              await reader.cancel().catch(() => {});
-              break;
-            }
-          }
-          // Flush a multi-byte character split across the last two chunks.
-          await report(decoder.decode());
-        } finally {
-          reader.releaseLock?.();
-        }
-        return { status: response.status, contentType };
-      }, {
-        url: qwenCodeUrl(path),
-        payload: body,
-        headers,
-        binding,
-      });
-      return {
-        status: result.status,
-        contentType: result.contentType,
-        ...(result.bodyText === undefined ? {} : { bodyText: result.bodyText }),
+      let openedReported = false;
+      const reportOpened = (status: number, contentType: string): void => {
+        if (openedReported) return;
+        openedReported = true;
+        options.onOpen?.({ status, contentType });
       };
+      await page.exposeBinding(openBinding, async (_source, payload: unknown) => {
+        const record = (payload && typeof payload === "object" ? payload : {}) as {
+          status?: unknown;
+          contentType?: unknown;
+        };
+        if (typeof record.status === "number") {
+          reportOpened(record.status, typeof record.contentType === "string" ? record.contentType : "");
+        }
+        return true;
+      });
+      const onAbort = (): void => {
+        // Best effort: the page-side controller is what actually cancels the reader, so a page that
+        // went away simply stops being asked.
+        void page
+          .evaluate((key) => {
+            const stop = (window as unknown as Record<string, (() => void) | undefined>)[key];
+            if (typeof stop === "function") stop();
+          }, abortKey)
+          .catch(() => undefined);
+      };
+      if (options.signal?.aborted === true) onAbort();
+      else options.signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        const result = await page.evaluate(async ({ url, payload, headers, binding, openBinding, abortKey }) => {
+          const controller = new AbortController();
+          (window as unknown as Record<string, unknown>)[abortKey] = () => controller.abort();
+          type ChunkSink = (chunk: string) => Promise<boolean>;
+          type OpenSink = (payload: { status: number; contentType: string }) => Promise<boolean>;
+          const report = (window as unknown as Record<string, ChunkSink | undefined>)[binding];
+          const announce = (window as unknown as Record<string, OpenSink | undefined>)[openBinding];
+          const finish = (outcome: { status: number; contentType: string; bodyText?: string }): typeof outcome => {
+            delete (window as unknown as Record<string, unknown>)[abortKey];
+            return outcome;
+          };
+          let response: Response;
+          try {
+            response = await fetch(url, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(payload),
+              credentials: "same-origin",
+              signal: controller.signal,
+            });
+          } catch (error) {
+            delete (window as unknown as Record<string, unknown>)[abortKey];
+            throw error;
+          }
+          const contentType = response.headers.get("content-type") ?? "";
+          if (typeof announce === "function") await announce({ status: response.status, contentType });
+          if (typeof report !== "function") {
+            return finish({ status: response.status, contentType, bodyText: "the page lost the stream binding" });
+          }
+          if (!contentType.includes("text/event-stream") || response.body === null) {
+            const text = await response.text();
+            return finish({ status: response.status, contentType, bodyText: text.slice(0, 2_000) });
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (await report(decoder.decode(value, { stream: true }))) {
+                await reader.cancel().catch(() => {});
+                break;
+              }
+            }
+            // Flush a multi-byte character split across the last two chunks.
+            await report(decoder.decode());
+          } finally {
+            reader.releaseLock?.();
+          }
+          return finish({ status: response.status, contentType });
+        }, {
+          url: qwenCodeUrl(path),
+          payload: body,
+          headers,
+          binding,
+          openBinding,
+          abortKey,
+        });
+        // A non-stream answer never reported its head through the binding: report it now so the
+        // caller's submission phase is decided from the provider's own status either way.
+        reportOpened(result.status, result.contentType);
+        return {
+          status: result.status,
+          contentType: result.contentType,
+          ...(result.bodyText === undefined ? {} : { bodyText: result.bodyText }),
+        };
+      } finally {
+        options.signal?.removeEventListener("abort", onAbort);
+      }
     },
   };
 }
@@ -186,7 +263,8 @@ export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacili
 export interface QwenTurnMessage {
   readonly id: null;
   readonly fid: string;
-  readonly parentId: null;
+  /** The cursor this message hangs off: `null` when it is the first message of a fresh chat. */
+  readonly parentId: string | null;
   readonly childrenIds: readonly string[];
   readonly role: "user";
   readonly content: string;
@@ -199,7 +277,7 @@ export interface QwenTurnMessage {
   readonly feature_config: { readonly thinking_enabled: boolean; readonly output_schema: string };
   readonly extra: { readonly meta: { readonly subChatType: string } };
   readonly sub_chat_type: string;
-  readonly parent_id: null;
+  readonly parent_id: string | null;
 }
 
 /** The `completions` request body, in the captured shape (plus client-generated ids). */
@@ -208,11 +286,11 @@ export interface QwenCompletionRequest {
   readonly version: string;
   readonly incremental_output: true;
   readonly chatId: string;
-  readonly parentId: "";
+  readonly parentId: string;
   readonly chat_id: string;
   readonly chat_mode: string;
   readonly model: string;
-  readonly parent_id: null;
+  readonly parent_id: string | null;
   readonly messages: readonly QwenTurnMessage[];
   readonly timestamp: number;
 }
@@ -233,22 +311,33 @@ export function qwenCodeCompletionRequest(input: {
   readonly messageId: string;
   /** The assistant message id, listed as the user message's only child, as the app does. */
   readonly assistantId: string;
+  /**
+   * The parent cursor of the previous turn, when this chat already has one.
+   *
+   * The recorded app links each new message to the previous one (`parentId`/`parent_id`), and the
+   * stream's `response.created` repeats the cursor the next turn continues from. A fresh chat has
+   * none, which is the captured `parentId: ""` / `parent_id: null` pair.
+   */
+  readonly parentId?: string;
 }): QwenCompletionRequest {
   const { chatId, prompt, model, timestampSeconds, messageId, assistantId } = input;
+  // The captured first-turn shape is `parentId: ""` at the top level and `null` on the message; a
+  // continuation names the same cursor in both places.
+  const parentId = input.parentId !== undefined && input.parentId.length > 0 ? input.parentId : "";
   return {
     stream: true,
     version: QWEN_CODE_COMPLETION_VERSION,
     incremental_output: true,
     chatId,
-    parentId: "",
+    parentId,
     chat_id: chatId,
     chat_mode: QWEN_CODE_CHAT_MODE,
     model,
-    parent_id: null,
+    parent_id: parentId.length > 0 ? parentId : null,
     messages: [{
       id: null,
       fid: messageId,
-      parentId: null,
+      parentId: parentId.length > 0 ? parentId : null,
       // A fresh chat has no prior sibling; the client pre-allocates the assistant's id here. The
       // captured app uses a *different* id for the child than for the user message, so this does too.
       childrenIds: [assistantId],
@@ -292,8 +381,29 @@ export interface QwenNetworkTurnOptions {
   readonly newId?: () => string;
 }
 
+/**
+ * Build the `task/new` body, in the captured shape.
+ *
+ * Pure and exported so the payload is assertable without a browser, and so the one-turn proof
+ * (`runQwenNetworkTurn`) and the provider transport send exactly the same create request.
+ */
+export function qwenTaskNewRequest(input: {
+  readonly model: string;
+  readonly timestampMs: number;
+}): Record<string, unknown> {
+  return {
+    chatId: "",
+    models: [input.model],
+    chat_type: QWEN_CODE_CHAT_TYPE,
+    title: "New Chat",
+    chat_mode: QWEN_CODE_CHAT_MODE,
+    timestamp: input.timestampMs,
+    sub_chat_type: QWEN_CODE_SUB_CHAT_TYPE,
+  };
+}
+
 /** The id `task/new` returned, or a typed failure explaining why the turn could not start. */
-function readCreatedChatId(body: unknown, status: number): string {
+export function readQwenCreatedChatId(body: unknown, status: number): string {
   const failure = (
     category: "AUTH_REQUIRED" | "UPSTREAM_ERROR",
     providerCode: string,
@@ -352,20 +462,15 @@ export async function runQwenNetworkTurn(options: QwenNetworkTurnOptions): Promi
   );
   let created: QwenJsonPostResult;
   try {
-    created = await options.request.postJson(QWEN_CODE_TASK_NEW_PATH, {
-      chatId: "",
-      models: [model],
-      chat_type: QWEN_CODE_CHAT_TYPE,
-      title: "New Chat",
-      chat_mode: QWEN_CODE_CHAT_MODE,
-      timestamp: startedAt,
-      sub_chat_type: QWEN_CODE_SUB_CHAT_TYPE,
-    });
+    created = await options.request.postJson(
+      QWEN_CODE_TASK_NEW_PATH,
+      qwenTaskNewRequest({ model, timestampMs: startedAt }),
+    );
   } catch (error) {
     if (isWebChatError(error)) throw error;
     throw transportFailure("QWEN_TASK_CREATE_TRANSPORT", error);
   }
-  const chatId = readCreatedChatId(created.body, created.status);
+  const chatId = readQwenCreatedChatId(created.body, created.status);
 
   const parser = new QwenSseParser();
   const accumulator = createQwenCompletionAccumulator({

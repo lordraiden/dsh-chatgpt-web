@@ -9,6 +9,11 @@ import {
 import type { IncomingMeta, ProviderAdapter } from "../src/adapters/base";
 import type { AdapterEvent, CodexParsedRequest } from "../src/types";
 import { defaultConfig } from "../src/config";
+import {
+  captureChatGptWebHome,
+  restoreChatGptWebHome,
+  useTemporaryChatGptWebHome,
+} from "./support/chatgpt-web-home";
 import { ChatGptWebProviderCore } from "../src/adapters/chatgpt-web/provider-core";
 import { startServer } from "../src/server";
 import { parseRequest } from "../src/responses/parser";
@@ -134,25 +139,35 @@ describe("issue #78 Responses compatibility seam audit", () => {
   });
 
   test("Web model catalog remains available when native Codex models are unavailable or malformed", async () => {
-    const config = defaultConfig();
-    const unavailable = await modelsRequest(
-      new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer test-token" } }),
-      config,
-      async () => { throw new Error("native Codex unavailable"); },
-    );
-    expect(unavailable.status).toBe(200);
-    const unavailableBody = await unavailable.json() as { models?: Array<{ slug?: string }> };
-    expect(unavailableBody.models?.length).toBeGreaterThan(0);
-    expect(unavailableBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+    // Hermetic: `/v1/models` is the deployment's composed catalogue, and a second provider's rows
+    // appear when that provider is configured or has a verified session on disk (issue #299, slice 2).
+    // The assertion below is about the ChatGPT rows surviving a native failure, so the test must not
+    // read whatever session this machine happens to hold.
+    const savedHome = captureChatGptWebHome();
+    const modelsHome = useTemporaryChatGptWebHome("issue-78-models-home-", { clearFreeHome: true });
+    try {
+      const config = defaultConfig();
+      const unavailable = await modelsRequest(
+        new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer test-token" } }),
+        config,
+        async () => { throw new Error("native Codex unavailable"); },
+      );
+      expect(unavailable.status).toBe(200);
+      const unavailableBody = await unavailable.json() as { models?: Array<{ slug?: string }> };
+      expect(unavailableBody.models?.length).toBeGreaterThan(0);
+      expect(unavailableBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
 
-    const malformed = await modelsRequest(
-      new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer test-token" } }),
-      config,
-      async () => new Response("{not-json", { status: 200, headers: { "content-type": "application/json" } }),
-    );
-    expect(malformed.status).toBe(200);
-    const malformedBody = await malformed.json() as { models?: Array<{ slug?: string }> };
-    expect(malformedBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+      const malformed = await modelsRequest(
+        new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer test-token" } }),
+        config,
+        async () => new Response("{not-json", { status: 200, headers: { "content-type": "application/json" } }),
+      );
+      expect(malformed.status).toBe(200);
+      const malformedBody = await malformed.json() as { models?: Array<{ slug?: string }> };
+      expect(malformedBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+    } finally {
+      restoreChatGptWebHome(savedHome, modelsHome);
+    }
   });
 
   test("Native Codex requests stay outside the Web adapter on Responses and compact", async () => {

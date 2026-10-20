@@ -216,11 +216,20 @@ copy from:
    extraction, completion detection, abort, resource close, physical settlement. No transport test may
    read internal network responses to obtain model output (architecture §26.3).
 
-> **Unverified here:** the suite asserts its own neutrality only by construction — there is exactly one
-> fixture today, and the file's stated intent ("A future provider can implement this shape without
-> importing or emulating ChatGPT internals") is not itself under test. The second fixture is what
-> verifies it; if it needs a change to [`tests/web-chat-provider-conformance.ts`](../tests/web-chat-provider-conformance.ts), that change is a
-> finding about the shared suite, not a license to fork it.
+> **Verified by the second fixture (issue #299, slice 2).** The suite's neutrality is no longer claimed
+> only by construction: [`tests/issue-299-qwen-code-provider-conformance.test.ts`](../tests/issue-299-qwen-code-provider-conformance.test.ts)
+> drives a provider with **no page and no retained surface at all** (a durable chat id, a network
+> transport) through the same shared scenarios, and it needed no provider-specific branch in the suite.
+>
+> It did need one **correction**, which is exactly the finding this note predicted. Scenario 6
+> ("lost process-local continuity fails closed") asserted unconditionally that an implicit continuation
+> fails after `restart()` — a true statement about ChatGPT's retained surface and a false one about a
+> provider whose continuation state is durable, so it would have made "durable continuity" unpassable.
+> The assertion now follows the `restartRecovery` declaration the harness already supplies: for
+> `exact_resume` it requires the continuation to succeed **as the same conversation** (same key,
+> generation and opaque handle), and for every other declaration it keeps the original refusal.
+> ChatGPT's assertions are unchanged (it declares `explicit_replay`). One suite with a corrected
+> assumption — not a fork, and not a weakened gate.
 
 ### 1.8 Definition of done
 

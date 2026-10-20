@@ -10,6 +10,11 @@ import {
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
+import {
+  qwenCodeCatalogueRows,
+  qwenCodeCatalogueVisible,
+  resolveQwenCodeProviderConfig,
+} from "./adapters/qwen-code/provider-config";
 
 type JsonObject = Record<string, unknown>;
 
@@ -125,6 +130,37 @@ export function buildChatGptWebModelCatalog(
     }
   }
   return catalog;
+}
+
+/**
+ * The public WebChat catalogue: every provider this deployment can serve, in one list.
+ *
+ * The ChatGPT rows keep their own owner ({@link buildChatGptWebModelCatalog}, the route authority
+ * documented in `doc/provider-onboarding.md` §4.2); a second provider contributes **its own rows**
+ * through its own module. This function only composes them, so `/v1/models`, the chat-completions
+ * accepted-model check and any other consumer agree on exactly one list of public routes — and a
+ * deployment that never configured the second provider keeps the catalogue it had before.
+ */
+export function buildPublicModelCatalog(
+  config: AppConfig,
+  contextOverride?: CodexModelContextOverride,
+): JsonObject {
+  const chatgpt = buildChatGptWebModelCatalog(config, contextOverride) as { models?: JsonObject[] };
+  const rows: JsonObject[] = [...(chatgpt.models ?? [])];
+  if (qwenCodeCatalogueVisible(config)) {
+    rows.push(...qwenCodeCatalogueRows(resolveQwenCodeProviderConfig(config)).map(row => ({ ...row })));
+  }
+  return { object: "list", models: rows };
+}
+
+/** The public route ids this deployment serves, in catalogue order. */
+export function publicModelRouteIds(config: AppConfig): readonly string[] {
+  const catalog = buildPublicModelCatalog(config);
+  const models = Array.isArray(catalog.models) ? catalog.models : [];
+  return models.flatMap((row) => {
+    const routeId = slug(row);
+    return routeId === undefined ? [] : [routeId];
+  });
 }
 
 function useCompatibilityV1SubagentSurface(model: JsonObject): void {

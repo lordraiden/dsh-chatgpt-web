@@ -68,8 +68,8 @@ import {
 import { webChatAccountBindingId, isEphemeralWebChatTurn, type WebChatAccountBinding, type WebChatConversationStore } from "../../web-chat/core";
 import {
   CHATGPT_WEB_DRIVER_ID,
-  closeWebChatConversationStore,
-  createWebChatConversationStore,
+  closeSharedConversationStores,
+  resolveSharedConversationStore,
 } from "../../web-chat/host/provider-host";
 import {
   chatGptWebChatAccountBinding,
@@ -576,11 +576,10 @@ export class ChatGptWebNativeContinuityConfigError extends Error {
  *
  * The file backend owns **one writer per file and process**, so the process keeps exactly one store per
  * effective location: every adapter instance of this process resolves the same store, and a second
- * store for the same file is refused by the backend rather than silently racing a second writer.
- */
-const nativeContinuityStores = new Map<string, WebChatConversationStore>();
-
-/**
+ * store for the same file is refused by the backend rather than silently racing a second writer. The
+ * registry itself belongs to the host boundary (`resolveSharedConversationStore`), because a second
+ * provider composes the same deployment store (issue #299, slice 2).
+ *
  * Resolve the native continuity store for the effective configuration.
  *
  * @param config - the effective application configuration; omitted resolves `loadConfig()`.
@@ -592,17 +591,14 @@ const nativeContinuityStores = new Map<string, WebChatConversationStore>();
  */
 export function resolveNativeChatGptContinuityStore(config?: AppConfig): WebChatConversationStore {
   const effective = config ?? loadNativeContinuityConfig();
-  const path = effective.webChat?.conversationStorePath?.trim();
-  const key = path && path.length > 0 ? resolve(path) : "";
-  const existing = nativeContinuityStores.get(key);
-  if (existing) return existing;
   const provider = providerConfig(effective);
-  const store = createWebChatConversationStore({
+  // The host owns the one registry of process-wide stores (issue #299, slice 2): a second provider
+  // composes the same deployment store, and two owners for one file would make the durable backend
+  // refuse the second writer.
+  return resolveSharedConversationStore({
     ...(effective.webChat !== undefined ? { webChat: effective.webChat } : {}),
     ...(provider.chatgptWeb !== undefined ? { chatgptWeb: provider.chatgptWeb } : {}),
   });
-  nativeContinuityStores.set(key, store);
-  return store;
 }
 
 /** Load the effective configuration, turning an unreadable one into the typed continuity failure. */
@@ -633,9 +629,9 @@ function loadNativeContinuityConfig(): AppConfig {
  * backend and never turns into an unhandled rejection.
  */
 export async function closeNativeChatGptContinuityStores(): Promise<void> {
-  const stores = [...nativeContinuityStores.values()];
-  nativeContinuityStores.clear();
-  for (const store of stores) await closeWebChatConversationStore(store);
+  // The shared registry owns the stores: releasing it releases this deployment's continuity file(s),
+  // once, whoever composed them.
+  await closeSharedConversationStores();
 }
 
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;

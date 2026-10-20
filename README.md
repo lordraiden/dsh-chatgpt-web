@@ -401,6 +401,16 @@ curl -fsS http://127.0.0.1:17841/v1/models
 | `chatgpt-web/high` | Sol/High. |
 | `chatgpt-web/extra-high` | Pro-gated. |
 | `chatgpt-web/pro` | Pro-gated. |
+| `qwen-code/qwen3-coder-plus` | Qwen Code (second provider), shown once configured or signed in. |
+
+The second provider's rows are the same shape and provider-qualified once, but they are **not** derived
+from ChatGPT's capability state: `qwen-code/<modelId>` appears when `webChat.providers["qwen-code"]`
+exists in the configuration or a verified Qwen Code session is on disk, and the model ids are the
+deployment's own list (`webChat.providers["qwen-code"].models`, defaulting to the one id the capture
+measured, `qwen3-coder-plus`). No endpoint that lists Qwen Code's selectable models was recorded, so
+the list is configuration rather than discovery. The route is text-only and reasoning-free; a turn is
+served by the Qwen Code provider's own driver, not by the ChatGPT browser adapter
+([`doc/qwen-code.md` §7](./doc/qwen-code.md#7-slice-2--the-provider-driver-issue-299)).
 
 The catalogue is resolved from the authenticated account's capability state, so it is not a promise
 that every account has every route: unknown or unverifiable capability state fails closed, and an

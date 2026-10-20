@@ -8,6 +8,9 @@ import {
   QWEN_CODE_AUTH_PROVIDER_LABEL,
   QWEN_CODE_PROVIDER_ID,
   createQwenCodeAuthController,
+  createQwenCodeProvider,
+  qwenCodeResponsesRequest,
+  type QwenCodeProviderComposition,
 } from "./adapters/qwen-code";
 import { CHATGPT_WEB_DRIVER_ID } from "./web-chat/host/provider-host";
 import { createChatGptWebProviderRuntime } from "./adapters/chatgpt-web/provider-runtime";
@@ -83,7 +86,7 @@ import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody, RequestBodyTooLargeError } from "./http-body";
 import { HttpClientDisconnectedError, httpStatusFromTerminalError } from "./lib/errors";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
-import { augmentNativeModelCatalog, buildChatGptWebModelCatalog } from "./model-catalog";
+import { augmentNativeModelCatalog, buildChatGptWebModelCatalog, buildPublicModelCatalog, publicModelRouteIds } from "./model-catalog";
 import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import {
   readCodexModelContextOverride,
@@ -457,6 +460,14 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  /**
+   * Non-ChatGPT WebChat providers this listener serves (issue #299, slice 2).
+   *
+   * The caller (the listener's own composition) decides which providers exist; this ingress only
+   * asks one of them whether it serves the requested route. Absent means exactly today's behaviour:
+   * a route that is not a ChatGPT Web route is forwarded to the native Codex path.
+   */
+  webChatProviders?: readonly QwenCodeProviderComposition[];
 }
 
 /**
@@ -505,7 +516,7 @@ export async function modelsRequest(
   contextOverride?: () => CodexModelContextOverride | undefined,
 ): Promise<Response> {
   const override = contextOverride?.();
-  const webCatalog = buildChatGptWebModelCatalog(config, override);
+  const webCatalog = buildPublicModelCatalog(config, override);
   let upstream: Response | undefined;
   try {
     upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
@@ -599,6 +610,19 @@ export async function responseRequest(
     }
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  // A second WebChat provider's public routes (`<providerId>/<modelId>`) are served by that
+  // provider's own ingress. The dispatch is by the route's provider id against the compositions this
+  // listener was given, so an unserved route keeps falling through to the native Codex path below.
+  const webChatRoute = typeof requestedModel === "string" ? requestedModel.trim() : "";
+  const webChatProvider = options.webChatProviders?.find(candidate => candidate.modelOf(webChatRoute) !== undefined);
+  if (webChatProvider !== undefined) {
+    return await qwenCodeResponsesRequest({
+      request: req,
+      body: raw,
+      provider: webChatProvider,
+      ...(options.onAdapterEvent ? { onAdapterEvent: options.onAdapterEvent } : {}),
+    });
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     if (isChatGptWebInternalBackendModel(requestedModel)) {
@@ -1705,6 +1729,14 @@ export function startServer(
       /** Clock seam for the freshness checks and the reported `verifiedAt`; defaults to `Date.now`. */
       readonly now?: () => number;
     };
+    /**
+     * Non-ChatGPT WebChat providers this listener serves.
+     *
+     * Production leaves this out and composes the deployment's own provider (Qwen Code) below; a test
+     * passes a composition whose session is a deterministic seam, so the route can be exercised
+     * without a browser. An explicit list replaces the default entirely.
+     */
+    readonly webChatProviders?: readonly QwenCodeProviderComposition[];
   } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
@@ -1779,6 +1811,23 @@ export function startServer(
     return [createChatGptWebProviderRuntime({ provider, adapter })];
   };
   const advisorHost: AdvisorHost = createAdvisorHost({ runtimes: advisorRuntimes });
+
+  /**
+   * The second WebChat provider's composition (issue #299, slice 2).
+   *
+   * One instance per listener, exactly like the ChatGPT provider core: it owns the session page (the
+   * transport resource), the durable chat state and the shared lease registry, so two requests can
+   * never create two of any of them. Constructing it is inert — the page is launched lazily by the
+   * first turn that needs it, so a deployment without a Qwen session still starts and serves the
+   * ChatGPT routes unchanged.
+   *
+   * A provider block this deployment misconfigured is a startup error, not a per-turn surprise: the
+   * resolver validates the block here, once.
+   */
+  const qwenCodeProvider = dependencies.webChatProviders === undefined
+    ? createQwenCodeProvider({ config })
+    : undefined;
+  const webChatProviders = dependencies.webChatProviders ?? [qwenCodeProvider!];
 
   /**
    * The interactive sign-in surface (issue #276). One owner for the life of this listener: it holds
@@ -2215,7 +2264,7 @@ export function startServer(
           new Request(req, { signal }),
           config,
           adapterFactory,
-          { onTurnIdentity: bindIdentity },
+          { onTurnIdentity: bindIdentity, webChatProviders },
         ),
         req.signal,
         process.platform,
@@ -2239,7 +2288,9 @@ export function startServer(
         return formatErrorResponse(400, "invalid_request_error", message, code);
       }
       // An unknown model names the accepted ids instead of falling through to the native passthrough.
-      const accepted = buildOpenAiModelsData(buildChatGptWebModelCatalog(config)).map((entry) => entry.id);
+      // The list is the deployment's composed public catalogue, so a route a composed provider serves
+      // is accepted here by exactly the owner that serves it (issue #299, slice 2).
+      const accepted = publicModelRouteIds(config);
       if (!accepted.includes(translation.model)) {
         return formatErrorResponse(
           400,
@@ -2272,7 +2323,10 @@ export function startServer(
           body: JSON.stringify(translation.body),
           signal,
         });
-        const upstream = await responseRequest(internalRequest, config, adapterFactory, { onTurnIdentity: bindIdentity });
+        const upstream = await responseRequest(internalRequest, config, adapterFactory, {
+          onTurnIdentity: bindIdentity,
+          webChatProviders,
+        });
         if (translation.stream) {
           return declareDropped(new Response(
             toChatCompletionStream(upstream.body ?? new ReadableStream(), translation.model),
@@ -2396,6 +2450,9 @@ export function startServer(
         // The durable continuity store owns an open file and one writer slot per process; the
         // sidecar releases it on its own shutdown path (#193).
         closeNativeChatGptContinuityStores(),
+        // The second provider owns a session page and a durable chat state file; both are released
+        // here, and releasing is idempotent. A caller that composed its own providers owns theirs.
+        qwenCodeProvider?.close() ?? Promise.resolve(),
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")

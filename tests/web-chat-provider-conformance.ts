@@ -390,7 +390,26 @@ export function defineWebChatProviderConformanceSuite(fixture: WebChatProviderCo
           { store: restarted.store, driver: restarted.driver },
           continuationInput(restarted, record, { kind: "continue" }),
         );
-        expect(implicit.outcome).toBe("failed");
+        if (beforeRestart.restartRecovery === "exact_resume") {
+          // A provider whose continuity is **durable** loses nothing at a restart, so the honest
+          // assertion is the opposite one: the implicit continuation must succeed, and it must
+          // succeed *as the same conversation* — same affinity, same generation, same opaque handle.
+          // Nothing about the "no silent fork" invariant is weakened: a provider that had to rebuild
+          // would still be refused here, and a continuation may never become a new conversation.
+          //
+          // This branch is the suite's own neutrality finding (issue #299, slice 2): the assertion
+          // below used to be unconditional, which assumed every provider's continuity is
+          // process-local — true for ChatGPT's retained surface, false for a provider that keeps its
+          // continuation state durably (Qwen Code's chat id). The declaration the harness already
+          // supplies (`restartRecovery`) is what the assertion now follows; ChatGPT's own
+          // assertions are unchanged because it declares `explicit_replay`.
+          expect(implicit.outcome).toBe("exact_resume");
+          expect(implicit.conversation?.key).toBe(record.identity.key);
+          expect(implicit.conversation?.generation).toBe(record.generation);
+          expect(implicit.conversation?.handle).toBe(record.handle);
+        } else {
+          expect(implicit.outcome).toBe("failed");
+        }
 
         const replay = await resolveWebChatContinuation(
           { store: restarted.store, driver: restarted.driver },
