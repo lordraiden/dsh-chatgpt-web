@@ -52,6 +52,19 @@ import {
   type QwenCodeImportedSessionProbe,
 } from "./adapters/qwen-code/session-import";
 import type { QwenPageHydrationOptions } from "./adapters/qwen-code/session-probe";
+import {
+  QWEN_CHAT_AUTH_PROVIDER_LABEL,
+  QWEN_CHAT_PROVIDER_ID,
+} from "./adapters/qwen-chat/provider";
+import {
+  storeQwenChatSession,
+  validateQwenChatSessionStorageState,
+} from "./adapters/qwen-chat/session-store";
+import {
+  verifyQwenChatImportedSession,
+  type QwenChatImportedSessionPageOpener,
+  type QwenChatImportedSessionProbe,
+} from "./adapters/qwen-chat/session-import";
 import { nonSecretDiagnosticText } from "./lib/safe-diagnostics";
 import {
   AUTH_IMPORT_REFUSAL_CODES,
@@ -176,6 +189,7 @@ export const DEEPSEEK_WEB_IMPORT_PROVIDER_LABEL = "DeepSeek Web";
 export const AUTH_IMPORT_PROVIDER_IDS = [
   CHATGPT_WEB_AUTH_PROVIDER_ID,
   QWEN_CODE_PROVIDER_ID,
+  QWEN_CHAT_PROVIDER_ID,
   DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
 ] as const;
 
@@ -415,6 +429,51 @@ export function qwenCodeAuthImportProvider(options: QwenCodeAuthImportOptions = 
   };
 }
 
+/** Options for the Qwen Chat import; the probe/page seams are what make the gate testable. */
+export interface QwenChatAuthImportOptions {
+  readonly chromeExecutablePath?: string;
+  readonly probe?: QwenChatImportedSessionProbe;
+  readonly openPage?: QwenChatImportedSessionPageOpener;
+  readonly hydration?: QwenPageHydrationOptions;
+}
+
+/**
+ * Qwen Chat: validate the provider's own cookies (including the per-domain chat cookie rule), then
+ * the same `GET /api/v2/chats` predicate sign-in uses.
+ *
+ * A Qwen Code capture is refused before any browser starts — cookies are per-domain, and the refusal
+ * says so — instead of being probed and reported as an unauthenticated session.
+ */
+export function qwenChatAuthImportProvider(options: QwenChatAuthImportOptions = {}): AuthImportProvider {
+  return {
+    id: QWEN_CHAT_PROVIDER_ID,
+    label: QWEN_CHAT_AUTH_PROVIDER_LABEL,
+    verification: "authenticated",
+    accept: (state, now) => validateQwenChatSessionStorageState(state, now),
+    authenticate: async state => {
+      const verification = await verifyQwenChatImportedSession(state, {
+        ...(options.chromeExecutablePath === undefined ? {} : { chromeExecutablePath: options.chromeExecutablePath }),
+        ...(options.probe === undefined ? {} : { probe: options.probe }),
+        ...(options.openPage === undefined ? {} : { openPage: options.openPage }),
+        ...(options.hydration === undefined ? {} : { hydration: options.hydration }),
+      });
+      return {
+        storageState: state,
+        detail: verification.read === "truncated-envelope"
+          ? `Authenticated: /api/v2/chats answered success:true (HTTP ${verification.status}); `
+            + `the body was cut at ${verification.bodyChars ?? 0} characters, so its leading envelope `
+            + "is what decided it"
+          : `Authenticated: /api/v2/chats answered success:true (HTTP ${verification.status})`,
+        ...(verification.read === "truncated-envelope"
+          ? { reading: `body truncated at ${verification.bodyChars ?? 0} chars; the envelope reports success:true` }
+          : {}),
+        verified: true,
+      };
+    },
+    store: authentication => storeQwenChatSession(authentication.storageState),
+  };
+}
+
 /**
  * DeepSeek Web: a capture-only participant (no adapter, no predicate).
  *
@@ -466,6 +525,8 @@ export function authImportProvider(providerId: string, config?: AppConfig): Auth
       return chatGptWebAuthImportProvider(config ?? loadConfig());
     case QWEN_CODE_PROVIDER_ID:
       return qwenCodeAuthImportProvider({ chromeExecutablePath: (config ?? loadConfig()).chromeExecutablePath });
+    case QWEN_CHAT_PROVIDER_ID:
+      return qwenChatAuthImportProvider({ chromeExecutablePath: (config ?? loadConfig()).chromeExecutablePath });
     case DEEPSEEK_WEB_IMPORT_PROVIDER_ID:
       return deepSeekWebAuthImportProvider();
     default:

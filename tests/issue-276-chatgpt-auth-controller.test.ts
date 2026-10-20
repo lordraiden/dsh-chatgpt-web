@@ -1024,13 +1024,15 @@ describe("issue #276 slice 2b — the real listener registers the controller laz
 
     const providers = await fetch(`${base}/v1/control/auth/providers`, { headers: control });
     expect(providers.status).toBe(200);
-    // Two providers are registered in the production composition: ChatGPT Web (issue #276) and Qwen
-    // Code (issue #299). Registration is inert, so listing both still starts nothing.
+    // Three providers are registered in the production composition: ChatGPT Web (issue #276), Qwen
+    // Code (issue #299) and Qwen Chat (issue #333, a second product on the same vendor auth family).
+    // Registration is inert, so listing all three still starts nothing.
     expect(await providers.json()).toEqual({
       ok: true,
       providers: [
         { providerId: CHATGPT_WEB_AUTH_PROVIDER_ID, label: CHATGPT_WEB_AUTH_PROVIDER_LABEL },
         { providerId: "qwen-code", label: "Qwen Code" },
+        { providerId: "qwen-chat", label: "Qwen Chat" },
       ],
     });
 

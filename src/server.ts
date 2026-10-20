@@ -12,6 +12,14 @@ import {
   qwenCodeResponsesRequest,
   type QwenCodeProviderComposition,
 } from "./adapters/qwen-code";
+import {
+  QWEN_CHAT_AUTH_PROVIDER_LABEL,
+  QWEN_CHAT_PROVIDER_ID,
+  createQwenChatAuthController,
+  createQwenChatProvider,
+  qwenChatResponsesRequest,
+  type QwenChatProviderComposition,
+} from "./adapters/qwen-chat";
 import { CHATGPT_WEB_DRIVER_ID } from "./web-chat/host/provider-host";
 import { createChatGptWebProviderRuntime } from "./adapters/chatgpt-web/provider-runtime";
 import {
@@ -453,6 +461,15 @@ export class HttpTurnCounter {
 
 type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ChatGptWebProviderAdapter;
 
+/**
+ * A non-ChatGPT provider composition this listener can serve.
+ *
+ * The two Qwen products are separate providers with separate ingresses; the host routes by the
+ * composition's own `modelOf` and then dispatches to that provider's ingress below. A union (rather
+ * than one provider's type) keeps the host from pretending a second provider is a copy of the first.
+ */
+type ComposedWebChatProvider = QwenCodeProviderComposition | QwenChatProviderComposition;
+
 export interface ResponseRequestOptions {
   /** DEV and other in-process harnesses can keep continuation state in their own canonical store. */
   rememberState?: boolean;
@@ -467,7 +484,7 @@ export interface ResponseRequestOptions {
    * asks one of them whether it serves the requested route. Absent means exactly today's behaviour:
    * a route that is not a ChatGPT Web route is forwarded to the native Codex path.
    */
-  webChatProviders?: readonly QwenCodeProviderComposition[];
+  webChatProviders?: readonly ComposedWebChatProvider[];
 }
 
 /**
@@ -617,10 +634,21 @@ export async function responseRequest(
   const webChatRoute = typeof requestedModel === "string" ? requestedModel.trim() : "";
   const webChatProvider = options.webChatProviders?.find(candidate => candidate.modelOf(webChatRoute) !== undefined);
   if (webChatProvider !== undefined) {
+    // Each provider owns its own ingress (request shapes, stream vocabulary, error translation); the
+    // host selected the route and now lets that provider execute it. The id is the one the
+    // composition reported, never a second spelling minted here.
+    if (webChatProvider.providerId === QWEN_CHAT_PROVIDER_ID) {
+      return await qwenChatResponsesRequest({
+        request: req,
+        body: raw,
+        provider: webChatProvider as QwenChatProviderComposition,
+        ...(options.onAdapterEvent ? { onAdapterEvent: options.onAdapterEvent } : {}),
+      });
+    }
     return await qwenCodeResponsesRequest({
       request: req,
       body: raw,
-      provider: webChatProvider,
+      provider: webChatProvider as QwenCodeProviderComposition,
       ...(options.onAdapterEvent ? { onAdapterEvent: options.onAdapterEvent } : {}),
     });
   }
@@ -1736,7 +1764,7 @@ export function startServer(
      * passes a composition whose session is a deterministic seam, so the route can be exercised
      * without a browser. An explicit list replaces the default entirely.
      */
-    readonly webChatProviders?: readonly QwenCodeProviderComposition[];
+    readonly webChatProviders?: readonly ComposedWebChatProvider[];
   } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
@@ -1827,7 +1855,15 @@ export function startServer(
   const qwenCodeProvider = dependencies.webChatProviders === undefined
     ? createQwenCodeProvider({ config })
     : undefined;
-  const webChatProviders = dependencies.webChatProviders ?? [qwenCodeProvider!];
+  // The operator's Qwen account family has a second product with a different API and a usable model
+  // menu (`chat.qwen.ai`). It is composed independently and starts nothing until a turn needs it; a
+  // deployment that never configured or signed in to it keeps exactly the catalogue and routes it
+  // had (its rows are only advertised when `qwenChatCatalogueVisible` says so).
+  const qwenChatProvider = dependencies.webChatProviders === undefined
+    ? createQwenChatProvider({ config })
+    : undefined;
+  const webChatProviders = dependencies.webChatProviders
+    ?? [qwenCodeProvider!, qwenChatProvider!];
 
   /**
    * The interactive sign-in surface (issue #276). One owner for the life of this listener: it holds
@@ -1864,6 +1900,18 @@ export function startServer(
       providerId: QWEN_CODE_PROVIDER_ID,
       label: QWEN_CODE_AUTH_PROVIDER_LABEL,
       controller: createQwenCodeAuthController({
+        config: {
+          chromeExecutablePath: config.chromeExecutablePath,
+          authBrowserMode: config.authBrowserMode,
+        },
+      }),
+    }, {
+      // Qwen Chat's sign-in (same vendor auth host, same relay mechanism; this provider's own id,
+      // root URL and `GET /api/v2/chats` predicate). Registering it is all the host needs — the
+      // neutral page, relay and authority are unchanged.
+      providerId: QWEN_CHAT_PROVIDER_ID,
+      label: QWEN_CHAT_AUTH_PROVIDER_LABEL,
+      controller: createQwenChatAuthController({
         config: {
           chromeExecutablePath: config.chromeExecutablePath,
           authBrowserMode: config.authBrowserMode,
@@ -2453,6 +2501,9 @@ export function startServer(
         // The second provider owns a session page and a durable chat state file; both are released
         // here, and releasing is idempotent. A caller that composed its own providers owns theirs.
         qwenCodeProvider?.close() ?? Promise.resolve(),
+        // The second Qwen provider owns a session page and its own durable chat state; releasing is
+        // idempotent and a caller that composed its own providers owns theirs.
+        qwenChatProvider?.close() ?? Promise.resolve(),
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")

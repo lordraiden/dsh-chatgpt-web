@@ -300,6 +300,8 @@ Scripted or offline-from-desktop provisioning: on a machine where you can sign i
 docker compose exec chatgpt-web node lib/cli.js auth import --provider chatgpt-web --from /capture
 # Qwen Code: capture on your own PC first — scripts/qwen-storage-state.mjs (doc/qwen-code.md §6)
 docker compose exec chatgpt-web node lib/cli.js auth import --provider qwen-code --from /capture
+# Qwen Chat: capture at chat.qwen.ai (cookies are per-domain — a Qwen Code capture is not one)
+docker compose exec chatgpt-web node lib/cli.js auth import --provider qwen-chat --from /capture
 ```
 
 `auth import` is **fail-closed by construction**: the capture is verified against the provider's login
@@ -312,12 +314,18 @@ cookies with the dependency-free `scripts/qwen-storage-state.mjs` (it attaches t
 `--remote-debugging-port=9222`), then import the file. Both commands, the checks and the expiry
 symptoms are in [`doc/qwen-code.md` §6](./doc/qwen-code.md#6-signing-in-on-the-operators-own-machine-then-importing-the-session-issue-299).
 
+Qwen Chat (`--provider qwen-chat`) shares the Qwen **account family** and auth host (`auth.qwen.ai`)
+with Qwen Code, but **cookies and localStorage are per-domain**: a capture made at `coder.qwen.ai` is
+refused as a Qwen Chat session. Sign in at `chat.qwen.ai` (the operator surface's **Qwen Chat** entry,
+or a capture made there) and import that. Signing in needs no restart; adding a provider block or
+refreshing the model list does. Details: [`doc/qwen-chat.md`](./doc/qwen-chat.md) §5.
+
 ### Hand a capture to a running service (`POST /v1/control/auth/import`)
 
 The same pipeline is available over the operator control surface, for a tool (a Harness plugin, a
 script) that already holds a Playwright `storageState` object. **Control token only**, exactly like
 the rest of `/v1/control/*`; the API key is refused. The request body is
-`{ "provider": "chatgpt-web" | "qwen-code" | "deepseek-web", "storageState": { ... } }` and is capped
+`{ "provider": "chatgpt-web" | "qwen-code" | "qwen-chat" | "deepseek-web", "storageState": { ... } }` and is capped
 at 512 KiB (an oversized body is refused before it is buffered):
 
 ```bash
@@ -402,6 +410,9 @@ curl -fsS http://127.0.0.1:17841/v1/models
 | `chatgpt-web/extra-high` | Pro-gated. |
 | `chatgpt-web/pro` | Pro-gated. |
 | `qwen-code/qwen3-coder-plus` | Qwen Code (second provider), shown once configured or signed in. |
+| `qwen-chat/qwen3.7-plus` | Qwen Chat (third provider), shown once configured or signed in. |
+| `qwen-chat/qwen3.8-max` | Qwen Chat. |
+| `qwen-chat/qwen3.8-omni-flash` | Qwen Chat. |
 
 The second provider's rows are the same shape and provider-qualified once, but they are **not** derived
 from ChatGPT's capability state: `qwen-code/<modelId>` appears when `webChat.providers["qwen-code"]`
@@ -411,6 +422,14 @@ measured, `qwen3-coder-plus`). No endpoint that lists Qwen Code's selectable mod
 the list is configuration rather than discovery. The route is text-only and reasoning-free; a turn is
 served by the Qwen Code provider's own driver, not by the ChatGPT browser adapter
 ([`doc/qwen-code.md` §7](./doc/qwen-code.md#7-slice-2--the-provider-driver-issue-299)).
+
+Qwen Chat rows are advertised the same way but carry the model's **three modes as reasoning levels**:
+`Auto`, `Thinking` and `Fast` in `supported_reasoning_levels`, with the default from the model's
+measured abilities. Select one with `reasoning_effort` (or `reasoning: {"effort": …}` on
+`/v1/responses`); an unsupported label is a typed `400`, and a model whose abilities hide the
+selection offers none. The model list is configuration with a measured seed and a public hint; refresh
+the cache with `dsh-chatgpt-web models refresh --provider qwen-chat` and restart to serve it. Full
+protocol, assumptions and the per-domain sign-in rule: [`doc/qwen-chat.md`](./doc/qwen-chat.md).
 
 The catalogue is resolved from the authenticated account's capability state, so it is not a promise
 that every account has every route: unknown or unverifiable capability state fails closed, and an

@@ -9,6 +9,12 @@ import {
   qwenCodeCatalogueVisible,
   resolveQwenCodeProviderConfig,
 } from "./adapters/qwen-code/provider-config";
+import { createQwenChatDriver } from "./adapters/qwen-chat/driver";
+import { createMemoryQwenChatConversationState } from "./adapters/qwen-chat/chat-state";
+import {
+  qwenChatCatalogueVisible,
+  resolveQwenChatProviderConfig,
+} from "./adapters/qwen-chat/provider-config";
 import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import {
@@ -95,6 +101,15 @@ export function webChatDoctorDrivers(config: AppConfig): readonly WebChatProvide
     drivers.push(createQwenCodeDriver({
       provider: resolveQwenCodeProviderConfig(config),
       state: createMemoryQwenCodeConversationState(),
+    }));
+  }
+  // The Qwen Chat provider is inspected on the same terms: a configured block or a verified session.
+  // `doctor` never starts a browser or touches the durable chat file; a memory state is enough for a
+  // resolution-only inspection.
+  if (qwenChatCatalogueVisible(config)) {
+    drivers.push(createQwenChatDriver({
+      provider: resolveQwenChatProviderConfig(config),
+      state: createMemoryQwenChatConversationState(),
     }));
   }
   return drivers;

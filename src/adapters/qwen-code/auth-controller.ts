@@ -134,7 +134,7 @@ export interface QwenCodeSessionProbeResult {
   /** Always `true` when the probe resolves; an unauthenticated session rejects instead. */
   readonly authenticated: true;
   /** The endpoint that proved it, for diagnostics. */
-  readonly probe: "task-list";
+  readonly probe: string;
   /** The HTTP status the endpoint answered. */
   readonly status: number;
 }
@@ -158,6 +158,20 @@ export type QwenCodeAuthSessionStored = (location: string) => void;
 export interface QwenCodeAuthControllerOptions {
   /** The deployment facts this controller needs: the executable and the launch mode. */
   readonly config: Pick<AppConfig, "chromeExecutablePath" | "authBrowserMode">;
+  /**
+   * The catalogue/provider id this sign-in belongs to. Defaults to {@link QWEN_CODE_PROVIDER_ID}.
+   *
+   * The Qwen Chat provider shares this controller's whole relay/completion mechanism (same vendor
+   * auth host, same token storage shape) and supplies its own id so the neutral auth surface sees one
+   * session per provider. The default keeps this controller's delivered behaviour unchanged.
+   */
+  readonly providerId?: string;
+  /** The app URL the sign-in browser opens. Defaults to {@link QWEN_CODE_ROOT_URL}. */
+  readonly rootUrl?: string;
+  /** The authenticated endpoint named in the bounded-timeout message. Defaults to the task list. */
+  readonly probePath?: string;
+  /** Human label used in operator-facing messages. Defaults to "Qwen Code". */
+  readonly sessionLabel?: string;
   /** Where a disposable profile is created. Defaults to this provider's credentials directory. */
   readonly profileRoot?: string;
   /** The frame geometry. Defaults to {@link QWEN_CODE_AUTH_VIEWPORT}. */
@@ -291,7 +305,7 @@ async function defaultProbeSession(page: Page): Promise<QwenCodeSessionProbeResu
 
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw new TypeError(`A Qwen Code sign-in controller requires a positive ${label}`);
+    throw new TypeError(`A Qwen sign-in controller requires a positive ${label}`);
   }
   return value;
 }
@@ -299,13 +313,16 @@ function positiveInteger(value: number, label: string): number {
 function assertViewport(viewport: QwenCodeAuthViewport): QwenCodeAuthViewport {
   if (!viewport || !Number.isSafeInteger(viewport.width) || viewport.width < 1
     || !Number.isSafeInteger(viewport.height) || viewport.height < 1) {
-    throw new TypeError("A Qwen Code sign-in controller requires a positive viewport");
+    throw new TypeError("A Qwen sign-in controller requires a positive viewport");
   }
   return { width: viewport.width, height: viewport.height };
 }
 
 /** The controller-internal view of the shared configuration the session needs. */
 interface QwenCodeAuthControllerOwner {
+  readonly providerId: string;
+  readonly sessionLabel: string;
+  readonly probePath: string;
   readonly now: () => number;
   readonly sleep: (ms: number) => Promise<void>;
   readonly viewport: QwenCodeAuthViewport;
@@ -323,7 +340,7 @@ interface QwenCodeAuthControllerOwner {
 
 /** One Qwen Code sign-in. Owns the browser, the temporary profile and the completion decision. */
 class QwenCodeAuthSession implements ProviderAuthSession {
-  readonly providerId = QWEN_CODE_PROVIDER_ID;
+  readonly providerId: string;
 
   #state: AuthSessionState = "starting";
   #failureDetail: string | undefined;
@@ -339,7 +356,9 @@ class QwenCodeAuthSession implements ProviderAuthSession {
   /** The last failed probe's sanitized reason; surfaced only when the session hits its bound. */
   #lastProbeDetail: string | undefined;
 
-  constructor(private readonly owner: QwenCodeAuthControllerOwner) {}
+  constructor(private readonly owner: QwenCodeAuthControllerOwner) {
+    this.providerId = owner.providerId;
+  }
 
   /** Called by the controller once the browser is up, to begin the interactive lifecycle. */
   begin(handle: QwenCodeAuthBrowserHandle, profileDir: string): void {
@@ -350,7 +369,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
       move: (x, y) => handle.page.mouse.move(x, y),
       down: () => handle.page.mouse.down(),
       up: () => handle.page.mouse.up(),
-    }, { providerId: QWEN_CODE_PROVIDER_ID, timeoutMs: this.owner.gestureTimeoutMs });
+    }, { providerId: this.providerId, timeoutMs: this.owner.gestureTimeoutMs });
     this.#deadline = this.owner.now() + this.owner.pollTimeoutMs;
     this.#state = "awaiting_input";
     void this.#poll();
@@ -407,7 +426,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
           throw webChatError(
             "UNSUPPORTED_OPTION",
             `The sign-in click (${event.x}, ${event.y}) is outside the ${size.width}x${size.height} viewport`,
-            { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_CLICK_OUT_OF_VIEWPORT" },
+            { providerId: this.providerId, providerCode: "AUTH_CLICK_OUT_OF_VIEWPORT" },
           );
         }
         await page.mouse.click(event.x, event.y);
@@ -431,7 +450,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
               "UNSUPPORTED_OPTION",
               `The sign-in drag point (${point?.x}, ${point?.y}) is outside the `
               + `${size.width}x${size.height} viewport`,
-              { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_DRAG_OUT_OF_VIEWPORT" },
+              { providerId: this.providerId, providerCode: "AUTH_DRAG_OUT_OF_VIEWPORT" },
             );
           }
           if (!Number.isFinite(point.atMs) || point.atMs < previousAtMs) {
@@ -484,7 +503,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
             "UNSUPPORTED_OPTION",
             `The sign-in pointer (${event.x}, ${event.y}) is outside the `
             + `${size.width}x${size.height} viewport`,
-            { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_POINTER_OUT_OF_VIEWPORT" },
+            { providerId: this.providerId, providerCode: "AUTH_POINTER_OUT_OF_VIEWPORT" },
           );
         }
         // The gesture owns the pressed button across requests: `down` presses, each `move` is one
@@ -527,7 +546,7 @@ class QwenCodeAuthSession implements ProviderAuthSession {
             "TRANSPORT_UNAVAILABLE",
             `The sign-in browser could not follow the navigation intent: ${nonSecretDiagnosticText(error)}`,
             {
-              providerId: QWEN_CODE_PROVIDER_ID,
+              providerId: this.providerId,
               providerCode: "AUTH_NAVIGATION_FAILED",
               cause: error,
             },
@@ -554,14 +573,14 @@ class QwenCodeAuthSession implements ProviderAuthSession {
       return webChatError(
         "UPSTREAM_ERROR",
         `The sign-in browser closed while an input was being relayed: ${detail}`,
-        { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_PAGE_CLOSED", cause: error },
+        { providerId: this.providerId, providerCode: "AUTH_PAGE_CLOSED", cause: error },
       );
     }
     this.#fail(`The sign-in browser could not relay an input: ${detail}`);
     return webChatError(
       "UPSTREAM_ERROR",
       `The sign-in browser could not relay an input: ${detail}`,
-      { providerId: QWEN_CODE_PROVIDER_ID, providerCode: "AUTH_INPUT_FAILED", cause: error },
+      { providerId: this.providerId, providerCode: "AUTH_INPUT_FAILED", cause: error },
     );
   }
 
@@ -569,8 +588,8 @@ class QwenCodeAuthSession implements ProviderAuthSession {
     if (this.#state !== "captured") {
       throw webChatError(
         "CONVERSATION_STATE_MISMATCH",
-        `The ${QWEN_CODE_PROVIDER_ID} sign-in has not captured`,
-        { providerId: QWEN_CODE_PROVIDER_ID },
+        `The ${this.providerId} sign-in has not captured`,
+        { providerId: this.providerId },
       );
     }
     return { kind: "browser-storage", storageState: this.#storageState };
@@ -628,8 +647,8 @@ class QwenCodeAuthSession implements ProviderAuthSession {
     if (this.#settled || !this.#page) {
       throw webChatError(
         "TRANSPORT_UNAVAILABLE",
-        `The ${QWEN_CODE_PROVIDER_ID} sign-in browser is closed and cannot ${action}`,
-        { providerId: QWEN_CODE_PROVIDER_ID },
+        `The ${this.providerId} sign-in browser is closed and cannot ${action}`,
+        { providerId: this.providerId },
       );
     }
     return this.#page;
@@ -646,8 +665,8 @@ class QwenCodeAuthSession implements ProviderAuthSession {
     if (!this.#pointer) {
       throw webChatError(
         "TRANSPORT_UNAVAILABLE",
-        `The ${QWEN_CODE_PROVIDER_ID} sign-in browser is closed and cannot relay a pointer gesture`,
-        { providerId: QWEN_CODE_PROVIDER_ID },
+        `The ${this.providerId} sign-in browser is closed and cannot relay a pointer gesture`,
+        { providerId: this.providerId },
       );
     }
     return this.#pointer;
@@ -666,15 +685,15 @@ class QwenCodeAuthSession implements ProviderAuthSession {
       if (this.#settled) return;
       if (this.#polls >= this.owner.maxPolls) {
         this.#fail(this.#timeoutDetail(
-          `The Qwen Code session did not authenticate within ${this.owner.maxPolls} probes `
-          + `(${QWEN_CODE_TASK_LIST_PATH})`,
+          `The ${this.owner.sessionLabel} session did not authenticate within ${this.owner.maxPolls} probes `
+          + `(${this.owner.probePath})`,
         ));
         return;
       }
       if (this.owner.now() >= this.#deadline) {
         this.#fail(this.#timeoutDetail(
-          `The Qwen Code session did not authenticate within ${this.owner.pollTimeoutMs}ms `
-          + `(${QWEN_CODE_TASK_LIST_PATH})`,
+          `The ${this.owner.sessionLabel} session did not authenticate within ${this.owner.pollTimeoutMs}ms `
+          + `(${this.owner.probePath})`,
         ));
         return;
       }
@@ -734,10 +753,14 @@ export function createQwenCodeAuthController(
   options: QwenCodeAuthControllerOptions,
 ): ProviderAuthController {
   if (!options || !options.config || typeof options.config.chromeExecutablePath !== "string") {
-    throw new TypeError("A Qwen Code sign-in controller requires the deployment configuration");
+    throw new TypeError("A Qwen sign-in controller requires the deployment configuration");
   }
   const config = options.config;
-  const profileRoot = options.profileRoot ?? providerCredentialsDir(QWEN_CODE_PROVIDER_ID);
+  const providerId = options.providerId ?? QWEN_CODE_PROVIDER_ID;
+  const sessionLabel = options.sessionLabel ?? "Qwen Code";
+  const probePath = options.probePath ?? QWEN_CODE_TASK_LIST_PATH;
+  const rootUrl = options.rootUrl ?? QWEN_CODE_ROOT_URL;
+  const profileRoot = options.profileRoot ?? providerCredentialsDir(providerId);
   const viewport = assertViewport(options.viewport ?? QWEN_CODE_AUTH_VIEWPORT);
   const pollIntervalMs = positiveInteger(
     options.pollIntervalMs ?? QWEN_CODE_AUTH_POLL_INTERVAL_MS,
@@ -776,6 +799,9 @@ export function createQwenCodeAuthController(
   const captures = new WeakSet<object>();
 
   const owner: QwenCodeAuthControllerOwner = {
+    providerId,
+    sessionLabel,
+    probePath,
     now,
     sleep,
     viewport,
@@ -807,7 +833,7 @@ export function createQwenCodeAuthController(
           `The interactive sign-in browser could not start: Chrome was not found at `
           + `${config.chromeExecutablePath.trim() || "(unset)"}`,
           {
-            providerId: QWEN_CODE_PROVIDER_ID,
+            providerId,
             providerCode: "CHROME_EXECUTABLE_MISSING",
           },
         );
@@ -820,7 +846,7 @@ export function createQwenCodeAuthController(
           headless,
           profileDir,
           viewport,
-          url: QWEN_CODE_ROOT_URL,
+          url: rootUrl,
         });
       } catch (error) {
         // The profile is owned from the moment it exists, even when the browser never came up.
@@ -829,7 +855,7 @@ export function createQwenCodeAuthController(
           "TRANSPORT_UNAVAILABLE",
           `The interactive sign-in browser could not start: ${nonSecretDiagnosticText(error)}`,
           {
-            providerId: QWEN_CODE_PROVIDER_ID,
+            providerId,
             providerCode: "BROWSER_LAUNCH_FAILED",
             cause: error,
           },
@@ -849,8 +875,8 @@ export function createQwenCodeAuthController(
       if (state === null || typeof state !== "object" || !captures.has(state as object)) {
         throw webChatError(
           "CONVERSATION_STATE_MISMATCH",
-          `The ${QWEN_CODE_PROVIDER_ID} sign-in controller was asked to store a capture it did not produce`,
-          { providerId: QWEN_CODE_PROVIDER_ID },
+          `The ${providerId} sign-in controller was asked to store a capture it did not produce`,
+          { providerId },
         );
       }
       const location = storeSession(state);
@@ -860,7 +886,7 @@ export function createQwenCodeAuthController(
         // A host hook must never turn a stored sign-in into a failed one: the session is already
         // durable. It is still named, because a stale in-process fact is a real problem.
         console.warn(
-          `[qwen-code] sign-in completion hook failed for ${QWEN_CODE_PROVIDER_ID} `
+          `[${providerId}] sign-in completion hook failed for ${providerId} `
           + `(${nonSecretDiagnosticText(error)}); the stored session is unaffected`,
         );
       }

@@ -15,6 +15,11 @@ import {
   qwenCodeCatalogueVisible,
   resolveQwenCodeProviderConfig,
 } from "./adapters/qwen-code/provider-config";
+import {
+  qwenChatCatalogueRows,
+  qwenChatCatalogueVisible,
+  resolveQwenChatProviderConfig,
+} from "./adapters/qwen-chat/provider-config";
 
 type JsonObject = Record<string, unknown>;
 
@@ -149,6 +154,13 @@ export function buildPublicModelCatalog(
   const rows: JsonObject[] = [...(chatgpt.models ?? [])];
   if (qwenCodeCatalogueVisible(config)) {
     rows.push(...qwenCodeCatalogueRows(resolveQwenCodeProviderConfig(config)).map(row => ({ ...row })));
+  }
+  // The second Qwen product (`chat.qwen.ai`) is a separate provider with its own modes. Its rows are
+  // advertised on the same terms as Qwen Code's: the operator configured the block, or a verified
+  // session exists. The two providers can both be present — they share an account family, never a
+  // conversation.
+  if (qwenChatCatalogueVisible(config)) {
+    rows.push(...qwenChatCatalogueRows(resolveQwenChatProviderConfig(config)).map(row => ({ ...row })));
   }
   return { object: "list", models: rows };
 }

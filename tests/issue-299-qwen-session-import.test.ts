@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Page } from "playwright-core";
 import { resolve } from "node:path";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -198,6 +198,12 @@ function countingProvider(provider: AuthImportProvider): { provider: AuthImportP
     stores: () => stores,
   };
 }
+
+// Every test in this file may store a verified session; pin the data home to a fresh temporary
+// directory for each one so a run can never write into the operator's real `<data dir>`.
+beforeEach(() => {
+  freshHome();
+});
 
 afterEach(() => {
   while (homes.length > 0) {
