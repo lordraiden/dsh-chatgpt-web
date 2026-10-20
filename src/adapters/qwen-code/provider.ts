@@ -120,6 +120,26 @@ export const QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS = 60_000;
 export const QWEN_CODE_AUTH_PROBE_TIMEOUT_MS = 15_000;
 
 /**
+ * How long the import probe waits for the app to restore its own session before it concludes that
+ * the page really still considers itself signed out.
+ *
+ * The app's own bundle (0.0.29) makes this a two-step boot, not a static page: a persisted
+ * `loggedOut` state is reset, then `GET https://auth.qwen.ai/api/v2/auths/refresh` — authenticated by
+ * the captured cookies — returns an `access_token`, which the token manager persists under
+ * {@link QWEN_CODE_ACCESS_TOKEN_STORAGE_KEY}. On a cold container that is a handful of network round
+ * trips, so the bound is generous; it is a deadline, never a sleep that makes the probe correct.
+ */
+export const QWEN_CODE_SESSION_HYDRATION_TIMEOUT_MS = 20_000;
+
+/**
+ * How often the hydration wait re-reads the page's own token state.
+ *
+ * A polling interval, not a correctness sleep: the probe is ready as soon as the app's own token
+ * exists and is unexpired, and gives up at {@link QWEN_CODE_SESSION_HYDRATION_TIMEOUT_MS}.
+ */
+export const QWEN_CODE_SESSION_HYDRATION_POLL_INTERVAL_MS = 250;
+
+/**
  * The non-secret headers every Qwen API request carries.
  *
  * They are exactly the client header set the recorded HAR shows on `GET /coder/api/v2/task/list`:

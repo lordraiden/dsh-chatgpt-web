@@ -12,19 +12,24 @@
  * `authorization: Bearer <token>` beside the cookies, and the token is what the app persists in
  * `localStorage` (`session-probe.ts` documents the evidence and the key). A cookie-only call from a
  * request context is therefore not "how the page does it" — that is precisely the live
- * `import_predicate_failed`. So this module:
+ * `import_predicate_failed`. The second live attempt carried a token state that said `loggedOut:
+ * true`: a stale entry the operator's fresh profile had written, not the session the cookies hold.
+ * So **the page, not the capture, is the authority for its own session**. This module:
  *
  * 1. opens the provider's own page in a context seeded with the capture (cookies **and**
  *    `localStorage`),
- * 2. reads the token **from the capture at call time**, assembles the app's own header shape, and
- * 3. issues the request from inside that page through the provider-neutral
+ * 2. waits — bounded, on the app's own observable state, never on a fixed sleep — for the app to
+ *    restore its session from those cookies and install a usable token (the app's bootstrap resets a
+ *    stale `loggedOut` state and refreshes its token with a cookie-authenticated call),
+ * 3. reads the token **from the live page** at call time, assembles the app's own header shape, and
+ * 4. issues the request from inside that page through the provider-neutral
  *    `requestInPageContext`, so origin, referer, cookies and `Sec-Fetch-*` are the page's.
  *
  * No token is ever read from code, configuration or a fixture, and none is logged or returned. When
- * the capture carries no usable token, the refusal says exactly that — and still reports what the
- * provider answered — instead of failing generically.
+ * the live page still has no usable token at the deadline, the refusal says exactly that — and still
+ * reports what the provider answered — instead of failing generically or blaming the capture.
  */
-import { chromium, type BrowserContextOptions } from "playwright-core";
+import { chromium, type BrowserContext, type BrowserContextOptions, type Page } from "playwright-core";
 import {
   QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
   QWEN_CODE_AUTH_VIEWPORT,
@@ -33,11 +38,12 @@ import {
 import { qwenCodeAuthLaunchArgs, qwenTaskListAuthenticated } from "./auth-controller";
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import {
-  createQwenPageTaskListSender,
-  probeQwenTaskListFromCapture,
+  probeQwenTaskListFromPageAfterHydration,
   qwenTaskListProbeRefusal,
   type QwenAccessTokenProblem,
   type QwenAccessTokenSource,
+  type QwenPageHydrationOptions,
+  type QwenPageSessionProgress,
   type QwenTaskListObservation,
 } from "./session-probe";
 
@@ -58,6 +64,8 @@ export interface QwenCodeImportedSessionProbeResult {
   readonly tokenSource?: QwenAccessTokenSource;
   /** Why no token was available, when that is the case. */
   readonly tokenProblem?: QwenAccessTokenProblem;
+  /** What the bounded wait for the app's own session restore saw, when it ran. */
+  readonly pageSession?: QwenPageSessionProgress;
 }
 
 /**
@@ -68,6 +76,24 @@ export interface QwenCodeImportedSessionProbeResult {
  * network access.
  */
 export type QwenCodeImportedSessionProbe = (storageState: unknown) => Promise<QwenCodeImportedSessionProbeResult>;
+
+/** One opened provider page, and the only handle that may close it. */
+export interface QwenCodeImportedSessionPage {
+  /** A page already on the provider's app shell, in the captured context. */
+  readonly page: Page;
+  /** Releases the page, its context and its browser (or whatever else the opener owns). Idempotent. */
+  close(): Promise<void>;
+}
+
+/**
+ * Open the provider's app on a captured session.
+ *
+ * A seam so the import tests drive the production composition with a simulated page; the default
+ * opener is the Chromium launch below. The opener must hand back a page that is already on the app.
+ */
+export type QwenCodeImportedSessionPageOpener = (
+  storageState: unknown,
+) => Promise<QwenCodeImportedSessionPage>;
 
 /** A verified imported session. Credential-free by construction. */
 export interface QwenCodeImportedSessionVerification {
@@ -80,23 +106,28 @@ export interface QwenCodeImportedSessionVerification {
 
 /** Options for {@link verifyQwenCodeImportedSession}. */
 export interface QwenCodeImportedSessionOptions {
-  /** The configured Chrome executable. Only read by the default probe. */
+  /** The configured Chrome executable. Only read by the default page opener. */
   readonly chromeExecutablePath?: string;
   /** Probe override; tests inject the same assembly with a recording sender, so no browser starts. */
   readonly probe?: QwenCodeImportedSessionProbe;
+  /** Page-opener override: tests supply a simulated page instead of launching Chromium. */
+  readonly openPage?: QwenCodeImportedSessionPageOpener;
+  /** The bounded wait for the app's own session restore. Defaults apply when omitted. */
+  readonly hydration?: QwenPageHydrationOptions;
 }
 
 /**
- * The default probe: open the provider's page on the captured state, then probe from inside it.
+ * The default page opener: launch Chromium on the captured state and open the app shell.
  *
  * Opening the page is what makes the request the page's own (same-origin `fetch`, the app's cookies
  * and `Referer`). It also applies the capture's `localStorage` to the origin, which is where the
- * provider keeps the token the API actually checks. Nothing about the page's markup is read.
+ * provider's token manager keeps its state — including a stale `loggedOut` entry, which the app's own
+ * bootstrap then repairs. Nothing about the page's markup is read.
  */
-async function probeWithBrowser(
+async function openBrowserPage(
   storageState: unknown,
   chromeExecutablePath: string,
-): Promise<QwenCodeImportedSessionProbeResult> {
+): Promise<QwenCodeImportedSessionPage> {
   const browser = await chromium.launch({
     executablePath: chromeExecutablePath,
     // The repository's established headless shape: `--headless=new` travels in `args` (see
@@ -104,44 +135,54 @@ async function probeWithBrowser(
     headless: false,
     args: qwenCodeAuthLaunchArgs({ headless: true, viewport: QWEN_CODE_AUTH_VIEWPORT }),
   });
+  let context: BrowserContext | undefined;
   try {
-    const context = await browser.newContext({
+    context = await browser.newContext({
       storageState: storageState as NonNullable<BrowserContextOptions["storageState"]>,
       viewport: { width: QWEN_CODE_AUTH_VIEWPORT.width, height: QWEN_CODE_AUTH_VIEWPORT.height },
     });
-    try {
-      const page = await context.newPage();
-      try {
-        await page.goto(QWEN_CODE_ROOT_URL, {
-          waitUntil: "domcontentloaded",
-          timeout: QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
-        });
-      } catch (error) {
-        // The capture is not judged here: failing to open the page is a transport failure, and it is
-        // reported as one instead of being dressed up as "the session is not authenticated".
-        throw new Error(
-          `the provider's page could not be opened to issue the probe: ${nonSecretDiagnosticText(error)}`,
-        );
-      }
-      const observation: QwenTaskListObservation = await probeQwenTaskListFromCapture(
-        storageState,
-        createQwenPageTaskListSender(page),
-      );
-      return {
-        status: observation.status,
-        payload: observation.payload,
-        ...(observation.sentAuthorization === undefined
-          ? {}
-          : { sentAuthorization: observation.sentAuthorization }),
-        ...(observation.tokenSource === undefined ? {} : { tokenSource: observation.tokenSource }),
-        ...(observation.tokenProblem === undefined ? {} : { tokenProblem: observation.tokenProblem }),
-      };
-    } finally {
-      await context.close();
-    }
-  } finally {
-    await browser.close();
+    const page = await context.newPage();
+    await page.goto(QWEN_CODE_ROOT_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
+    });
+    const openedContext = context;
+    return {
+      page,
+      async close() {
+        try { await openedContext.close(); } finally { await browser.close(); }
+      },
+    };
+  } catch (error) {
+    await context?.close().catch(() => {});
+    await browser.close().catch(() => {});
+    // The capture is not judged here: failing to open the page is a transport failure, and it is
+    // reported as one instead of being dressed up as "the session is not authenticated".
+    throw new Error(
+      `the provider's page could not be opened to issue the probe: ${nonSecretDiagnosticText(error)}`,
+    );
   }
+}
+
+/** Wait for the app's own session restore, probe from the live page, and flatten the observation. */
+async function probeOpenedPage(
+  page: Page,
+  hydration: QwenPageHydrationOptions | undefined,
+): Promise<QwenCodeImportedSessionProbeResult> {
+  const observation: QwenTaskListObservation = await probeQwenTaskListFromPageAfterHydration(
+    page,
+    hydration ?? {},
+  );
+  return {
+    status: observation.status,
+    payload: observation.payload,
+    ...(observation.sentAuthorization === undefined
+      ? {}
+      : { sentAuthorization: observation.sentAuthorization }),
+    ...(observation.tokenSource === undefined ? {} : { tokenSource: observation.tokenSource }),
+    ...(observation.tokenProblem === undefined ? {} : { tokenProblem: observation.tokenProblem }),
+    ...(observation.pageSession === undefined ? {} : { pageSession: observation.pageSession }),
+  };
 }
 
 /**
@@ -155,10 +196,20 @@ export async function verifyQwenCodeImportedSession(
   options: QwenCodeImportedSessionOptions = {},
 ): Promise<QwenCodeImportedSessionVerification> {
   const probe: QwenCodeImportedSessionProbe = options.probe ?? (async state => {
-    if (!options.chromeExecutablePath) {
-      throw new Error("no Chrome executable is available for the session check; configure chromeExecutablePath");
+    const openPage = options.openPage ?? (async (capture: unknown) => {
+      if (!options.chromeExecutablePath) {
+        throw new Error(
+          "no Chrome executable is available for the session check; configure chromeExecutablePath",
+        );
+      }
+      return await openBrowserPage(capture, options.chromeExecutablePath);
+    });
+    const opened = await openPage(state);
+    try {
+      return await probeOpenedPage(opened.page, options.hydration);
+    } finally {
+      await opened.close();
     }
-    return await probeWithBrowser(state, options.chromeExecutablePath);
   });
 
   const result = await probe(storageState);

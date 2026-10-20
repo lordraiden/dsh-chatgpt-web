@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { Page } from "playwright-core";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -13,7 +14,6 @@ import {
 } from "../src/auth-import";
 import { CHATGPT_WEB_AUTH_PROVIDER_ID } from "../src/adapters/chatgpt-web/auth-controller";
 import { QWEN_CODE_PROVIDER_ID } from "../src/adapters/qwen-code/provider";
-import { probeQwenTaskListFromCapture } from "../src/adapters/qwen-code/session-probe";
 import {
   captureChatGptWebHome,
   restoreChatGptWebHome,
@@ -45,8 +45,10 @@ const SECRET_QWEN_LOCAL = "SECRET-QWEN-LOCAL-STORAGE-VALUE";
 const SECRET_DEEPSEEK = "SECRET-DEEPSEEK-COOKIE-VALUE";
 const SECRET_DEEPSEEK_LOCAL = "SECRET-DEEPSEEK-LOCAL-STORAGE-VALUE";
 const SECRET_FOREIGN = "SECRET-FOREIGN-COOKIE-VALUE";
-/** The page's own token, in the capture. Asserted absent from every response body. */
+/** The page's own token, read from the live page. Asserted absent from every response body. */
 const SECRET_QWEN_PAGE_TOKEN = "SECRET-QWEN-PAGE-TOKEN-VALUE";
+/** A leftover token in a stale capture's state; it must never be what the probe sends. */
+const SECRET_QWEN_STALE_TOKEN = "SECRET-QWEN-STALE-TOKEN-VALUE";
 const SECRETS = [
   SECRET_CHATGPT,
   SECRET_QWEN,
@@ -55,6 +57,7 @@ const SECRETS = [
   SECRET_DEEPSEEK_LOCAL,
   SECRET_FOREIGN,
   SECRET_QWEN_PAGE_TOKEN,
+  SECRET_QWEN_STALE_TOKEN,
 ];
 
 const AUTHENTICATED_TASK_LIST = {
@@ -162,6 +165,36 @@ function qwenImport(
     },
   });
 }
+
+
+/**
+ * A simulated provider page.
+ *
+ * `states` is the page's own successive answers to the token read (the first entries model the app
+ * repairing a stale capture state), and every request the probe issues from the page is recorded.
+ */
+function simulatedQwenPage(
+  states: readonly (string | undefined)[],
+  payload: unknown,
+  sent: Record<string, string>[],
+) {
+  let readIndex = 0;
+  const page = {
+    evaluate: async (_fn: unknown, arg?: Record<string, unknown>) => {
+      if (typeof arg?.["accessKey"] === "string") {
+        const state = states[Math.min(readIndex, states.length - 1)];
+        readIndex += 1;
+        return { state, legacy: undefined };
+      }
+      sent.push({ ...(arg?.["headers"] as Record<string, string>) });
+      return { status: 200, contentType: "application/json", text: JSON.stringify(payload) };
+    },
+  } as unknown as Page;
+  return async () => ({ page, close: async () => {} });
+}
+
+/** Wait for the app itself, not a timer, but keep the suite fast. */
+const FAST_HYDRATION = { timeoutMs: 500, pollIntervalMs: 5 } as const;
 
 /** Wrap one descriptor so a test can prove the single writer was (or was not) reached. */
 function tracked(provider: AuthImportProvider): { provider: AuthImportProvider; stores: () => number } {
@@ -430,31 +463,36 @@ describe("session import — caller capture problems are 4xx with the pipeline's
     expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
   });
 
-  test("qwen-code: the capture's own token is what the probe sends, and a refusal reports the answer", async () => {
-    // The production assembly, with a recording sender instead of a browser: what is asserted is the
-    // header the service would send, built from the capture the caller handed it.
+  test("qwen-code: the live page's token is what the probe sends, and a refusal reports the answer", async () => {
+    // The production assembly with a simulated page instead of a browser: the header asserted is the
+    // one the service would send, built from the page the captured cookies opened — never from the
+    // stale token entry the capture happens to carry.
     const sent: Record<string, string>[] = [];
-    const tokenState = {
-      name: "qwen_access_token_state",
-      value: JSON.stringify({ token: SECRET_QWEN_PAGE_TOKEN, loggedOut: false, version: 1 }),
-    };
+    const liveState = JSON.stringify({
+      token: SECRET_QWEN_PAGE_TOKEN, loggedOut: false, version: 1, expiresAt: 1_900_000_000_000,
+    });
     const qwen = tracked(qwenCodeAuthImportProvider({
-      probe: state => probeQwenTaskListFromCapture(state, async request => {
-        sent.push({ ...request.headers });
-        return { status: 200, payload: ANONYMOUS_TASK_LIST };
-      }),
+      openPage: simulatedQwenPage([liveState], ANONYMOUS_TASK_LIST, sent),
+      hydration: FAST_HYDRATION,
     }));
     const server = serve([qwen.provider]);
     const result = await postImport(server, {
       provider: QWEN_CODE_PROVIDER_ID,
       storageState: {
         cookies: [cookie(".qwen.ai", SECRET_QWEN, 1_893_456_000)],
-        origins: [{ origin: "https://coder.qwen.ai", localStorage: [tokenState] }],
+        origins: [{
+          origin: "https://coder.qwen.ai",
+          localStorage: [{
+            name: "qwen_access_token_state",
+            value: JSON.stringify({ token: SECRET_QWEN_STALE_TOKEN, loggedOut: true, version: 1 }),
+          }],
+        }],
       },
     });
 
-    // The header the signed-in app itself sends.
+    // The header the signed-in app itself sends, from the live page.
     expect(sent[0]?.authorization).toBe(`Bearer ${SECRET_QWEN_PAGE_TOKEN}`);
+    expect(sent[0]?.authorization).not.toBe(`Bearer ${SECRET_QWEN_STALE_TOKEN}`);
     expect(sent[0]?.source).toBe("web");
 
     expect(result.status).toBe(400);
@@ -465,13 +503,11 @@ describe("session import — caller capture problems are 4xx with the pipeline's
     expectNoSecret(result.text);
   });
 
-  test("qwen-code: a capture with no page token gets the honest cookie-only refusal, not a generic one", async () => {
+  test("qwen-code: a page with no token gets the honest signed-out refusal, not a generic one", async () => {
     const sent: Record<string, string>[] = [];
     const qwen = tracked(qwenCodeAuthImportProvider({
-      probe: state => probeQwenTaskListFromCapture(state, async request => {
-        sent.push({ ...request.headers });
-        return { status: 200, payload: ANONYMOUS_TASK_LIST };
-      }),
+      openPage: simulatedQwenPage([undefined], ANONYMOUS_TASK_LIST, sent),
+      hydration: FAST_HYDRATION,
     }));
     const server = serve([qwen.provider]);
     const logged: string[] = [];
@@ -494,11 +530,11 @@ describe("session import — caller capture problems are 4xx with the pipeline's
     expect(sent[0]?.authorization).toBeUndefined();
     expect(result.status).toBe(400);
     expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
-    // The operator (and the log) sees what the provider answered and why the request was too thin.
+    // The operator (and the log) sees what the provider answered and the page's own verdict.
     expect(result.text).toContain("HTTP 200");
     expect(result.text).toContain("Unauthorized 401 Unauthorized");
-    expect(result.text).toContain("cookie-only");
-    expect(result.text).toContain("needs the token the page uses");
+    expect(result.text).toContain("does not consider itself signed in");
+    expect(result.text).toContain("sign in again");
     expect(qwen.stores()).toBe(0);
     expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
     expectNoSecret(result.text);
@@ -507,7 +543,7 @@ describe("session import — caller capture problems are 4xx with the pipeline's
     expect(refusalLog).toContain("auth_import_refused");
     expect(refusalLog).toContain("import_predicate_failed");
     expect(refusalLog).toContain("Unauthorized 401 Unauthorized");
-    expect(refusalLog).toContain("needs the token the page uses");
+    expect(refusalLog).toContain("does not consider itself signed in");
     expectNoSecret(refusalLog);
   });
 
