@@ -1539,6 +1539,12 @@ async function authImportRequest(
     }, { headers: controlCorsHeaders() });
   } catch (error) {
     if (isAuthImportRefusal(error)) {
+      // The refusal is the diagnosis: the operator sees it in the answer, and the next person to
+      // read the log sees the same status/provider answer (never a cookie or a token — the pipeline's
+      // message is already built from non-secret diagnostics).
+      console.warn(
+        `[chatgpt-web] auth_import_refused ${JSON.stringify({ provider: providerId, code: error.code, message: error.message })}`,
+      );
       return authImportErrorResponse(error.code, error.message, 400);
     }
     // The pipeline accepted the capture and the write (or an internal seam) failed. That is this

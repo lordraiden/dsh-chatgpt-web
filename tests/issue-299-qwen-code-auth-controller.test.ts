@@ -66,6 +66,9 @@ const STORAGE_STATE = {
 };
 
 /** The payload the captured service returns to an anonymous caller (status 200!). */
+/** The page token the fake page keeps in localStorage. Synthetic, and asserted absent from logs. */
+const PAGE_ACCESS_TOKEN = "SECRET-PAGE-ACCESS-TOKEN";
+
 const ANONYMOUS_TASK_LIST = {
   success: false,
   request_id: "request-fixture",
@@ -92,6 +95,8 @@ interface FakePage {
     gotos: string[];
     screenshots: Array<{ caret?: string; type?: string; quality?: number }>;
     probes: string[];
+    /** The headers each in-page probe actually assembled (issue #299's token fix). */
+    probeHeaders: Array<Record<string, string>>;
   };
 }
 
@@ -99,13 +104,27 @@ function fakePage(options: {
   readonly viewport?: { width: number; height: number };
   readonly closed?: () => boolean;
   readonly probeResponse?: unknown;
+  /** The page's own localStorage token state: what the app's token manager would have written. */
+  readonly accessToken?: string | null;
   /** Fail the Nth `mouse.move` (1-based), which is how a page that dies mid-drag is modelled. */
   readonly failMoveAt?: number;
 } = {}): FakePage {
   const viewport = options.viewport ?? { width: 320, height: 480 };
   const calls: FakePage["calls"] = {
     clicks: [], moves: [], downs: 0, ups: 0, types: [], keys: [], wheels: [], gotos: [], screenshots: [], probes: [],
+    probeHeaders: [],
   };
+  // The page's own token state, exactly as the captured app persists it (JSON under the key the
+  // provider names). The controller must read it at call time and never keep or print it.
+  const storedTokenState = options.accessToken === null
+    ? undefined
+    : JSON.stringify({
+      token: options.accessToken ?? PAGE_ACCESS_TOKEN,
+      expiresAt: Date.now() + 3_600_000,
+      sessionId: "session-fixture",
+      loggedOut: false,
+      version: 1,
+    });
   let moves = 0;
   const page = {
     viewportSize: () => viewport,
@@ -134,6 +153,24 @@ function fakePage(options: {
       return Buffer.from(ONE_BY_ONE_PNG);
     },
     goto: async (url: string) => { calls.gotos.push(url); },
+    // The controller's probe is two in-page operations now: read the page's token, then fetch the
+    // API from the same-origin page. The fake answers both by their argument shape.
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      const params = (arg ?? {}) as Record<string, unknown>;
+      if (typeof params["accessKey"] === "string") {
+        return { state: storedTokenState, legacy: undefined };
+      }
+      if (typeof params["url"] === "string") {
+        calls.probes.push(params["url"]);
+        calls.probeHeaders.push({ ...(params["headers"] as Record<string, string>) });
+        return {
+          status: 200,
+          contentType: "application/json",
+          text: JSON.stringify(options.probeResponse ?? AUTHENTICATED_TASK_LIST),
+        };
+      }
+      throw new Error("unexpected page.evaluate in the fake page");
+    },
     isClosed: () => options.closed?.() ?? false,
     request: {
       get: async (url: string) => {
@@ -358,6 +395,13 @@ describe("issue #299 — the state machine and the structural authenticated chec
     expect(harness.fake.calls.probes.length).toBeGreaterThanOrEqual(1);
     // Same-origin API, not a page scrape.
     expect(harness.fake.calls.probes[0]).toBe("https://coder.qwen.ai/coder/api/v2/task/list?page=1");
+    // The request is the page's own: the token the app keeps in localStorage rides as a bearer.
+    expect(harness.fake.calls.probeHeaders[0]).toMatchObject({
+      accept: "application/json",
+      source: "web",
+      version: "0.0.29",
+      authorization: `Bearer ${PAGE_ACCESS_TOKEN}`,
+    });
     expect(session.detail?.()).toContain("did not authenticate");
     // The last probe's own answer is part of the failure, not just a bare timeout.
     expect(session.detail?.()).toContain("Unauthorized");
@@ -371,6 +415,10 @@ describe("issue #299 — the state machine and the structural authenticated chec
     const harness = makeController({ fake: fakePage({ probeResponse: AUTHENTICATED_TASK_LIST }) });
     const session = await harness.controller.startAuth();
     await waitForState(session, "captured");
+
+    // The header the page's own client would send, and the token never leaves the request.
+    expect(harness.fake.calls.probeHeaders[0]?.authorization).toBe(`Bearer ${PAGE_ACCESS_TOKEN}`);
+    expect(session.detail?.() ?? "").not.toContain(PAGE_ACCESS_TOKEN);
 
     const capture = await session.capture();
     expect(capture.kind).toBe("browser-storage");

@@ -16,10 +16,12 @@
  *   never the managed runtime profile, and removed on *every* exit path: capture, cancel, timeout,
  *   input failure, and a launch that never came up.
  * - **The completion decision is an authenticated API call, not a page scrape.** `GET
- *   /coder/api/v2/task/list` through the browser context: an anonymous caller gets HTTP 200 with
- *   `{ success: false, data: { code: "Unauthorized" } }`, so the check inspects `success`, not the
- *   status code. Text scraping was rejected — the SPA's signed-in and signed-out shells differ by
- *   more than a string this module should own.
+ *   /coder/api/v2/task/list`, issued **from inside the provider's page** with the `authorization`
+ *   header the page itself builds from its own localStorage token (see `session-probe.ts` and
+ *   `doc/qwen-code.md` §4). Cookies alone are not how this provider authenticates: an anonymous
+ *   caller gets HTTP 200 with `{ success: false, data: { code: "Unauthorized" } }`, so the check
+ *   inspects `success`, not the status code. Text scraping was rejected — the SPA's signed-in and
+ *   signed-out shells differ by more than a string this module should own.
  * - **No stealth.** The launch uses the repository's established headless shape (`--headless=new` in
  *   `args`, never `headless: true`) and the anti-automation pair both existing launch sites use. It
  *   deliberately does **not** override the user agent: a live probe of this provider showed the plain
@@ -57,15 +59,22 @@ import {
   QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS,
   QWEN_CODE_AUTH_POLL_INTERVAL_MS,
   QWEN_CODE_AUTH_POLL_TIMEOUT_MS,
-  QWEN_CODE_AUTH_PROBE_TIMEOUT_MS,
   QWEN_CODE_AUTH_VIEWPORT,
   QWEN_CODE_PROVIDER_ID,
   QWEN_CODE_ROOT_URL,
   QWEN_CODE_TASK_LIST_PATH,
-  qwenCodeApiHeaders,
-  qwenCodeUrl,
 } from "./provider";
+import {
+  probeQwenTaskListFromPage,
+  qwenTaskListAuthenticated,
+  qwenTaskListProbeRefusal,
+  qwenTaskListRefusal,
+} from "./session-probe";
 import { sanitizeQwenStorageState, storeQwenSession } from "./session-store";
+
+// The task-list predicates and their refusal vocabulary live with the probe that reads the answer
+// (`session-probe.ts`); re-exported here so this module's long-standing public surface is unchanged.
+export { qwenTaskListAuthenticated, qwenTaskListRefusal };
 
 /** The frame geometry the sign-in browser is launched with (re-exported for the surface). */
 export type QwenCodeAuthViewport = { readonly width: number; readonly height: number };
@@ -254,49 +263,22 @@ async function defaultOpenBrowser(launch: QwenCodeAuthBrowserLaunch): Promise<Qw
 }
 
 /**
- * Whether a `task/list` payload means "authenticated".
+ * The default probe: the one authenticated endpoint, issued **from inside the provider's page** with
+ * the token the page itself keeps (issue #299).
  *
- * The captured service answers an anonymous caller HTTP **200** with `success:false` and
- * `data.code: "Unauthorized"`, so the HTTP status alone cannot decide this. A signed-in caller gets
- * `success:true` and a `data` array.
+ * The recorded HAR settles how this provider authenticates: the app's API calls carry
+ * `authorization: Bearer <token>` beside the cookies, and that token is what its own token manager
+ * persists in `localStorage` (see `session-probe.ts`). A cookie-only call from a request context is
+ * not the page's behaviour — it is exactly the `import_predicate_failed` shape — so the probe reads
+ * the page's token at call time, assembles the app's header shape, and runs the request in the page's
+ * browsing context. The token is never logged, never returned, and never taken from a constant.
  */
-export function qwenTaskListAuthenticated(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  const record = payload as Record<string, unknown>;
-  return record["success"] === true && Array.isArray(record["data"]);
-}
-
-/** The non-secret reason a probe payload means "not authenticated" (diagnositics only). */
-export function qwenTaskListRefusal(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== "object") return "an unrecognised body";
-  const record = payload as Record<string, unknown>;
-  const data = (record["data"] && typeof record["data"] === "object" ? record["data"] : {}) as Record<string, unknown>;
-  const code = data["code"];
-  const details = data["details"];
-  if (typeof code === "string" && typeof details === "string") return `${code} ${details}`;
-  if (typeof code === "string") return code;
-  return "an unrecognised body";
-}
-
-/** The default probe: one authenticated endpoint, through the browser context's request facility. */
 async function defaultProbeSession(page: Page): Promise<QwenCodeSessionProbeResult> {
-  const response = await page.request.get(qwenCodeUrl(QWEN_CODE_TASK_LIST_PATH, { page: "1" }), {
-    headers: qwenCodeApiHeaders(),
-    timeout: QWEN_CODE_AUTH_PROBE_TIMEOUT_MS,
-  });
-  const status = response.status();
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = undefined;
+  const observation = await probeQwenTaskListFromPage(page);
+  if (!qwenTaskListAuthenticated(observation.payload)) {
+    throw new Error(qwenTaskListProbeRefusal(observation));
   }
-  if (!qwenTaskListAuthenticated(payload)) {
-    throw new Error(
-      `the task list answered HTTP ${status} with ${qwenTaskListRefusal(payload)}`,
-    );
-  }
-  return { authenticated: true, probe: "task-list", status };
+  return { authenticated: true, probe: "task-list", status: observation.status };
 }
 
 function positiveInteger(value: number, label: string): number {

@@ -13,6 +13,7 @@ import {
 } from "../src/auth-import";
 import { CHATGPT_WEB_AUTH_PROVIDER_ID } from "../src/adapters/chatgpt-web/auth-controller";
 import { QWEN_CODE_PROVIDER_ID } from "../src/adapters/qwen-code/provider";
+import { probeQwenTaskListFromCapture } from "../src/adapters/qwen-code/session-probe";
 import {
   captureChatGptWebHome,
   restoreChatGptWebHome,
@@ -44,6 +45,8 @@ const SECRET_QWEN_LOCAL = "SECRET-QWEN-LOCAL-STORAGE-VALUE";
 const SECRET_DEEPSEEK = "SECRET-DEEPSEEK-COOKIE-VALUE";
 const SECRET_DEEPSEEK_LOCAL = "SECRET-DEEPSEEK-LOCAL-STORAGE-VALUE";
 const SECRET_FOREIGN = "SECRET-FOREIGN-COOKIE-VALUE";
+/** The page's own token, in the capture. Asserted absent from every response body. */
+const SECRET_QWEN_PAGE_TOKEN = "SECRET-QWEN-PAGE-TOKEN-VALUE";
 const SECRETS = [
   SECRET_CHATGPT,
   SECRET_QWEN,
@@ -51,6 +54,7 @@ const SECRETS = [
   SECRET_DEEPSEEK,
   SECRET_DEEPSEEK_LOCAL,
   SECRET_FOREIGN,
+  SECRET_QWEN_PAGE_TOKEN,
 ];
 
 const AUTHENTICATED_TASK_LIST = {
@@ -424,6 +428,87 @@ describe("session import — caller capture problems are 4xx with the pipeline's
     expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
     expect(qwen.stores()).toBe(0);
     expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
+  });
+
+  test("qwen-code: the capture's own token is what the probe sends, and a refusal reports the answer", async () => {
+    // The production assembly, with a recording sender instead of a browser: what is asserted is the
+    // header the service would send, built from the capture the caller handed it.
+    const sent: Record<string, string>[] = [];
+    const tokenState = {
+      name: "qwen_access_token_state",
+      value: JSON.stringify({ token: SECRET_QWEN_PAGE_TOKEN, loggedOut: false, version: 1 }),
+    };
+    const qwen = tracked(qwenCodeAuthImportProvider({
+      probe: state => probeQwenTaskListFromCapture(state, async request => {
+        sent.push({ ...request.headers });
+        return { status: 200, payload: ANONYMOUS_TASK_LIST };
+      }),
+    }));
+    const server = serve([qwen.provider]);
+    const result = await postImport(server, {
+      provider: QWEN_CODE_PROVIDER_ID,
+      storageState: {
+        cookies: [cookie(".qwen.ai", SECRET_QWEN, 1_893_456_000)],
+        origins: [{ origin: "https://coder.qwen.ai", localStorage: [tokenState] }],
+      },
+    });
+
+    // The header the signed-in app itself sends.
+    expect(sent[0]?.authorization).toBe(`Bearer ${SECRET_QWEN_PAGE_TOKEN}`);
+    expect(sent[0]?.source).toBe("web");
+
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
+    expect(result.text).toContain("Unauthorized 401 Unauthorized");
+    expect(result.text).toContain("carried the page's own token and was still refused");
+    expect(qwen.stores()).toBe(0);
+    expectNoSecret(result.text);
+  });
+
+  test("qwen-code: a capture with no page token gets the honest cookie-only refusal, not a generic one", async () => {
+    const sent: Record<string, string>[] = [];
+    const qwen = tracked(qwenCodeAuthImportProvider({
+      probe: state => probeQwenTaskListFromCapture(state, async request => {
+        sent.push({ ...request.headers });
+        return { status: 200, payload: ANONYMOUS_TASK_LIST };
+      }),
+    }));
+    const server = serve([qwen.provider]);
+    const logged: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { logged.push(args.join(" ")); };
+    let result;
+    try {
+      result = await postImport(server, {
+        provider: QWEN_CODE_PROVIDER_ID,
+        storageState: {
+          cookies: [cookie(".qwen.ai", SECRET_QWEN, 1_893_456_000)],
+          origins: [{ origin: "https://coder.qwen.ai", localStorage: [{ name: "theme", value: "dark" }] }],
+        },
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    const refusalLog = logged.join("\n");
+
+    expect(sent[0]?.authorization).toBeUndefined();
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
+    // The operator (and the log) sees what the provider answered and why the request was too thin.
+    expect(result.text).toContain("HTTP 200");
+    expect(result.text).toContain("Unauthorized 401 Unauthorized");
+    expect(result.text).toContain("cookie-only");
+    expect(result.text).toContain("needs the token the page uses");
+    expect(qwen.stores()).toBe(0);
+    expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
+    expectNoSecret(result.text);
+
+    // The same evidence reaches the log, so the next person diagnoses from it instead of guessing.
+    expect(refusalLog).toContain("auth_import_refused");
+    expect(refusalLog).toContain("import_predicate_failed");
+    expect(refusalLog).toContain("Unauthorized 401 Unauthorized");
+    expect(refusalLog).toContain("needs the token the page uses");
+    expectNoSecret(refusalLog);
   });
 
   test("a ChatGPT predicate that fails is the same import_predicate_failed refusal", async () => {

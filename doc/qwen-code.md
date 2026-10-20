@@ -123,7 +123,9 @@ knowledge from the capture, kept inside the Qwen adapter.
 | --- | --- |
 | Provider identity (`qwen-code`), paths, defaults, headers | `src/adapters/qwen-code/provider.ts` |
 | Sign-in controller over the neutral `ProviderAuthController` | `src/adapters/qwen-code/auth-controller.ts` |
-| Structural authenticated check (`task/list`, `success === true`) | same module (`qwenTaskListAuthenticated`) |
+| Structural authenticated check (`task/list`, `success === true`) | `src/adapters/qwen-code/session-probe.ts` (`qwenTaskListAuthenticated`, re-exported by the controller) |
+| The page's own token (`authorization` header) + the probe request | same module (`session-probe.ts`); evidence in §4.1 |
+| Provider-neutral "issue the request from inside the page" | `src/adapters/page-context-request.ts` |
 | Capture, scoping and the verified marker | `src/adapters/qwen-code/session-store.ts` (`providers/qwen-code/storage-state.json`) |
 | SSE parsing + the three termination signals | `src/adapters/qwen-code/sse.ts` |
 | One browser-network turn (`task/new` → `completions`) | `src/adapters/qwen-code/network-turn.ts` |
@@ -143,16 +145,75 @@ second registration entry and the shared sanitizer extraction.
   physical/logical account check are slice 2; nothing was recorded here.
 - **No conversation identity, affinity or retention.** The chat id returned by `task/new` is used for
   one turn and then dropped, as the slice requires; it is never the caller's conversation identity.
-- **One open question for slice 2.** The captured web app also sends an `authorization` header alongside
-  cookies. The slice's probe and turn both go through the browser context (cookies from the session, no
-  literal credential), so if a real signed-in session answers `Unauthorized` to the cookie-only call,
-  the fix is to issue the request the way the page does — from the page, with whatever the page itself
-  attaches — not to hard-code a token. The live turn in §5 is what settles it.
+- **Resolved after the live import (below): the `authorization` header.** The question this slice left
+  open — "the app also sends an `authorization` header; what if a cookie-only call is refused?" — was
+  answered by the operator's real sign-in: the import probe *was* refused (`import_predicate_failed`).
+  The mechanism and its evidence are in §4.1; the probe and the turn path now issue the request the way
+  the page does.
+
+### 4.1 What the app actually sends, and the fix (issue #299, second pass)
+
+The live result that defined this work: the operator signed in to Qwen Code in a real Firefox window,
+the Harness plugin captured **14 cookies and 15 localStorage keys** for `coder.qwen.ai`, POSTed them to
+`POST /v1/control/auth/import`, and the service answered **`import_predicate_failed`** — its probe
+`GET /coder/api/v2/task/list` was refused, so nothing was stored. The capture was fine. The
+authentication of the probe was not.
+
+**Evidence, from the recorded HAR of the signed-in app** (`coder.qwen.ai` archive, 2026-10-19) and the
+app's own bundle (`https://assets.alicdn.com/g/qwenweb/qwen-coder-fe/0.0.29/js/main.js`, the exact
+version the client sends in its `version` header):
+
+| Fact | Observation |
+| --- | --- |
+| The API call that matters | `GET /coder/api/v2/task/list?page=1` → HTTP 200, `{"success":true,"data":[…]}` for the signed-in app |
+| Headers on **every** API call | `authorization: Bearer <token>` (281-character, JWT-shaped) **plus** `cookie`, `accept: application/json`, `content-type: application/json`, `source: web`, `version: 0.0.29`, `bx-v: 2.5.37`, `x-request-id: <uuid>` |
+| Request origin | `sec-fetch-site: same-origin`, `referer` the app page — the call is made *by the page* |
+| Where the token comes from | the bundle's axios interceptor does `t.set("Authorization", \`Bearer ${r}\`)` with `r = Zu.getAccessToken()`; the token manager persists it as JSON under `localStorage["qwen_access_token_state"]` (`{token, expiresAt, sessionId, loggedOut, version, stateId, updatedAt, sourceId}`), migrating the legacy `token` + `at_expire_time` pair |
+| A cookie-only caller | HTTP 200 with `{"success":false,"data":{"code":"Unauthorized","details":"401 Unauthorized"}}` — the status code cannot decide it |
+
+So the refusal was not a bug in the capture: cookies are necessary but not sufficient, and the request
+that failed was one the page never makes.
+
+**What was implemented** (`src/adapters/qwen-code/session-probe.ts`):
+
+1. **The token is read from the capture at call time** — `localStorage["qwen_access_token_state"]`
+   (or its legacy `token` entry) in the captured storage state. Never a constant, a config value or a
+   fixture, and never logged.
+2. **The header shape is the app's** — `authorization: Bearer <token>` plus the same client headers
+   (`qwenCodeApiHeaders`) and a per-call `x-request-id`, exactly the recorded set.
+3. **The request is issued from inside the provider's page** — `src/adapters/page-context-request.ts`
+   runs `fetch` in the page's browsing context on a context seeded with the capture, so the request is
+   same-origin and carries the page's `Origin`, `Referer`, cookies and `Sec-Fetch-*`. That module is
+   provider-neutral; the token key and header shape stay in the Qwen adapter.
+4. **The same approach is used by the sign-in controller** (`defaultProbeSession`, reading the token
+   from the page it already holds) **and by the turn facility** (`createQwenPageRequestFacility`), so a
+   session that verifies can also run a turn.
+5. **The capture script** (`scripts/qwen-storage-state.mjs`) now reads the app page's `localStorage`
+   over the same DevTools connection and writes it into the capture's `origins`; without that, the
+   documented capture path would produce a file the probe (correctly) refuses.
+
+**The honest refusal when the token is missing.** A capture that authenticates cookies but carries no
+usable token is refused with its cause, not a generic failure:
+
+```text
+The capture could not be verified against the Qwen Code login surface, so nothing was written: the task
+list answered HTTP 200 with Unauthorized 401 Unauthorized; the provider's API rejected the cookie-only
+request: it needs the token the page uses (the capture has no token entry at all) — sign in again so the
+capture includes it, then re-export and re-import
+```
+
+If a token *was* sent and the provider still refused it, the refusal says that instead ("the request
+carried the page's own token and was still refused, so the session itself is no longer accepted").
+Either way the operator and the log see the provider's status and its own code (or a bounded body
+snippet), and never a cookie, a storage value or the token.
 
 ## 5. The manual live probe (operator step)
 
 The script is `scripts/probe-qwen-headless.mjs`. It starts nothing but a disposable browser profile and
-prints no cookie, token or storage state.
+prints no cookie, token or storage state. Its authenticated check is issued **from inside the page with
+the page's own `authorization` header** (read from `localStorage` at call time), exactly like the
+controller, and `--storage-state` therefore needs a capture that includes the app's local storage — both
+the repository's capture script and the Harness plugin write one.
 
 ```bash
 # 1. The sign-in surface verdict (fresh profile, no account needed):
@@ -268,13 +329,15 @@ What the import validates, and what it refuses **before anything is written**:
 | no cookies at all | `the capture contains no cookies at all; open https://coder.qwen.ai …` |
 | cookies, but none for this provider (renamed/missing domain) | `the capture contains no coder.qwen.ai cookies (every cookie in it belongs to another domain)` |
 | the provider's cookies all expired | `every coder.qwen.ai cookie in the capture has expired; sign in again …` |
-| `task/list` answers anything but `success:true` (including HTTP 200 + `success:false`, which is what an anonymous caller gets) | `The capture could not be verified against the Qwen Code login surface, so nothing was written: the task list answered HTTP 200 with Unauthorized 401 Unauthorized; sign in to Qwen Code again …` |
+| `task/list` answers anything but `success:true` when the capture carried the token | `… the task list answered HTTP 200 with Unauthorized 401 Unauthorized; the request carried the page's own token and was still refused, so the session itself is no longer accepted: sign in again …` |
+| `task/list` answers anything but `success:true` and the capture has **no** token (cookie-only) | `… the provider's API rejected the cookie-only request: it needs the token the page uses (the capture has no token entry at all) — sign in again so the capture includes it, then re-export and re-import` |
 
 A file that passes every step is stored through `storeProviderSession`, the deployment's single
 session writer, exactly like a sign-in through the page: `providers/qwen-code/storage-state.json`
 (inside the container, `/data/providers/qwen-code/storage-state.json`) plus
 `storage-state.json.verified.json`, both written atomically with mode 0600. The sanitizer keeps only
-`qwen.ai` / `aliyun.com` cookies and the `coder.qwen.ai` / `auth.qwen.ai` storage origins.
+`qwen.ai` / `aliyun.com` cookies and the `coder.qwen.ai` / `auth.qwen.ai` storage origins — including
+the local storage entry that holds the token, which the probe needs.
 
 `auth import` runs in its own short-lived process. Nothing consumes this file yet — the Qwen driver
 and turn route are slice 2 (§4) — so there is no process to restart today; once the route exists, the
