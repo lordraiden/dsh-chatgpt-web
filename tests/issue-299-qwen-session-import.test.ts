@@ -19,7 +19,10 @@ import {
   type AuthImportProvider,
 } from "../src/auth-import";
 import { QWEN_CODE_COOKIE_DOMAINS } from "../src/adapters/qwen-code/session-store";
-import { QWEN_CODE_PROVIDER_ID } from "../src/adapters/qwen-code/provider";
+import {
+  QWEN_CODE_PROVIDER_ID,
+  QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS,
+} from "../src/adapters/qwen-code/provider";
 import {
   awaitQwenPageSession,
   probeQwenTaskListFromPageAfterHydration,
@@ -28,6 +31,7 @@ import {
   qwenTaskListProbeRefusal,
   qwenTaskListRefusal,
   qwenTaskListRequest,
+  qwenTaskListVerdict,
 } from "../src/adapters/qwen-code/session-probe";
 import { waitForPageHydration } from "../src/adapters/page-hydration";
 import { defaultConfig, saveConfig } from "../src/config";
@@ -1045,5 +1049,266 @@ describe("issue #299 — an unrecognised task-list answer is reported, never dis
     expect(refusal).toContain("[redacted]");
     // The non-secret part of the envelope is still visible.
     expect(refusal).toContain("unfamiliar envelope");
+  });
+});
+
+/**
+ * Issue #299, fourth pass — a transport bound must not decide authentication.
+ *
+ * The live failure this covers, verbatim: the session was authenticated, `task/list` answered
+ * `{"success":true,"data":[…]}` with `content-type: application/json`, the body was the account's chat
+ * list, it exceeded the page transport's 20 000-character bound, arrived cut mid-array, `JSON.parse`
+ * threw, and the import refused a perfectly good session as a "non-JSON body".
+ *
+ * These tests drive the **production transport** — the real page code from `page-context-request.ts`,
+ * executed against a stubbed `fetch` — so the cut, the reading and the verdict are the ones a real
+ * browser produces, with no browser and no network.
+ */
+describe("issue #299 — a cut answer must not decide authentication", () => {
+  /** A JWT-shaped synthetic token. It must never appear in a refusal. */
+  const CUT_ENVELOPE_TOKEN =
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjdXQtZW52ZWxvcGUifQ.c2lnbmF0dXJlLXBsYWNlaG9sZGVy";
+
+  /** One chat-list entry, in the recorded shape. Ids and titles are synthetic. */
+  function chatEntry(index: number): Record<string, unknown> {
+    return {
+      id: `chat-${index}`,
+      title: `Conversation ${index}`,
+      created_at: 1_700_000_000 + index,
+      updated_at: 1_700_000_100 + index,
+      models: ["qwen3-coder-plus"],
+      chat_type: "code",
+      sub_chat_type: "web_dev",
+    };
+  }
+
+  /** The endpoint's own envelope `{success, request_id, data:[…]}`, sized like a real chat list. */
+  function chatListBody(entries: number, success = true): string {
+    return JSON.stringify({
+      success,
+      request_id: "request-fixture",
+      data: Array.from({ length: entries }, (_, index) => chatEntry(index)),
+    });
+  }
+
+  /**
+   * A page whose `evaluate` **actually runs** the code the adapter hands it.
+   *
+   * That is what makes these tests test the transport: the real streaming read, the real bound and the
+   * real `truncated` flag, against one stub answer instead of a network. The token read is served from
+   * the same page so the production assembly (`wait`, live token, request) runs unmodified.
+   */
+  function answeringPage(options: {
+    readonly token?: string;
+    readonly body: string;
+    readonly status?: number;
+    readonly contentType?: string;
+  }): Page {
+    const state = options.token === undefined ? undefined : tokenStateEntry(options.token).value;
+    return {
+      evaluate: async (fn: (arg: Record<string, unknown>) => Promise<unknown>, arg?: Record<string, unknown>) => {
+        if (typeof arg?.["accessKey"] === "string") return { state, legacy: undefined };
+        if (typeof arg?.["url"] === "string") {
+          const previous = globalThis.fetch;
+          globalThis.fetch = (async () => new Response(options.body, {
+            status: options.status ?? 200,
+            headers: { "content-type": options.contentType ?? "application/json" },
+          })) as unknown as typeof fetch;
+          try {
+            return await fn(arg);
+          } finally {
+            globalThis.fetch = previous;
+          }
+        }
+        throw new Error("the simulated page does not implement this evaluation");
+      },
+    } as unknown as Page;
+  }
+
+  /** The live case: an account-sized chat list, cut by the transport mid-array. */
+  const FULL_CHAT_LIST = chatListBody(500);
+
+  test("the fixture is larger than the bound, so the transport really has to cut it", () => {
+    // Guards the test itself: a smaller fixture would arrive whole and stop exercising the cut.
+    expect(FULL_CHAT_LIST.length).toBeGreaterThan(QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS);
+  });
+
+  test(`a cut '{"success":true,"data":[…]}' answer authenticates and stores exactly once`, async () => {
+    const home = freshHome();
+    const directory = freshDirectory("issue-299-cut-truth-");
+    const live = tokenStateEntry(LIVE_PAGE_TOKEN);
+    const page = answeringPage({ token: LIVE_PAGE_TOKEN, body: FULL_CHAT_LIST });
+
+    // The transport reading, observed directly: the body was cut, so it does not parse — and that is
+    // precisely the state the old code reported as "the provider answered with a non-JSON body".
+    const observation = await probeQwenTaskListFromPageAfterHydration(page, FAST_HYDRATION);
+    expect(observation.truncated).toBe(true);
+    expect(observation.bodyText?.length).toBe(QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS);
+    // The recorded envelope order, and the array cut mid-way.
+    expect(FULL_CHAT_LIST.startsWith('{"success":true,"request_id":"request-fixture","data":[{"id":"chat-0"'))
+      .toBe(true);
+    // The sender keeps the unparseable prefix as text (it always did), so the old predicate could only
+    // ever answer "not authenticated" for this answer.
+    expect(observation.payload).toBe(observation.bodyText);
+    expect(typeof observation.payload).toBe("string");
+    expect(qwenTaskListVerdict(observation)).toEqual({ authenticated: true, source: "truncated-envelope" });
+
+    const { provider, stores } = countingProvider(qwenCodeAuthImportProvider({
+      openPage: openerFor(page),
+      hydration: FAST_HYDRATION,
+    }));
+    const result = await importProviderSession({
+      provider,
+      from: writeState(directory, captureWithTokenState(live)),
+      now: () => NOW,
+    });
+
+    expect(result.verified).toBe(true);
+    expect(stores()).toBe(1);
+    expect(result.path).toBe(join(home, "providers", QWEN_CODE_PROVIDER_ID, "storage-state.json"));
+    // Which reading won is said out loud, not hidden behind "success:true": in the operator's line,
+    // and in the note the service log records beside `verified`.
+    expect(result.detail).toContain("success:true");
+    expect(result.detail).toContain(`cut at ${QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS} characters`);
+    expect(result.reading).toBe(
+      `body truncated at ${QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS} chars; the envelope reports success:true`,
+    );
+    expect(JSON.stringify(result)).not.toContain(LIVE_PAGE_TOKEN);
+  });
+
+  test("the same shape with success:false refuses with the provider's reason, storing nothing", async () => {
+    const home = freshHome();
+    const directory = freshDirectory("issue-299-cut-refused-");
+    const live = tokenStateEntry(LIVE_PAGE_TOKEN);
+    // An account-sized body whose envelope refuses: the prefix is the diagnosis, the size is the cut.
+    const body = JSON.stringify({
+      success: false,
+      request_id: "request-fixture",
+      data: { code: "Unauthorized", details: "401 Unauthorized" },
+      echo: "x".repeat(QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS + 1_000),
+    });
+    const page = answeringPage({ token: LIVE_PAGE_TOKEN, body });
+
+    const { provider, stores } = countingProvider(qwenCodeAuthImportProvider({
+      openPage: openerFor(page),
+      hydration: FAST_HYDRATION,
+    }));
+    const failure = await importProviderSession({
+      provider,
+      from: writeState(directory, captureWithTokenState(live)),
+      now: () => NOW,
+    }).then(() => undefined, error => error as Error);
+
+    expect(failure?.message).toContain("could not be verified against the Qwen Code login surface");
+    // The provider's own reason, read from the cut envelope's prefix.
+    expect(failure?.message).toContain("Unauthorized 401 Unauthorized");
+    // ...and the fact that decided it: the cut, and what the envelope said.
+    expect(failure?.message).toContain(`body truncated at ${QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS} chars`);
+    expect(failure?.message).toContain("the envelope reports success:false");
+    // The pipeline's inner diagnostic bound is 300 characters; the composed detail fits inside it, so
+    // the sanitizer never cuts the diagnosis and the log line carries the same evidence as the answer.
+    const refusalPrefix = "The capture could not be verified against the Qwen Code login surface, "
+      + "so nothing was written: ";
+    expect(failure!.message.length).toBeLessThanOrEqual(refusalPrefix.length + 300);
+    expect(failure?.message).not.toContain(LIVE_PAGE_TOKEN);
+    expect(stores()).toBe(0);
+    expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
+  });
+
+  test("a cut body with no recognisable envelope refuses honestly, naming the cut and keeping the snippet redacted", () => {
+    // Starts with a JSON object, but its first member is the list: no readable top-level `success`.
+    const body = JSON.stringify({
+      data: Array.from({ length: 700 }, (_, index) => ({ id: `chat-${index}`, token: CUT_ENVELOPE_TOKEN })),
+    });
+    expect(body.length).toBeGreaterThan(QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS);
+
+    // Exactly what the transport hands the probe for that body: cut at the bound, unparseable.
+    const cut = body.slice(0, QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS);
+    const refusal = qwenTaskListProbeRefusal({
+      status: 200,
+      payload: cut,
+      contentType: "application/json",
+      bodyText: cut,
+      truncated: true,
+      sentAuthorization: true,
+    });
+
+    expect(refusal).toContain("HTTP 200");
+    expect(refusal).toContain("content-type: application/json");
+    // It names the cut as a cut, at the bound, instead of calling a JSON body "non-JSON".
+    expect(refusal).toContain(`cut at ${QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS} characters`);
+    expect(refusal).not.toContain("non-JSON body");
+    expect(refusal).not.toContain(CUT_ENVELOPE_TOKEN);
+    expect(refusal).toContain("[redacted]");
+    expect(refusal.length).toBeLessThanOrEqual(300);
+  });
+
+  test("a body between the old default and the new bound is now read whole", async () => {
+    // The cap raise is a real part of the fix: this answer already overflowed the 20 000 default and
+    // fits inside the provider's own bound, so the ordinary predicate reads it without a cut.
+    const body = chatListBody(200);
+    expect(body.length).toBeGreaterThan(20_000);
+    expect(body.length).toBeLessThan(QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS);
+    const page = answeringPage({ token: LIVE_PAGE_TOKEN, body });
+
+    const observation = await probeQwenTaskListFromPageAfterHydration(page, FAST_HYDRATION);
+
+    expect(observation.truncated).toBe(false);
+    expect(observation.bodyText).toBe(body);
+    expect(qwenTaskListVerdict(observation)).toEqual({ authenticated: true, source: "parsed-body" });
+  });
+
+  test("a whole valid body still authenticates, and a small success:false still refuses as before", async () => {
+    const authenticated = await probeQwenTaskListFromPageAfterHydration(
+      answeringPage({ token: LIVE_PAGE_TOKEN, body: chatListBody(2) }),
+      FAST_HYDRATION,
+    );
+    expect(authenticated.truncated).toBe(false);
+    expect(qwenTaskListVerdict(authenticated)).toEqual({ authenticated: true, source: "parsed-body" });
+
+    const anonymousBody = JSON.stringify({
+      success: false,
+      request_id: "request-fixture",
+      data: { code: "Unauthorized", details: "401 Unauthorized" },
+    });
+    const anonymous = await probeQwenTaskListFromPageAfterHydration(
+      answeringPage({ token: LIVE_PAGE_TOKEN, body: anonymousBody }),
+      FAST_HYDRATION,
+    );
+    const refusal = qwenTaskListProbeRefusal(anonymous);
+    expect(refusal).toBe(qwenTaskListProbeRefusal({
+      status: 200,
+      payload: JSON.parse(anonymousBody),
+      contentType: "application/json",
+      bodyText: anonymousBody,
+      truncated: false,
+      sentAuthorization: true,
+    }));
+    expect(refusal).toContain("Unauthorized 401 Unauthorized");
+    // A whole body's refusal says nothing about truncation, because nothing was truncated.
+    expect(refusal).not.toContain("truncated");
+    expect(refusal).not.toContain("cut at");
+  });
+
+  test("an HTML document still refuses as a document, even when the transport cut it", async () => {
+    const html = `<!DOCTYPE html><html><head><title>Access Verification</title></head><body>${
+      "<p>Please complete the slider.</p>".repeat(4_000)
+    }</body></html>`;
+    expect(html.length).toBeGreaterThan(QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS);
+    const page = answeringPage({
+      token: LIVE_PAGE_TOKEN,
+      body: html,
+      contentType: "text/html; charset=utf-8",
+    });
+
+    const observation = await probeQwenTaskListFromPageAfterHydration(page, FAST_HYDRATION);
+    expect(observation.truncated).toBe(true);
+
+    const refusal = qwenTaskListProbeRefusal(observation);
+    // The document is the more actionable fact, so a cut does not hide it.
+    expect(refusal).toContain("non-JSON document");
+    expect(refusal).toContain("Access Verification");
+    expect(refusal).not.toContain("body snippet");
+    expect(refusal.length).toBeLessThanOrEqual(300);
   });
 });

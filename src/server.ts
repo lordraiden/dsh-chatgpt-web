@@ -1558,9 +1558,16 @@ async function authImportRequest(
       storageState: body.storageState,
       now,
     });
-    // Never the capture, never a cookie: provider id and the one boolean the caller acts on.
+    // Never the capture, never a cookie: provider id, the one boolean the caller acts on, and — when
+    // the provider reports one — the non-secret note about how its predicate read the answer (e.g.
+    // "the transport cut the body, its envelope decided"). That note is what makes a session proved
+    // from an oversized answer distinguishable from one proved from a whole body in the service log.
     console.info(
-      `[chatgpt-web] auth_import_stored ${JSON.stringify({ provider: providerId, verified: result.verified })}`,
+      `[chatgpt-web] auth_import_stored ${JSON.stringify({
+        provider: providerId,
+        verified: result.verified,
+        ...(result.reading === undefined ? {} : { reading: result.reading }),
+      })}`,
     );
     return Response.json({
       ok: true,

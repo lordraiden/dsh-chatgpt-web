@@ -120,6 +120,30 @@ export const QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS = 60_000;
 export const QWEN_CODE_AUTH_PROBE_TIMEOUT_MS = 15_000;
 
 /**
+ * How much of one `task/list` answer the probe reads before it stops.
+ *
+ * **A measured bound, not a guess.** `task/list` is not a small status object: it answers the
+ * account's own chat list (`{success, request_id, data:[…]}`), so its size is the account's, not the
+ * protocol's. The live import measured exactly that: the answer exceeded the page transport's
+ * 20 000-character default, arrived cut mid-array, `JSON.parse` threw, and a perfectly authenticated
+ * session was refused as a "non-JSON body" (issue #299).
+ *
+ * 64 KiB is chosen for three reasons, and it is still a bound:
+ *
+ * - it is more than three times the default, which covers an ordinary page of chats completely, so
+ *   the ordinary predicate (`success === true && Array.isArray(data)`) keeps reading a whole body;
+ * - it is small enough that a probe never ships an account-sized answer into Node, and the page
+ *   transport stops reading at it instead of buffering the rest;
+ * - it is **not** what decides authentication. A bigger answer is read structurally from the
+ *   envelope prefix (`session-probe.ts`, `readQwenTruncatedEnvelope`), so the cut can never turn a
+ *   valid answer into a refusal again — only into an honestly reported one.
+ *
+ * The endpoint offers no observed way to ask for less: the recorded HAR shows `?page=1` and nothing
+ * else, and inventing a page-size parameter would be inventing a provider protocol.
+ */
+export const QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS = 65_536;
+
+/**
  * How long the import probe waits for the app to restore its own session before it concludes that
  * the page really still considers itself signed out.
  *
