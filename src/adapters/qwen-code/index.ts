@@ -32,6 +32,7 @@ export {
   QWEN_CODE_ROUTE_ID,
   QWEN_CODE_ROOT_URL,
   QWEN_CODE_SUB_CHAT_TYPE,
+  QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS,
   QWEN_CODE_TASK_LIST_PATH,
   QWEN_CODE_TASK_NEW_PATH,
   qwenCodeApiHeaders,
@@ -69,6 +70,7 @@ export {
   qwenAuthorizationHeaderFromPage,
   qwenTaskListProbeRefusal,
   qwenTaskListRequest,
+  qwenTaskListVerdict,
   readQwenAccessTokenFromPage,
   type QwenAccessTokenProblem,
   type QwenAccessTokenRead,
@@ -78,8 +80,10 @@ export {
   type QwenPageSessionWait,
   type QwenTaskListAnswer,
   type QwenTaskListObservation,
+  type QwenTaskListReadSource,
   type QwenTaskListRequest,
   type QwenTaskListSender,
+  type QwenTaskListVerdict,
 } from "./session-probe";
 
 export {

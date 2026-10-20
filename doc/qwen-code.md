@@ -239,6 +239,75 @@ The accepted shapes are unchanged: a `success:true` body still authenticates, an
 refusal still reads exactly as before — only a body this adapter does not understand gains the extra
 report, because that is precisely the case that used to be blind.
 
+### 4.2 A transport bound must not decide authentication (issue #299, fourth pass)
+
+The live result that defined this pass, and that settles how the probe must read an answer:
+
+```text
+auth_import_refused {"provider":"qwen-code","code":"import_predicate_failed",
+ "message":"… the task list answered HTTP 200, content-type: application/json; the provider answered with a
+ non-JSON body: {\"success\":true,\"request_id\":\"[redacted]\",\"data\":[{\"id\":\"[redacted]\",
+ \"title\":\"Saludo Inicial\",\"created_at\":…},…"}
+```
+
+**The session was authenticated.** Qwen answered `{"success":true,"data":[…]}` with
+`content-type: application/json`. What went wrong was ours: the page transport
+(`src/adapters/page-context-request.ts`) bounded the answer at its 20 000-character default, the body
+was the account's **chat list**, it arrived cut mid-array, `JSON.parse` threw, and a successful answer
+was classified as a non-JSON body. A cap that exists to keep diagnostics small had become an
+authentication decision.
+
+**Three options were considered, and two were taken deliberately:**
+
+| Option | Decision |
+| --- | --- |
+| Ask the endpoint for a smaller answer (`?page_size=…`) | **Rejected.** The recorded HAR shows `?page=1` and nothing else. Inventing a page-size parameter would be inventing a provider protocol (AGENTS.md → *Agent decision discipline*). |
+| Raise the bound for this one call | **Taken.** `QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS` = 65 536 in `provider.ts`: more than three times the default, so an ordinary page of chats is read whole and the ordinary predicate still applies; still small enough that a probe never ships an account-sized answer into Node, and the transport now *streams* the body and stops at the bound instead of buffering the rest. |
+| Read only as far as the question needs | **Taken, as the rule below.** A body bigger than the bound is decided structurally from its leading envelope, so the cut can never again turn a valid answer into a refusal. |
+
+**The truncation-tolerant rule, exactly.** It is used **only** when the transport reported the body as
+truncated (such a body cannot be parsed, so the ordinary predicate has nothing to inspect):
+
+1. the body must **begin** with a JSON object (a byte-order mark and whitespace are allowed). A body
+   that starts with a document (`<!DOCTYPE html>`, `<html>`) is never read this way, so an HTML
+   block/challenge page still refuses as the document it is;
+2. `success` must be a **top-level member of that object** whose value is the literal `true` or `false`.
+   A `"success":true` nested deeper, inside a string, or anywhere else in the text is **not** an
+   envelope and never authenticates — this is why the read is a small scanner
+   (`readQwenTruncatedEnvelope` in `session-probe.ts`) and not a regex over the snippet;
+3. `success:false` refuses, citing the provider's own reason from the prefix when it is legible
+   (`data.code`/`data.details`, then a free-text `message`/`detail`/`error`/`msg`);
+4. `success:true` authenticates: the provider answered its own authorization question, and the cut only
+   removed the `data` payload that the *content* predicate would have needed. If the prefix does show a
+   `data` member that does not open an array, this is not the list envelope, so no verdict is taken;
+5. anything else (no object, no boolean `success`, a cut inside the key or the literal) stays the honest
+   refusal — and it now **names the cut** instead of calling a JSON body "non-JSON".
+
+**Which reading won is always said.** The one verdict (`qwenTaskListVerdict`) reports
+`source: "parsed-body"` or `source: "truncated-envelope"`; the sign-in controller's poll step and the
+import path use it, so a signed-in session can no longer hang on a large chat list. On success the
+import's own line names the cut (`… cut at 65536 characters, so its leading envelope is what decided
+it`) and the service log carries the same fact beside the stored session:
+
+```text
+auth_import_stored {"provider":"qwen-code","verified":true,
+ "reading":"body truncated at 65536 chars; the envelope reports success:true"}
+```
+
+A refusal says the envelope's verdict and the cut together:
+
+```text
+the task list answered HTTP 200 with Unauthorized 401 Unauthorized; body truncated at 65536 chars;
+the envelope reports success:false; the request carried the page's own token and was still refused, …
+```
+
+Every prior property is kept: a real non-JSON body (an HTML block page) still refuses as a document, an
+empty body still refuses, `success:false` still refuses with the provider's own reason, the refusal
+still reports status + content-type + a redacted bounded snippet, and **nothing is stored on refusal**.
+The suite asserts the live case end to end by running the real transport against a stubbed `fetch`
+(`tests/issue-299-qwen-session-import.test.ts`, *a cut answer must not decide authentication*).
+
+
 ## 5. The manual live probe (operator step)
 
 The script is `scripts/probe-qwen-headless.mjs`. It starts nothing but a disposable browser profile and
@@ -366,6 +435,9 @@ What the import validates, and what it refuses **before anything is written**:
 | the provider's cookies all expired | `every coder.qwen.ai cookie in the capture has expired; sign in again …` |
 | `task/list` answers anything but `success:true` when the live page had a usable token | `… the task list answered HTTP 200 with Unauthorized 401 Unauthorized; the request carried the page's own token and was still refused, so the session itself is no longer accepted: sign in again …` |
 | `task/list` answers a body no shape in this adapter recognises | `… the task list answered HTTP 200, content-type: text/html; charset=utf-8; the provider answered with a non-JSON document: title "Access Verification"; sign in again, then re-export and re-import` (status + content-type + a redacted, bounded snippet; ≤ 300 chars) |
+| the answer is larger than the transport bound and its leading envelope reports `success:true` | **not refused**: the session is verified and stored, and the line names the reading (`… success:true (HTTP 200); the body was cut at 65536 characters, so its leading envelope is what decided it`) |
+| the answer is larger than the transport bound and its leading envelope reports `success:false` | `… the task list answered HTTP 200 with <the provider's own code>; body truncated at N chars; the envelope reports success:false; …` |
+| the answer is cut before its envelope is legible (no object, no boolean `success`) | `… the task list answered HTTP 200, content-type: application/json; the provider's answer was cut at N characters before its JSON envelope was complete: <redacted snippet>; sign in again …` |
 | the page never restored a usable token within the bound (cookie-only request) | `… the captured session opened the page, but after 20003ms it still does not consider itself signed in (the live page has no token yet), so no page token was sent — sign in again, then re-export and re-import` |
 
 A file that passes every step is stored through `storeProviderSession`, the deployment's single

@@ -42,6 +42,13 @@
  *   sent, and the refusal names why it was not. What *does* cross is the provider's answer: when the
  *   body is not a shape this adapter recognises, a redacted, bounded snippet of it (plus the status
  *   and content type) is reported, because a thrown-away body is a refusal nobody can act on.
+ * - **A transport bound never decides authentication.** `task/list` answers the account's own chat
+ *   list, which can be far larger than any diagnostic snippet; the page transport therefore reads it
+ *   up to a provider-owned bound and reports when it had to cut. A cut body is read structurally from
+ *   its leading `{success, data}` envelope ({@link readQwenTruncatedEnvelope}), so "the transport
+ *   stopped reading" can never again be reported as "the provider answered garbage" — the live
+ *   `import_predicate_failed` of issue #299, where a `{"success":true,"data":[…]}` answer was cut at
+ *   20 000 characters and refused as a non-JSON body.
  *
  * The sign-in controller and the turn facility read the same live page through the same helper
  * ({@link readQwenAccessTokenFromPage}); the controller's own polling loop is its bounded wait. The
@@ -63,6 +70,7 @@ import {
   QWEN_CODE_LEGACY_ACCESS_TOKEN_STORAGE_KEY,
   QWEN_CODE_SESSION_HYDRATION_POLL_INTERVAL_MS,
   QWEN_CODE_SESSION_HYDRATION_TIMEOUT_MS,
+  QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS,
   QWEN_CODE_TASK_LIST_PATH,
   qwenCodeApiHeaders,
   qwenCodeUrl,
@@ -108,6 +116,16 @@ export interface QwenTaskListAnswer {
    * can reach a refusal, and it is never a credential.
    */
   readonly bodyText?: string;
+  /**
+   * Whether the transport had to **cut** the body at its own bound before the body ended.
+   *
+   * A cut body is not a provider failure: `task/list` answers an account-sized chat list, so a large
+   * answer is normal and possibly a successful one. When this is `true` the parsed `payload` cannot
+   * exist, and the answer is read structurally from its leading envelope
+   * ({@link qwenTaskListVerdict}). Absent (or `false`) means "the whole body arrived", which is what
+   * every injected seam that hands over a complete body means.
+   */
+  readonly truncated?: boolean;
 }
 
 /** Sends one assembled request. Production binds this to the provider's page. */
@@ -241,6 +259,266 @@ function htmlDocumentFragment(text: string): string {
   return sanitizedBodyFragment(firstLine);
 }
 
+/**
+ * What the leading `{ success, data }` envelope of a **cut** body says.
+ *
+ * `unreadable` is not "garbage": it means the cut landed before the envelope's own verdict was
+ * legible, so the honest answer is that this adapter could not read it.
+ */
+type QwenTruncatedEnvelopeRead =
+  | { readonly verdict: "authenticated" }
+  | { readonly verdict: "refused"; readonly reason?: string }
+  | { readonly verdict: "unreadable" };
+
+/** A cursor into a JSON document's leading bytes, which may end in the middle of a value. */
+interface QwenJsonCursor {
+  position: number;
+}
+
+/** A nesting bound, so a hostile body cannot turn a prefix read into unbounded recursion. */
+const ENVELOPE_MAX_DEPTH = 32;
+
+/** Skip the whitespace JSON allows between tokens. */
+function skipEnvelopeWhitespace(text: string, cursor: QwenJsonCursor): void {
+  while (cursor.position < text.length) {
+    const code = text.charCodeAt(cursor.position);
+    if (code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d) cursor.position += 1;
+    else return;
+  }
+}
+
+/**
+ * Read one JSON string at the cursor, or `undefined` when the prefix ends inside it.
+ *
+ * Escapes are kept verbatim: the only consumer is a diagnostic reason, so decoding every escape
+ * would be more parser than this read needs.
+ */
+function readEnvelopeString(text: string, cursor: QwenJsonCursor): string | undefined {
+  if (text[cursor.position] !== '"') return undefined;
+  cursor.position += 1;
+  let value = "";
+  while (cursor.position < text.length) {
+    const ch = text[cursor.position]!;
+    if (ch === "\\") {
+      const escaped = text[cursor.position + 1];
+      if (escaped === undefined) return undefined;
+      value += ch + escaped;
+      cursor.position += 2;
+      continue;
+    }
+    cursor.position += 1;
+    if (ch === '"') return value;
+    value += ch;
+  }
+  return undefined;
+}
+
+/** Read the bare literal token at the cursor (`true`, `false`, `null`, a number), or `undefined`. */
+function readEnvelopeLiteral(text: string, cursor: QwenJsonCursor): string | undefined {
+  const start = cursor.position;
+  while (cursor.position < text.length) {
+    const ch = text[cursor.position]!;
+    if (ch === "," || ch === "}" || ch === "]" || ch === " " || ch === "\t" || ch === "\n" || ch === "\r") break;
+    cursor.position += 1;
+  }
+  return cursor.position === start ? undefined : text.slice(start, cursor.position);
+}
+
+/**
+ * Skip one JSON value, returning `false` when the prefix ends inside it.
+ *
+ * Used only to step over members this read does not need. A cut inside a skipped value is the normal
+ * case for a large `data` array, so failing here is information, not an error.
+ */
+function skipEnvelopeValue(text: string, cursor: QwenJsonCursor, depth = 0): boolean {
+  if (depth > ENVELOPE_MAX_DEPTH) return false;
+  skipEnvelopeWhitespace(text, cursor);
+  const opening = text[cursor.position];
+  if (opening === undefined) return false;
+  if (opening === '"') return readEnvelopeString(text, cursor) !== undefined;
+  if (opening === "{" || opening === "[") {
+    const closing = opening === "{" ? "}" : "]";
+    cursor.position += 1;
+    for (;;) {
+      skipEnvelopeWhitespace(text, cursor);
+      if (text[cursor.position] === closing) {
+        cursor.position += 1;
+        return true;
+      }
+      if (text[cursor.position] === undefined) return false;
+      if (opening === "{") {
+        if (readEnvelopeString(text, cursor) === undefined) return false;
+        skipEnvelopeWhitespace(text, cursor);
+        if (text[cursor.position] !== ":") return false;
+        cursor.position += 1;
+      }
+      if (!skipEnvelopeValue(text, cursor, depth + 1)) return false;
+      skipEnvelopeWhitespace(text, cursor);
+      if (text[cursor.position] === ",") {
+        cursor.position += 1;
+        continue;
+      }
+      if (text[cursor.position] === closing) {
+        cursor.position += 1;
+        return true;
+      }
+      return false;
+    }
+  }
+  const literal = readEnvelopeLiteral(text, cursor);
+  return literal !== undefined && /^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$/.test(literal);
+}
+
+/**
+ * Read the string members of the object at the cursor that this module cares about.
+ *
+ * A cut inside the object simply yields the members that were visible; the caller decides whether
+ * that is enough to report a reason.
+ */
+function readEnvelopeStringMembers(
+  text: string,
+  cursor: QwenJsonCursor,
+  wanted: readonly string[],
+): Record<string, string> {
+  const found: Record<string, string> = {};
+  if (text[cursor.position] !== "{") return found;
+  cursor.position += 1;
+  for (;;) {
+    skipEnvelopeWhitespace(text, cursor);
+    const next = text[cursor.position];
+    if (next !== '"') break;
+    const key = readEnvelopeString(text, cursor);
+    if (key === undefined) break;
+    skipEnvelopeWhitespace(text, cursor);
+    if (text[cursor.position] !== ":") break;
+    cursor.position += 1;
+    skipEnvelopeWhitespace(text, cursor);
+    if (wanted.includes(key) && text[cursor.position] === '"') {
+      const value = readEnvelopeString(text, cursor);
+      if (value === undefined) break;
+      found[key] = value;
+    } else if (!skipEnvelopeValue(text, cursor, 1)) {
+      break;
+    }
+    skipEnvelopeWhitespace(text, cursor);
+    if (text[cursor.position] === ",") {
+      cursor.position += 1;
+      continue;
+    }
+    break;
+  }
+  return found;
+}
+
+/** The provider's own vocabulary for a refusal read from a cut body's envelope. */
+function qwenEnvelopeRefusalReason(
+  code: string | undefined,
+  details: string | undefined,
+  freeText: { readonly key: string; readonly value: string } | undefined,
+): string | undefined {
+  if (code !== undefined && code.trim().length > 0) {
+    const safeCode = qwenProviderCode(code);
+    const safeDetails = details === undefined ? undefined : qwenProviderCode(details);
+    return safeDetails === undefined ? safeCode : `${safeCode} ${safeDetails}`;
+  }
+  if (freeText !== undefined) {
+    const text = nonSecretDiagnosticText(redactTokenLike(freeText.value.trim()));
+    return `${freeText.key}: ${truncateWithEllipsis(text, REFUSAL_MESSAGE_CHARS)}`;
+  }
+  return undefined;
+}
+
+/**
+ * Read the verdict out of the leading `{ success, data }` envelope of a body this adapter had to cut.
+ *
+ * ## The rule, deliberately narrow
+ *
+ * This is used **only** for a body the transport reported as truncated — such a body cannot be
+ * parsed, so the ordinary predicate (`success === true && Array.isArray(data)`) has nothing to
+ * inspect. The rule is:
+ *
+ * 1. the body must **begin** with a JSON object (an optional byte-order mark and whitespace are
+ *    allowed). A body that starts with a document (`<!DOCTYPE html>`, `<html>`) is not this shape and
+ *    is never read this way, so an HTML block page still refuses as the document it is;
+ * 2. `success` must be a **top-level member of that object** whose value is the literal `true` or
+ *    `false`. A `"success":true` anywhere else — nested deeper, inside a string, in the middle of the
+ *    text — is not an envelope and never authenticates. This is the whole reason the read is a small
+ *    scanner instead of a regex over the snippet;
+ * 3. `success:false` refuses, citing the provider's own reason from the prefix when it is legible
+ *    (`data.code`/`data.details`, then a free-text `message`/`detail`/`error`/`msg`), because that
+ *    reason is the operator's diagnosis;
+ * 4. `success:true` authenticates. The provider has answered its own authorization question, and the
+ *    cut removed the `data` payload that only the *content* predicate would need. If the prefix does
+ *    show a `data` member and it does not open an array, this is not the list envelope this module
+ *    knows: no verdict is taken rather than authenticating a shape nobody has evidence for;
+ * 5. anything else (no object, no boolean `success`, a cut inside the key or the literal) is
+ *    `unreadable`, and the refusal says the body was cut instead of guessing.
+ */
+function readQwenTruncatedEnvelope(text: string): QwenTruncatedEnvelopeRead {
+  const body = text.startsWith("\uFEFF") ? text.slice(1) : text;
+  const cursor: QwenJsonCursor = { position: 0 };
+  skipEnvelopeWhitespace(body, cursor);
+  if (body[cursor.position] !== "{") return { verdict: "unreadable" };
+  cursor.position += 1;
+
+  let success: boolean | undefined;
+  let dataOpening: string | undefined;
+  let dataMembers: Record<string, string> = {};
+  let freeText: { key: string; value: string } | undefined;
+
+  for (;;) {
+    skipEnvelopeWhitespace(body, cursor);
+    const next = body[cursor.position];
+    // The prefix ended between members, or the object closed: either way, scan no further.
+    if (next === undefined || next === "}") break;
+    if (next !== '"') return { verdict: "unreadable" };
+    const key = readEnvelopeString(body, cursor);
+    if (key === undefined) break;
+    skipEnvelopeWhitespace(body, cursor);
+    if (body[cursor.position] !== ":") return { verdict: "unreadable" };
+    cursor.position += 1;
+    skipEnvelopeWhitespace(body, cursor);
+
+    if (key === "success") {
+      const literal = readEnvelopeLiteral(body, cursor);
+      if (literal === "true") success = true;
+      else if (literal === "false") success = false;
+      // A cut inside the literal, or a non-boolean value, is not this envelope's success flag.
+      else return { verdict: "unreadable" };
+    } else if (key === "data") {
+      dataOpening = body[cursor.position];
+      if (dataOpening === "{") {
+        dataMembers = readEnvelopeStringMembers(body, cursor, ["code", "details"]);
+      } else if (!skipEnvelopeValue(body, cursor)) {
+        // The array the list envelope answers is cut: expected, and its opening character is all the
+        // rule needs. Nothing after it can change the verdict.
+        break;
+      }
+    } else if (freeText === undefined && (REFUSAL_MESSAGE_KEYS as readonly string[]).includes(key)
+      && body[cursor.position] === '"') {
+      const value = readEnvelopeString(body, cursor);
+      if (value !== undefined && value.trim().length > 0) freeText = { key, value };
+    } else if (!skipEnvelopeValue(body, cursor)) {
+      break;
+    }
+
+    skipEnvelopeWhitespace(body, cursor);
+    if (body[cursor.position] === ",") {
+      cursor.position += 1;
+      continue;
+    }
+    break;
+  }
+
+  if (success === undefined) return { verdict: "unreadable" };
+  if (success === false) {
+    const reason = qwenEnvelopeRefusalReason(dataMembers["code"], dataMembers["details"], freeText);
+    return reason === undefined ? { verdict: "refused" } : { verdict: "refused", reason };
+  }
+  if (dataOpening !== undefined && dataOpening !== "[") return { verdict: "unreadable" };
+  return { verdict: "authenticated" };
+}
+
 /** One distinguishable rendering of the body, ordered from most to least useful. */
 interface QwenAnswerBodyShape {
   /** What the body is, in the operator's words. */
@@ -286,11 +564,15 @@ function qwenAnswerIsJson(payload: unknown, bodyText: string | undefined): boole
  *
  * Every branch names what actually arrived instead of pretending it was JSON: an empty body, a
  * non-JSON document (an HTML block/challenge page is a real possibility), an unfamiliar JSON envelope,
- * or some other non-JSON text.
+ * or some other non-JSON text. A **cut** body is its own branch, before the generic text one: "the
+ * transport stopped reading" is a different fact from "this is not JSON", and reporting the first as
+ * the second is exactly the misdiagnosis this module had to stop making. A cut HTML document is still
+ * named as the document it is, because that is the more actionable fact.
  */
 function qwenAnswerBodyShape(
   payload: unknown,
   bodyText: string | undefined,
+  truncated = false,
 ): QwenAnswerBodyShape {
   const text = qwenAnswerBodyText(payload, bodyText).trim();
   if (text.length === 0) {
@@ -319,6 +601,16 @@ function qwenAnswerBodyShape(
       shortTag: "non-JSON document",
       minimalTag: "HTML",
       details: fragment.length === 0 ? [] : [fragment],
+    };
+  }
+
+  if (truncated) {
+    const snippet = sanitizedBodyFragment(text);
+    return {
+      tag: `the provider's answer was cut at ${text.length} characters before its JSON envelope was complete`,
+      shortTag: `cut at ${text.length} characters`,
+      minimalTag: "truncated",
+      details: snippet.length === 0 ? [] : [snippet],
     };
   }
 
@@ -391,12 +683,14 @@ interface QwenTaskListRefusalRead {
  *
  * The provider's own vocabulary is preferred when present (`data.code` + `data.details`, then a
  * free-text `message`/`detail`/`error`). Those are the shapes the capture and the sign-in path already
- * understand, so their text is unchanged. Everything else is classified into an
- * {@link QwenAnswerBodyShape}: the refusal then reports what actually arrived instead of guessing.
+ * understand, so their text is unchanged. A body the transport had to **cut** cannot be parsed, so its
+ * leading envelope is read instead; a refused envelope reports the provider's own reason exactly like
+ * a parsed one. Everything else is classified into an {@link QwenAnswerBodyShape}: the refusal then
+ * reports what actually arrived instead of guessing.
  */
 function readQwenTaskListRefusal(
   payload: unknown,
-  answer: Pick<QwenTaskListAnswer, "bodyText"> = {},
+  answer: Pick<QwenTaskListAnswer, "bodyText" | "truncated"> = {},
 ): QwenTaskListRefusalRead {
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
     const record = payload as Record<string, unknown>;
@@ -420,7 +714,14 @@ function readQwenTaskListRefusal(
     }
   }
 
-  const shape = qwenAnswerBodyShape(payload, answer.bodyText);
+  if (answer.truncated === true && typeof answer.bodyText === "string") {
+    const envelope = readQwenTruncatedEnvelope(answer.bodyText);
+    if (envelope.verdict === "refused") {
+      return { recognised: true, text: envelope.reason ?? "an envelope reporting success:false" };
+    }
+  }
+
+  const shape = qwenAnswerBodyShape(payload, answer.bodyText, answer.truncated === true);
   const rendering = qwenShapeFragment(shape, Number.POSITIVE_INFINITY).replace(/^; /, "");
   return {
     recognised: false,
@@ -439,9 +740,54 @@ function readQwenTaskListRefusal(
  */
 export function qwenTaskListRefusal(
   payload: unknown,
-  answer: Pick<QwenTaskListAnswer, "contentType" | "bodyText"> = {},
+  answer: Pick<QwenTaskListAnswer, "contentType" | "bodyText" | "truncated"> = {},
 ): string {
   return readQwenTaskListRefusal(payload, answer).text;
+}
+
+/** Which reading decided a task-list answer. Diagnostics only: the verdict is `authenticated`. */
+export type QwenTaskListReadSource = "parsed-body" | "truncated-envelope";
+
+/** What one task-list answer decided, and which reading decided it. */
+export interface QwenTaskListVerdict {
+  readonly authenticated: boolean;
+  /**
+   * How the answer was read, present only when a reading authenticated it.
+   *
+   * `parsed-body` is the ordinary predicate over a complete body; `truncated-envelope` means the
+   * transport cut the body and its leading envelope (`success:true`) decided. Naming it is what makes
+   * the next truncation diagnosable from a success line, not only from a refusal.
+   */
+  readonly source?: QwenTaskListReadSource;
+  /** A cut body's envelope refused: the provider's own reason, when the prefix carried one. */
+  readonly reason?: string;
+}
+
+/**
+ * The one verdict for a `task/list` answer, whether it arrived whole or cut.
+ *
+ * This is the authentication decision; {@link qwenTaskListAuthenticated} stays the content predicate
+ * for a body that parsed. The order matters: a complete body is always decided by the predicate, and
+ * only a body the transport reported as **truncated** may be decided structurally. A cut body that is
+ * not the endpoint's envelope is neither authenticated nor explained away: the caller composes the
+ * honest truncation refusal from {@link qwenTaskListProbeRefusal}.
+ */
+export function qwenTaskListVerdict(
+  answer: Pick<QwenTaskListAnswer, "payload" | "bodyText" | "truncated">,
+): QwenTaskListVerdict {
+  if (qwenTaskListAuthenticated(answer.payload)) return { authenticated: true, source: "parsed-body" };
+  if (answer.truncated === true && typeof answer.bodyText === "string") {
+    const envelope = readQwenTruncatedEnvelope(answer.bodyText);
+    if (envelope.verdict === "authenticated") return { authenticated: true, source: "truncated-envelope" };
+    if (envelope.verdict === "refused") {
+      return {
+        authenticated: false,
+        source: "truncated-envelope",
+        ...(envelope.reason === undefined ? {} : { reason: envelope.reason }),
+      };
+    }
+  }
+  return { authenticated: false };
 }
 
 /**
@@ -546,14 +892,21 @@ export function createQwenPageTaskListSender(page: Page): QwenTaskListSender {
       url: request.url,
       headers: request.headers,
       timeoutMs: QWEN_CODE_AUTH_PROBE_TIMEOUT_MS,
+      // The list is account-sized, so this call raises the transport's default: the bound is the
+      // answer's expected size, not a threshold at which a good session starts looking bad
+      // ({@link QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS} explains the value, and the predicate tolerates
+      // the cut when it is not enough).
+      maxAnswerChars: QWEN_CODE_TASK_LIST_MAX_ANSWER_CHARS,
     });
     // The page's answer is kept whole: the parsed payload for the predicate, and the content type
-    // plus raw text so an unrecognised body can be reported instead of thrown away.
+    // plus raw text so an unrecognised body can be reported instead of thrown away. `truncated` is
+    // kept too, because a cut body is a reading to explain, not a failure to report.
     return {
       status: answer.status,
       payload: answer.payload ?? answer.text,
       contentType: answer.contentType,
       bodyText: answer.text,
+      truncated: answer.truncated,
     };
   };
 }
@@ -577,6 +930,7 @@ export async function probeQwenTaskList(
     payload: answer.payload,
     ...(answer.contentType === undefined ? {} : { contentType: answer.contentType }),
     ...(answer.bodyText === undefined ? {} : { bodyText: answer.bodyText }),
+    ...(answer.truncated === undefined ? {} : { truncated: answer.truncated }),
     sentAuthorization: read.accessToken !== undefined,
     tokenSource: read.accessToken === undefined ? "none" : source,
     ...(read.accessToken === undefined && read.problem !== undefined ? { tokenProblem: read.problem } : {}),
@@ -722,13 +1076,98 @@ function qwenUnrecognisedAction(
 }
 
 /**
+ * The "what to do" clause for a refusal the provider's own vocabulary explains.
+ *
+ * Kept byte-identical to the wording this refusal has always used: the operator-facing sentence is a
+ * contract (`doc/qwen-code.md` §6), and only the truncation clause is ever inserted in front of it.
+ */
+function qwenProviderRefusalAction(
+  observation: Pick<
+    QwenTaskListObservation,
+    "sentAuthorization" | "tokenProblem" | "pageSession"
+  >,
+): string {
+  if (observation.sentAuthorization === false) {
+    const problem = qwenTokenProblemText(observation.tokenProblem ?? "absent");
+    if (observation.pageSession !== undefined && !observation.pageSession.hydrated) {
+      return `; the captured session opened the page, but after `
+        + `${observation.pageSession.waitedMs}ms it still does not consider itself signed in `
+        + `(${problem}), so no page token was sent — sign in again, then re-export and re-import`;
+    }
+    return `; the provider's API rejected the cookie-only request: it needs the token the `
+      + `page uses (${problem}) — sign in again so the page itself has one, then re-export and re-import`;
+  }
+  if (observation.sentAuthorization === true) {
+    return "; the request carried the page's own token and was still refused, so the session "
+      + "itself is no longer accepted — sign in again, then re-export and re-import";
+  }
+  return "; sign in to Qwen Code again, export the session again, and re-run the import";
+}
+
+/**
+ * The clause that says the transport cut the body, and which reading won — fitted to the budget.
+ *
+ * This is the diagnostic the live failure lacked: "the body was bigger than the transport bound" and
+ * "the envelope says `success:true`/`success:false`" are the two facts that decide the verdict, so the
+ * refusal carries both (the full form is `; body truncated at 65536 chars; the envelope reports
+ * success:false`). It is only ever emitted for a body the transport actually reported as truncated,
+ * so a normal refusal's text does not change. Shorter forms exist only because the pipeline's inner
+ * diagnostic bound is 300 characters; the last resort still says "truncated" rather than dropping the
+ * fact that decided the message.
+ */
+function qwenTruncationClause(
+  observation: Pick<QwenTaskListObservation, "payload" | "bodyText" | "truncated">,
+  budget: number,
+): string {
+  if (observation.truncated !== true || budget <= 0) return "";
+  const chars = typeof observation.bodyText === "string" ? observation.bodyText.length : undefined;
+  const where = chars === undefined ? "body truncated" : `body truncated at ${chars} chars`;
+  const success = qwenEnvelopeSuccessValue(observation.payload, observation);
+  const candidates = success === undefined
+    ? [`; ${where}`, "; body truncated", "; truncated"]
+    : [
+      `; ${where}; the envelope reports success:${success}`,
+      `; ${where}; success:${success}`,
+      "; truncated",
+    ];
+  return candidates.find(candidate => candidate.length <= budget) ?? "";
+}
+
+/**
+ * The envelope's own `success` value, from whichever reading is available.
+ *
+ * A parsed body answers directly; a cut body's leading envelope is read structurally. `undefined`
+ * means neither reading could produce it, and the refusal then says only that the body was cut.
+ */
+function qwenEnvelopeSuccessValue(
+  payload: unknown,
+  answer: Pick<QwenTaskListAnswer, "bodyText" | "truncated">,
+): boolean | undefined {
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const success = (payload as Record<string, unknown>)["success"];
+    if (typeof success === "boolean") return success;
+  }
+  if (typeof answer.bodyText === "string") {
+    const envelope = readQwenTruncatedEnvelope(answer.bodyText);
+    if (envelope.verdict === "authenticated") return true;
+    if (envelope.verdict === "refused") return false;
+  }
+  return undefined;
+}
+
+/**
  * The honest, specific refusal for a probe that did not authenticate.
  *
  * It always reports what the provider answered. When the body is one of the shapes this adapter
  * already understands (the provider's `data.code`, or a free-text message), the text is unchanged.
  * When it is **not**, the refusal reports the HTTP status, the `content-type` and a redacted snippet
- * of the actual body — an HTML block page is named as a non-JSON document with its title/first line —
+ * of the actual body — an HTML block page is named as a non-JSON document with its title/first line,
+ * and a body the transport had to cut is named as cut (with the length), never as "non-JSON" —
  * because discarding that body is exactly the blindness this refusal exists to remove.
+ *
+ * When the truncation mattered, the refusal says which reading won: a cut body whose envelope reports
+ * `success:false` is refused *by that envelope*, and the message carries both facts, so the next
+ * person to read the log can tell a transport bound from a provider refusal.
  *
  * When the request went out without a token it says which fact decided that: the live page was still
  * signed out at the deadline of the bounded wait, or (for a caller that reads the page once) the page
@@ -740,30 +1179,30 @@ function qwenUnrecognisedAction(
 export function qwenTaskListProbeRefusal(
   observation: Pick<
     QwenTaskListObservation,
-    "status" | "payload" | "contentType" | "bodyText" | "sentAuthorization" | "tokenProblem" | "pageSession"
+    | "status"
+    | "payload"
+    | "contentType"
+    | "bodyText"
+    | "truncated"
+    | "sentAuthorization"
+    | "tokenProblem"
+    | "pageSession"
   >,
 ): string {
-  const read = readQwenTaskListRefusal(observation.payload, {
+  const answer = {
     ...(observation.bodyText === undefined ? {} : { bodyText: observation.bodyText }),
-  });
+    ...(observation.truncated === undefined ? {} : { truncated: observation.truncated }),
+  };
+  const read = readQwenTaskListRefusal(observation.payload, answer);
 
   if (read.recognised) {
     const answered = `the task list answered HTTP ${observation.status} with ${read.text}`;
-    if (observation.sentAuthorization === false) {
-      const problem = qwenTokenProblemText(observation.tokenProblem ?? "absent");
-      if (observation.pageSession !== undefined && !observation.pageSession.hydrated) {
-        return `${answered}; the captured session opened the page, but after `
-          + `${observation.pageSession.waitedMs}ms it still does not consider itself signed in `
-          + `(${problem}), so no page token was sent — sign in again, then re-export and re-import`;
-      }
-      return `${answered}; the provider's API rejected the cookie-only request: it needs the token the `
-        + `page uses (${problem}) — sign in again so the page itself has one, then re-export and re-import`;
-    }
-    if (observation.sentAuthorization === true) {
-      return `${answered}; the request carried the page's own token and was still refused, so the session `
-        + "itself is no longer accepted — sign in again, then re-export and re-import";
-    }
-    return `${answered}; sign in to Qwen Code again, export the session again, and re-run the import`;
+    const action = qwenProviderRefusalAction(observation);
+    const note = qwenTruncationClause(
+      observation,
+      PROBE_REFUSAL_MAX_CHARS - answered.length - action.length,
+    );
+    return `${answered}${note}${action}`;
   }
 
   // The answer did not match a known shape. Report the identifying fields in priority order: HTTP
@@ -773,7 +1212,8 @@ export function qwenTaskListProbeRefusal(
   const action = qwenUnrecognisedAction(observation);
   const shapeBudget = PROBE_REFUSAL_MAX_CHARS - head.length - contentType.length - action.length;
   const shape = qwenShapeFragment(
-    read.shape ?? qwenAnswerBodyShape(observation.payload, observation.bodyText),
+    read.shape
+      ?? qwenAnswerBodyShape(observation.payload, observation.bodyText, observation.truncated === true),
     shapeBudget,
   );
   return `${head}${contentType}${shape}${action}`;

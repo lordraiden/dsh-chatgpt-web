@@ -81,6 +81,16 @@ export interface AuthImportAuthentication {
    * that other readers treat as "this session works".
    */
   readonly verified: boolean;
+  /**
+   * One short, non-secret note about **how** the predicate read the provider's answer, when that is
+   * worth recording.
+   *
+   * It exists so a stored-session log line can say which reading won (issue #299: a valid answer was
+   * read from its envelope because the transport had to cut it) without the host having to understand
+   * any provider's protocol. Omitted when the provider has nothing to add, and it is never a
+   * credential: it is composed from non-secret diagnostics only.
+   */
+  readonly reading?: string;
 }
 
 /**
@@ -149,6 +159,13 @@ export interface AuthImportResult {
   readonly verified: boolean;
   /** The verification time as ISO 8601, or `null` for an unverified capture. */
   readonly verifiedAt: string | null;
+  /**
+   * How the predicate read the provider's answer, when the provider reported it (issue #299).
+   *
+   * The host logs it beside `verified`, so "the answer was cut and its envelope decided" is visible in
+   * the service log and not only in the CLI's own detail line.
+   */
+  readonly reading?: string;
 }
 
 /** DeepSeek Web's provider id: a capture-only participant until its adapter exists. */
@@ -303,6 +320,7 @@ async function runProviderImport(
     detail: authentication.detail,
     verified: authentication.verified,
     verifiedAt: authentication.verified ? new Date(clock()).toISOString() : null,
+    ...(authentication.reading === undefined ? {} : { reading: authentication.reading }),
   };
 }
 
@@ -380,7 +398,16 @@ export function qwenCodeAuthImportProvider(options: QwenCodeAuthImportOptions = 
       });
       return {
         storageState: state,
-        detail: `Authenticated: /coder/api/v2/task/list answered success:true (HTTP ${verification.status})`,
+        // Which reading authenticated it is named in the operator's one line: a session proved from a
+        // cut answer must never look identical to one proved from a whole body.
+        detail: verification.read === "truncated-envelope"
+          ? `Authenticated: /coder/api/v2/task/list answered success:true (HTTP ${verification.status}); `
+            + `the body was cut at ${verification.bodyChars ?? 0} characters, so its leading envelope `
+            + "is what decided it"
+          : `Authenticated: /coder/api/v2/task/list answered success:true (HTTP ${verification.status})`,
+        ...(verification.read === "truncated-envelope"
+          ? { reading: `body truncated at ${verification.bodyChars ?? 0} chars; the envelope reports success:true` }
+          : {}),
         verified: true,
       };
     },

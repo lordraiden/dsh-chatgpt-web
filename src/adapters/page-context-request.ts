@@ -13,8 +13,10 @@
  * that — a header name, where its value comes from — is the provider's business and must never be
  * decided here.
  *
- * Deliberately small: one request, bounded by a timeout, returning status plus decoded text. It is a
- * transport primitive, not a second HTTP client and not an architecture around `Page`
+ * Deliberately small: one request, bounded by a timeout and by a caller-owned character bound,
+ * returning status plus decoded text. The bound is a transport fact, reported honestly
+ * ({@link PageContextAnswer.truncated}) instead of silently deciding that a large answer is a bad
+ * one. It is a transport primitive, not a second HTTP client and not an architecture around `Page`
  * (AGENTS.md → *Browser is a transport mechanism, not the architecture*).
  */
 import type { Page } from "playwright-core";
@@ -31,7 +33,14 @@ export interface PageContextRequest {
   readonly body?: string;
   /** How long the request may take before it is aborted inside the page. */
   readonly timeoutMs: number;
-  /** Upper bound on the answer text handed back to Node. Defaults to {@link DEFAULT_MAX_ANSWER_CHARS}. */
+  /**
+   * Upper bound on the answer text handed back to Node. Defaults to {@link DEFAULT_MAX_ANSWER_CHARS}.
+   *
+   * The caller owns this bound because only the caller knows how large its endpoint's *successful*
+   * answer legitimately is. It is a transport bound, never an authentication decision: a body larger
+   * than it is reported as {@link PageContextAnswer.truncated} and the caller decides what a cut
+   * answer means for its own protocol.
+   */
   readonly maxAnswerChars?: number;
 }
 
@@ -43,9 +52,22 @@ export interface PageContextAnswer {
   readonly text: string;
   /** `JSON.parse(text)` when that succeeds, else `undefined`. */
   readonly payload: unknown;
+  /**
+   * Whether the body was longer than the caller's bound and had to be cut.
+   *
+   * The read stops at the bound instead of buffering an unbounded body inside the page, so `text` is
+   * a prefix of the answer when this is `true`. A caller must not read "I cannot parse this" as "the
+   * provider answered garbage": a cut body is the transport's own limit at work.
+   */
+  readonly truncated: boolean;
 }
 
-/** A larger body than this is truncated: these APIs answer small JSON objects. */
+/**
+ * A larger body than this is cut: these APIs answer small JSON objects.
+ *
+ * It is a *default*, not a rule about what a provider may legitimately answer: a probe of an
+ * account-sized collection endpoint has to raise it for its own call (and still tolerate a cut body).
+ */
 const DEFAULT_MAX_ANSWER_CHARS = 20_000;
 
 /**
@@ -63,6 +85,9 @@ export async function requestInPageContext(
 ): Promise<PageContextAnswer> {
   const method = request.method ?? "GET";
   const maxChars = request.maxAnswerChars ?? DEFAULT_MAX_ANSWER_CHARS;
+  if (!Number.isSafeInteger(maxChars) || maxChars < 1) {
+    throw new TypeError("A page-context request requires a positive maxAnswerChars bound");
+  }
   const observed = await page.evaluate(async ({ url, method, headers, body, timeoutMs, maxChars }) => {
     const controller = new AbortController();
     const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
@@ -75,12 +100,36 @@ export async function requestInPageContext(
         credentials: "same-origin",
         signal: controller.signal,
       });
-      const text = await response.text();
-      return {
-        status: response.status,
-        contentType: response.headers.get("content-type") ?? "",
-        text: text.length > maxChars ? text.slice(0, maxChars) : text,
-      };
+      const contentType = response.headers.get("content-type") ?? "";
+      // Read the body as it arrives and stop at the bound: a chat list can be far larger than any
+      // diagnostic needs, and the caller only ever has to decide what the answer says about its
+      // session. Stopping also means a provider cannot force the page to buffer an unbounded body.
+      const reader = response.body?.getReader?.();
+      if (!reader) {
+        const whole = await response.text();
+        const cut = whole.length > maxChars;
+        return { status: response.status, contentType, text: cut ? whole.slice(0, maxChars) : whole, truncated: cut };
+      }
+      const decoder = new TextDecoder();
+      let text = "";
+      let truncated = false;
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        if (chunk.value) text += decoder.decode(chunk.value, { stream: true });
+        if (text.length > maxChars) {
+          truncated = true;
+          text = text.slice(0, maxChars);
+          break;
+        }
+      }
+      if (truncated) {
+        // The rest of the answer is not needed: release the connection rather than drain it.
+        try { await reader.cancel(); } catch { /* the bound already decided; nothing to recover */ }
+      } else {
+        text += decoder.decode();
+      }
+      return { status: response.status, contentType, text, truncated };
     } finally {
       clearTimeout(timer);
     }
@@ -104,5 +153,6 @@ export async function requestInPageContext(
     contentType: observed.contentType,
     text: observed.text,
     payload,
+    truncated: observed.truncated === true,
   };
 }

@@ -69,6 +69,7 @@ import {
   qwenTaskListAuthenticated,
   qwenTaskListProbeRefusal,
   qwenTaskListRefusal,
+  qwenTaskListVerdict,
 } from "./session-probe";
 import { sanitizeQwenStorageState, storeQwenSession } from "./session-store";
 
@@ -279,7 +280,10 @@ async function defaultOpenBrowser(launch: QwenCodeAuthBrowserLaunch): Promise<Qw
  */
 async function defaultProbeSession(page: Page): Promise<QwenCodeSessionProbeResult> {
   const observation = await probeQwenTaskListFromPage(page);
-  if (!qwenTaskListAuthenticated(observation.payload)) {
+  // The same verdict the import path uses: a complete body is decided by the predicate, and a body
+  // the page transport had to cut is decided by its leading envelope — the poll must not keep a signed
+  // in session waiting because its chat list is larger than a diagnostic snippet.
+  if (!qwenTaskListVerdict(observation).authenticated) {
     throw new Error(qwenTaskListProbeRefusal(observation));
   }
   return { authenticated: true, probe: "task-list", status: observation.status };

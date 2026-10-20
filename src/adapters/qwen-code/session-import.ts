@@ -35,16 +35,18 @@ import {
   QWEN_CODE_AUTH_VIEWPORT,
   QWEN_CODE_ROOT_URL,
 } from "./provider";
-import { qwenCodeAuthLaunchArgs, qwenTaskListAuthenticated } from "./auth-controller";
+import { qwenCodeAuthLaunchArgs } from "./auth-controller";
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import {
   probeQwenTaskListFromPageAfterHydration,
   qwenTaskListProbeRefusal,
+  qwenTaskListVerdict,
   type QwenAccessTokenProblem,
   type QwenAccessTokenSource,
   type QwenPageHydrationOptions,
   type QwenPageSessionProgress,
   type QwenTaskListObservation,
+  type QwenTaskListReadSource,
 } from "./session-probe";
 
 /**
@@ -62,6 +64,14 @@ export interface QwenCodeImportedSessionProbeResult {
   readonly contentType?: string;
   /** The answer's bounded raw body text, when the probe could observe it. Diagnostics only. */
   readonly bodyText?: string;
+  /**
+   * Whether the transport had to cut the body at its own bound before the body ended.
+   *
+   * `task/list` answers an account-sized chat list, so a cut is normal and may be a perfectly
+   * authenticated answer. The verdict is then read from the leading envelope
+   * (`session-probe.ts`, `qwenTaskListVerdict`), never from "this does not parse".
+   */
+  readonly truncated?: boolean;
   /** Whether the provider's own `authorization` header accompanied the request. */
   readonly sentAuthorization?: boolean;
   /** Where the token came from, for diagnostics. */
@@ -106,6 +116,16 @@ export interface QwenCodeImportedSessionVerification {
   readonly probe: "task-list";
   /** The HTTP status the endpoint answered. */
   readonly status: number;
+  /**
+   * Which reading authenticated the answer.
+   *
+   * `parsed-body` is the ordinary predicate over a complete body; `truncated-envelope` means the page
+   * transport had to cut the answer at its bound and the leading `{success, data}` envelope decided.
+   * The caller reports it, so a stored session never hides which reading won.
+   */
+  readonly read: QwenTaskListReadSource;
+  /** How many characters of the answer were read, when the envelope decided a cut one. */
+  readonly bodyChars?: number;
 }
 
 /** Options for {@link verifyQwenCodeImportedSession}. */
@@ -182,6 +202,7 @@ async function probeOpenedPage(
     payload: observation.payload,
     ...(observation.contentType === undefined ? {} : { contentType: observation.contentType }),
     ...(observation.bodyText === undefined ? {} : { bodyText: observation.bodyText }),
+    ...(observation.truncated === undefined ? {} : { truncated: observation.truncated }),
     ...(observation.sentAuthorization === undefined
       ? {}
       : { sentAuthorization: observation.sentAuthorization }),
@@ -219,8 +240,21 @@ export async function verifyQwenCodeImportedSession(
   });
 
   const result = await probe(storageState);
-  if (!qwenTaskListAuthenticated(result.payload)) {
+  // The one verdict, shared with the sign-in controller's poll step: a complete body is decided by
+  // the predicate, and a body the page transport had to cut is decided by its leading envelope. A
+  // bound on how much of an account-sized answer is read must never be reported as "the provider
+  // answered garbage" — that was the live `import_predicate_failed` of issue #299.
+  const verdict = qwenTaskListVerdict(result);
+  if (!verdict.authenticated) {
     throw new Error(qwenTaskListProbeRefusal(result));
   }
-  return { authenticated: true, probe: "task-list", status: result.status };
+  return {
+    authenticated: true,
+    probe: "task-list",
+    status: result.status,
+    read: verdict.source ?? "parsed-body",
+    ...(verdict.source === "truncated-envelope" && typeof result.bodyText === "string"
+      ? { bodyChars: result.bodyText.length }
+      : {}),
+  };
 }
