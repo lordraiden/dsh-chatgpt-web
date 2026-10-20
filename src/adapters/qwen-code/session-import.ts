@@ -58,6 +58,10 @@ export interface QwenCodeImportedSessionProbeResult {
   readonly status: number;
   /** The parsed JSON body, or `undefined` when it was not JSON. */
   readonly payload: unknown;
+  /** The answer's `content-type`, when the probe could observe it. Diagnostics only. */
+  readonly contentType?: string;
+  /** The answer's bounded raw body text, when the probe could observe it. Diagnostics only. */
+  readonly bodyText?: string;
   /** Whether the provider's own `authorization` header accompanied the request. */
   readonly sentAuthorization?: boolean;
   /** Where the token came from, for diagnostics. */
@@ -176,6 +180,8 @@ async function probeOpenedPage(
   return {
     status: observation.status,
     payload: observation.payload,
+    ...(observation.contentType === undefined ? {} : { contentType: observation.contentType }),
+    ...(observation.bodyText === undefined ? {} : { bodyText: observation.bodyText }),
     ...(observation.sentAuthorization === undefined
       ? {}
       : { sentAuthorization: observation.sentAuthorization }),

@@ -177,6 +177,7 @@ function simulatedQwenPage(
   states: readonly (string | undefined)[],
   payload: unknown,
   sent: Record<string, string>[],
+  body?: { readonly contentType: string; readonly text: string },
 ) {
   let readIndex = 0;
   const page = {
@@ -187,7 +188,9 @@ function simulatedQwenPage(
         return { state, legacy: undefined };
       }
       sent.push({ ...(arg?.["headers"] as Record<string, string>) });
-      return { status: 200, contentType: "application/json", text: JSON.stringify(payload) };
+      return body === undefined
+        ? { status: 200, contentType: "application/json", text: JSON.stringify(payload) }
+        : { status: 200, contentType: body.contentType, text: body.text };
     },
   } as unknown as Page;
   return async () => ({ page, close: async () => {} });
@@ -501,6 +504,61 @@ describe("session import — caller capture problems are 4xx with the pipeline's
     expect(result.text).toContain("carried the page's own token and was still refused");
     expect(qwen.stores()).toBe(0);
     expectNoSecret(result.text);
+  });
+
+  test("qwen-code: an unrecognised HTTP 200 body reaches the refusal and the log", async () => {
+    // The live shape: the page hydrated and the probe sent its token, but the provider answered with
+    // an HTML challenge page. Before this, the response body was discarded and the refusal said only
+    // "an unrecognised body". Now the body, its content type and the real title reach both places.
+    const sent: Record<string, string>[] = [];
+    const liveState = JSON.stringify({
+      token: SECRET_QWEN_PAGE_TOKEN, loggedOut: false, version: 1, expiresAt: 1_900_000_000_000,
+    });
+    const htmlBody = "<!DOCTYPE html><html><head><title>Access Verification</title></head>"
+      + "<body><p>Please complete the slider.</p></body></html>";
+    const qwen = tracked(qwenCodeAuthImportProvider({
+      openPage: simulatedQwenPage([liveState], ANONYMOUS_TASK_LIST, sent, {
+        contentType: "text/html; charset=utf-8",
+        text: htmlBody,
+      }),
+      hydration: FAST_HYDRATION,
+    }));
+    const server = serve([qwen.provider]);
+    const logged: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { logged.push(args.join(" ")); };
+    let result;
+    try {
+      result = await postImport(server, {
+        provider: QWEN_CODE_PROVIDER_ID,
+        storageState: {
+          cookies: [cookie(".qwen.ai", SECRET_QWEN, 1_893_456_000)],
+          origins: [{ origin: "https://coder.qwen.ai", localStorage: [{ name: "theme", value: "dark" }] }],
+        },
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    const refusalLog = logged.join("\n");
+
+    expect(sent[0]?.authorization).toBe(`Bearer ${SECRET_QWEN_PAGE_TOKEN}`);
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
+    expect(result.text).toContain("HTTP 200");
+    expect(result.text).toContain("content-type: text/html; charset=utf-8");
+    expect(result.text).toContain("the provider answered with a non-JSON document");
+    expect(result.text).toContain("Access Verification");
+    expect(qwen.stores()).toBe(0);
+    expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
+    expectNoSecret(result.text);
+
+    // The same answer reaches the log line, so the operator does not need a second round trip.
+    expect(refusalLog).toContain("auth_import_refused");
+    expect(refusalLog).toContain("import_predicate_failed");
+    expect(refusalLog).toContain("content-type: text/html; charset=utf-8");
+    expect(refusalLog).toContain("the provider answered with a non-JSON document");
+    expect(refusalLog).toContain("Access Verification");
+    expectNoSecret(refusalLog);
   });
 
   test("qwen-code: a page with no token gets the honest signed-out refusal, not a generic one", async () => {

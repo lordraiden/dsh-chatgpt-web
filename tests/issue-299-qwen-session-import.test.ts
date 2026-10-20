@@ -591,6 +591,8 @@ const CAPTURE_WITHOUT_TOKEN = {
 function simulatedQwenPage(options: {
   readonly states: readonly (string | undefined)[];
   readonly payload?: unknown;
+  /** A recorded-shape answer body, for the cases the predicate's JSON fixture cannot express. */
+  readonly body?: { readonly contentType: string; readonly text: string };
 }) {
   const reads: (string | undefined)[] = [];
   const sent: { url: string; headers: Record<string, string> }[] = [];
@@ -605,11 +607,13 @@ function simulatedQwenPage(options: {
       }
       if (typeof arg?.["url"] === "string") {
         sent.push({ url: String(arg["url"]), headers: { ...(arg["headers"] as Record<string, string>) } });
-        return {
-          status: 200,
-          contentType: "application/json",
-          text: JSON.stringify(options.payload ?? AUTHENTICATED_TASK_LIST),
-        };
+        return options.body === undefined
+          ? {
+            status: 200,
+            contentType: "application/json",
+            text: JSON.stringify(options.payload ?? AUTHENTICATED_TASK_LIST),
+          }
+          : { status: 200, contentType: options.body.contentType, text: options.body.text };
       }
       throw new Error("the simulated page does not implement this evaluation");
     },
@@ -911,5 +915,135 @@ describe("issue #299 — the generic hydration wait is bounded and observable", 
       .rejects.toBeInstanceOf(TypeError);
     await expect(waitForPageHydration(async () => 1, () => true, { timeoutMs: 10, pollIntervalMs: 0 }))
       .rejects.toBeInstanceOf(TypeError);
+  });
+});
+
+/**
+ * Issue #299 — a task-list answer the predicate does not recognise must be reported, not discarded.
+ *
+ * The live failure this covers: the page hydrated, the probe sent its token, and the provider answered
+ * HTTP 200 with a body the predicate did not recognise — which the refusal then threw away, leaving
+ * "an unrecognised body" with no evidence. These fixtures are recorded shapes, not live calls.
+ */
+describe("issue #299 — an unrecognised task-list answer is reported, never discarded", () => {
+  /** A JWT-shaped synthetic token. It must never appear in a refusal. */
+  const SHAPE_TOKEN =
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJlLXBsYWNlaG9sZGVy";
+
+  /** Compose exactly as the production probe does: parse, keep the raw body, then refuse. */
+  function refusalFor(body: string, contentType: string): string {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      payload = body;
+    }
+    return qwenTaskListProbeRefusal({
+      status: 200,
+      payload,
+      contentType,
+      bodyText: body,
+      sentAuthorization: true,
+    });
+  }
+
+  test("(a) a JSON body with an unknown envelope reports status, content-type and a snippet", () => {
+    const body = JSON.stringify({
+      success: false,
+      data: null,
+      request_id: "req-fixture",
+      error: { type: "quota_exceeded", message: "daily limit reached" },
+    });
+    const refusal = refusalFor(body, "application/json");
+
+    expect(refusal).toContain("HTTP 200");
+    expect(refusal).toContain("content-type: application/json");
+    expect(refusal).toContain("body snippet:");
+    // The actual envelope, not a guess from a known shape.
+    expect(refusal).toContain('"success":false');
+    expect(refusal).toContain("quota_exceeded");
+    // Bounded to the pipeline's inner diagnostic limit.
+    expect(refusal.length).toBeLessThanOrEqual(300);
+  });
+
+  test("(b) a non-JSON HTML block page is named as a document, with its title", () => {
+    const body = "<!DOCTYPE html>\n<html lang=\"en\">\n<head><title>Access Verification</title></head>\n"
+      + "<body><p>Please complete the slider.</p></body>\n</html>";
+    const refusal = refusalFor(body, "text/html; charset=utf-8");
+
+    expect(refusal).toContain("HTTP 200");
+    expect(refusal).toContain("content-type: text/html; charset=utf-8");
+    expect(refusal).toContain("the provider answered with a non-JSON document");
+    expect(refusal).toContain("Access Verification");
+    // Not dressed up as a JSON payload.
+    expect(refusal).not.toContain("body snippet");
+    expect(refusal.length).toBeLessThanOrEqual(300);
+    expect(refusal).not.toContain(SHAPE_TOKEN);
+  });
+
+  test("(c) an empty body says so instead of pretending it was JSON", () => {
+    const refusal = refusalFor("", "application/json");
+
+    expect(refusal).toContain("HTTP 200");
+    expect(refusal).toContain("content-type: application/json");
+    expect(refusal).toContain("empty body");
+    expect(refusal.length).toBeLessThanOrEqual(300);
+  });
+
+  test("(d) a body that is only a token-like string is redacted", () => {
+    const refusal = refusalFor(SHAPE_TOKEN, "text/plain");
+
+    expect(refusal).toContain("HTTP 200");
+    expect(refusal).toContain("content-type: text/plain");
+    expect(refusal).toContain("[redacted]");
+    expect(refusal).not.toContain(SHAPE_TOKEN);
+    // Not even a fragment of the token survives.
+    expect(refusal).not.toContain(SHAPE_TOKEN.slice(0, 16));
+    expect(refusal.length).toBeLessThanOrEqual(300);
+  });
+
+  test("the page-bound sender keeps the answer the refusal needs", async () => {
+    // The regression that made the live refusal blind: the sender used to keep only `payload`, so a
+    // non-JSON body arrived as a bare string with no content type and no raw text.
+    const body = "<!DOCTYPE html><html><head><title>Access Verification</title></head></html>";
+    const live = tokenStateEntry(LIVE_PAGE_TOKEN);
+    const { page } = simulatedQwenPage({
+      states: [live.value],
+      body: { contentType: "text/html; charset=utf-8", text: body },
+    });
+
+    const observation = await probeQwenTaskListFromPageAfterHydration(page, FAST_HYDRATION);
+
+    expect(observation.status).toBe(200);
+    expect(observation.contentType).toBe("text/html; charset=utf-8");
+    expect(observation.bodyText).toBe(body);
+    // The predicate still sees a non-object for a non-JSON body, so it cannot authenticate.
+    expect(qwenTaskListRefusal(observation.payload, observation)).toContain("non-JSON document");
+
+    const refusal = qwenTaskListProbeRefusal(observation);
+    expect(refusal).toContain("content-type: text/html; charset=utf-8");
+    expect(refusal).toContain("Access Verification");
+    expect(refusal.length).toBeLessThanOrEqual(300);
+    expect(refusal).not.toContain(LIVE_PAGE_TOKEN);
+  });
+
+  test("a known provider message containing a token is redacted too", () => {
+    const refusal = qwenTaskListRefusal({ success: false, message: `rejected token ${SHAPE_TOKEN}` });
+    expect(refusal).toContain("rejected token");
+    expect(refusal).toContain("[redacted]");
+    expect(refusal).not.toContain(SHAPE_TOKEN);
+  });
+
+  test("a short secret in a credential-named field is redacted by name, not only by length", () => {
+    const body = JSON.stringify({
+      success: false,
+      data: { token: "short-session-value", note: "unfamiliar envelope" },
+    });
+    const refusal = refusalFor(body, "application/json");
+
+    expect(refusal).not.toContain("short-session-value");
+    expect(refusal).toContain("[redacted]");
+    // The non-secret part of the envelope is still visible.
+    expect(refusal).toContain("unfamiliar envelope");
   });
 });
