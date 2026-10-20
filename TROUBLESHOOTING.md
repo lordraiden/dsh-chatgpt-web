@@ -2,7 +2,8 @@
 
 This guide covers operational problems in the current production implementation of dsh-chatgpt-web.
 
-Today the production WebChat provider is **ChatGPT Web**. Qwen Chat and DeepSeek Chat are future text-only providers under the multi-provider architecture and are not current user-facing routes.
+Today the production WebChat providers are **ChatGPT Web** and **Qwen Code**. DeepSeek Chat is a future
+text-only provider under the multi-provider architecture and is not a current user-facing route.
 
 For the ownership model and future provider architecture, see doc/architecture.md.
 
@@ -338,13 +339,42 @@ The intended recovery choices are explicit:
 
 Do not reconstruct authoritative DSH state from browser-visible conversation text.
 
-## 13. Qwen Chat or DeepSeek Chat cannot be selected
+## 13. Qwen Code or DeepSeek Chat cannot be selected
 
-This is expected on the current production release.
+**Qwen Code is a supported route** (`qwen-code/<model>`) once this deployment has a verified session for
+it or a `webChat.providers["qwen-code"]` block. **DeepSeek Chat is still a roadmap provider**: its
+capture can be imported, but it is stored unverified and no route is advertised for it.
 
-Qwen Chat and DeepSeek Chat are architectural roadmap providers, not currently supported user-facing routes, and the container-only product advertises no route for them.
+Do not add ad-hoc DeepSeek routes to ChatGPT-specific code. A new provider requires the shared WebChat
+contracts to be implemented first, and it must pass the conformance suite.
 
-Do not add ad-hoc Qwen/DeepSeek routes to ChatGPT-specific code. A new provider requires the shared WebChat contracts to be implemented first.
+### `qwen-code/...` is missing from `/v1/models`
+
+The rows appear when the provider is **configured or signed in**: add
+`webChat.providers["qwen-code"] = { "models": ["qwen3-coder-plus"] }` to the configuration, or complete a
+Qwen Code sign-in at `/v1/control/auth/` (or `auth import --provider qwen-code`). A ChatGPT-only
+deployment keeps exactly the catalogue it had.
+
+### A Qwen Code turn fails with 401 / `QWEN_SESSION_MISSING`
+
+The deployment has no **verified** Qwen Code session: the storage state is missing, or its
+`.verified.json` marker says it was never verified. The message names the operator surface; sign in again
+at `/v1/control/auth/` (choose "Qwen Code") on a machine whose own browser can complete the provider's
+Access Verification, or adopt a capture as in [§5.5 of `doc/container.md`](./doc/container.md). A session
+the provider has revoked reports `QWEN_SESSION_UNAUTHORIZED` on the same route.
+
+### A Qwen Code turn fails with 409 / `QWEN_CHAT_LOST`
+
+The provider no longer accepts the chat this conversation was continuing. That is recorded as a **lost**
+chat, never silently replaced: the next turn rebuilds the conversation from canonical history as an
+explicit replay (a new chat, a generation that advances by one). If replaying is not what you want, start
+a new conversation on the caller side.
+
+### A session title or compaction turn does not appear in the Qwen Code account
+
+That is correct. A turn that declares a housekeeping `purpose` (`session-title`, `compaction`, or any
+declared value) is answered and kept nowhere: it creates no chat, records no conversation and consumes
+none. If one of them fails, it fails with a typed category — it never falls back to the account's chat.
 
 ## 14. A tool-sending harness works, but never receives tool calls
 

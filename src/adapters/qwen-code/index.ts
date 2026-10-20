@@ -130,3 +130,54 @@ export {
   type QwenTurnMessage,
   type QwenTurnRequestFacility,
 } from "./network-turn";
+
+// --- slice 2: the provider driver, its runtime and the Responses ingress -------------------------
+
+export { createQwenCodeDriver, qwenCodeAffinityKey, qwenCodeConversationHandle } from "./driver";
+export {
+  createQwenCodeProvider,
+  compileQwenCodeReplayPrompt,
+  qwenCodeAffinitySessionId,
+  qwenCodeReplayHistory,
+  QwenCodeRequestError,
+  type QwenCodeProviderComposition,
+  type QwenCodeProviderOptions,
+  type QwenCodeResolvedTurn,
+} from "./provider-runtime";
+export { qwenCodeResponsesRequest, type QwenCodeResponsesRequestOptions } from "./responses";
+export {
+  QWEN_CODE_UNRECORDED_ACCOUNT_FINGERPRINT,
+  qwenCodeAccountBinding,
+  qwenCodeCatalogueRows,
+  qwenCodeCatalogueVisible,
+  qwenCodeExecutionNamespace,
+  qwenCodeModelDescriptors,
+  qwenCodeSessionVerified,
+  resolveQwenCodeProviderConfig,
+  type QwenCodeModelEntry,
+  type QwenCodeProviderConfig,
+} from "./provider-config";
+export {
+  createFileQwenCodeConversationState,
+  createMemoryQwenCodeConversationState,
+  type QwenCodeChatRecord,
+  type QwenCodeConversationEntry,
+  type QwenCodeConversationState,
+} from "./chat-state";
+export {
+  createQwenCodeBrowserSession,
+  QWEN_CODE_SIGN_IN_INSTRUCTION,
+  type QwenCodeBrowserSessionOptions,
+  type QwenCodeRequestSession,
+  type QwenCodeSessionPage,
+  type QwenCodeSessionPageOpener,
+} from "./browser-session";
+export {
+  createQwenCodeTextTransport,
+  qwenCodeChatDigest,
+  QWEN_CODE_SETTLE_TIMEOUT_MS,
+  QWEN_CODE_TURN_TIMEOUT_MS,
+  type QwenCodeTextTransportOptions,
+  type QwenCodeTurnAnswer,
+  type QwenCodeTurnDiagnostic,
+} from "./text-transport";

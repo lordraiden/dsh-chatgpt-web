@@ -15,6 +15,8 @@
  * - Provider continuation state stays opaque and provider-scoped; it never replaces the durable
  *   conversation store.
  */
+import { resolve } from "node:path";
+
 import {
   createMemoryConversationStore,
   isWebChatModelDescriptor,
@@ -51,6 +53,46 @@ export function resolveWebChatProviderConfig(config: WebChatHostConfig, provider
   if (scoped !== undefined) return scoped;
   if (providerId === CHATGPT_WEB_DRIVER_ID) return config.chatgptWeb;
   return undefined;
+}
+
+/**
+ * The process-owned conversation stores, one per effective durable location.
+ *
+ * The durable backend owns **one writer per file and process**, so the process keeps exactly one
+ * store per location: every provider composition of this process resolves the same store, and a
+ * second store for the same file is refused by the backend instead of silently racing a second
+ * writer. This is the one registry; the ChatGPT adapter's `resolveNativeChatGptContinuityStore`
+ * delegates to it rather than keeping a second map (issue #299, slice 2).
+ */
+const sharedConversationStores = new Map<string, WebChatConversationStore>();
+
+/**
+ * Resolve the deployment's conversation store for one configuration.
+ *
+ * @param config - the host configuration (the durable location and its provider fallbacks).
+ * @returns the process-owned store for that location, or the memory backend when none is configured.
+ */
+export function resolveSharedConversationStore(config: WebChatHostConfig): WebChatConversationStore {
+  const path = config.webChat?.conversationStorePath?.trim();
+  const key = path !== undefined && path.length > 0 ? resolve(path) : "";
+  const existing = sharedConversationStores.get(key);
+  if (existing !== undefined) return existing;
+  const store = createWebChatConversationStore(config);
+  sharedConversationStores.set(key, store);
+  return store;
+}
+
+/**
+ * Release every process-owned conversation store.
+ *
+ * Taking the map first makes the release **idempotent**: a repeated shutdown sees an empty map and
+ * releases nothing twice. Each backend drains its own write queue before giving the file back, so a
+ * committed update is already on disk.
+ */
+export async function closeSharedConversationStores(): Promise<void> {
+  const stores = [...sharedConversationStores.values()];
+  sharedConversationStores.clear();
+  for (const store of stores) await closeWebChatConversationStore(store);
 }
 
 /**

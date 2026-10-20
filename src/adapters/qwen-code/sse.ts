@@ -180,6 +180,13 @@ export class QwenSseParser {
 export interface QwenCompletionResult {
   /** The `response.created` chat id, when the stream announced one. */
   readonly chatId?: string;
+  /**
+   * The `response.created` parent cursor, when the stream announced one.
+   *
+   * It is the message the next turn of the same chat hangs off (`parentId`/`parent_id`), which is why
+   * a continuation is recorded from the stream rather than guessed.
+   */
+  readonly parentId?: string;
   /** The response id the deltas belong to. */
   readonly responseId?: string;
   /** The concatenated answer text (assistant deltas only; see `includeFunctionOutput`). */
@@ -196,6 +203,13 @@ export interface QwenCompletionResult {
 
 /** Construction options for {@link createQwenCompletionAccumulator}. */
 export interface QwenCompletionAccumulatorOptions {
+  /**
+   * Called with each piece of content that enters the answer, in order.
+   *
+   * A transport streams these to its consumer as they arrive; the *rule* about what counts as the
+   * answer (the `function`-role exclusion) stays here, so no consumer reimplements it.
+   */
+  readonly onDelta?: (text: string) => void;
   /**
    * Whether `role:"function"` output is part of the answer.
    *
@@ -230,8 +244,10 @@ export function createQwenCompletionAccumulator(
   options: QwenCompletionAccumulatorOptions = {},
 ): QwenCompletionAccumulator {
   const includeFunctionOutput = options.includeFunctionOutput === true;
+  const onDelta = options.onDelta;
   const parts: string[] = [];
   let chatId: string | undefined;
+  let parentId: string | undefined;
   let responseId: string | undefined;
   let termination: QwenCompletionTermination | undefined;
   let terminalStatus: string | undefined;
@@ -240,6 +256,7 @@ export function createQwenCompletionAccumulator(
 
   const result = (): QwenCompletionResult => ({
     ...(chatId === undefined ? {} : { chatId }),
+    ...(parentId === undefined ? {} : { parentId }),
     ...(responseId === undefined ? {} : { responseId }),
     text: parts.join(""),
     termination: termination ?? "stream_end",
@@ -258,6 +275,7 @@ export function createQwenCompletionAccumulator(
       switch (frame.kind) {
         case "created":
           chatId ??= frame.chatId;
+          parentId ??= frame.parentId;
           responseId ??= frame.responseId;
           return false;
         case "info":
@@ -269,7 +287,10 @@ export function createQwenCompletionAccumulator(
           return false;
         case "delta": {
           const isFunction = frame.role === "function";
-          if (!isFunction || includeFunctionOutput) parts.push(frame.content);
+          if (!isFunction || includeFunctionOutput) {
+            parts.push(frame.content);
+            if (frame.content.length > 0) onDelta?.(frame.content);
+          }
           if (frame.responseId !== undefined) responseId ??= frame.responseId;
           if (!isFunction && frame.status !== undefined && frame.status !== "typing") {
             termination = "delta_status";

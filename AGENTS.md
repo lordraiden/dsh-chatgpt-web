@@ -22,8 +22,8 @@ private-npm-registry or `dsh plugin update` release contract. Do not reintroduce
 not describe the product as a DSH plugin.
 
 **Architectural direction:** a provider-neutral **WebChat Core** for authenticated, text-only
-consumer-web chat. ChatGPT Web is the current and only provider; Qwen Chat and DeepSeek Chat are
-planned providers and are not current routes.
+consumer-web chat. ChatGPT Web and **Qwen Code** (`qwen-code/<model>`, issue #299 slice 2) are the
+current providers; DeepSeek Chat is a planned provider and is not a current route.
 
 ## Source-of-truth hierarchy
 
@@ -302,13 +302,13 @@ Do not reintroduce account-wide exclusivity as a generic WebChat rule.
 ## Provider migration discipline
 
 The multi-provider work is intentionally staged. The shared contracts, the ChatGPT migration, the
-service host integration and the conformance suite are delivered; the remaining order is:
+service host integration, the conformance suite and the **Qwen Code text provider** (issue #299 slice 2,
+`src/adapters/qwen-code/**`) are delivered; the remaining order is:
 
-1. Qwen Web text provider.
-2. Qwen real-session validation/recovery hardening.
-3. DeepSeek Web text provider.
-4. DeepSeek real-session validation/recovery hardening.
-5. Cross-provider integration validation.
+1. Qwen real-session validation/recovery hardening.
+2. DeepSeek Web text provider.
+3. DeepSeek real-session validation/recovery hardening.
+4. Cross-provider integration validation.
 
 Do not re-litigate the delivered stages while adding a provider.
 

@@ -136,13 +136,22 @@ No Qwen knowledge enters `src/web-chat/core/**`; the neutral contract, the sign-
 ity boundary are untouched. The only change outside the new adapter directory and its tests is the
 second registration entry and the shared sanitizer extraction.
 
-## 4. What the code deliberately does not do yet (slice 2)
+## 4. What slice 1 deliberately left out (delivered by slice 2 — see §7)
+
+> **Note on the route spelling.** Slice 1 wrote the catalogue rows as `qwen-coder/<model>`. The shipped
+> provider id is **`qwen-code`** (`QWEN_CODE_PROVIDER_ID`), which is also the credential directory the
+> operator's verified session lives in (`providers/qwen-code/`) and the id the sign-in surface
+> registered. The public route is therefore **`qwen-code/<model>`**; `qwen-coder/` was never an id in
+> the code. Renaming it would orphan that session directory, so the id is kept and the spelling above is
+> corrected rather than perpetuated (see §7.7).
 
 - **No driver and no turn route.** `WebChatProviderDriver`, `WebChatTextTransport`,
-  `WebChatProviderRuntime`, the catalogue rows (`qwen-coder/<model>`) and the conformance fixture are
-  slice 2. This slice proves sign-in and one network turn; it does not serve `/v1/responses`.
+  `WebChatProviderRuntime`, the catalogue rows (`qwen-code/<model>`) and the conformance fixture are
+  slice 2 (§7). Slice 1 proves sign-in and one network turn; it does not serve `/v1/responses`.
 - **No account binding.** `inspectAccount()`'s fingerprint, `persistAccountIdentityFingerprint` and the
-  physical/logical account check are slice 2; nothing was recorded here.
+  physical/logical account check are slice 2. §7.5 records what was actually possible: no stable
+  provider-side account identifier was measured, so this provider publishes a **recorded** identity and
+  never derives one.
 - **No conversation identity, affinity or retention.** The chat id returned by `task/new` is used for
   one turn and then dropped, as the slice requires; it is never the caller's conversation identity.
 - **Resolved after the live import (below): the `authorization` header.** The question this slice left
@@ -477,3 +486,195 @@ session, and once they stop being accepted there is nothing else to reset.
   attached to.
 - The import needs a browser in the container for the `task/list` check, exactly like the sign-in
   page does; it uses the configured `chromeExecutablePath` and the repository's headless launch shape.
+
+## 7. Slice 2 — the provider driver (issue #299)
+
+> **Scope.** This section is the evidence record for the driver: what was built, how a turn flows, how
+> continuity and the ephemeral rule are honoured, the catalogue mechanism, what the conformance suite
+> proved and what is still unproven. Where this section and the code disagree, the code and its tests
+> win (`tests/issue-299-qwen-code-provider-conformance.test.ts`,
+> `tests/issue-299-qwen-code-text-transport.test.ts`, `tests/issue-299-qwen-code-route.test.ts`).
+
+### 7.1 What was delivered
+
+| Concern | Owner |
+| --- | --- |
+| Provider facts: session path, account binding, models, namespace, catalogue rows | `src/adapters/qwen-code/provider-config.ts` |
+| Durable conversation ↔ chat state (chat id + parent cursor + generation) | `src/adapters/qwen-code/chat-state.ts` |
+| The session page (the one transport resource) and its readiness | `src/adapters/qwen-code/browser-session.ts` |
+| The text transport: `task/new` → `completions`, the three termination signals, settlement | `src/adapters/qwen-code/text-transport.ts` |
+| `WebChatProviderDriver` | `src/adapters/qwen-code/driver.ts` |
+| The composition: continuity decision, exchange, durable confirmation, `WebChatProviderRuntime` | `src/adapters/qwen-code/provider-runtime.ts` |
+| The Responses ingress for `qwen-code/<model>` | `src/adapters/qwen-code/responses.ts` |
+| Wire-up: dispatch, catalogue rows, `doctor` | `src/server.ts`, `src/model-catalog.ts`, `src/doctor.ts` |
+
+Nothing Qwen-specific enters `src/web-chat/core/**`. The reusable seams this provider *consumes*
+rather than reimplements are: the host's one turn-identity reader
+(`src/web-chat/host/turn-identity.ts`), the core's ephemeral classification
+(`src/web-chat/core/turn-delivery.ts`), the continuation decision and record
+(`src/web-chat/core/continuation.ts`), the exchange lifecycle and lease registry
+(`src/web-chat/transport/**`), and the Responses framing plus its keep-alive clock
+(`src/bridge.ts`).
+
+### 7.2 How one turn flows, end to end
+
+```text
+POST /v1/chat/completions  or  POST /v1/responses   model = qwen-code/<modelId>
+        ↓  translateChatCompletionsRequest (chat route only; it adds no engine)
+        ↓  responseRequest: the route's provider id matches a composed provider
+src/adapters/qwen-code/responses.ts
+        ↓  resolve the turn: model, current user text, canonical history, declared purpose
+        ↓  (ephemeral? — answered through the transport with no store read and no chat)
+src/adapters/qwen-code/provider-runtime.ts
+        ↓  provider facts → intent → resolveWebChatContinuation (the core decides)
+        ↓  beginWebChatConversationAttempt (the record becomes unconfirmed)
+        ↓  createWebChatExchange (shared lifecycle: prepare → submit → stream → settle)
+src/adapters/qwen-code/text-transport.ts
+        ↓  GET the chat: recorded chat (reuse) or POST /coder/api/v2/task/new
+        ↓  POST /coder/api/v2/task/completions?chat_id=<id>   (text/event-stream)
+        ↓  choices[].delta.content in order, role:"function" chatter excluded
+        ↓  stop on: non-function delta leaving "typing" | response.info != keep_alive | stream end
+        ↓  completion → record { chatId, parentId } → confirmWebChatConversation
+        ↓  events → the adapter vocabulary → response.* SSE (or the non-stream payload)
+```
+
+The request shapes are the measured ones: `task/new` sends `{chatId:"", models:[model], chat_type,
+title, chat_mode, timestamp, sub_chat_type}` and `completions` carries `chat_id` in the query **and** in
+the body, with client-generated message/assistant ids and the parent cursor of the previous turn (the
+captured first-turn shape is `parentId: ""` / `parent_id: null`).
+
+**The inherited text-only policy is not re-implemented.** A capability declaration (`tools`,
+`tool_choice`/`function_call`, `mcp`) is discarded and **declared** on both routes
+(`x-dsh-chatgpt-web-ignored-features` plus one log line), through the Core's own list
+(`rejectUnsupportedWebChatFeatures`); nothing reads those fields when the turn is built, so they cannot
+be forwarded even by accident. Attached *content* keeps failing with the Core's existing
+`UNSUPPORTED_OPTION` refusal. No policy, refusal category or feature list was added for this provider.
+
+### 7.3 Continuity: one conversation key, one chat
+
+- The chat id and the cursor the turn ended on are persisted by **this provider**, keyed by the core's
+  affinity key, in `providers/qwen-code/conversations.json` (atomic write, mode 0600). It is continuity
+  state only: no transcript, no credential, and it never becomes the caller's conversation identity.
+- A conversational turn **reuses** the recorded chat, and creates one only when the conversation has
+  none. A different conversation key gets a different chat (pinned in the route suite).
+- The declared restart recovery is **`exact_resume`**, and it is honest: the chat id is durable, so a
+  turn after a restart continues the same chat, same generation, same opaque handle.
+- **If a chat is lost or rejected** the failure is typed, never a silent new chat:
+  `CONVERSATION_LOST` (`QWEN_CHAT_LOST`, HTTP 409) is reported, the chat is recorded as `lost`, and the
+  next turn rebuilds the conversation as an **explicit replay** from canonical history — a new chat and
+  a generation that advances by one, both visible in the record.
+- There is **no `retained_surface_lost` family** for this provider: nothing of a conversation is
+  retained locally, so nothing of it can be evicted. The one physical resource is the session page,
+  which is not keyed by conversation.
+- **A never-confirmed attempt is rebuilt, not resumed.** This provider cannot prove from provider
+  state which message a half-observed (crashed or cancelled) turn actually applied, so it deliberately
+  omits `reconcileConversation`; the next turn therefore takes the same honest recovery the ChatGPT
+  adapter takes when it cannot prove its installation state — an **explicit replay** from canonical
+  history, which advances the generation and is recorded as such. Leaving the caller with a permanent
+  refusal would have been the alternative, and it is not a better one.
+
+### 7.4 Ephemeral turns: answered, kept nowhere
+
+A turn that declares a purpose (`session-title`, `compaction`, or any non-blank value — the
+classification is the core's, not this adapter's) is answered with:
+
+- **no `task/new`**: zero chat-creation calls (**asserted** in
+  `tests/issue-299-qwen-code-text-transport.test.ts` and through the real listener with the
+  `x-dsh-turn-purpose` header);
+- **no store read and no store write**: the conversation record is neither created nor continued;
+- **no recorded chat or cursor**: the next conversational turn behaves as if the housekeeping call had
+  never run.
+
+The one honest caveat: this protocol can only *answer* without creating a chat by streaming into a chat
+id this process generated, so that is what an ephemeral turn does. Whether the provider accepts a chat
+id it did not create is **not yet measured** (§7.6). If it refuses, the turn fails with the provider's
+own typed category — it never falls back to creating a chat, which is exactly the bug this rule exists
+to prevent.
+
+### 7.5 Authentication and account identity
+
+- Every request is issued **from inside the session page** with the app's own cookies *and* the
+  `authorization: Bearer <page token>` header read from the live page at call time (`session-probe.ts`
+  → `createQwenRequestFacility`), exactly as slice 1 established.
+- Readiness runs **before** the submission boundary: no verified session (or a page that never restored
+  its own token) fails as `AUTH_REQUIRED` with zero send attempts and a message naming
+  `/v1/control/auth/`; a session the provider stops accepting is `AUTH_REQUIRED` /
+  `QWEN_SESSION_UNAUTHORIZED`. There is no automatic retry of any kind.
+- **Account identity is recorded, never derived.** No stable provider-side account identifier was
+  measured (the captured HAR has chat endpoints, not a "who am I"), so this provider publishes a
+  fingerprint only when the deployment recorded one
+  (`webChat.providers["qwen-code"].accountIdentityFingerprint`) and otherwise reports the session as
+  authenticated with **no** fingerprint. Conversations bind to a documented stable placeholder in that
+  case, published with `accountIdentityRecorded: false`. This is the §4.3 trap of
+  [`provider-onboarding.md`](./provider-onboarding.md) avoided rather than repeated: nothing here mints
+  an identity from a file.
+
+### 7.6 The catalogue, and what such a row claims
+
+- `qwen-code/<modelId>` rows are the provider's own rows (`qwenCodeCatalogueRows`), composed into
+  `/v1/models` beside the ChatGPT rows. The model id maps to a row by provider-qualification, once:
+  `providerId` + `/` + the provider-local model id (`webChatPublicRoute`).
+- The model list is **configuration**, not discovery: `webChat.providers["qwen-code"].models` (string or
+  `{id,label}` entries), defaulting to the one id the capture measured, `qwen3-coder-plus`. No endpoint
+  that lists the account's selectable models was recorded, and inventing one would be inventing a
+  provider protocol. An empty list is a configuration error, never "serve everything".
+- The rows appear when the provider is configured **or** a verified session exists; a ChatGPT-only
+  deployment's catalogue is unchanged.
+- The row claims only what is true: text-only input, no tools, no image input, no reasoning levels (the
+  recorded request pins `thinking_enabled: false`). A selected reasoning level is refused, not dropped.
+- `doctor` reports the provider (`webchat-qwen-code`) once those same conditions hold, and never starts a
+  browser to inspect it.
+
+### 7.7 Diagnostics
+
+One structured, credential-free line per turn stage (`[qwen-code] qwen_turn {...}`): `ready`,
+`chat-created` / `chat-reused` / `ephemeral`, `streaming`, `submitted`, `completed` (with the
+**termination signal that fired**, the frame count, the answer length and the elapsed time) or
+`failed`/`cancelled` (with the typed category and the provider's own code). The chat is named only as a
+12-hex digest. No cookie, token, prompt or chat id is ever printed. A settlement that had to tear the
+page down is reported as `qwen_turn_settle_timeout` with its bound.
+
+### 7.8 Conformance, and one finding about the shared suite
+
+`tests/issue-299-qwen-code-provider-conformance.test.ts` runs the **shared** suite
+(`tests/web-chat-provider-conformance.ts`) against the real driver, runtime, exchange, durable record
+and chat state; only the session page's request facility is controlled. **All ten suite scenarios pass**,
+including the failure matrix (cancel 1/1, auth loss 0/0, provider error 1/1, partial 1/1, ambiguous 1/0,
+none retryable), the three-turn lineage, the isolation of account/session identities and the idempotent
+shutdown.
+
+The second fixture did what [`provider-onboarding.md`](./provider-onboarding.md) §1.7 said it would: it
+found a **neutrality gap in the shared suite**. Test 6 ("lost process-local continuity fails closed")
+asserted, unconditionally, that an implicit continuation fails after `restart()` — true for a provider
+whose continuity is a retained surface (ChatGPT), false for one whose continuation state is durable
+(this provider, whose chat id survives the restart). The assertion now follows the declaration the
+harness already supplies (`restartRecovery`): for `exact_resume` it requires the continuation to
+**succeed as the same conversation** (same key, generation and handle), which is strictly stronger than
+before; for every other declaration it keeps the original refusal. ChatGPT's own assertions are
+unchanged, because it declares `explicit_replay`. This is one suite with a corrected assumption, not a
+fork.
+
+### 7.9 What only a live session can prove
+
+Everything above is deterministic and covered by fixtures. These are **not** measured yet, and each one
+is a single operator command away:
+
+| Unproven | Why | How to prove it |
+| --- | --- | --- |
+| A real streamed turn through the driver (the transport was proven in slice 1, the *driver path* was not) | No Qwen account is available in this environment | `curl -sS -X POST http://127.0.0.1:17841/v1/chat/completions -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"model":"qwen-code/qwen3-coder-plus","stream":true,"messages":[{"role":"user","content":"Reply with exactly: ready"}]}'` |
+| Continuation by chat id against the real provider (including whether the recorded `parentId` cursor is accepted) | needs a second live turn | run the same command twice with the same `x-session-affinity` header, or a `user` field |
+| An ephemeral turn being accepted with a client-generated chat id | the capture only shows `task/new` → `completions` | send one call with `-H 'x-dsh-turn-purpose: session-title'`; a refusal is a finding to report, not something to disguise |
+| Headless session reuse for turns | the import probe launches headless on the capture, but no turn has run that way | the first live turn above |
+
+### 7.10 What the operator must do to use it
+
+1. Sign in (or import) so `providers/qwen-code/storage-state.json` exists **with its verified marker** —
+   `GET /v1/control/auth/providers` reports `Qwen Code`, and the import answers `verified: true`.
+2. Declare the provider, if the deployment does not already: add
+   `"webChat": { "providers": { "qwen-code": { "models": ["qwen3-coder-plus"] } } }` to the configuration.
+   (A verified session alone is enough for the row to appear; the block is what pins the model list.)
+3. Restart the service after an `auth import` (the sign-in surface needs no restart); a running
+   listener resolves the new session at the next turn.
+4. Pick the model id **`qwen-code/qwen3-coder-plus`** in the harness (that is the catalogue slug; the
+   provider-local id `qwen3-coder-plus` is never the public route). In a DSH harness this is the model
+   id it sends as `model`; the conversation continues on the same `x-session-affinity` / `user` value.

@@ -3,6 +3,12 @@ import type { AppConfig } from "./config";
 import { getConfigDir, getConfigPath, loadConfig } from "./config";
 import { join } from "node:path";
 import { createChatGptWebDriver } from "./adapters/chatgpt-web/chatgpt-driver";
+import { createQwenCodeDriver } from "./adapters/qwen-code/driver";
+import { createMemoryQwenCodeConversationState } from "./adapters/qwen-code/chat-state";
+import {
+  qwenCodeCatalogueVisible,
+  resolveQwenCodeProviderConfig,
+} from "./adapters/qwen-code/provider-config";
 import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import {
@@ -77,7 +83,21 @@ function launcherOwnershipError(config: AppConfig, health: Record<string, unknow
  * an error by {@link webChatProviderChecks} instead of being omitted from the report.
  */
 export function webChatDoctorDrivers(config: AppConfig): readonly WebChatProviderDriver[] {
-  return [createChatGptWebDriver({ provider: effectiveChatGptWebProviderConfig(config) })];
+  const drivers: WebChatProviderDriver[] = [
+    createChatGptWebDriver({ provider: effectiveChatGptWebProviderConfig(config) }),
+  ];
+  // A second provider is reported once this deployment can serve it: a configured provider block or
+  // a verified session (issue #299, slice 2). A ChatGPT-only deployment keeps exactly the report it
+  // had, and a deployment that signed in to Qwen Code sees its account and models without editing
+  // anything else. The driver is composed with no session page and no continuity file of its own:
+  // `doctor` inspects, it never starts a browser.
+  if (qwenCodeCatalogueVisible(config)) {
+    drivers.push(createQwenCodeDriver({
+      provider: resolveQwenCodeProviderConfig(config),
+      state: createMemoryQwenCodeConversationState(),
+    }));
+  }
+  return drivers;
 }
 
 /**
