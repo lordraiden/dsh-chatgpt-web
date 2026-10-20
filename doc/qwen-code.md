@@ -229,6 +229,16 @@ carried the page's own token and was still refused, so the session itself is no 
 Either way the operator and the log see the provider's status and its own code (or a bounded body
 snippet), and never a cookie, a storage value or the token.
 
+**An answer that matches no known shape is reported, not thrown away.** When `task/list` answers a body
+the predicate does not recognise, the refusal carries the HTTP status, the `content-type` and a bounded
+snippet of the **actual body** (an HTML block/challenge page is named as a non-JSON document with its
+`<title>` or first line, never as JSON). Long token-shaped runs, bearer values and JWTs are redacted
+before the snippet is bounded, and the whole refusal is composed to the pipeline's 300-character inner
+diagnostic bound, so the `auth_import_refused` log line carries the same evidence as the API answer.
+The accepted shapes are unchanged: a `success:true` body still authenticates, and the `Unauthorized`
+refusal still reads exactly as before — only a body this adapter does not understand gains the extra
+report, because that is precisely the case that used to be blind.
+
 ## 5. The manual live probe (operator step)
 
 The script is `scripts/probe-qwen-headless.mjs`. It starts nothing but a disposable browser profile and
@@ -355,6 +365,7 @@ What the import validates, and what it refuses **before anything is written**:
 | cookies, but none for this provider (renamed/missing domain) | `the capture contains no coder.qwen.ai cookies (every cookie in it belongs to another domain)` |
 | the provider's cookies all expired | `every coder.qwen.ai cookie in the capture has expired; sign in again …` |
 | `task/list` answers anything but `success:true` when the live page had a usable token | `… the task list answered HTTP 200 with Unauthorized 401 Unauthorized; the request carried the page's own token and was still refused, so the session itself is no longer accepted: sign in again …` |
+| `task/list` answers a body no shape in this adapter recognises | `… the task list answered HTTP 200, content-type: text/html; charset=utf-8; the provider answered with a non-JSON document: title "Access Verification"; sign in again, then re-export and re-import` (status + content-type + a redacted, bounded snippet; ≤ 300 chars) |
 | the page never restored a usable token within the bound (cookie-only request) | `… the captured session opened the page, but after 20003ms it still does not consider itself signed in (the live page has no token yet), so no page token was sent — sign in again, then re-export and re-import` |
 
 A file that passes every step is stored through `storeProviderSession`, the deployment's single
