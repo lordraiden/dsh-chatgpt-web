@@ -434,7 +434,44 @@ and, since issue #301, a stuck turn also ends itself within the grace with a log
 of staying invisible. That is what an operator gets: a bounded failure they can see and act on, not a
 green healthcheck over an infinite hang.
 
-## 16. Reporting a bug
+## 16. A long turn ends with `turn_timeout`
+
+### Symptom
+
+A turn fails with HTTP `504`, `type: server_error`, `code: turn_timeout`, and a message saying the bridge's
+own turn clock expired after N ms. The log carries one line:
+
+~~~text
+[chatgpt-web] turn_timeout limitMs=900000 detail="ChatGPT web turn timed out"
+~~~
+
+The stream from `/v1/chat/completions` has been receiving `: keep-alive` comments until then, so this is
+not a client that gave up: the **bridge** decided the turn had run long enough.
+
+### Cause
+
+This is the bridge's absolute ceiling for one provider turn, not a ChatGPT failure and not a client
+timeout. It exists because a provider turn can genuinely hang forever, and something must own that bound.
+The default is 15 minutes (`900000` ms); the failed session that motivated it showed legitimate turns of
+4 m 21 s and "sometimes more than 10 minutes".
+
+The client's own 300 s idle timer is no longer a factor: while the provider is working, the
+chat-completions stream emits standard SSE comment lines (`: keep-alive`), which every OpenAI-compatible
+client ignores. No client timeout was raised or needs to be raised.
+
+### What to do
+
+1. If the turn was still making visible progress, raise the ceiling for the deployment:
+   `DSH_CHATGPT_WEB_TURN_TIMEOUT_MS=1800000` (milliseconds, positive integer up to 6 hours), or set
+   `chatgptWeb.turnTimeoutMs` / `chatgptWeb.tuning.turnTimeoutMs` in `config.json`. An explicit
+   configuration wins over the environment variable.
+2. If the turn was genuinely wedged, leave the default in place: it is what prevents a dead provider turn
+   from holding the conversation forever. The turn is retired on expiry and the conversation is released
+   through the normal failed-turn path.
+3. Do not raise any client-side `streamIdleTimeout`/idle timer as a workaround — the keep-alive is the
+   fix for that, and the two clocks are independent.
+
+## 17. Reporting a bug
 
 Include:
 
@@ -465,7 +502,7 @@ Before sharing logs or screenshots, remove:
 - private prompts;
 - local filesystem secrets.
 
-## 17. Development versus user troubleshooting
+## 18. Development versus user troubleshooting
 
 If you are changing the implementation rather than operating an installed release, start with:
 

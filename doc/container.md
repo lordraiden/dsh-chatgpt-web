@@ -309,6 +309,11 @@ Rules this deployment enforces:
    `DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS` (default `0` = unlimited, which keeps the DSH/Codex consumer
    unchanged) answers a typed `429 rate_limit_exceeded`. One active turn per provider conversation
    remains a typed `409 retained_surface_busy` (architecture §15.1).
+   `DSH_CHATGPT_WEB_TURN_TIMEOUT_MS` (default `900000` = 15 minutes, positive integer up to 6 hours) is
+   the bridge's absolute ceiling for one provider turn; expiry fails with `504` / `code: turn_timeout`,
+   which is deliberately distinct from a ChatGPT failure. Streaming `/v1/chat/completions` emits SSE
+   `: keep-alive` comments while the provider works, so the caller's own idle timer is not the bound.
+   An explicit `chatgptWeb.turnTimeoutMs` (or `tuning.turnTimeoutMs`) wins over the environment variable.
 6. The caveats in §5 still apply: this is a personal, single-account bridge — not a public multi-tenant
    service — and the provider's terms of service are yours to honour.
 

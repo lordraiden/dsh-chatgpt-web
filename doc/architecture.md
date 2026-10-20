@@ -768,8 +768,24 @@ conversation take the same bounded, explicit outcome rather than hanging; when i
 resumes without operator action. This is the #291 discipline (bound, then write off as `rejected`, never
 `fulfilled`, and retire the resource) applied to the turn path instead of only to shutdown. It does not
 bound a turn's wait on its *own* in-flight physical operation: that lifetime belongs to the provider
-driver's own stall budgets (`generationRunningStallMs`, the per-stage timeouts, and the opt-in
-`turnTimeoutMs`), which is why no absolute turn deadline is imposed here.
+driver's own stall budgets (`generationRunningStallMs`, the per-stage timeouts, and the always-resolved
+`turnTimeoutMs`), which is why no absolute turn deadline is imposed by the HTTP layer here. The
+provider's ceiling is the only absolute one: it defaults to fifteen minutes, is deployable through
+`DSH_CHATGPT_WEB_TURN_TIMEOUT_MS` (an explicit `chatgptWeb.turnTimeoutMs` wins), and fails as its own
+`turn_timeout` category so a bridge clock is never published as a ChatGPT failure.
+
+**A client that goes away releases the turn (issue #329).** The HTTP request lifetime is owned by
+`HttpTurnCounter` (`src/server.ts`). When the request signal aborts or the response body's consumer
+cancels it, the tracked turn is aborted with a client-disconnect marker, and that abort is threaded
+through the internal request into the provider turn so the physical browser turn stops and the turn
+retires through the same path every other exit uses — which releases the conversation's admission
+slot. A disconnect is deliberately **not** an explicit cancel for retained-surface ownership: both
+surface as an `AbortError`, but only an explicit cancel proves the operation was abandoned, so a
+disconnect publishes the ordinary failed-attempt settlement (`unreconciled`/`not_started`) instead of
+retiring the conversation. The chat-completions SSE writer also translates the Responses bridge's
+existing `response.heartbeat` keep-alive into standard SSE comment lines while the provider has not
+produced answer text yet; comments are ignored by clients, add no `data:` event, and stop at the first
+real delta or a terminal frame, so a healthy long turn never looks idle.
 
 **A failed turn is not a death (issue #314).** A turn that failed *after* its submission was accepted
 does not prove what happened to the conversation it was using, and it is not evidence that the

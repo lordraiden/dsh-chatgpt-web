@@ -288,3 +288,33 @@ export function httpStatusFromTerminalError(error: {
   if (message) return inferHttpStatusFromAdapterMessage(message);
   return 502;
 }
+
+/**
+ * The HTTP client went away before the response finished.
+ *
+ * This is the request-lifetime owner's marker for "the consumer is gone", carried as the
+ * `AbortSignal.reason` from the server's tracked turn down into the provider turn. It exists to keep
+ * one distinction the product needs: a **client disconnect is not an explicit cancel**. Both abort
+ * the browser turn, but an explicit cancel (the operator/consumer asked to stop) is a teardown whose
+ * retained physical surface must not be trusted again, while an abandoned request is an ordinary
+ * failed attempt — the conversation itself is fine and the next turn must be able to resume it.
+ *
+ * It is a marker, never a caller-facing failure: nobody is left to read it, and it must not be
+ * classified as a provider error.
+ */
+export class HttpClientDisconnectedError extends Error {
+  readonly code = "client_disconnected";
+
+  constructor(message = "The HTTP client disconnected before the response completed") {
+    super(message);
+    this.name = "HttpClientDisconnectedError";
+  }
+}
+
+/** Whether an abort reason is the request-lifetime owner's client-disconnect marker. */
+export function isHttpClientDisconnectedReason(reason: unknown): boolean {
+  return reason instanceof HttpClientDisconnectedError
+    || (typeof reason === "object"
+      && reason !== null
+      && (reason as { code?: unknown }).code === "client_disconnected");
+}

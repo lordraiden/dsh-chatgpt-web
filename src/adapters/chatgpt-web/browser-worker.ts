@@ -17,6 +17,7 @@ import {
   type ResolvedChatGptWebTuning,
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
+import { isHttpClientDisconnectedReason } from "../../lib/errors";
 import { safeErrorDescriptor } from "../../lib/safe-diagnostics";
 import type { CodexProviderConfig } from "../../types";
 import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
@@ -97,6 +98,7 @@ import {
   chatGptRetainedSurfaceBusyError,
   chatGptRetainedSurfaceLostError,
   chatGptStoppedThinkingError,
+  chatGptTurnTimeoutError,
 } from "./adapter-error";
 import {
   RetainedSurfaceBusyError,
@@ -199,6 +201,66 @@ export function chatGptGenerationRunningStallExceeded(
   if (runningSince === undefined) return false;
   return now - runningSince > tuning.generationRunningStallMs;
 }
+
+/**
+ * The bridge's own absolute ceiling for one provider turn (issue #329).
+ *
+ * This is the only clock that decides "this turn is taking too long and the bridge gives up". It is
+ * deliberately **not** a client timeout: the chat-completions surface now emits SSE keep-alives while
+ * the provider works, so a healthy ten- or fifteen-minute turn no longer trips an OpenAI client's
+ * idle timer. What remains is the bridge's own, explicit, configurable ceiling — and because a turn
+ * that genuinely hangs forever must still be bounded, that ceiling is the honest owner of the bound.
+ *
+ * Fifteen minutes is the measured product expectation from the failed session that motivated #329
+ * ("Worked for 4m 21s", sometimes more than 10 minutes), and it keeps the ceiling above the
+ * provider's own continuous-generation budget (also 15 minutes, measured from the visible Stop button)
+ * rather than below it. Deployments with legitimately longer turns raise
+ * `DSH_CHATGPT_WEB_TURN_TIMEOUT_MS`; this is not a client setting and never weakens the client.
+ */
+export const DEFAULT_TURN_TIMEOUT_MS = 15 * 60_000;
+/** Upper bound for the environment override; longer than any plausible attended web turn. */
+export const MAX_TURN_TIMEOUT_MS = 6 * 60 * 60_000;
+/** The environment variable that overrides the bridge turn ceiling. */
+export const TURN_TIMEOUT_ENV = "DSH_CHATGPT_WEB_TURN_TIMEOUT_MS";
+
+/**
+ * Resolve the bridge's absolute turn ceiling.
+ *
+ * Precedence: an explicit `chatgptWeb.turnTimeoutMs` (or its `tuning.turnTimeoutMs`) wins, because it
+ * is a deliberate operator configuration; absent that, `DSH_CHATGPT_WEB_TURN_TIMEOUT_MS`; absent
+ * that, {@link DEFAULT_TURN_TIMEOUT_MS}. The environment value is validated here, once, with a message
+ * that names the variable and the accepted range — a malformed bound must fail closed and visibly,
+ * never silently become the default.
+ *
+ * @param configured - the value authored in the provider configuration, if any.
+ * @param env - the environment to read (a seam for deterministic tests).
+ * @returns the effective ceiling in milliseconds.
+ * @throws {Error} when the configured or environment value is not a positive number of milliseconds.
+ */
+export function resolveTurnTimeoutMs(
+  configured: number | undefined,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  if (configured !== undefined) {
+    if (!Number.isFinite(configured) || configured <= 0) {
+      throw new Error("ChatGPT Web turnTimeoutMs must be a positive finite number of milliseconds");
+    }
+    return configured;
+  }
+  const raw = env[TURN_TIMEOUT_ENV];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_TURN_TIMEOUT_MS;
+  const text = raw.trim();
+  // Integers only: a decimal or unit-suffixed value is a configuration mistake, not a bound to guess at.
+  const parsed = /^[0-9]+$/.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > MAX_TURN_TIMEOUT_MS) {
+    throw new Error(
+      `Invalid ${TURN_TIMEOUT_ENV}=${JSON.stringify(raw)}: expected a positive integer number of `
+      + `milliseconds between 1 and ${MAX_TURN_TIMEOUT_MS} (for example 900000).`,
+    );
+  }
+  return parsed;
+}
+
 /**
  * Default bounded wait for a finalized answer during a read-only recovery of a retained
  * conversation. Callers that own a user-facing budget (the Advisor) pass their own value.
@@ -1316,8 +1378,17 @@ export function chatGptBrowserTurnTerminal(error: unknown): "aborted" | "failed"
  * submission was confirmed** (issue #317 stage 1 classifies the phase; a failure that never reached the
  * provider marks nothing and is an ordinary retry). This classification is about the *teardown* boundary
  * only — the phase is the settlement rule's, and neither phase retires anything here.
+ *
+ * A **client disconnect is not an explicit cancel** (issue #329). Both surface here as an `AbortError`
+ * (the transport stops the browser turn in either case), but only an explicit cancel means "this
+ * operation was abandoned and its result must not be trusted". A caller that simply went away — the
+ * 300 s client idle timeout that motivated this fix — leaves a perfectly healthy conversation behind;
+ * retiring it would turn one abandoned attempt into a lost session, so the disconnect is treated as the
+ * ordinary failed attempt the phase rules already govern. The marker travels on the abort signal, not in
+ * the message.
  */
-export function chatGptBrowserTurnRetiresRetainedSurface(error: unknown): boolean {
+export function chatGptBrowserTurnRetiresRetainedSurface(error: unknown, abortReason?: unknown): boolean {
+  if (isHttpClientDisconnectedReason(abortReason)) return false;
   return chatGptBrowserTurnTerminal(error) === "aborted" || error instanceof ChatGptSurfaceStaleError;
 }
 
@@ -1492,7 +1563,8 @@ export interface ResolvedBrowserConfig {
   browserDiagnosticsPath?: string;
   storageStatePath: string;
   chromeExecutablePath: string;
-  turnTimeoutMs?: number;
+  /** The bridge's absolute turn ceiling; always resolved (issue #329). */
+  turnTimeoutMs: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
   /** User-tunable transport limits with every default applied. */
@@ -2136,9 +2208,11 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   const browserDiagnosticsPath = resolve(expandUserPath(
     configured.browserDiagnosticsPath?.trim() || join(getConfigDir(), "diagnostics", "browser-turns"),
   ));
-  // The direct turnTimeoutMs field wins over the tuning block; an absent deadline means no ceiling.
+  // The direct turnTimeoutMs field wins over the tuning block; absent both, the environment override
+  // and then the default ceiling decide (issue #329). There is always a bound now: a hung provider
+  // turn must be declared lost by the bridge, never left to a client's own timeout.
   const tuning = resolveChatGptWebTuning(configured.tuning);
-  const turnTimeoutMs = configured.turnTimeoutMs ?? tuning.turnTimeoutMs;
+  const turnTimeoutMs = resolveTurnTimeoutMs(configured.turnTimeoutMs ?? tuning.turnTimeoutMs);
   if (browserHost === "launcher" && !browserHostDescriptorPath) {
     throw new Error("Launcher browser host requires chatgptWeb.browserHostDescriptorPath");
   }
@@ -2150,10 +2224,6 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     : undefined;
   if (resolvedBrowserHelperScriptPath && !existsSync(resolvedBrowserHelperScriptPath)) {
     throw new Error(`Explicit browser helper script does not exist: ${resolvedBrowserHelperScriptPath}`);
-  }
-  if (turnTimeoutMs !== undefined
-    && (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0)) {
-    throw new Error("ChatGPT Web turnTimeoutMs must be a positive finite number");
   }
   if (isLegacyChatGptConnectorName(appName)) {
     throw new Error(legacyChatGptConnectorMigrationMessage(appName));
@@ -2167,7 +2237,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     // The provider-scoped session wins when it exists; the legacy path stays the alias (issue #249).
     storageStatePath: resolveProviderStorageStatePath(configured.storageStatePath),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
-    ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
+    turnTimeoutMs,
     tuning,
     headed: configured.headed === true,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
@@ -3268,7 +3338,7 @@ export class ChatGptBrowserWorker {
         );
       }
       if (deadline !== undefined && Date.now() >= deadline) {
-        throw new Error("ChatGPT web turn timed out");
+        throw this.turnDeadlineExceeded("ChatGPT web turn timed out");
       }
       // While the temporary-chat surface rehydrates the conversation ("Loading chats"), the
       // assistant turn cannot appear yet, so the deadline is paused instead of consumed. A
@@ -3920,7 +3990,7 @@ export class ChatGptBrowserWorker {
         throw new DOMException("ChatGPT multipart stage aborted", "AbortError");
       }
       if (deadline !== undefined && Date.now() >= deadline) {
-        throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
+        throw this.turnDeadlineExceeded("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptContextExhausted(page);
@@ -4759,6 +4829,21 @@ export class ChatGptBrowserWorker {
     }
   }
 
+  /**
+   * The bridge's own absolute turn clock expired (issue #329).
+   *
+   * One log line names the clock (`turn_timeout`) and its configured ceiling, so the operator can tell
+   * it apart from the browser's own "browser turn failed" line, which describes the provider/browser
+   * outcome. The error carries the same code to the API caller.
+   */
+  private turnDeadlineExceeded(detail: string): ChatGptWebAdapterError {
+    const timeoutMs = this.config.turnTimeoutMs;
+    console.warn(
+      `[chatgpt-web] turn_timeout limitMs=${timeoutMs} detail=${JSON.stringify(detail)}`,
+    );
+    return chatGptTurnTimeoutError(timeoutMs, detail);
+  }
+
   private async runBrowserTurn(
     turn: BrowserTurn,
     launcherSurfaceId?: string,
@@ -4934,9 +5019,7 @@ export class ChatGptBrowserWorker {
           turn.compaction === true,
         );
       }
-      const deadline = this.config.turnTimeoutMs === undefined
-        ? undefined
-        : Date.now() + this.config.turnTimeoutMs;
+      const deadline = Date.now() + this.config.turnTimeoutMs;
       let page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
         if (maintenancePage) return maintenancePage;
         if (!launcherSurfaceId) {
@@ -5422,7 +5505,7 @@ export class ChatGptBrowserWorker {
           throw new DOMException("ChatGPT web turn aborted", "AbortError");
         }
         if (deadline !== undefined && Date.now() >= deadline) {
-          throw new Error("ChatGPT web turn timed out");
+          throw this.turnDeadlineExceeded("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
         await throwIfChatGptContextExhausted(page);
@@ -5678,7 +5761,7 @@ export class ChatGptBrowserWorker {
       // A cancelled turn, a closed tab, or a surface whose document was replaced (a stale/rehydrated
       // page) publishes no settlement for the operation that held the retained conversation, so the
       // surface is retired; every ordinary failure only marks it (issue #314).
-      turnTornDown = chatGptBrowserTurnRetiresRetainedSurface(error);
+      turnTornDown = chatGptBrowserTurnRetiresRetainedSurface(error, turn.abortSignal?.reason);
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${safeErrorDescriptor(error)}`,
