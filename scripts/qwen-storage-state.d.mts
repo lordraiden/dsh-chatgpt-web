@@ -46,17 +46,28 @@ export const QWEN_COOKIE_DOMAINS: readonly string[];
 export const QWEN_STORAGE_ORIGINS: readonly string[];
 
 export function hostAllowed(host: string, allowed?: readonly string[]): boolean;
-export function cdpCookiesToStorageState(payload: unknown, now?: number): PlaywrightStorageState;
+export function cdpCookiesToStorageState(
+  payload: unknown,
+  now?: number,
+  storageEntries?: unknown,
+): PlaywrightStorageState;
+export function localStorageToOrigins(entries: unknown): PlaywrightStorageState["origins"];
 export function captureToFile(options: {
   payload: unknown;
   outPath: string;
   stdout?: (line: string) => void;
   now?: number;
-}): { path: string; cookies: number; domains: string[] };
+  storage?: unknown;
+}): { path: string; cookies: number; domains: string[]; storageKeys: number };
 export function fetchChromeCookies(options?: {
   host?: string;
   port?: number;
   timeoutMs?: number;
 }): Promise<CdpCookie[]>;
+export function fetchChromeLocalStorage(options?: {
+  host?: string;
+  port?: number;
+  timeoutMs?: number;
+}): Promise<unknown[]>;
 export function parseArgs(argv: string[]): CaptureScriptOptions;
 export function main(argv?: string[], io?: { stdout?: (line: string) => void }): Promise<number>;

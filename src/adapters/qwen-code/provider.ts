@@ -59,6 +59,25 @@ export const QWEN_CODE_CONFIGS_GIT_PATH = "/api/v2/configs/git";
 export const QWEN_CODE_COMPLETIONS_PATH = "/coder/api/v2/task/completions";
 
 /**
+ * The localStorage entry the app's own token manager persists its session token under.
+ *
+ * **Evidence, not a guess.** The recorded HAR of the signed-in app shows an `authorization` header on
+ * *every* authenticated API call — `GET /coder/api/v2/task/list` included — alongside the cookies
+ * (`Bearer <token>`, 281 characters, JWT-shaped), with `source: web`, `version: 0.0.29` and `bx-v:
+ * 2.5.37`. The same app's bundle (`.../qwen-coder-fe/0.0.29/js/main.js`, the exact version the client
+ * header reports) builds that header as `` `Bearer ${token}` `` from `TokenManager.getAccessToken()`,
+ * whose coordinator persists the token as JSON under this key (migrating the legacy `token` +
+ * `at_expire_time` pair). A cookie-only request is therefore *not* how the page authenticates, which
+ * is what the live import measured as `import_predicate_failed`.
+ *
+ * The key lives here, with the provider, and never in a provider-neutral module.
+ */
+export const QWEN_CODE_ACCESS_TOKEN_STORAGE_KEY = "qwen_access_token_state";
+
+/** The legacy key the same token manager migrates a session from when the state entry is absent. */
+export const QWEN_CODE_LEGACY_ACCESS_TOKEN_STORAGE_KEY = "token";
+
+/**
  * The model the one-turn proof asks for.
  *
  * Provider-local and *not* a public route: the public route identity is `<providerId>/<modelId>`
@@ -100,7 +119,14 @@ export const QWEN_CODE_AUTH_NAVIGATION_TIMEOUT_MS = 60_000;
 /** How long one authenticated-session probe may take before it counts as "not yet". */
 export const QWEN_CODE_AUTH_PROBE_TIMEOUT_MS = 15_000;
 
-/** The non-secret headers every Qwen API request carries. Credentials ride in the browser session. */
+/**
+ * The non-secret headers every Qwen API request carries.
+ *
+ * They are exactly the client header set the recorded HAR shows on `GET /coder/api/v2/task/list`:
+ * `accept`, `content-type`, `source: web`, `version` and `bx-v`. The *credential* header
+ * (`authorization: Bearer <token>`) is not part of this set: it is read from the session at call time
+ * and added by `session-probe.ts`, so it can never be baked into a constant here.
+ */
 export function qwenCodeApiHeaders(extra: Readonly<Record<string, string>> = {}): Record<string, string> {
   return {
     accept: "application/json",

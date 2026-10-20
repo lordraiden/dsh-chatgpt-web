@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { Page } from "playwright-core";
 
 import {
   QWEN_CODE_COMPLETIONS_PATH,
@@ -6,6 +7,7 @@ import {
   QWEN_CODE_TASK_NEW_PATH,
   QwenSseParser,
   createQwenCompletionAccumulator,
+  createQwenPageRequestFacility,
   parseQwenSsePayload,
   qwenCodeCompletionRequest,
   runQwenNetworkTurn,
@@ -423,5 +425,70 @@ describe("issue #299 — the one-turn round trip over a recorded-shape stream", 
     await expect(runQwenNetworkTurn({ request, prompt: "   " })).rejects.toBeInstanceOf(TypeError);
     await expect(runQwenNetworkTurn({ request, prompt: "x", model: " " })).rejects.toBeInstanceOf(TypeError);
     expect(seen.paths).toEqual([]);
+  });
+});
+
+/**
+ * Issue #299 — a verified session must also be able to run a turn, so the turn facility authenticates
+ * the same way the probe does: the `authorization` header the page's own client sends, read from the
+ * page's localStorage at call time (the recorded HAR shows a cookie-only call is refused).
+ */
+describe("issue #299 — the turn facility sends the page's own authorization header", () => {
+  const TOKEN = "SECRET-TURN-ACCESS-TOKEN";
+
+  function fakePageWithToken(tokenState: string | undefined) {
+    const posts: { url: string; headers: Record<string, string>; body: string }[] = [];
+    const page = {
+      evaluate: async (_fn: unknown, arg?: Record<string, unknown>) => {
+        if (typeof arg?.["accessKey"] === "string") return { state: tokenState, legacy: undefined };
+        posts.push({
+          url: String(arg?.["url"]),
+          headers: { ...(arg?.["headers"] as Record<string, string>) },
+          body: String(arg?.["body"]),
+        });
+        return { status: 200, body: { success: true, data: { id: "chat-fixture" } } };
+      },
+    } as unknown as Page;
+    return { page, posts };
+  }
+
+  const storedState = (token: string) => JSON.stringify({ token, loggedOut: false, version: 1 });
+
+  test("the JSON POST carries the token the page keeps, and never a constant", async () => {
+    const { page, posts } = fakePageWithToken(storedState(TOKEN));
+    const facility = createQwenPageRequestFacility(page);
+
+    const answer = await facility.postJson(QWEN_CODE_TASK_NEW_PATH, { chatId: "", models: [QWEN_CODE_DEFAULT_MODEL] });
+
+    expect(answer.status).toBe(200);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    expect(posts[0]!.headers.source).toBe("web");
+    expect(posts[0]!.headers.version).toBe("0.0.29");
+    // The token rides the request, not the payload.
+    expect(posts[0]!.body).not.toContain(TOKEN);
+  });
+
+  test("a page with no token still issues the request, without inventing one", async () => {
+    const { page, posts } = fakePageWithToken(undefined);
+    const facility = createQwenPageRequestFacility(page);
+
+    await facility.postJson(QWEN_CODE_TASK_NEW_PATH, { chatId: "" });
+
+    expect(posts[0]!.headers.authorization).toBeUndefined();
+    expect(posts[0]!.headers.source).toBe("web");
+  });
+
+  test("the streaming POST carries the same header", async () => {
+    const { page, posts } = fakePageWithToken(storedState(TOKEN));
+    // The stream path also publishes a binding and reads the answer; this fake page only needs the
+    // request the facility assembles before it hands the rest to the page.
+    (page as unknown as Record<string, unknown>)["exposeBinding"] = async () => {};
+    const facility = createQwenPageRequestFacility(page);
+
+    await facility.postEventStream(`${QWEN_CODE_COMPLETIONS_PATH}?chat_id=chat-fixture`, {}, () => true).catch(() => undefined);
+
+    expect(posts[0]!.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    expect(posts[0]!.headers.accept).toBe("text/event-stream");
   });
 });

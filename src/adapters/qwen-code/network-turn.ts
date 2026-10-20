@@ -7,9 +7,12 @@
  * Ownership and safety rules:
  *
  * - **The browser is the session holder, not the interaction surface.** Every request is issued from
- *   inside the page (`fetch` in the page's own browsing context), so cookies — and anything else the
- *   session keeps — come from the session. No cookie, token or `Authorization` value is read,
- *   constructed or logged here; there is no literal credential anywhere in this module.
+ *   inside the page (`fetch` in the page's own browsing context), so cookies — and the
+ *   `authorization` header the app builds from its own localStorage token — come from the session.
+ *   The recorded HAR shows this provider refuses a cookie-only call: every API call carries
+ *   `authorization: Bearer <token>`. The facility therefore reads that token **from the page at call
+ *   time** (`session-probe.ts`) and attaches the app's own header shape; there is still no literal
+ *   credential, constant or fixture in this module, and the token is never logged.
  * - **The response stream is parsed incrementally.** The page hands each decoded chunk back to this
  *   Node-side parser, so `choices[].delta.content` is consumed as it arrives and the reader is
  *   cancelled as soon as a terminal signal is observed (see `sse.ts` for the three signals).
@@ -37,6 +40,7 @@ import {
   qwenCodeApiHeaders,
   qwenCodeUrl,
 } from "./provider";
+import { qwenAuthorizationHeaderFromPage } from "./session-probe";
 import {
   QwenSseParser,
   createQwenCompletionAccumulator,
@@ -83,13 +87,18 @@ export interface QwenTurnRequestFacility {
 /**
  * The default facility: the page's own `fetch`, inside the page's browsing context.
  *
- * Cookies are the browser's; this module never sees one. The binding name is unique per call because
- * Playwright refuses to expose the same binding name twice on one page, and a page may serve several
- * turns over its life.
+ * Cookies are the browser's, and the `authorization` header is the one the page's own token manager
+ * holds — read from the page at call time, never from configuration or a constant. This module never
+ * sees a cookie. The binding name is unique per call because Playwright refuses to expose the same
+ * binding name twice on one page, and a page may serve several turns over its life.
  */
 export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacility {
   return {
     async postJson(path: string, body: unknown): Promise<QwenJsonPostResult> {
+      const headers = qwenCodeApiHeaders({
+        "x-request-id": randomUUID(),
+        ...await qwenAuthorizationHeaderFromPage(page),
+      });
       const result = await page.evaluate(async ({ url, payload, headers }) => {
         const response = await fetch(url, {
           method: "POST",
@@ -105,7 +114,7 @@ export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacili
           // A non-JSON body (an HTML error page) is kept as text; the caller reports the status.
         }
         return { status: response.status, body: parsed };
-      }, { url: qwenCodeUrl(path), payload: body, headers: qwenCodeApiHeaders({ "x-request-id": randomUUID() }) });
+      }, { url: qwenCodeUrl(path), payload: body, headers });
       return { status: result.status, body: result.body };
     },
 
@@ -114,6 +123,12 @@ export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacili
       body: unknown,
       onChunk: (chunk: string) => boolean,
     ): Promise<QwenStreamPostResult> {
+      const headers = qwenCodeApiHeaders({
+        accept: "text/event-stream",
+        "x-request-id": randomUUID(),
+        "x-accel-buffering": "no",
+        ...await qwenAuthorizationHeaderFromPage(page),
+      });
       const binding = `__dshQwenCodeChunk_${randomUUID().replace(/-/g, "")}`;
       await page.exposeBinding(binding, async (_source, chunk: unknown) => {
         return typeof chunk === "string" ? onChunk(chunk) : false;
@@ -155,11 +170,7 @@ export function createQwenPageRequestFacility(page: Page): QwenTurnRequestFacili
       }, {
         url: qwenCodeUrl(path),
         payload: body,
-        headers: qwenCodeApiHeaders({
-          accept: "text/event-stream",
-          "x-request-id": randomUUID(),
-          "x-accel-buffering": "no",
-        }),
+        headers,
         binding,
       });
       return {

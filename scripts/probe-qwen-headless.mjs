@@ -10,7 +10,10 @@
  *
  * It prints no cookie, storage state or token: the session is only ever used, never shown. The
  * authenticated check is the same structural one the controller uses (`GET /coder/api/v2/task/list`,
- * which answers HTTP 200 with `success:false` for an anonymous caller).
+ * which answers HTTP 200 with `success:false` for an anonymous caller), and it is issued **the way
+ * the page issues it**: from inside the page, with the `authorization: Bearer <token>` header the
+ * app builds from `localStorage["qwen_access_token_state"]` (see `doc/qwen-code.md` §4). A
+ * cookie-only call is exactly the `import_predicate_failed` shape and is not retried as a fallback.
  *
  * Usage:
  *
@@ -34,6 +37,58 @@ const TASK_LIST = `${ORIGIN}/coder/api/v2/task/list?page=1`;
 const COMPLETIONS = `${ORIGIN}/coder/api/v2/task/completions`;
 const TASK_NEW = `${ORIGIN}/coder/api/v2/task/new`;
 const DEFAULT_MODEL = "qwen3-coder-plus";
+
+/** The localStorage keys the app's token manager uses (current and legacy). Provider facts. */
+const ACCESS_TOKEN_KEY = "qwen_access_token_state";
+const LEGACY_ACCESS_TOKEN_KEY = "token";
+
+/**
+ * Read the page's own token and return the `authorization` header the app would send.
+ *
+ * The token stays inside this process and is never printed: the probe reports only whether the
+ * header was sent. No token is hard-coded, defaulted or read from a fixture.
+ */
+async function authorizationHeader(page) {
+  const read = await page.evaluate(({ accessKey, legacyKey }) => {
+    const parse = (value) => {
+      if (typeof value !== "string" || value.trim() === "") return undefined;
+      const trimmed = value.trim();
+      if (!trimmed.startsWith("{")) return trimmed;
+      try {
+        const state = JSON.parse(trimmed);
+        if (state && state.loggedOut === true) return undefined;
+        return typeof state.token === "string" && state.token.trim() !== "" ? state.token.trim() : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    try {
+      const state = parse(localStorage.getItem(accessKey));
+      if (state !== undefined) return { token: state, source: "state" };
+      const legacy = parse(localStorage.getItem(legacyKey));
+      return legacy === undefined ? { token: undefined, source: "none" } : { token: legacy, source: "legacy" };
+    } catch {
+      return { token: undefined, source: "unreadable" };
+    }
+  }, { accessKey: ACCESS_TOKEN_KEY, legacyKey: LEGACY_ACCESS_TOKEN_KEY });
+  return {
+    header: read?.token === undefined ? {} : { authorization: `Bearer ${read.token}` },
+    source: read?.source ?? "none",
+  };
+}
+
+/** The API headers the page's own client sends, plus the page's token when it has one. */
+function apiHeaders(authorization, extra = {}) {
+  return {
+    accept: "application/json",
+    "content-type": "application/json",
+    source: "web",
+    version: "0.0.29",
+    "bx-v": "2.5.37",
+    ...authorization.header,
+    ...extra,
+  };
+}
 
 function flag(name) {
   const index = process.argv.indexOf(name);
@@ -135,30 +190,41 @@ try {
       .length,
   }));
 
-  // The structural authenticated check, through the browser context's request facility.
-  const probe = await page.request.get(TASK_LIST, { headers: { accept: "application/json" } });
-  const probeBody = await probe.json().catch(() => undefined);
+  // The structural authenticated check, issued from the page with the page's own token.
+  const authorization = await authorizationHeader(page);
+  const probeAnswer = await page.evaluate(async ({ url, headers }) => {
+    const answer = await fetch(url, { credentials: "same-origin", headers });
+    const text = await answer.text();
+    let body;
+    try { body = JSON.parse(text); } catch { body = undefined; }
+    return { status: answer.status, body, text: text.slice(0, 400) };
+  }, { url: TASK_LIST, headers: apiHeaders(authorization) });
+  const probeBody = probeAnswer.body;
   summary.structuralProbe = {
-    status: probe.status(),
+    status: probeAnswer.status,
     authenticated: probeBody?.success === true && Array.isArray(probeBody?.data),
-    reason: probeBody?.success === true ? undefined : probeBody?.data?.code,
+    reason: probeBody?.success === true ? undefined : (probeBody?.data?.code ?? probeAnswer.text),
+    // Whether the page's own token travelled with the request; never the token itself.
+    sentAuthorization: Object.keys(authorization.header).length > 0,
+    tokenSource: authorization.source,
   };
 
   // One live turn, only when a captured session was supplied and it passed the structural check.
   if (storageStatePath !== undefined && summary.structuralProbe.authenticated === true) {
     const postJson = async (url, payload) => {
-      const result = await page.evaluate(async ({ url, payload }) => {
+      const headers = apiHeaders(await authorizationHeader(page));
+      const result = await page.evaluate(async ({ url, payload, headers }) => {
         const answer = await fetch(url, {
           method: "POST",
           credentials: "same-origin",
-          headers: { accept: "application/json", "content-type": "application/json", source: "web", version: "0.0.29" },
+          headers,
           body: JSON.stringify(payload),
         });
         const text = await answer.text();
         let body;
         try { body = JSON.parse(text); } catch { body = text; }
         return { status: answer.status, body };
-      }, { url, payload });
+      }, { url, payload, headers });
       return result;
     };
     const created = await postJson(TASK_NEW, {
@@ -169,17 +235,22 @@ try {
     if (typeof chatId !== "string") {
       summary.turn = { created: created.status, createdSuccess: created.body?.success, chatId: false };
     } else {
-      const streamed = await page.evaluate(async ({ url, payload }) => {
+      const streamHeaders = apiHeaders(await authorizationHeader(page), {
+        accept: "text/event-stream",
+        "x-accel-buffering": "no",
+      });
+      const streamed = await page.evaluate(async ({ url, payload, headers }) => {
         const answer = await fetch(url, {
           method: "POST",
           credentials: "same-origin",
-          headers: { accept: "text/event-stream", "content-type": "application/json", source: "web", version: "0.0.29" },
+          headers,
           body: JSON.stringify(payload),
         });
         const text = await answer.text();
         return { status: answer.status, contentType: answer.headers.get("content-type"), text: text.slice(0, 20_000) };
       }, {
         url: `${COMPLETIONS}?chat_id=${encodeURIComponent(chatId)}`,
+        headers: streamHeaders,
         payload: {
           stream: true, version: "2.1", incremental_output: true, chatId, parentId: "",
           chat_id: chatId, chat_mode: "normal", model: DEFAULT_MODEL, parent_id: null,

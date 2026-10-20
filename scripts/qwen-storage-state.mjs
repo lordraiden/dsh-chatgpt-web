@@ -15,14 +15,19 @@
  * 1. attaches to the Chrome the operator already started with `--remote-debugging-port=9222`;
  * 2. reads that browser's cookies over the DevTools protocol (`Storage.getCookies`, falling back to a
  *    page target's `Network.getAllCookies`);
- * 3. keeps only the provider's domain family, drops third-party-partitioned and already-expired
- *    cookies, and maps each one to Playwright's storage-state shape;
- * 4. writes a `storageState` JSON file with mode 0600 and prints where it is.
+ * 3. reads the app page's `localStorage` over the same protocol, because this provider's API is **not**
+ *    cookie-authenticated: every API call carries `authorization: Bearer <token>` and the app keeps
+ *    that token in `localStorage["qwen_access_token_state"]` (see `doc/qwen-code.md` §4). A capture
+ *    without it is a capture the import will (correctly) refuse;
+ * 4. keeps only the provider's domain family and storage origins, drops third-party-partitioned and
+ *    already-expired cookies, and maps everything to Playwright's storage-state shape;
+ * 5. writes a `storageState` JSON file with mode 0600 and prints where it is.
  *
  * Safety rules:
  *
- * - **No cookie name or value ever leaves this process except into the file.** The log prints the
- *   destination path, a count and the (non-secret) domains. Every error is this script's own text.
+ * - **No cookie name or value, and no storage key or value, ever leaves this process except into the
+ *   file.** The log prints the destination path, counts and the (non-secret) domains. Every error is
+ *   this script's own text.
  * - **Re-running is safe and idempotent:** the file is replaced atomically, so a stale partial write
  *   can never be mistaken for a capture.
  *
@@ -55,8 +60,11 @@ import { pathToFileURL } from "node:url";
  */
 export const QWEN_COOKIE_DOMAINS = Object.freeze(["qwen.ai", "aliyun.com"]);
 
-/** The storage origins this provider owns. The capture reads cookies only, so it is emitted empty. */
+/** The storage origins this provider owns; the capture reads the app page's local storage. */
 export const QWEN_STORAGE_ORIGINS = Object.freeze(["https://coder.qwen.ai", "https://auth.qwen.ai"]);
+
+/** Where the signed-in app page lives. The token the API checks is in that origin's local storage. */
+const APP_ORIGIN = "https://coder.qwen.ai";
 
 const DEFAULT_PORT = 9222;
 const DEFAULT_HOST = "127.0.0.1";
@@ -117,7 +125,7 @@ function sameSite(value) {
  * @param {number} [now] - clock in milliseconds, for the expiry filter
  * @returns {{cookies: Array<{name: string, value: string, domain: string, path: string, expires: number, httpOnly: boolean, secure: boolean, sameSite: "Strict"|"Lax"|"None"}>, origins: []}}
  */
-export function cdpCookiesToStorageState(payload, now = Date.now()) {
+export function cdpCookiesToStorageState(payload, now = Date.now(), storageEntries = []) {
   const cookies = [];
   for (const cookie of cookieList(payload)) {
     if (!cookie || typeof cookie !== "object") continue;
@@ -136,7 +144,27 @@ export function cdpCookiesToStorageState(payload, now = Date.now()) {
       sameSite: sameSite(cookie.sameSite),
     });
   }
-  return { cookies, origins: [] };
+  return { cookies, origins: localStorageToOrigins(storageEntries) };
+}
+
+/**
+ * Map the sign-in page's `localStorage` entries to Playwright's storage-state `origins` shape.
+ *
+ * Pure and network-free. The values (a token among them) go into the capture file and nowhere else:
+ * this function never logs, and the caller prints only a count.
+ *
+ * @param {unknown} entries - `[[name, value], …]` as read from the page
+ * @returns {{origin: string, localStorage: {name: string, value: string}[]}[]}
+ */
+export function localStorageToOrigins(entries) {
+  if (!Array.isArray(entries)) return [];
+  const storage = [];
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || typeof entry[0] !== "string" || typeof entry[1] !== "string") continue;
+    storage.push({ name: entry[0], value: entry[1] });
+  }
+  // An origin with nothing in it is not an origin Playwright needs to seed.
+  return storage.length === 0 ? [] : [{ origin: APP_ORIGIN, localStorage: storage }];
 }
 
 function writeSecretFile(target, text) {
@@ -163,13 +191,15 @@ function writeSecretFile(target, text) {
  * @param {string} options.outPath - destination file
  * @param {(line: string) => void} [options.stdout] - log sink (tests capture this)
  * @param {number} [options.now] - clock in milliseconds
- * @returns {{path: string, cookies: number, domains: string[]}}
+ * @param {unknown} [options.storage] - the app page's `localStorage` entries (`[[name, value], …]`)
+ * @returns {{path: string, cookies: number, domains: string[], storageKeys: number}}
  */
 export function captureToFile(options) {
   const stdout = options.stdout ?? (line => process.stdout.write(`${line}\n`));
   const now = options.now ?? Date.now();
   const raw = cookieList(options.payload);
-  const state = cdpCookiesToStorageState(options.payload, now);
+  const state = cdpCookiesToStorageState(options.payload, now, options.storage);
+  const storageKeys = state.origins.reduce((total, origin) => total + origin.localStorage.length, 0);
 
   if (state.cookies.length === 0) {
     throw new Error(
@@ -188,11 +218,14 @@ export function captureToFile(options) {
   stdout("Qwen Code session captured from Chrome.");
   stdout(`  storage state: ${target} (mode 0600${replaced ? ", replaced the previous capture" : ""})`);
   stdout(`  cookies: ${state.cookies.length} (domains: ${domains.join(", ")})`);
+  // A count only: a storage key name is not as sensitive as its value, but the log is the part
+  // people paste, and the app's key list is not the operator's business.
+  stdout(`  local storage keys: ${storageKeys} (origin: ${APP_ORIGIN})`);
   stdout("");
   stdout("This file contains a live Qwen Code session. Treat it like a password:");
   stdout("do not commit it, paste it into an issue, or leave it in a shared directory.");
   stdout("Delete it after importing it into the deployment. See doc/qwen-code.md for the exact steps.");
-  return { path: target, cookies: state.cookies.length, domains };
+  return { path: target, cookies: state.cookies.length, domains, storageKeys };
 }
 
 async function getJson(url, timeoutMs) {
@@ -300,6 +333,50 @@ export async function fetchChromeCookies({ host = DEFAULT_HOST, port = DEFAULT_P
   }
 }
 
+/**
+ * Read the sign-in page's `localStorage` from the running Chrome.
+ *
+ * `Runtime.evaluate` runs one expression on a page target at the provider's origin; `returnByValue`
+ * hands back the JSON string. Only the page's own storage is read — no DOM, no click, no navigation.
+ *
+ * @returns {Promise<unknown[]>} `[[name, value], …]`, or an empty list when no provider page is open
+ */
+export async function fetchChromeLocalStorage({ host = DEFAULT_HOST, port = DEFAULT_PORT, timeoutMs = CDP_TIMEOUT_MS } = {}) {
+  const base = `http://${host}:${port}`;
+  const targets = await getJson(`${base}/json/list`, timeoutMs).catch(() => []);
+  const page = Array.isArray(targets)
+    ? targets.find(target => target && target.type === "page"
+      && typeof target.webSocketDebuggerUrl === "string"
+      && hostAllowed(hostOf(target.url), QWEN_COOKIE_DOMAINS))
+    : undefined;
+  if (!page) {
+    throw new Error(
+      "no coder.qwen.ai page is open in that Chrome; open https://coder.qwen.ai in the signed-in window, "
+      + "then run this script again — the session token the API checks lives in that page's local storage",
+    );
+  }
+  const result = await callCdp(page.webSocketDebuggerUrl, "Runtime.evaluate", {
+    expression: "JSON.stringify(Object.entries(localStorage))",
+    returnByValue: true,
+  }, timeoutMs);
+  const value = result && result.result ? result.result.value : undefined;
+  if (typeof value !== "string") return [];
+  try {
+    return JSON.parse(value);
+  } catch {
+    return [];
+  }
+}
+
+/** The hostname of a URL, or an empty string; the page target is chosen by it. */
+function hostOf(value) {
+  try {
+    return new URL(String(value)).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 function parsePort(value) {
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port must be an integer between 1 and 65535");
@@ -349,7 +426,8 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     return 0;
   }
   const cookies = await fetchChromeCookies({ host: options.host, port: options.port });
-  captureToFile({ payload: cookies, outPath: options.out, stdout });
+  const storage = await fetchChromeLocalStorage({ host: options.host, port: options.port });
+  captureToFile({ payload: cookies, outPath: options.out, stdout, storage });
   return 0;
 }
 

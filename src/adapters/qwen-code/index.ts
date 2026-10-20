@@ -55,6 +55,31 @@ export {
 } from "./auth-controller";
 
 export {
+  QWEN_CODE_ACCESS_TOKEN_STORAGE_KEY,
+  QWEN_CODE_LEGACY_ACCESS_TOKEN_STORAGE_KEY,
+} from "./provider";
+
+export {
+  createQwenPageTaskListSender,
+  probeQwenTaskList,
+  probeQwenTaskListFromCapture,
+  probeQwenTaskListFromPage,
+  qwenAccessTokenFromPersistedValue,
+  qwenAccessTokenFromStorageState,
+  qwenAuthorizationHeaderFromPage,
+  qwenTaskListProbeRefusal,
+  qwenTaskListRequest,
+  readQwenAccessTokenFromPage,
+  type QwenAccessTokenProblem,
+  type QwenAccessTokenRead,
+  type QwenAccessTokenSource,
+  type QwenTaskListAnswer,
+  type QwenTaskListObservation,
+  type QwenTaskListRequest,
+  type QwenTaskListSender,
+} from "./session-probe";
+
+export {
   QWEN_CODE_COOKIE_DOMAINS,
   QWEN_CODE_STORAGE_ORIGINS,
   qwenCodeCredentialsDir,
