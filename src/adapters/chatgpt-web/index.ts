@@ -176,12 +176,37 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Pro
 function cancellableBrowserTurn(
   run: Promise<string>,
   controller: AbortController,
+  /**
+   * The caller's own abort signal (the HTTP request lifetime), when this turn has one.
+   *
+   * A client disconnect aborts the *physical* browser turn through this signal. Without it the
+   * adapter only abandoned its wait: the Playwright helper kept working, the retained conversation
+   * stayed busy, and the next request on that conversation was refused as
+   * `retained_surface_busy` after the admission bound (issue #329). The reason is forwarded intact
+   * so the worker can tell an abandoned request from an explicit cancel.
+   */
+  requestSignal?: AbortSignal,
 ): { browser: Promise<string>; physicalSettlement: Promise<void>; cancel: (reason?: Error) => void } {
   let rejectCancellation!: (error: Error) => void;
   const cancellation = new Promise<never>((_resolve, reject) => {
     rejectCancellation = reject;
   });
   let cancellationRejected = false;
+  // `browser` is the fast client-facing result. Replacement ownership must wait for the actual
+  // worker promise, whose finally block completes the launcher /turn/end handshake.
+  const physicalSettlement = run.then(() => undefined, () => undefined);
+  if (requestSignal) {
+    if (requestSignal.aborted) {
+      if (!controller.signal.aborted) controller.abort(requestSignal.reason);
+    } else {
+      const forwardRequestAbort = (): void => {
+        if (!controller.signal.aborted) controller.abort(requestSignal.reason);
+      };
+      requestSignal.addEventListener("abort", forwardRequestAbort, { once: true });
+      // The signal belongs to the request, but the listener must not outlive the physical turn.
+      void physicalSettlement.finally(() => requestSignal.removeEventListener("abort", forwardRequestAbort));
+    }
+  }
   return {
     // Cancellation wins immediately even while the detached Playwright helper is still unwinding.
     // The helper keeps the same abort signal and remains responsible for its normal end/cleanup
@@ -189,7 +214,7 @@ function cancellableBrowserTurn(
     browser: Promise.race([run, cancellation]),
     // `browser` is the fast client-facing result. Replacement ownership must wait for the actual
     // worker promise, whose finally block completes the launcher /turn/end handshake.
-    physicalSettlement: run.then(() => undefined, () => undefined),
+    physicalSettlement,
     cancel(reason?: Error) {
       if (!controller.signal.aborted) controller.abort(reason);
       // Explicit targeted cancellation ends the Codex Responses turn immediately. Generic
@@ -752,6 +777,14 @@ export function createChatGptWebAdapter(
       onSurfaceReady?: () => void | Promise<void>;
     },
     phases?: ChatGptTurnPhaseReporter,
+    /**
+     * The caller's abort signal (HTTP request lifetime), when this runtime has one.
+     *
+     * It is threaded explicitly because `startRuntime` is composed at the adapter factory level, not
+     * inside one `runTurn` invocation. The runtime turns it into a physical abort so a client
+     * disconnect stops the browser turn and releases the conversation (issue #329).
+     */
+    requestAbortSignal?: AbortSignal,
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -1155,7 +1188,7 @@ export function createChatGptWebAdapter(
           throw normalized;
         }
       };
-      const browserTurn = cancellableBrowserTurn(trackBrowserOwner(runManual()), browserAbort);
+      const browserTurn = cancellableBrowserTurn(trackBrowserOwner(runManual()), browserAbort, requestAbortSignal);
       void browserTurn.browser.catch(error => {
         if (tokenSettled) return;
         tokenSettled = true;
@@ -1235,7 +1268,7 @@ export function createChatGptWebAdapter(
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
-      })), browserAbort);
+      })), browserAbort, requestAbortSignal);
       recordSentSystemFingerprint(browserTurn.browser);
       return {
         mode: "read-only",
@@ -1307,7 +1340,7 @@ export function createChatGptWebAdapter(
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
-    }))), browserAbort);
+    }))), browserAbort, requestAbortSignal);
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;
@@ -1514,6 +1547,10 @@ export function createChatGptWebAdapter(
                       capabilitySnapshot,
                       `${handoffTraceId}_fallback`,
                       turnCapabilities,
+                      undefined,
+                      undefined,
+                      undefined,
+                      incoming.abortSignal,
                     );
                     try {
                       const rawSummary = await withAbort(fallbackRuntime.browser, operationSignal);
@@ -1813,6 +1850,7 @@ export function createChatGptWebAdapter(
               providerTurn,
               options,
               phases,
+              incoming.abortSignal,
             ),
             onSessionCreated: created => {
               replaySession = created;
@@ -1851,7 +1889,7 @@ export function createChatGptWebAdapter(
             session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
               executionKey,
               ownerKey,
-              () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn, undefined, phases),
+              () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn, undefined, phases, incoming.abortSignal),
               traceId,
               incoming.abortSignal,
               nativeTurnId,

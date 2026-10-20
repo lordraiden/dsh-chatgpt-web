@@ -158,6 +158,32 @@ export function chatGptSettlementWaitTimeoutError(graceMs: number, phase: string
   );
 }
 
+export const CHATGPT_TURN_TIMEOUT_CODE = "turn_timeout";
+
+/**
+ * The bridge's own absolute turn clock expired (issue #329).
+ *
+ * This is deliberately **not** a provider failure: ChatGPT may have been healthy and still working,
+ * but the operator-configured ceiling (`turnTimeoutMs`, default 15 minutes,
+ * `DSH_CHATGPT_WEB_TURN_TIMEOUT_MS`) says the turn has been running long enough to be declared lost.
+ * Its own code and its own log line exist so an operator can tell "the bridge gave up on the clock"
+ * apart from "ChatGPT failed"; it is never automatically retried (that would simply spend the same
+ * ceiling again).
+ */
+export function chatGptTurnTimeoutError(timeoutMs: number, detail = "the ChatGPT Web turn exceeded the bridge's absolute turn deadline"): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    `${detail}: the bridge's turn timeout expired after ${timeoutMs} ms. `
+    + "This is the bridge's own turn clock, not a ChatGPT failure; raise turnTimeoutMs "
+    + "(DSH_CHATGPT_WEB_TURN_TIMEOUT_MS) if the turn was still making progress.",
+    {
+      status: 504,
+      errorType: "server_error",
+      code: CHATGPT_TURN_TIMEOUT_CODE,
+      retryable: false,
+    },
+  );
+}
+
 export const CHATGPT_RETAINED_SURFACE_LOST_CODE = "retained_surface_lost";
 
 /**

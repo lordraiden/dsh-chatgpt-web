@@ -424,10 +424,33 @@ function sseLine(payload: unknown): string {
 }
 
 /**
+ * The SSE comment written while the provider turn is alive but has not produced answer text yet.
+ *
+ * It is a **comment** (`:`) on purpose: SSE clients ignore it, so a client that understands only
+ * `data:` frames parses exactly the same stream it parsed before. That is what makes it safe to
+ * keep a long, healthy provider turn (minutes of reasoning before the first visible token) from
+ * looking dead to a client's idle timer, without touching any client-side timeout.
+ */
+export const CHAT_COMPLETIONS_KEEP_ALIVE_COMMENT = ": keep-alive\n\n";
+
+/**
  * Re-shape the internal Responses SSE stream into OpenAI `chat.completion.chunk` events.
  *
  * The upstream stream is consumed as-is: this function adds no retry, no buffering policy of its own
  * and no second interpretation of the turn — it only renames events.
+ *
+ * **Keep-alive (issue #329).** The internal Responses bridge already owns the one keep-alive clock for
+ * a turn: while the provider is working it emits a parser-ignored `response.heartbeat` event every
+ * `heartbeatMs` (2 s at the call site) so a Codex/Responses client never trips its own idle timer.
+ * This surface deliberately translates that *existing* event into an SSE comment instead of adding a
+ * second timer: OpenAI-compatible clients ignore comments, so the wire protocol is unchanged, and
+ * there is no timer here to clear, leak or race with the terminal frame. The comment stops at the
+ * first real answer delta (the client is receiving content again) and never after a terminal event.
+ *
+ * **Cancellation.** The returned stream owns the upstream reader. When its consumer cancels it (the
+ * HTTP client disconnected and the request-lifetime owner cancelled the response body), the
+ * cancellation is forwarded upstream so the provider turn is aborted and its conversation released,
+ * instead of a detached turn continuing to hold the admission slot.
  */
 export function toChatCompletionStream(upstream: ReadableStream<Uint8Array>, model: string): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -437,6 +460,8 @@ export function toChatCompletionStream(upstream: ReadableStream<Uint8Array>, mod
   let buffer = "";
   let sawText = false;
   let finished = false;
+  let closed = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
   const chunk = (delta: Record<string, unknown>, finish: string | null): string => sseLine({
     id,
@@ -448,11 +473,26 @@ export function toChatCompletionStream(upstream: ReadableStream<Uint8Array>, mod
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      const reader = upstream.getReader();
-      controller.enqueue(encoder.encode(chunk({ role: "assistant", content: "" }, null)));
+      const upstreamReader = upstream.getReader();
+      reader = upstreamReader;
+      const write = (frame: string): boolean => {
+        if (closed) return false;
+        try {
+          controller.enqueue(encoder.encode(frame));
+          return true;
+        } catch {
+          // The consumer went away between our check and the enqueue: stop writing, never throw a
+          // second time from inside start() (the RC2 double-throw the Request bridge already avoids).
+          closed = true;
+          return false;
+        }
+      };
+
+      write(chunk({ role: "assistant", content: "" }, null));
       try {
         for (;;) {
-          const { done, value } = await reader.read();
+          const { done, value } = await upstreamReader.read();
+          if (closed) break;
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
           let separator = buffer.indexOf("\n\n");
@@ -471,31 +511,69 @@ export function toChatCompletionStream(upstream: ReadableStream<Uint8Array>, mod
                 continue;
               }
               const type = typeof event.type === "string" ? event.type : "";
-              if (type === "response.output_text.delta" && typeof event.delta === "string") {
-                sawText = true;
-                controller.enqueue(encoder.encode(chunk({ content: event.delta }, null)));
+              if (type === "response.heartbeat") {
+                // The internal keep-alive. Only before the first real delta and before any terminal
+                // event, so a client never sees a comment once the answer (or the end) arrived.
+                if (!sawText && !finished) write(CHAT_COMPLETIONS_KEEP_ALIVE_COMMENT);
+              } else if (type === "response.output_text.delta" && typeof event.delta === "string") {
+                if (event.delta.length > 0) sawText = true;
+                write(chunk({ content: event.delta }, null));
               } else if (type === "response.failed") {
                 finished = true;
                 const failure = responseFailure({ error: (event.response as Record<string, unknown> | undefined)?.error });
-                controller.enqueue(encoder.encode(sseLine({
+                write(sseLine({
                   error: { message: failure?.message ?? "The provider turn failed.", type: "server_error" },
-                })));
+                }));
               } else if (type === "response.completed" || type === "response.incomplete") {
                 finished = true;
-                controller.enqueue(encoder.encode(chunk({}, sawText ? "stop" : "stop")));
+                write(chunk({}, sawText ? "stop" : "stop"));
               }
             }
           }
         }
       } catch (error) {
-        controller.enqueue(encoder.encode(sseLine({
-          error: { message: error instanceof Error ? error.message : String(error), type: "server_error" },
-        })));
+        if (!closed) {
+          write(sseLine({
+            error: { message: error instanceof Error ? error.message : String(error), type: "server_error" },
+          }));
+        }
       } finally {
-        if (!finished) controller.enqueue(encoder.encode(chunk({}, "stop")));
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-        reader.releaseLock();
+        if (!closed) {
+          if (!finished) write(chunk({}, "stop"));
+          write("data: [DONE]\n\n");
+          try {
+            controller.close();
+          } catch {
+            // Already closed (the consumer cancelled): nothing left to close.
+          }
+        }
+        try {
+          upstreamReader.releaseLock();
+        } catch {
+          // A cancelled/locked reader is already released on the cancellation path.
+        }
+        reader = undefined;
+      }
+    },
+    async cancel(reason) {
+      // The response body was cancelled/aborted (client disconnect, or the request-lifetime owner
+      // tearing the stream down). Forward it to the upstream Responses stream: its own cancel hook
+      // aborts the provider turn, and this adapter's reader is released so no stream is left locked.
+      closed = true;
+      finished = true;
+      const upstreamReader = reader;
+      reader = undefined;
+      if (!upstreamReader) return;
+      try {
+        await upstreamReader.cancel(reason);
+      } catch {
+        // Cancellation is best effort; the upstream owner reports its own settlement.
+      } finally {
+        try {
+          upstreamReader.releaseLock();
+        } catch {
+          // Already released.
+        }
       }
     },
   });

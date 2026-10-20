@@ -81,7 +81,7 @@ import {
 } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody, RequestBodyTooLargeError } from "./http-body";
-import { httpStatusFromTerminalError } from "./lib/errors";
+import { HttpClientDisconnectedError, httpStatusFromTerminalError } from "./lib/errors";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import { augmentNativeModelCatalog, buildChatGptWebModelCatalog } from "./model-catalog";
 import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
@@ -267,6 +267,8 @@ export class HttpTurnCounter {
     } = { abort, done, finish };
     this.active.set(id, tracked);
     let released = false;
+    let responseCompleted = false;
+    let clientDisconnectLogged = false;
     let clientAbortListener: (() => void) | undefined;
     let streamAbortListener: (() => void) | undefined;
     const release = () => {
@@ -280,8 +282,29 @@ export class HttpTurnCounter {
       if (streamAbortListener) abort.signal.removeEventListener("abort", streamAbortListener);
       finish();
     };
-    clientAbortListener = () => abort.abort(clientSignal?.reason);
-    if (clientSignal?.aborted) abort.abort(clientSignal.reason);
+    /**
+     * Note that the *consumer* went away, and abort the turn with the request-lifetime owner's
+     * marker.
+     *
+     * This is the one line that distinguishes "client disconnected" from "turn failed": the failure
+     * path already reports through `http_stream_failed`, so a reader never has to guess which of the
+     * two ended a stream. It carries no prompt, header or provider content — only the turn id, the
+     * endpoint and the fact itself.
+     */
+    const noteClientDisconnect = (): void => {
+      if (clientDisconnectLogged || responseCompleted) return;
+      clientDisconnectLogged = true;
+      console.info(
+        `[dsh-chatgpt-web] http_client_disconnected ${JSON.stringify({ httpTurnId: id, endpoint })}`,
+      );
+    };
+    /** Abort the tracked turn because the HTTP client is gone (never an explicit cancel). */
+    const abortForClientDisconnect = (): void => {
+      noteClientDisconnect();
+      if (!abort.signal.aborted) abort.abort(new HttpClientDisconnectedError());
+    };
+    clientAbortListener = () => abortForClientDisconnect();
+    if (clientSignal?.aborted) abortForClientDisconnect();
     else clientSignal?.addEventListener("abort", clientAbortListener, { once: true });
 
     try {
@@ -324,6 +347,7 @@ export class HttpTurnCounter {
             try {
               const chunk = await reader.read();
               if (chunk.done) {
+                responseCompleted = true;
                 release();
                 controller.close();
                 return;
@@ -348,6 +372,12 @@ export class HttpTurnCounter {
             }
           },
           async cancel(reason) {
+            // The response body's consumer cancelled it. On the Node listener (`sendWebResponse`)
+            // this is how a client disconnect is observed at all: `res.on("close")` cancels the
+            // Web Response body, and the request signal never fires. Abort the turn here instead of
+            // merely detaching, so the provider turn stops and its conversation is released through
+            // the same retirement path as every other exit.
+            if (!responseCompleted) abortForClientDisconnect();
             try {
               await reader.cancel(reason);
             } finally {
@@ -381,7 +411,10 @@ export class HttpTurnCounter {
         try {
           for (;;) {
             const chunk = await reader.read();
-            if (chunk.done) break;
+            if (chunk.done) {
+              responseCompleted = true;
+              break;
+            }
             chunks += 1;
             bytes += chunk.value.byteLength;
             // Consume eagerly so the lifecycle branch never backpressures the client branch.
@@ -675,8 +708,10 @@ export async function responseRequest(
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
-  if (req.signal.aborted) abort.abort();
-  else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
+  // Preserve the reason the request-lifetime owner attached (a client disconnect is marked so the
+  // provider can tell it apart from an explicit cancel; see HttpClientDisconnectedError).
+  if (req.signal.aborted) abort.abort(req.signal.reason);
+  else req.signal.addEventListener("abort", () => abort.abort(req.signal.reason), { once: true });
   const run = async () => {
     try {
       await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => {
@@ -2205,15 +2240,8 @@ export function startServer(
           `Unknown model ${JSON.stringify(translation.model)}. Available models: ${accepted.join(", ")}.`,
         );
       }
-      // Exactly the same execution as /v1/responses: this route adds no engine, no ProviderCore and no
-      // retry authority, it only renames the wire shape (issues #248, architecture §18/§26).
-      const internalRequest = new Request(req.url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(translation.body),
-      });
       // Capability declarations are discarded by design (this bridge is a text chat with no execution
-      // or return channel), but never silently: they never enter the internal request above and are
+      // or return channel), but never silently: they never enter the internal request and are
       // declared here, once, on every response shape this route returns.
       const dropped = translation.droppedCapabilities;
       if (dropped.length > 0) {
@@ -2226,6 +2254,17 @@ export function startServer(
         return response;
       };
       return httpTurns.track(async (signal, bindIdentity) => {
+        // Exactly the same execution as /v1/responses: this route adds no engine, no ProviderCore and
+        // no retry authority, it only renames the wire shape (issues #248, architecture §18/§26). The
+        // request is built *inside* the tracked turn and carries its signal, so a client disconnect
+        // aborts this provider turn instead of leaving it running and holding the conversation's
+        // admission slot (issue #329).
+        const internalRequest = new Request(req.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(translation.body),
+          signal,
+        });
         const upstream = await responseRequest(internalRequest, config, adapterFactory, { onTurnIdentity: bindIdentity });
         if (translation.stream) {
           return declareDropped(new Response(

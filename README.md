@@ -248,6 +248,13 @@ Rules this deployment enforces:
    `0.0.0.0:17841` raw. See [`doc/container.md`](./doc/container.md) §5.2 for the Caddy sketch and the
    request-size / in-flight bounds (`DSH_CHATGPT_WEB_MAX_REQUEST_BYTES`,
    `DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS`).
+5. **Long turns have one explicit bridge ceiling.** `DSH_CHATGPT_WEB_TURN_TIMEOUT_MS` (default
+   `900000`, i.e. 15 minutes; positive integer, at most 6 hours) is the only absolute-duration clock that
+   declares a turn lost, and its failures carry their own `turn_timeout` code so they are never mistaken for a ChatGPT
+   failure. `/v1/chat/completions` streams standard SSE `: keep-alive` comments while the provider is
+   working, so a healthy turn of 10–15 minutes does not trip a client's idle timer; **no client timeout
+   needs to be raised**. An explicit `chatgptWeb.turnTimeoutMs` (or `tuning.turnTimeoutMs`) in
+   `config.json` wins over the environment variable.
 
 The [`SECURITY.md`](./SECURITY.md) policy applies: this is a personal, single-account bridge, not a
 public multi-tenant service, and the provider's terms of service are yours to honour.

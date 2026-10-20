@@ -172,6 +172,9 @@ const CHATGPT_WEB_CHAT_CATEGORY_BY_CODE: Readonly<Record<string, WebChatErrorCat
   chatgpt_submission_ambiguous: "SUBMISSION_AMBIGUOUS",
   chatgpt_submitted_turn_failed: "UPSTREAM_ERROR",
   answer_recovery_unavailable: "RESPONSE_TIMEOUT",
+  // The bridge's own absolute turn clock expired (issue #329). A response timeout, never an
+  // upstream/provider failure: the code says which clock gave up.
+  turn_timeout: "RESPONSE_TIMEOUT",
   codex_tool_timeout: "RESPONSE_TIMEOUT",
   compaction_handoff_timeout: "RESPONSE_TIMEOUT",
   manual_handoff_timeout: "RESPONSE_TIMEOUT",
