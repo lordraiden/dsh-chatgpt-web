@@ -494,6 +494,28 @@ The interactive sign-in surface follows the same rule: no cookie or browser stor
 appear in a session view or a log, and the capture is relayed to the provider's own `storeCapture`
 without the host reading it.
 
+### 5.4 Analysing a capture
+
+Before writing a driver, shape the capture instead of reading it by hand:
+
+```bash
+node scripts/har-shape.mjs turn.har [--json] [--top 8] [--depth 6] [--frames 8]
+```
+
+[`scripts/har-shape.mjs`](../scripts/har-shape.mjs) applies the rules above: field, header and query
+**names** plus value **types**, SSE frame key shapes, short enumerated termination values and model
+ids; account-like values as fingerprints; long token-shaped strings redacted; no cookie,
+`authorization`, query or body value is printed, error paths included. It reports endpoints by
+frequency, the turn-call candidates with the evidence for each, the request body key trees, the
+streaming format with its changing fields, and what the capture is missing (for example
+"no [DONE]-like marker"). It has no npm dependencies and reads the file; it never writes a capture
+back or copies it anywhere.
+
+The output is **evidence, not a protocol**: which changing field actually terminates the turn, whether
+a `model` value is a selectable id or an internal alias, and where the account boundary really lies
+still need a human read of the capture plus a real turn. Do not turn a candidate into a driver rule
+without that (AGENTS.md → *Agent decision discipline*).
+
 ## 6. Failure modes we have already hit
 
 Each is real, already fixed, and still worth recognising in minutes. Symptom first, then the tell that
