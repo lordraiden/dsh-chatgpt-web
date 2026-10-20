@@ -149,7 +149,9 @@ second registration entry and the shared sanitizer extraction.
   open — "the app also sends an `authorization` header; what if a cookie-only call is refused?" — was
   answered by the operator's real sign-in: the import probe *was* refused (`import_predicate_failed`).
   The mechanism and its evidence are in §4.1; the probe and the turn path now issue the request the way
-  the page does.
+  the page does. A second live import then showed that the capture's own token entry could be a stale
+  `loggedOut` state written by the fresh profile, so the token is now read from the **live page after a
+  bounded wait for the app to restore itself**, never from the capture.
 
 ### 4.1 What the app actually sends, and the fix (issue #299, second pass)
 
@@ -174,32 +176,52 @@ version the client sends in its `version` header):
 So the refusal was not a bug in the capture: cookies are necessary but not sufficient, and the request
 that failed was one the page never makes.
 
+**Second pass: the token came from the capture. Third pass: the page is the authority.** The second
+live import reached the same predicate, but the capture's `qwen_access_token_state` said
+**`loggedOut: true`** — a leftover the operator's fresh Firefox profile wrote when it first loaded the
+app, while the operator's real session lives in the **cookies**. Sending that state's token (or none)
+is refused, and the capture is not the thing to fix. What the app does on boot settles it: from its own
+public bundle (`.../qwen-coder-fe/0.0.29/js/main.js`, the version the client header reports) —
+`prepareSessionRestore()` resets a stale `loggedOut` state, then
+`GET https://auth.qwen.ai/api/v2/auths/refresh` (cookie-authenticated) answers `data.access_token`,
+which `setAccessToken()` → `commit()` → `Gu()` writes back under `qwen_access_token_state` (with
+`expiresAt` in epoch milliseconds). So the app authenticates *itself* from the cookies, and the probe
+must wait for that and then read the live page.
+
 **What was implemented** (`src/adapters/qwen-code/session-probe.ts`):
 
-1. **The token is read from the capture at call time** — `localStorage["qwen_access_token_state"]`
-   (or its legacy `token` entry) in the captured storage state. Never a constant, a config value or a
-   fixture, and never logged.
-2. **The header shape is the app's** — `authorization: Bearer <token>` plus the same client headers
+1. **The page is opened on the captured state, then the probe waits for the app's own session
+   restore** — bounded at 20 s, re-reading every 250 ms (`src/adapters/page-hydration.ts`, which is
+   provider-neutral). The observable is the app's own token state in `localStorage`: a non-empty
+   `token`, `loggedOut !== true`, and a non-past `expiresAt`. A page that is already hydrated costs one
+   read; a page that never gets there ends at the deadline instead of hanging. There is no fixed sleep.
+2. **The token is read from the live page at call time** — `qwen_access_token_state` (or its legacy
+   bare `token` entry) as the app itself just wrote it. Never the capture's entry, never a constant, a
+   config value or a fixture, and never logged.
+3. **The header shape is the app's** — `authorization: Bearer <token>` plus the same client headers
    (`qwenCodeApiHeaders`) and a per-call `x-request-id`, exactly the recorded set.
-3. **The request is issued from inside the provider's page** — `src/adapters/page-context-request.ts`
+4. **The request is issued from inside the provider's page** — `src/adapters/page-context-request.ts`
    runs `fetch` in the page's browsing context on a context seeded with the capture, so the request is
    same-origin and carries the page's `Origin`, `Referer`, cookies and `Sec-Fetch-*`. That module is
-   provider-neutral; the token key and header shape stay in the Qwen adapter.
-4. **The same approach is used by the sign-in controller** (`defaultProbeSession`, reading the token
-   from the page it already holds) **and by the turn facility** (`createQwenPageRequestFacility`), so a
-   session that verifies can also run a turn.
-5. **The capture script** (`scripts/qwen-storage-state.mjs`) now reads the app page's `localStorage`
-   over the same DevTools connection and writes it into the capture's `origins`; without that, the
-   documented capture path would produce a file the probe (correctly) refuses.
+   provider-neutral; the token key, its parse and the header shape stay in the Qwen adapter.
+5. **One rule for every path.** The import probe, the sign-in controller (`defaultProbeSession`) and
+   the turn facility (`createQwenPageRequestFacility`) all read the token through the same helper,
+   `readQwenAccessTokenFromPage`. The controller's polling loop is its own bounded wait; the import is
+   a single shot, so it calls `probeQwenTaskListFromPageAfterHydration`, which is the same read and the
+   same request assembly after the wait. A captured token entry is never sent on its own authority.
+6. **The capture script** (`scripts/qwen-storage-state.mjs`) still captures the app page's
+   `localStorage` into the capture's `origins`: a fresh token entry is useful to the app on boot, but it
+   is no longer what the probe trusts.
 
-**The honest refusal when the token is missing.** A capture that authenticates cookies but carries no
-usable token is refused with its cause, not a generic failure:
+**The honest refusal when the page is still signed out.** If the deadline passes and the live page
+still has no usable token, the request goes out cookie-only (so the operator gets the provider's own
+answer) and the refusal names the page's verdict, not the capture's contents:
 
 ```text
 The capture could not be verified against the Qwen Code login surface, so nothing was written: the task
-list answered HTTP 200 with Unauthorized 401 Unauthorized; the provider's API rejected the cookie-only
-request: it needs the token the page uses (the capture has no token entry at all) — sign in again so the
-capture includes it, then re-export and re-import
+list answered HTTP 200 with Unauthorized 401 Unauthorized; the captured session opened the page, but
+after 20003ms it still does not consider itself signed in (the live page has no token yet), so no page
+token was sent — sign in again, then re-export and re-import
 ```
 
 If a token *was* sent and the provider still refused it, the refusal says that instead ("the request
@@ -211,9 +233,12 @@ snippet), and never a cookie, a storage value or the token.
 
 The script is `scripts/probe-qwen-headless.mjs`. It starts nothing but a disposable browser profile and
 prints no cookie, token or storage state. Its authenticated check is issued **from inside the page with
-the page's own `authorization` header** (read from `localStorage` at call time), exactly like the
-controller, and `--storage-state` therefore needs a capture that includes the app's local storage — both
-the repository's capture script and the Harness plugin write one.
+the page's own `authorization` header**, exactly like the controller. When `--storage-state` is
+supplied, it waits — bounded at 20 s, polling every 250 ms — for the app to restore its own token from
+the captured cookies before it issues the check, so a stale `loggedOut` entry in the capture does not
+decide the result; a fixed pause is never the pass/fail condition. Both the repository's capture script
+and the Harness plugin write the app's local storage into the capture, which the app itself may use on
+boot.
 
 ```bash
 # 1. The sign-in surface verdict (fresh profile, no account needed):
@@ -329,15 +354,16 @@ What the import validates, and what it refuses **before anything is written**:
 | no cookies at all | `the capture contains no cookies at all; open https://coder.qwen.ai …` |
 | cookies, but none for this provider (renamed/missing domain) | `the capture contains no coder.qwen.ai cookies (every cookie in it belongs to another domain)` |
 | the provider's cookies all expired | `every coder.qwen.ai cookie in the capture has expired; sign in again …` |
-| `task/list` answers anything but `success:true` when the capture carried the token | `… the task list answered HTTP 200 with Unauthorized 401 Unauthorized; the request carried the page's own token and was still refused, so the session itself is no longer accepted: sign in again …` |
-| `task/list` answers anything but `success:true` and the capture has **no** token (cookie-only) | `… the provider's API rejected the cookie-only request: it needs the token the page uses (the capture has no token entry at all) — sign in again so the capture includes it, then re-export and re-import` |
+| `task/list` answers anything but `success:true` when the live page had a usable token | `… the task list answered HTTP 200 with Unauthorized 401 Unauthorized; the request carried the page's own token and was still refused, so the session itself is no longer accepted: sign in again …` |
+| the page never restored a usable token within the bound (cookie-only request) | `… the captured session opened the page, but after 20003ms it still does not consider itself signed in (the live page has no token yet), so no page token was sent — sign in again, then re-export and re-import` |
 
 A file that passes every step is stored through `storeProviderSession`, the deployment's single
 session writer, exactly like a sign-in through the page: `providers/qwen-code/storage-state.json`
 (inside the container, `/data/providers/qwen-code/storage-state.json`) plus
 `storage-state.json.verified.json`, both written atomically with mode 0600. The sanitizer keeps only
 `qwen.ai` / `aliyun.com` cookies and the `coder.qwen.ai` / `auth.qwen.ai` storage origins — including
-the local storage entry that holds the token, which the probe needs.
+the local storage entry that holds the token. That entry is what the app itself may seed from on boot;
+the probe still reads the live page after the app has restored its own session.
 
 `auth import` runs in its own short-lived process. Nothing consumes this file yet — the Qwen driver
 and turn route are slice 2 (§4) — so there is no process to restart today; once the route exists, the
@@ -355,7 +381,10 @@ A session does not "fail loudly" on its own: the provider simply stops accepting
   (`runQwenNetworkTurn`), so it is a diagnosis, not a mystery.
 
 Recovery is the same two steps: sign in again at `https://coder.qwen.ai` in Chrome, re-run the capture
-script, re-run `auth import`. There is no refresh token to renew and nothing else to reset.
+script, re-run `auth import`. The import stores no refresh credential of its own: on boot the app
+refreshes its access token from the cookie session (`GET https://auth.qwen.ai/api/v2/auths/refresh`),
+which is exactly why the probe waits for that and then reads the live token — the cookies are the
+session, and once they stop being accepted there is nothing else to reset.
 
 ### What still needs a human (nothing is "fully automatic" here)
 

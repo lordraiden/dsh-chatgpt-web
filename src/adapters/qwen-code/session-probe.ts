@@ -25,15 +25,25 @@
  *
  * ## What this module does about it
  *
- * - **The token is read at call time from the session that was captured** (or, for the sign-in
- *   controller and the turn facility, from the live page's own `localStorage`) — never from a
- *   constant, a config value or a fixture.
+ * - **The live page is the authority for its own session, never the imported capture.** A capture may
+ *   carry a `qwen_access_token_state` that is a leftover: the operator's fresh browser profile wrote
+ *   `loggedOut: true` when it first loaded the app, while the real authenticated session lives in the
+ *   captured cookies. The app's own bundle repairs exactly that on boot: `prepareSessionRestore()`
+ *   resets a stale `loggedOut` state, `GET https://auth.qwen.ai/api/v2/auths/refresh` (cookie-
+ *   authenticated) answers an `access_token`, and `setAccessToken()` persists it back under
+ *   `qwen_access_token_state`. So the probe opens the page in the captured context, **waits — bounded,
+ *   on that observable — for the app to authenticate itself**, then reads the token from the live page
+ *   and issues the probe from inside it. A captured token entry is never sent on its own authority.
  * - **The header shape is the app's**, assembled by {@link qwenTaskListRequest} and asserted against
  *   the recorded shape in the suite.
  * - **The request is issued from inside the provider's page** through the provider-neutral
  *   `requestInPageContext`, so origin, referer, cookies and `Sec-Fetch-*` are the page's.
  * - **The token never crosses into a log or a refusal**: the observation carries only whether one was
  *   sent, and the refusal names why it was not.
+ *
+ * The sign-in controller and the turn facility read the same live page through the same helper
+ * ({@link readQwenAccessTokenFromPage}); the controller's own polling loop is its bounded wait. The
+ * import path is a single shot, so it uses {@link awaitQwenPageSession} before probing.
  *
  * The two payload predicates ({@link qwenTaskListAuthenticated} / {@link qwenTaskListRefusal}) live
  * here because this is the module that reads the answer; `auth-controller.ts` re-exports them so no
@@ -44,18 +54,20 @@ import type { Page } from "playwright-core";
 
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import { requestInPageContext } from "../page-context-request";
+import { waitForPageHydration } from "../page-hydration";
 import {
   QWEN_CODE_ACCESS_TOKEN_STORAGE_KEY,
   QWEN_CODE_AUTH_PROBE_TIMEOUT_MS,
   QWEN_CODE_LEGACY_ACCESS_TOKEN_STORAGE_KEY,
+  QWEN_CODE_SESSION_HYDRATION_POLL_INTERVAL_MS,
+  QWEN_CODE_SESSION_HYDRATION_TIMEOUT_MS,
   QWEN_CODE_TASK_LIST_PATH,
   qwenCodeApiHeaders,
   qwenCodeUrl,
 } from "./provider";
-import { QWEN_CODE_STORAGE_ORIGINS } from "./session-store";
 
 /** How a token was (or was not) found; diagnostics only, never the token itself. */
-export type QwenAccessTokenProblem = "absent" | "logged-out" | "unreadable";
+export type QwenAccessTokenProblem = "absent" | "logged-out" | "expired" | "unreadable";
 
 /** What reading the session's own token produced. `accessToken` is never logged. */
 export interface QwenAccessTokenRead {
@@ -65,8 +77,8 @@ export interface QwenAccessTokenRead {
   readonly problem?: QwenAccessTokenProblem;
 }
 
-/** Where a token came from: the imported capture, the live page, or nowhere. */
-export type QwenAccessTokenSource = "capture" | "page" | "none";
+/** Where a token came from: the live page, or nowhere. A capture is never a source. */
+export type QwenAccessTokenSource = "page" | "none";
 
 /** One task-list request, exactly as the page's own client sends it. */
 export interface QwenTaskListRequest {
@@ -96,6 +108,22 @@ export interface QwenTaskListObservation extends QwenTaskListAnswer {
   readonly tokenSource?: QwenAccessTokenSource;
   /** Why no token was available; present when {@link sentAuthorization} is `false`. */
   readonly tokenProblem?: QwenAccessTokenProblem;
+  /**
+   * The bounded wait that preceded the read, when the probe waited on the live page (the import path).
+   *
+   * Absent for the sign-in controller's poll step, whose own polling loop is the wait. When present
+   * and `hydrated` is `false`, the page itself was still signed out at the deadline — which is a
+   * different fact from "no token was ever fetched" and the refusal says so.
+   */
+  readonly pageSession?: QwenPageSessionProgress;
+}
+
+/** What a bounded hydration wait saw, without any credential. */
+export interface QwenPageSessionProgress {
+  /** Whether the page's own token existed, unexpired, before the deadline. */
+  readonly hydrated: boolean;
+  /** The deadline that was actually enforced, in milliseconds. Diagnostics only. */
+  readonly waitedMs: number;
 }
 
 /**
@@ -175,8 +203,16 @@ export function qwenTaskListRefusal(payload: unknown): string {
  * {@link QWEN_CODE_LEGACY_ACCESS_TOKEN_STORAGE_KEY} held the bare token. A value that is neither is
  * `unreadable` rather than silently treated as a token: sending a guessed credential to the provider
  * is exactly the invention this module must not do.
+ *
+ * An expired state is `expired`, not a token: the app's token manager writes `expiresAt` as epoch
+ * **milliseconds** (its bundle converts a seconds-scale `expires_at`/JWT `exp` with `*1000`), and its
+ * own interceptor would refresh rather than send a token past that instant. A `0`/absent `expiresAt`
+ * is "unknown", not "expired": the provider, not a guess, decides whether such a token still works.
  */
-export function qwenAccessTokenFromPersistedValue(value: unknown): QwenAccessTokenRead {
+export function qwenAccessTokenFromPersistedValue(
+  value: unknown,
+  now: number = Date.now(),
+): QwenAccessTokenRead {
   if (typeof value !== "string") return { problem: "absent" };
   const trimmed = value.trim();
   if (trimmed.length === 0) return { problem: "absent" };
@@ -192,43 +228,12 @@ export function qwenAccessTokenFromPersistedValue(value: unknown): QwenAccessTok
   const state = parsed as Record<string, unknown>;
   if (state["loggedOut"] === true) return { problem: "logged-out" };
   const token = state["token"];
-  return typeof token === "string" && token.trim().length > 0
-    ? { accessToken: token.trim() }
-    : { problem: "absent" };
-}
-
-/** The `localStorage` entries of a captured storage state, flattened, for this provider's origins. */
-function qwenStorageEntries(storageState: unknown): { name: string; value: string }[] {
-  const state = (storageState && typeof storageState === "object" ? storageState : {}) as {
-    origins?: readonly { origin?: unknown; localStorage?: readonly unknown[] }[];
-  };
-  const entries: { name: string; value: string }[] = [];
-  for (const origin of state.origins ?? []) {
-    if (typeof origin?.origin !== "string"
-      || !(QWEN_CODE_STORAGE_ORIGINS as readonly string[]).includes(origin.origin)) continue;
-    for (const entry of origin.localStorage ?? []) {
-      const record = entry as { name?: unknown; value?: unknown } | null;
-      if (typeof record?.name === "string" && typeof record.value === "string") {
-        entries.push({ name: record.name, value: record.value });
-      }
-    }
+  if (typeof token !== "string" || token.trim().length === 0) return { problem: "absent" };
+  const expiresAt = state["expiresAt"];
+  if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= now) {
+    return { problem: "expired" };
   }
-  return entries;
-}
-
-/**
- * Read the provider's token from an **imported capture**, at call time.
- *
- * This is the whole point of the fix: the token comes from the session the operator captured, not
- * from anything this repository holds.
- */
-export function qwenAccessTokenFromStorageState(storageState: unknown): QwenAccessTokenRead {
-  const entries = qwenStorageEntries(storageState);
-  const persisted = entries.find(entry => entry.name === QWEN_CODE_ACCESS_TOKEN_STORAGE_KEY);
-  if (persisted !== undefined) return qwenAccessTokenFromPersistedValue(persisted.value);
-  const legacy = entries.find(entry => entry.name === QWEN_CODE_LEGACY_ACCESS_TOKEN_STORAGE_KEY);
-  if (legacy !== undefined) return qwenAccessTokenFromPersistedValue(legacy.value);
-  return { problem: "absent" };
+  return { accessToken: token.trim() };
 }
 
 /**
@@ -301,9 +306,9 @@ export function createQwenPageTaskListSender(page: Page): QwenTaskListSender {
 /**
  * Probe `task/list` with an explicit token read and a sender.
  *
- * Split from the two sources below so a test can drive the *production* assembly — the same
- * {@link qwenTaskListRequest} and the same observation — with a recording sender and a fixture
- * capture, and assert the exact header that was sent.
+ * Split from the page helpers below so a test can drive the *production* assembly — the same
+ * {@link qwenTaskListRequest} and the same observation — with a recording sender and assert the exact
+ * header that was sent, without a browser.
  */
 export async function probeQwenTaskList(
   read: QwenAccessTokenRead,
@@ -321,51 +326,132 @@ export async function probeQwenTaskList(
   };
 }
 
-/** Probe with the token carried by an imported capture. */
-export function probeQwenTaskListFromCapture(
-  storageState: unknown,
-  send: QwenTaskListSender,
-): Promise<QwenTaskListObservation> {
-  return probeQwenTaskList(qwenAccessTokenFromStorageState(storageState), "capture", send);
+/** How long the import probe waits for the app's own session restore, and how often it re-reads. */
+export interface QwenPageHydrationOptions {
+  /** Defaults to {@link QWEN_CODE_SESSION_HYDRATION_TIMEOUT_MS}. */
+  readonly timeoutMs?: number;
+  /** Defaults to {@link QWEN_CODE_SESSION_HYDRATION_POLL_INTERVAL_MS}. */
+  readonly pollIntervalMs?: number;
 }
 
-/** Probe with the token the live page keeps in its own localStorage. */
+/** What the bounded wait plus its final read produced. */
+export interface QwenPageSessionWait {
+  /** The page's token read after the wait; `accessToken` absent when there was none. */
+  readonly read: QwenAccessTokenRead;
+  /** Whether the page's own token existed, unexpired, before the deadline. */
+  readonly hydrated: boolean;
+  /** The deadline actually enforced, in milliseconds. Diagnostics only. */
+  readonly waitedMs: number;
+}
+
+/**
+ * Wait, bounded, for the **live page** to restore its own session; then keep the last read.
+ *
+ * The observable is the app's own token state in `localStorage`: the app's token manager reads and
+ * writes it (its request interceptor builds `Authorization: Bearer <token>` from
+ * `getAccessToken()`, which syncs that key), and on boot it replaces a stale `loggedOut` state with a
+ * token obtained from its own cookie-authenticated `/auths/refresh` call. So "a non-empty token that
+ * is not expired" is the app's own signed-in state, not a proxy for it.
+ *
+ * The wait itself is the provider-neutral {@link waitForPageHydration}; this function only decides
+ * what to observe and when it counts as hydrated. It never invents a token and never falls back to
+ * the imported capture.
+ */
+export async function awaitQwenPageSession(
+  page: Page,
+  options: QwenPageHydrationOptions = {},
+): Promise<QwenPageSessionWait> {
+  const wait = await waitForPageHydration(
+    () => readQwenAccessTokenFromPage(page),
+    read => read.accessToken !== undefined,
+    {
+      timeoutMs: options.timeoutMs ?? QWEN_CODE_SESSION_HYDRATION_TIMEOUT_MS,
+      pollIntervalMs: options.pollIntervalMs ?? QWEN_CODE_SESSION_HYDRATION_POLL_INTERVAL_MS,
+    },
+  );
+  return {
+    read: wait.state ?? { problem: "absent" },
+    hydrated: wait.hydrated,
+    waitedMs: wait.waitedMs,
+  };
+}
+
+/**
+ * Probe with the token the live page keeps in its own `localStorage`, read now.
+ *
+ * This is the sign-in controller's poll step: its polling loop already waits on the app's own
+ * authenticated answer, so it calls this repeatedly instead of sleeping inside one probe.
+ */
 export async function probeQwenTaskListFromPage(page: Page): Promise<QwenTaskListObservation> {
   const read = await readQwenAccessTokenFromPage(page);
   return await probeQwenTaskList(read, "page", createQwenPageTaskListSender(page));
+}
+
+/**
+ * Probe from the live page after a bounded wait for the app to authenticate itself.
+ *
+ * The import path is a single shot, so it waits (observably, not on a sleep) before reading. The
+ * request itself is assembled and sent by exactly the same primitives the controller uses, so the
+ * two paths cannot disagree about which token is sent.
+ */
+export async function probeQwenTaskListFromPageAfterHydration(
+  page: Page,
+  options: QwenPageHydrationOptions = {},
+): Promise<QwenTaskListObservation> {
+  const session = await awaitQwenPageSession(page, options);
+  const observation = await probeQwenTaskList(
+    session.read,
+    "page",
+    createQwenPageTaskListSender(page),
+  );
+  return {
+    ...observation,
+    pageSession: { hydrated: session.hydrated, waitedMs: session.waitedMs },
+  };
 }
 
 /** How the absence of a token is described to a human, without ever showing one. */
 function qwenTokenProblemText(problem: QwenAccessTokenProblem): string {
   switch (problem) {
     case "logged-out":
-      return "the captured token state says the page is signed out";
+      return "the page's token state says it is signed out";
+    case "expired":
+      return "the live page's token has expired";
     case "unreadable":
-      return "the captured token state is not the JSON the page writes";
+      return "the page's token state is not the JSON the app writes";
     default:
-      return "the capture has no token entry at all";
+      return "the live page has no token yet";
   }
 }
 
 /**
  * The honest, specific refusal for a probe that did not authenticate.
  *
- * It always reports what the provider answered (status + its own code, or a bounded body snippet),
- * and — when the request went out without the page's token — says exactly that: the capture has no
- * page token, so the request was cookie-only, and that is not how this provider authenticates. The
- * whole message is kept under the pipeline's 300-character diagnostic bound, so no part of the cause
- * or its fix is truncated away. No URL is embedded: the sanitizer would rewrite it, and the operator
- * knows where they signed in.
+ * It always reports what the provider answered (status + its own code, or a bounded body snippet).
+ * When the request went out without a token it says which fact decided that: the live page was still
+ * signed out at the deadline of the bounded wait, or (for a caller that reads the page once) the page
+ * simply had no token at that instant. It never claims a captured token was the authority. The whole
+ * message is kept under the pipeline's 300-character diagnostic bound, so no part of the cause or its
+ * fix is truncated away. No URL is embedded: the sanitizer would rewrite it, and the operator knows
+ * where they signed in.
  */
 export function qwenTaskListProbeRefusal(
-  observation: Pick<QwenTaskListObservation, "status" | "payload" | "sentAuthorization" | "tokenProblem">,
+  observation: Pick<
+    QwenTaskListObservation,
+    "status" | "payload" | "sentAuthorization" | "tokenProblem" | "pageSession"
+  >,
 ): string {
   const answered = `the task list answered HTTP ${observation.status} with `
     + `${qwenTaskListRefusal(observation.payload)}`;
   if (observation.sentAuthorization === false) {
     const problem = qwenTokenProblemText(observation.tokenProblem ?? "absent");
+    if (observation.pageSession !== undefined && !observation.pageSession.hydrated) {
+      return `${answered}; the captured session opened the page, but after `
+        + `${observation.pageSession.waitedMs}ms it still does not consider itself signed in `
+        + `(${problem}), so no page token was sent — sign in again, then re-export and re-import`;
+    }
     return `${answered}; the provider's API rejected the cookie-only request: it needs the token the `
-      + `page uses (${problem}) — sign in again so the capture includes it, then re-export and re-import`;
+      + `page uses (${problem}) — sign in again so the page itself has one, then re-export and re-import`;
   }
   if (observation.sentAuthorization === true) {
     return `${answered}; the request carried the page's own token and was still refused, so the session `

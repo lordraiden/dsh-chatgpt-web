@@ -48,8 +48,10 @@ import {
 } from "./adapters/qwen-code/session-store";
 import {
   verifyQwenCodeImportedSession,
+  type QwenCodeImportedSessionPageOpener,
   type QwenCodeImportedSessionProbe,
 } from "./adapters/qwen-code/session-import";
+import type { QwenPageHydrationOptions } from "./adapters/qwen-code/session-probe";
 import { nonSecretDiagnosticText } from "./lib/safe-diagnostics";
 import {
   AUTH_IMPORT_REFUSAL_CODES,
@@ -354,10 +356,12 @@ export function chatGptWebAuthImportProvider(config: AppConfig): AuthImportProvi
   };
 }
 
-/** Options for the Qwen Code import; the probe seam is what makes the gate testable. */
+/** Options for the Qwen Code import; the probe/page seams are what make the gate testable. */
 export interface QwenCodeAuthImportOptions {
   readonly chromeExecutablePath?: string;
   readonly probe?: QwenCodeImportedSessionProbe;
+  readonly openPage?: QwenCodeImportedSessionPageOpener;
+  readonly hydration?: QwenPageHydrationOptions;
 }
 
 /** Qwen Code: validate the provider's own cookies, then the same `task/list` predicate sign-in uses. */
@@ -371,6 +375,8 @@ export function qwenCodeAuthImportProvider(options: QwenCodeAuthImportOptions = 
       const verification = await verifyQwenCodeImportedSession(state, {
         ...(options.chromeExecutablePath === undefined ? {} : { chromeExecutablePath: options.chromeExecutablePath }),
         ...(options.probe === undefined ? {} : { probe: options.probe }),
+        ...(options.openPage === undefined ? {} : { openPage: options.openPage }),
+        ...(options.hydration === undefined ? {} : { hydration: options.hydration }),
       });
       return {
         storageState: state,

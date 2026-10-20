@@ -60,12 +60,12 @@ export {
 } from "./provider";
 
 export {
+  awaitQwenPageSession,
   createQwenPageTaskListSender,
   probeQwenTaskList,
-  probeQwenTaskListFromCapture,
   probeQwenTaskListFromPage,
+  probeQwenTaskListFromPageAfterHydration,
   qwenAccessTokenFromPersistedValue,
-  qwenAccessTokenFromStorageState,
   qwenAuthorizationHeaderFromPage,
   qwenTaskListProbeRefusal,
   qwenTaskListRequest,
@@ -73,6 +73,9 @@ export {
   type QwenAccessTokenProblem,
   type QwenAccessTokenRead,
   type QwenAccessTokenSource,
+  type QwenPageHydrationOptions,
+  type QwenPageSessionProgress,
+  type QwenPageSessionWait,
   type QwenTaskListAnswer,
   type QwenTaskListObservation,
   type QwenTaskListRequest,
@@ -92,6 +95,8 @@ export {
 export {
   verifyQwenCodeImportedSession,
   type QwenCodeImportedSessionOptions,
+  type QwenCodeImportedSessionPage,
+  type QwenCodeImportedSessionPageOpener,
   type QwenCodeImportedSessionProbe,
   type QwenCodeImportedSessionProbeResult,
   type QwenCodeImportedSessionVerification,

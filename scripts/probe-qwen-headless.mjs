@@ -12,8 +12,10 @@
  * authenticated check is the same structural one the controller uses (`GET /coder/api/v2/task/list`,
  * which answers HTTP 200 with `success:false` for an anonymous caller), and it is issued **the way
  * the page issues it**: from inside the page, with the `authorization: Bearer <token>` header the
- * app builds from `localStorage["qwen_access_token_state"]` (see `doc/qwen-code.md` §4). A
- * cookie-only call is exactly the `import_predicate_failed` shape and is not retried as a fallback.
+ * app builds from `localStorage["qwen_access_token_state"]` (see `doc/qwen-code.md` §4.1). With a
+ * captured session the app restores that token itself after boot, so the probe waits — bounded, on
+ * the page's own token state — for it instead of assuming a load time. A cookie-only call is exactly
+ * the `import_predicate_failed` shape and is not retried as a fallback.
  *
  * Usage:
  *
@@ -75,6 +77,27 @@ async function authorizationHeader(page) {
     header: read?.token === undefined ? {} : { authorization: `Bearer ${read.token}` },
     source: read?.source ?? "none",
   };
+}
+
+/** How long the probe waits for the app to restore its own session, and how often it re-reads. */
+const SESSION_HYDRATION_TIMEOUT_MS = 20_000;
+const SESSION_HYDRATION_POLL_INTERVAL_MS = 250;
+
+/**
+ * Wait — bounded, on the page's own observable state — for the app to authenticate itself.
+ *
+ * The app replaces a stale `loggedOut` entry and refreshes its access token on boot, so polling the
+ * page's own localStorage for a usable token is the condition; no fixed sleep decides this. The
+ * interval is a polling interval, and the deadline is what ends a page that never gets there.
+ */
+async function waitForPageToken(page) {
+  const deadline = Date.now() + SESSION_HYDRATION_TIMEOUT_MS;
+  for (;;) {
+    const authorization = await authorizationHeader(page);
+    if (Object.keys(authorization.header).length > 0) return authorization;
+    if (Date.now() >= deadline) return authorization;
+    await page.waitForTimeout(SESSION_HYDRATION_POLL_INTERVAL_MS);
+  }
 }
 
 /** The API headers the page's own client sends, plus the page's token when it has one. */
@@ -190,8 +213,12 @@ try {
       .length,
   }));
 
-  // The structural authenticated check, issued from the page with the page's own token.
-  const authorization = await authorizationHeader(page);
+  // The structural authenticated check, issued from the page with the page's own token. With a
+  // captured session, the app restores that token itself after boot: wait for the observable rather
+  // than for a load time.
+  const authorization = storageStatePath === undefined
+    ? await authorizationHeader(page)
+    : await waitForPageToken(page);
   const probeAnswer = await page.evaluate(async ({ url, headers }) => {
     const answer = await fetch(url, { credentials: "same-origin", headers });
     const text = await answer.text();

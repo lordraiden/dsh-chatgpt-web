@@ -272,6 +272,10 @@ async function defaultOpenBrowser(launch: QwenCodeAuthBrowserLaunch): Promise<Qw
  * not the page's behaviour — it is exactly the `import_predicate_failed` shape — so the probe reads
  * the page's token at call time, assembles the app's header shape, and runs the request in the page's
  * browsing context. The token is never logged, never returned, and never taken from a constant.
+ *
+ * This is the step the session's own poll loop repeats (`#poll`), so that loop *is* the bounded wait
+ * for a page the operator is still signing in; the one-shot import path waits for the app's own
+ * session restore and then runs the same read and request (`probeQwenTaskListFromPageAfterHydration`).
  */
 async function defaultProbeSession(page: Page): Promise<QwenCodeSessionProbeResult> {
   const observation = await probeQwenTaskListFromPage(page);

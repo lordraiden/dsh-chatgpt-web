@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { Page } from "playwright-core";
 import { resolve } from "node:path";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,12 +21,15 @@ import {
 import { QWEN_CODE_COOKIE_DOMAINS } from "../src/adapters/qwen-code/session-store";
 import { QWEN_CODE_PROVIDER_ID } from "../src/adapters/qwen-code/provider";
 import {
-  probeQwenTaskListFromCapture,
+  awaitQwenPageSession,
+  probeQwenTaskListFromPageAfterHydration,
   qwenAccessTokenFromPersistedValue,
+  qwenAuthorizationHeaderFromPage,
   qwenTaskListProbeRefusal,
   qwenTaskListRefusal,
   qwenTaskListRequest,
 } from "../src/adapters/qwen-code/session-probe";
+import { waitForPageHydration } from "../src/adapters/page-hydration";
 import { defaultConfig, saveConfig } from "../src/config";
 import {
   captureChatGptWebHome,
@@ -274,7 +278,7 @@ describe("issue #299 — the capture script turns a DevTools payload into a stor
     expect(log).not.toContain("qwen_access_token_state");
   });
 
-  test("a capture written by the script carries the token the probe sends", async () => {
+  test("a capture written by the script is imported, and the probe follows the live page", async () => {
     const directory = freshDirectory("issue-299-capture-to-probe-");
     const outPath = join(directory, "qwen-storage-state.json");
     captureToFile({
@@ -282,22 +286,25 @@ describe("issue #299 — the capture script turns a DevTools payload into a stor
       outPath,
       stdout: () => {},
       now: NOW,
-      storage: [["qwen_access_token_state", JSON.stringify({ token: "SECRET-CAPTURED-TOKEN", loggedOut: false })]],
+      storage: [["qwen_access_token_state", JSON.stringify({ token: "SECRET-CAPTURED-TOKEN", loggedOut: true })]],
     });
 
-    const recorded: Record<string, string>[] = [];
-    const probe = (state: unknown) => probeQwenTaskListFromCapture(state, async request => {
-      recorded.push({ ...request.headers });
-      return { status: 200, payload: AUTHENTICATED_TASK_LIST };
-    });
+    // The script's output is a valid capture. The token it happens to hold is not the probe's
+    // authority: the page, opened with those cookies, is.
+    const live = JSON.stringify({ token: LIVE_PAGE_TOKEN, loggedOut: false, version: 1 });
+    const { page, sent } = simulatedQwenPage({ states: [live] });
     const result = await importProviderSession({
-      provider: qwenCodeAuthImportProvider({ probe }),
+      provider: qwenCodeAuthImportProvider({
+        openPage: openerFor(page),
+        hydration: FAST_HYDRATION,
+      }),
       from: outPath,
       now: () => NOW,
     });
 
-    expect(recorded[0]!.authorization).toBe("Bearer SECRET-CAPTURED-TOKEN");
     expect(result.verified).toBe(true);
+    expect(sent[0]!.headers.authorization).toBe(`Bearer ${LIVE_PAGE_TOKEN}`);
+    expect(sent[0]!.headers.authorization).not.toContain("SECRET-CAPTURED-TOKEN");
   });
 
   test("the capture is written privately, safe to re-run, and never logs a cookie value", () => {
@@ -520,31 +527,38 @@ describe("issue #299 — the authenticated predicate gates the single session wr
 
 
 /**
- * Issue #299, second pass — the probe authenticates the way the page does.
+ * Issue #299, third pass — the live page is the authority for its own session.
  *
- * The live result that defines this block: a real Firefox capture (14 cookies, 15 localStorage keys)
- * reached `POST /v1/control/auth/import` and the service answered `import_predicate_failed`, because
- * `GET /coder/api/v2/task/list` was called with cookies only. The recorded HAR of the signed-in app
- * shows every API call carrying `authorization: Bearer <token>` beside the cookies, and the app's own
- * bundle persists that token under `qwen_access_token_state` in localStorage.
+ * The live evidence that defines this block: the second operator capture carried a
+ * `qwen_access_token_state` whose content said `loggedOut: true` — a stale entry written when the
+ * operator's fresh profile first loaded the app — while the real authenticated session lived in the
+ * captured cookies. A probe that sends that state's token (or none) is refused exactly as the
+ * deployed service logged it. The corrected rule: open the page in the captured context, wait
+ * (bounded, observably) for the app's own bootstrap to restore its session, then read the token from
+ * the live page and issue the probe from inside it.
  *
- * These tests drive the **production** request assembly with a recording sender, so the header is
- * asserted exactly as it would be sent, without a browser and without network access.
+ * These tests drive the **production** assembly (wait + live read + request) with a simulated page,
+ * so no browser, network or account is needed, and changing the simulated page value must change the
+ * request.
  */
 
-/** Synthetic token values. Both are asserted absent from every diagnostic and from stdout. */
-const PAGE_TOKEN = "SECRET-QWEN-PAGE-TOKEN";
-const OTHER_PAGE_TOKEN = "SECRET-QWEN-PAGE-TOKEN-CHANGED";
+/** Synthetic token values. All are asserted absent from every diagnostic and from stdout. */
+const STALE_CAPTURE_TOKEN = "SECRET-QWEN-STALE-CAPTURE-TOKEN";
+const LIVE_PAGE_TOKEN = "SECRET-QWEN-LIVE-PAGE-TOKEN";
+const OTHER_LIVE_PAGE_TOKEN = "SECRET-QWEN-LIVE-PAGE-TOKEN-CHANGED";
 
 /** The localStorage entry exactly as the app's token manager persists it (recorded shape). */
-function tokenStateEntry(token: string) {
+function tokenStateEntry(
+  token: string | null,
+  options: { readonly loggedOut?: boolean; readonly expiresAt?: number } = {},
+) {
   return {
     name: "qwen_access_token_state",
     value: JSON.stringify({
       token,
-      expiresAt: 1_900_000_000_000,
+      expiresAt: options.expiresAt ?? 1_900_000_000_000,
       sessionId: "session-fixture",
-      loggedOut: false,
+      loggedOut: options.loggedOut ?? false,
       version: 1,
       stateId: "state-fixture",
       updatedAt: 1_790_000_000_000,
@@ -553,157 +567,227 @@ function tokenStateEntry(token: string) {
   };
 }
 
-/** A capture with the provider's cookies plus the page's own token entry. */
-function capturedStateWithToken(token: string) {
+/** A capture with the provider's cookies and one localStorage entry. */
+function captureWithTokenState(entry: ReturnType<typeof tokenStateEntry>) {
   return {
     cookies: [IMPORTABLE_STATE.cookies[0]!],
-    origins: [{ origin: "https://coder.qwen.ai", localStorage: [tokenStateEntry(token)] }],
+    origins: [{ origin: "https://coder.qwen.ai", localStorage: [entry] }],
   };
 }
 
-/** A capture whose cookies are fine but which carries no token (the live failing shape). */
-const CAPTURED_STATE_WITHOUT_TOKEN = {
+/** A capture whose cookies are fine but which carries no token entry at all. */
+const CAPTURE_WITHOUT_TOKEN = {
   cookies: [IMPORTABLE_STATE.cookies[0]!],
   origins: [{ origin: "https://coder.qwen.ai", localStorage: [{ name: "theme", value: "dark" }] }],
 };
 
-/** A probe built from the real assembly, with a sender that records what would have been sent. */
-function recordingProbe(payload: unknown = AUTHENTICATED_TASK_LIST) {
+/**
+ * A simulated provider page.
+ *
+ * `states` is the page's own successive answers to the token read: the first entries model the stale
+ * capture being repaired by the app's bootstrap, the last one repeats. Every request the probe sends
+ * from the page is recorded, so the header can be asserted without a network.
+ */
+function simulatedQwenPage(options: {
+  readonly states: readonly (string | undefined)[];
+  readonly payload?: unknown;
+}) {
+  const reads: (string | undefined)[] = [];
   const sent: { url: string; headers: Record<string, string> }[] = [];
-  return {
-    sent,
-    probe: (state: unknown) => probeQwenTaskListFromCapture(state, async request => {
-      sent.push({ url: request.url, headers: { ...request.headers } });
-      return { status: 200, payload };
-    }),
-  };
+  let readIndex = 0;
+  const page = {
+    evaluate: async (_fn: unknown, arg?: Record<string, unknown>) => {
+      if (typeof arg?.["accessKey"] === "string") {
+        const state = options.states[Math.min(readIndex, options.states.length - 1)];
+        reads.push(state);
+        readIndex += 1;
+        return { state, legacy: undefined };
+      }
+      if (typeof arg?.["url"] === "string") {
+        sent.push({ url: String(arg["url"]), headers: { ...(arg["headers"] as Record<string, string>) } });
+        return {
+          status: 200,
+          contentType: "application/json",
+          text: JSON.stringify(options.payload ?? AUTHENTICATED_TASK_LIST),
+        };
+      }
+      throw new Error("the simulated page does not implement this evaluation");
+    },
+  } as unknown as Page;
+  return { page, reads, sent };
 }
 
-describe("issue #299 — the probe sends the header the app sends, read from the capture", () => {
-  test("the request is the captured shape, and success:true authenticates", async () => {
+function openerFor(page: Page) {
+  return async () => ({ page, close: async () => {} });
+}
+
+/** The bounded wait, shrunk so the suite stays fast; the production defaults are the real ones. */
+const FAST_HYDRATION = { timeoutMs: 500, pollIntervalMs: 5 } as const;
+
+describe("issue #299 — the live page, not the capture, is the authority", () => {
+  test("a stale loggedOut capture whose page restores a token authenticates and stores", async () => {
     const home = freshHome();
-    const directory = freshDirectory("issue-299-token-");
-    const source = writeState(directory, capturedStateWithToken(PAGE_TOKEN));
-    const { sent, probe } = recordingProbe();
-
-    const result = await importProviderSession({
-      provider: qwenCodeAuthImportProvider({ probe }),
-      from: source,
-      now: () => NOW,
+    const directory = freshDirectory("issue-299-live-page-");
+    // The exact live shape: the capture's state says signed out (and even carries a leftover token);
+    // the page, opened with those cookies, repairs that state and exposes a valid token.
+    const stale = tokenStateEntry(STALE_CAPTURE_TOKEN, { loggedOut: true });
+    const live = tokenStateEntry(LIVE_PAGE_TOKEN);
+    const { page, reads, sent } = simulatedQwenPage({
+      states: [stale.value, stale.value, live.value],
     });
+    const source = writeState(directory, captureWithTokenState(stale));
+    const { provider, stores } = countingProvider(qwenCodeAuthImportProvider({
+      openPage: openerFor(page),
+      hydration: FAST_HYDRATION,
+    }));
 
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.url).toBe("https://coder.qwen.ai/coder/api/v2/task/list?page=1");
+    const result = await importProviderSession({ provider, from: source, now: () => NOW });
 
-    // Exactly the header set the recorded request carries. `authorization` is the page's own token,
-    // and the per-call request id is the app's uuid.
-    expect(Object.keys(sent[0]!.headers).sort()).toEqual([
-      "accept", "authorization", "bx-v", "content-type", "source", "version", "x-request-id",
-    ]);
-    expect(sent[0]!.headers).toMatchObject({
-      accept: "application/json",
-      "content-type": "application/json",
-      source: "web",
-      version: "0.0.29",
-      "bx-v": "2.5.37",
-      authorization: `Bearer ${PAGE_TOKEN}`,
-    });
-    expect(sent[0]!.headers["x-request-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-
-    // A `success:true` answer is the authentication, and the session lands in the provider's layout.
     expect(result.verified).toBe(true);
+    expect(stores()).toBe(1);
+    // It polled the page's own state instead of trusting (or ignoring) the capture on a timer.
+    expect(reads.length).toBeGreaterThanOrEqual(3);
+    expect(sent).toHaveLength(1);
+    // The header is the live page's token, never the stale capture entry's.
+    expect(sent[0]!.headers.authorization).toBe(`Bearer ${LIVE_PAGE_TOKEN}`);
+    expect(sent[0]!.headers.authorization).not.toBe(`Bearer ${STALE_CAPTURE_TOKEN}`);
+    expect(sent[0]!.headers.source).toBe("web");
+
+    // A verified session lands in the provider's layout, and no token is echoed anywhere.
     expect(result.path).toBe(join(home, "providers", QWEN_CODE_PROVIDER_ID, "storage-state.json"));
-    expect(result.detail).toContain("success:true");
-    // The verification result and the confirmation never carry the token.
-    expect(JSON.stringify(result)).not.toContain(PAGE_TOKEN);
-    expect(result.detail).not.toContain(PAGE_TOKEN);
+    expect(existsSync(result.path)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(LIVE_PAGE_TOKEN);
+    expect(JSON.stringify(result)).not.toContain(STALE_CAPTURE_TOKEN);
   });
 
-  test("the token comes from the capture, not from a constant: changing it changes the request", async () => {
-    const directory = freshDirectory("issue-299-token-change-");
-    const changed = capturedStateWithToken(OTHER_PAGE_TOKEN);
-    const { sent, probe } = recordingProbe();
-
-    await importProviderSession({
-      provider: qwenCodeAuthImportProvider({ probe }),
-      from: writeState(directory, changed),
-      now: () => NOW,
-    });
-
-    expect(sent[0]!.headers.authorization).toBe(`Bearer ${OTHER_PAGE_TOKEN}`);
-    expect(sent[0]!.headers.authorization).not.toBe(`Bearer ${PAGE_TOKEN}`);
-    // ...and the pure assembly follows the same value.
-    expect(qwenTaskListRequest(OTHER_PAGE_TOKEN).headers.authorization).toBe(`Bearer ${OTHER_PAGE_TOKEN}`);
-  });
-
-  test("a capture without the token is refused with the honest cause, and nothing is stored", async () => {
+  test("neither the capture nor the page has a token: the honest refusal, nothing stored", async () => {
     const home = freshHome();
-    const directory = freshDirectory("issue-299-no-token-");
-    const source = writeState(directory, CAPTURED_STATE_WITHOUT_TOKEN);
-    const { sent, probe } = recordingProbe(ANONYMOUS_TASK_LIST);
-    const { provider, stores } = countingProvider(qwenCodeAuthImportProvider({ probe }));
+    const directory = freshDirectory("issue-299-no-page-token-");
+    const source = writeState(directory, CAPTURE_WITHOUT_TOKEN);
+    const { page, sent } = simulatedQwenPage({ states: [undefined], payload: ANONYMOUS_TASK_LIST });
+    const { provider, stores } = countingProvider(qwenCodeAuthImportProvider({
+      openPage: openerFor(page),
+      hydration: FAST_HYDRATION,
+    }));
 
     const failure = await importProviderSession({ provider, from: source, now: () => NOW })
       .then(() => undefined, error => error as Error);
 
-    // The request went out cookie-only, which is exactly what the page does not do.
+    // The page had no token, so the request could only be cookie-only — and the provider said so.
     expect(sent[0]!.headers.authorization).toBeUndefined();
-    expect(sent[0]!.headers.source).toBe("web");
-
     expect(failure?.message).toContain("could not be verified against the Qwen Code login surface");
-    // It reports what the provider answered...
     expect(failure?.message).toContain("HTTP 200");
     expect(failure?.message).toContain("Unauthorized 401 Unauthorized");
-    // ...and names the cause instead of failing generically.
-    expect(failure?.message).toContain("cookie-only");
-    expect(failure?.message).toContain("needs the token the page uses");
+    // The specific, honest cause: the page itself does not consider itself signed in.
+    expect(failure?.message).toContain("does not consider itself signed in");
+    expect(failure?.message).toMatch(/after \d+ms/);
     expect(failure?.message).toContain("sign in again");
 
     expect(stores()).toBe(0);
     expect(existsSync(join(home, "providers", QWEN_CODE_PROVIDER_ID))).toBe(false);
-    // Neither the cookie nor any token reaches the refusal.
     expect(failure?.message).not.toContain("SECRET-IMPORT-COOKIE");
-    expect(failure?.message).not.toContain(PAGE_TOKEN);
   });
 
-  test("the token is never logged, never echoed, and never read from a fixture", async () => {
-    const directory = freshDirectory("issue-299-token-quiet-");
+  test("the wait is bounded: a page that never hydrates ends in the refusal, not a hang", async () => {
+    const directory = freshDirectory("issue-299-hydration-bound-");
+    const stale = tokenStateEntry(null, { loggedOut: true });
+    const source = writeState(directory, captureWithTokenState(stale));
+    const { page, reads } = simulatedQwenPage({ states: [stale.value], payload: ANONYMOUS_TASK_LIST });
+    const { provider, stores } = countingProvider(qwenCodeAuthImportProvider({
+      openPage: openerFor(page),
+      hydration: { timeoutMs: 60, pollIntervalMs: 5 },
+    }));
+
+    const started = Date.now();
+    const failure = await importProviderSession({ provider, from: source, now: () => NOW })
+      .then(() => undefined, error => error as Error);
+    const elapsed = Date.now() - started;
+
+    expect(failure?.message).toContain("does not consider itself signed in");
+    // The deadline was enforced, and it was the only bound that ended the wait.
+    expect(elapsed).toBeGreaterThanOrEqual(60);
+    expect(elapsed).toBeLessThan(2_000);
+    expect(reads.length).toBeGreaterThanOrEqual(2);
+    expect(stores()).toBe(0);
+
+    // The same wait, observed directly: it reports the bound it enforced instead of hanging.
+    const direct = await awaitQwenPageSession(page, { timeoutMs: 40, pollIntervalMs: 5 });
+    expect(direct.hydrated).toBe(false);
+    expect(direct.waitedMs).toBeGreaterThanOrEqual(40);
+    expect(direct.read.problem).toBe("logged-out");
+  });
+
+  test("the token is read from the page, never a constant: changing the page changes the request", async () => {
+    for (const [pageToken, other] of [
+      [LIVE_PAGE_TOKEN, OTHER_LIVE_PAGE_TOKEN],
+      [OTHER_LIVE_PAGE_TOKEN, LIVE_PAGE_TOKEN],
+    ] as const) {
+      const directory = freshDirectory("issue-299-page-token-");
+      const live = tokenStateEntry(pageToken);
+      const { page, sent } = simulatedQwenPage({ states: [live.value] });
+      const source = writeState(directory, CAPTURE_WITHOUT_TOKEN);
+      const { provider } = countingProvider(qwenCodeAuthImportProvider({
+        openPage: openerFor(page),
+        hydration: FAST_HYDRATION,
+      }));
+
+      await importProviderSession({ provider, from: source, now: () => NOW });
+
+      expect(sent[0]!.headers.authorization).toBe(`Bearer ${pageToken}`);
+      expect(sent[0]!.headers.authorization).not.toBe(`Bearer ${other}`);
+      // ...and the pure assembly follows the same value.
+      expect(qwenTaskListRequest(pageToken).headers.authorization).toBe(`Bearer ${pageToken}`);
+    }
+  });
+
+  test("the live token never reaches the refusal or the console", async () => {
+    const directory = freshDirectory("issue-299-live-token-quiet-");
+    const live = tokenStateEntry(LIVE_PAGE_TOKEN);
+    const { page } = simulatedQwenPage({ states: [live.value], payload: ANONYMOUS_TASK_LIST });
     const lines: string[] = [];
     const original = { log: console.log, warn: console.warn, error: console.error, info: console.info };
-    const capture = (write: (...args: unknown[]) => void) => (...args: unknown[]) => { lines.push(args.join(" ")); write(...args); };
+    const capture = (write: (...args: unknown[]) => void) => (...args: unknown[]) => {
+      lines.push(args.join(" "));
+      write(...args);
+    };
     console.log = capture(original.log);
     console.warn = capture(original.warn);
     console.error = capture(original.error);
     console.info = capture(original.info);
+    let failure: Error | undefined;
     try {
-      // A failing predicate, so every diagnostic the import can produce is exercised.
-      const failing = recordingProbe(ANONYMOUS_TASK_LIST);
-      const failure = await importProviderSession({
-        provider: qwenCodeAuthImportProvider({ probe: failing.probe }),
-        from: writeState(directory, capturedStateWithToken(PAGE_TOKEN)),
+      failure = await importProviderSession({
+        provider: qwenCodeAuthImportProvider({ openPage: openerFor(page), hydration: FAST_HYDRATION }),
+        from: writeState(directory, captureWithTokenState(live)),
         now: () => NOW,
       }).then(() => undefined, error => error as Error);
-
-      expect(failure?.message).toContain("carried the page's own token and was still refused");
-      expect(failure?.message).not.toContain(PAGE_TOKEN);
-      expect(lines.join("\n")).not.toContain(PAGE_TOKEN);
-      // Production never consults a fixture: the request that was sent carries the capture's value.
-      expect(failing.sent[0]!.headers.authorization).toBe(`Bearer ${PAGE_TOKEN}`);
     } finally {
       console.log = original.log;
       console.warn = original.warn;
       console.error = original.error;
       console.info = original.info;
     }
+
+    // A token was sent, so the refusal is about the session, not the capture.
+    expect(failure?.message).toContain("carried the page's own token and was still refused");
+    expect(failure?.message).not.toContain(LIVE_PAGE_TOKEN);
+    expect(lines.join("\n")).not.toContain(LIVE_PAGE_TOKEN);
   });
 
-  test("the token reader understands the app's persisted state and its legacy key", () => {
-    expect(qwenAccessTokenFromPersistedValue(tokenStateEntry(PAGE_TOKEN).value)).toEqual({ accessToken: PAGE_TOKEN });
+  test("the token reader understands the app's persisted state, its legacy key, and its expiry", () => {
+    expect(qwenAccessTokenFromPersistedValue(tokenStateEntry(LIVE_PAGE_TOKEN).value, NOW))
+      .toEqual({ accessToken: LIVE_PAGE_TOKEN });
     // The legacy key held the bare token.
-    expect(qwenAccessTokenFromPersistedValue(PAGE_TOKEN)).toEqual({ accessToken: PAGE_TOKEN });
+    expect(qwenAccessTokenFromPersistedValue(LIVE_PAGE_TOKEN, NOW)).toEqual({ accessToken: LIVE_PAGE_TOKEN });
     // A state that says "logged out" is never used as a token.
-    expect(qwenAccessTokenFromPersistedValue(JSON.stringify({ token: PAGE_TOKEN, loggedOut: true })))
+    expect(qwenAccessTokenFromPersistedValue(tokenStateEntry(LIVE_PAGE_TOKEN, { loggedOut: true }).value, NOW))
       .toEqual({ problem: "logged-out" });
+    // The app persists `expiresAt` in epoch milliseconds; a past one is the app's own "refresh me".
+    expect(qwenAccessTokenFromPersistedValue(tokenStateEntry(LIVE_PAGE_TOKEN, { expiresAt: NOW - 1 }).value, NOW))
+      .toEqual({ problem: "expired" });
+    // An unknown expiry is not a reason to reject a token the provider might still accept.
+    expect(qwenAccessTokenFromPersistedValue(tokenStateEntry(LIVE_PAGE_TOKEN, { expiresAt: 0 }).value, NOW))
+      .toEqual({ accessToken: LIVE_PAGE_TOKEN });
     expect(qwenAccessTokenFromPersistedValue("")).toEqual({ problem: "absent" });
     expect(qwenAccessTokenFromPersistedValue("{not json")).toEqual({ problem: "unreadable" });
     expect(qwenAccessTokenFromPersistedValue(undefined)).toEqual({ problem: "absent" });
@@ -716,20 +800,17 @@ describe("issue #299 — the probe sends the header the app sends, read from the
     expect(refusal.length).toBeLessThanOrEqual(160);
   });
 
-  test("a token that was sent and refused says the session, not the capture, is the problem", async () => {
-    const directory = freshDirectory("issue-299-token-refused-");
-    const { probe } = recordingProbe(ANONYMOUS_TASK_LIST);
-    const failure = await importProviderSession({
-      provider: qwenCodeAuthImportProvider({ probe }),
-      from: writeState(directory, capturedStateWithToken(PAGE_TOKEN)),
-      now: () => NOW,
-    }).then(() => undefined, error => error as Error);
-
-    expect(failure?.message).toContain("carried the page's own token and was still refused");
-    expect(failure?.message).toContain("Unauthorized 401 Unauthorized");
-    // The generic "cookies only" cause must not be claimed when a token was sent.
-    expect(failure?.message).not.toContain("cookie-only");
-    expect(failure?.message).not.toContain(PAGE_TOKEN);
+  test("the cookie-only refusal (no bounded wait) still names the page token", () => {
+    const message = qwenTaskListProbeRefusal({
+      status: 200,
+      payload: ANONYMOUS_TASK_LIST,
+      sentAuthorization: false,
+      tokenProblem: "absent",
+    });
+    expect(message).toContain("Unauthorized 401 Unauthorized");
+    expect(message).toContain("cookie-only");
+    expect(message).toContain("it needs the token the page uses");
+    expect(message).toContain("sign in again");
   });
 
   test("the refusal composer keeps the token out even when it is handed one", () => {
@@ -739,6 +820,96 @@ describe("issue #299 — the probe sends the header the app sends, read from the
       sentAuthorization: true,
     });
     expect(message).toContain("Unauthorized 401 Unauthorized");
-    expect(message).not.toContain(PAGE_TOKEN);
+    expect(message).not.toContain(LIVE_PAGE_TOKEN);
+  });
+
+  test("the turn path and the probe path read the page through the same rule", async () => {
+    const live = tokenStateEntry(LIVE_PAGE_TOKEN);
+    const { page, sent } = simulatedQwenPage({ states: [live.value] });
+
+    const observation = await probeQwenTaskListFromPageAfterHydration(page, FAST_HYDRATION);
+    // The turn facility's header (`createQwenPageRequestFacility` uses exactly this helper).
+    const turnHeader = await qwenAuthorizationHeaderFromPage(page);
+
+    expect(observation.sentAuthorization).toBe(true);
+    expect(turnHeader.authorization).toBe(`Bearer ${LIVE_PAGE_TOKEN}`);
+    expect(sent[0]!.headers.authorization).toBe(turnHeader.authorization);
+  });
+
+  test("the assembly waits on the observable and reports what it saw", async () => {
+    const stale = tokenStateEntry(null, { loggedOut: true });
+    const live = tokenStateEntry(LIVE_PAGE_TOKEN);
+    const { page, reads } = simulatedQwenPage({ states: [stale.value, live.value] });
+
+    const observation = await probeQwenTaskListFromPageAfterHydration(page, FAST_HYDRATION);
+
+    expect(reads.length).toBeGreaterThanOrEqual(2);
+    expect(observation.sentAuthorization).toBe(true);
+    expect(observation.tokenSource).toBe("page");
+    expect(observation.pageSession?.hydrated).toBe(true);
+    expect(observation.pageSession?.waitedMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("issue #299 — the generic hydration wait is bounded and observable", () => {
+  test("a page that is already hydrated costs one read and no wait", async () => {
+    let reads = 0;
+    const wait = await waitForPageHydration(
+      async () => { reads += 1; return "ready"; },
+      state => state === "ready",
+      { timeoutMs: 1_000, pollIntervalMs: 5 },
+    );
+    expect(wait.hydrated).toBe(true);
+    expect(wait.state).toBe("ready");
+    expect(reads).toBe(1);
+    expect(wait.waitedMs).toBeLessThan(100);
+  });
+
+  test("it polls the observable until the page's own state is ready", async () => {
+    const seen = ["signed-out", "signed-out", "token"];
+    let reads = 0;
+    const wait = await waitForPageHydration(
+      async () => seen[Math.min(reads++, seen.length - 1)]!,
+      state => state === "token",
+      { timeoutMs: 1_000, pollIntervalMs: 5 },
+    );
+    expect(wait.hydrated).toBe(true);
+    expect(wait.state).toBe("token");
+    expect(reads).toBeGreaterThanOrEqual(3);
+  });
+
+  test("it enforces the deadline instead of hanging on a page that never hydrates", async () => {
+    let reads = 0;
+    const started = Date.now();
+    const wait = await waitForPageHydration(
+      async () => { reads += 1; return "signed-out"; },
+      state => state === "token",
+      { timeoutMs: 40, pollIntervalMs: 5 },
+    );
+    const elapsed = Date.now() - started;
+    expect(wait.hydrated).toBe(false);
+    expect(wait.state).toBe("signed-out");
+    expect(wait.waitedMs).toBeGreaterThanOrEqual(40);
+    expect(elapsed).toBeLessThan(1_000);
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+
+  test("an observation that throws is 'not yet', and the deadline still ends it", async () => {
+    let reads = 0;
+    const wait = await waitForPageHydration(
+      async () => { reads += 1; throw new Error("page is navigating"); },
+      () => true,
+      { timeoutMs: 30, pollIntervalMs: 5 },
+    );
+    expect(wait.hydrated).toBe(false);
+    expect(wait.state).toBeUndefined();
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a non-positive bound or interval is refused, not silently defaulted", async () => {
+    await expect(waitForPageHydration(async () => 1, () => true, { timeoutMs: 0 }))
+      .rejects.toBeInstanceOf(TypeError);
+    await expect(waitForPageHydration(async () => 1, () => true, { timeoutMs: 10, pollIntervalMs: 0 }))
+      .rejects.toBeInstanceOf(TypeError);
   });
 });
