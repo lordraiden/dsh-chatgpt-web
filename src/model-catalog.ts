@@ -20,6 +20,11 @@ import {
   qwenChatCatalogueVisible,
   resolveQwenChatProviderConfig,
 } from "./adapters/qwen-chat/provider-config";
+import {
+  deepSeekCatalogueRows,
+  deepSeekCatalogueVisible,
+  resolveDeepSeekProviderConfig,
+} from "./adapters/deepseek-web/provider-config";
 
 type JsonObject = Record<string, unknown>;
 
@@ -161,6 +166,13 @@ export function buildPublicModelCatalog(
   // conversation.
   if (qwenChatCatalogueVisible(config)) {
     rows.push(...qwenChatCatalogueRows(resolveQwenChatProviderConfig(config)).map(row => ({ ...row })));
+  }
+  // DeepSeek Web is advertised on **one** fact only: the operator configured at least one `model_type`.
+  // Its model list is a session-only remote setting (recon §2.5), so a verified session alone names no
+  // model this deployment could honestly serve — and the bundle's deep-link prefill literal is not a
+  // catalogue. An unconfigured deployment therefore keeps exactly the rows it had.
+  if (deepSeekCatalogueVisible(config)) {
+    rows.push(...deepSeekCatalogueRows(resolveDeepSeekProviderConfig(config)).map(row => ({ ...row })));
   }
   return { object: "list", models: rows };
 }

@@ -198,10 +198,16 @@ export const AUTH_IMPORT_PROVIDER_IDS = [
  *
  * Deliberately states both halves: the session was stored, and it cannot be used. A caller must not
  * mistake `verified: false` for a transient failure of an otherwise working login.
+ *
+ * The adapter now exists (`src/adapters/deepseek-web/**`), but its authenticated predicate does not:
+ * the page token's provenance was never measured, so no probe can prove this capture works. The
+ * sentence therefore says "no authenticated predicate has accepted it" — not "there is no adapter" —
+ * and the unproven inventory is `doc/deepseek-web.md` §6.
  */
 export const DEEPSEEK_WEB_UNVERIFIED_MESSAGE =
-  "Captured and stored, but not verified: DeepSeek Web has no adapter yet, so this session cannot be "
-  + "used for turns until one is added.";
+  "Captured and stored, but not verified: no authenticated predicate has accepted this DeepSeek Web "
+  + "session yet (the provider's page token provenance is unmeasured, doc/deepseek-web.md §6), so it "
+  + "cannot be used for turns.";
 
 function defaultReadFile(path: string): string {
   return readFileSync(path, "utf8");
@@ -475,13 +481,15 @@ export function qwenChatAuthImportProvider(options: QwenChatAuthImportOptions = 
 }
 
 /**
- * DeepSeek Web: a capture-only participant (no adapter, no predicate).
+ * DeepSeek Web: a capture-only participant (a predicate is still missing).
  *
- * There is deliberately no browser, no request and no `verified` claim here. The descriptor exists
- * so a plugin can put the browser's capture in the deployment's standard provider layout now, ready
- * for the driver; until then the answer says exactly that. Only the provider-neutral structural rule
- * is applied — a capture with neither cookies nor `localStorage` is not a capture. With no driver
- * there is no domain list, expiry rule or "deepseek keeps its token in cookies" assumption to invent.
+ * There is deliberately no browser, no request and no `verified` claim here. The descriptor puts the
+ * browser's capture in the deployment's standard provider layout, where the adapter's session check
+ * reads it — but a capture is not proof, and no authenticated predicate has been measured for this
+ * provider yet (`doc/deepseek-web.md` §6), so the answer says exactly that. Only the provider-neutral
+ * structural rule is applied — a capture with neither cookies nor `localStorage` is not a capture.
+ * With no predicate there is no domain list, expiry rule or "deepseek keeps its token in cookies"
+ * assumption to invent.
  */
 export function deepSeekWebAuthImportProvider(): AuthImportProvider {
   return {

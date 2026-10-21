@@ -15,6 +15,12 @@ import {
   qwenChatCatalogueVisible,
   resolveQwenChatProviderConfig,
 } from "./adapters/qwen-chat/provider-config";
+import { createDeepSeekDriver } from "./adapters/deepseek-web/driver";
+import { createMemoryDeepSeekConversationState } from "./adapters/deepseek-web/chat-state";
+import {
+  deepSeekCatalogueVisible,
+  resolveDeepSeekProviderConfig,
+} from "./adapters/deepseek-web/provider-config";
 import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import {
@@ -110,6 +116,15 @@ export function webChatDoctorDrivers(config: AppConfig): readonly WebChatProvide
     drivers.push(createQwenChatDriver({
       provider: resolveQwenChatProviderConfig(config),
       state: createMemoryQwenChatConversationState(),
+    }));
+  }
+  // DeepSeek Web is inspected only when it publishes a route (a configured model_type). A deployment
+  // that merely stored a capture gets no check here, because `doctor` must not suggest that an
+  // unverified capture is an account: the catalogue note and the service log say that instead.
+  if (deepSeekCatalogueVisible(config)) {
+    drivers.push(createDeepSeekDriver({
+      provider: resolveDeepSeekProviderConfig(config),
+      state: createMemoryDeepSeekConversationState(),
     }));
   }
   return drivers;

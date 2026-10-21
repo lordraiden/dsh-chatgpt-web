@@ -323,7 +323,9 @@ describe("session import — a verified provider lands in its own layout once", 
     });
     expect(typeof body.message).toBe("string");
     expect(String(body.message)).toMatch(/not verified/i);
-    expect(String(body.message)).toMatch(/no adapter/i);
+    // The reason is now the missing predicate, not a missing adapter: the adapter exists, and a
+    // capture still is not proof (doc/deepseek-web.md §7).
+    expect(String(body.message)).toMatch(/no authenticated predicate/i);
     expect(String(body.message)).toMatch(/cannot be used/i);
 
     expect(deepseek.stores()).toBe(1);

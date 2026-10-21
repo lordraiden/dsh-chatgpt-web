@@ -20,6 +20,13 @@ import {
   qwenChatResponsesRequest,
   type QwenChatProviderComposition,
 } from "./adapters/qwen-chat";
+import {
+  DEEPSEEK_WEB_PROVIDER_ID,
+  createDeepSeekWebProvider,
+  deepSeekWebCatalogueExplanation,
+  deepSeekWebResponsesRequest,
+  type DeepSeekWebProviderComposition,
+} from "./adapters/deepseek-web";
 import { CHATGPT_WEB_DRIVER_ID } from "./web-chat/host/provider-host";
 import { createChatGptWebProviderRuntime } from "./adapters/chatgpt-web/provider-runtime";
 import {
@@ -468,7 +475,7 @@ type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ChatGptWebPro
  * composition's own `modelOf` and then dispatches to that provider's ingress below. A union (rather
  * than one provider's type) keeps the host from pretending a second provider is a copy of the first.
  */
-type ComposedWebChatProvider = QwenCodeProviderComposition | QwenChatProviderComposition;
+type ComposedWebChatProvider = QwenCodeProviderComposition | QwenChatProviderComposition | DeepSeekWebProviderComposition;
 
 export interface ResponseRequestOptions {
   /** DEV and other in-process harnesses can keep continuation state in their own canonical store. */
@@ -642,6 +649,14 @@ export async function responseRequest(
         request: req,
         body: raw,
         provider: webChatProvider as QwenChatProviderComposition,
+        ...(options.onAdapterEvent ? { onAdapterEvent: options.onAdapterEvent } : {}),
+      });
+    }
+    if (webChatProvider.providerId === DEEPSEEK_WEB_PROVIDER_ID) {
+      return await deepSeekWebResponsesRequest({
+        request: req,
+        body: raw,
+        provider: webChatProvider as DeepSeekWebProviderComposition,
         ...(options.onAdapterEvent ? { onAdapterEvent: options.onAdapterEvent } : {}),
       });
     }
@@ -1862,8 +1877,26 @@ export function startServer(
   const qwenChatProvider = dependencies.webChatProviders === undefined
     ? createQwenChatProvider({ config })
     : undefined;
+  // DeepSeek Web is the third provider. Composing it is inert (no browser until a turn needs it, no
+  // file written), and it publishes **no** catalogue rows unless the operator configured the
+  // model_type values a signed-in capture showed — DeepSeek's model list is a session-only remote
+  // setting (recon §2.5), so an absent configuration is a deliberate "serve nothing", never a guess.
+  // The composition owns the ambient catalogue claim (`deepseek-web/<model_type>`), so a caller that
+  // asks this provider for an unserved model gets its typed 400 instead of an unrelated backend.
+  const deepSeekWebProvider = dependencies.webChatProviders === undefined
+    ? createDeepSeekWebProvider({ config })
+    : undefined;
+  if (deepSeekWebProvider !== undefined && deepSeekWebProvider.catalogue.length === 0) {
+    // "No rows" must never be a silent absence: say why, once, at startup.
+    const explanation = deepSeekWebCatalogueExplanation(config);
+    if (explanation !== undefined) {
+      console.info(
+        `[deepseek-web] deepseek_web_catalogue_empty ${JSON.stringify({ detail: explanation })}`,
+      );
+    }
+  }
   const webChatProviders = dependencies.webChatProviders
-    ?? [qwenCodeProvider!, qwenChatProvider!];
+    ?? [qwenCodeProvider!, qwenChatProvider!, deepSeekWebProvider!];
 
   /**
    * The interactive sign-in surface (issue #276). One owner for the life of this listener: it holds
@@ -2504,6 +2537,9 @@ export function startServer(
         // The second Qwen provider owns a session page and its own durable chat state; releasing is
         // idempotent and a caller that composed its own providers owns theirs.
         qwenChatProvider?.close() ?? Promise.resolve(),
+        // DeepSeek Web owns the same pair (a lazily-opened session page and a durable session-state
+        // file); releasing is idempotent for the same reason.
+        deepSeekWebProvider?.close() ?? Promise.resolve(),
       ]);
       const failures = results
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
