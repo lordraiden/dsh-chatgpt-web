@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Serialise a housekeeping call and a real turn of the same conversation instead of refusing one of
+  them (issue #336, operator report on the Qwen Code selector). The harness issues its session-title
+  call at the same moment as the user's first message, and `@earendil-works/pi-ai` never maps
+  `GenerateOptions.purpose` onto an OpenAI-compatible wire, so the call arrives with **no declared
+  purpose**: the service classifies it as a conversational turn, it takes the conversation's single
+  transport resource, and the user's first message — arriving during that window — was refused by the
+  shared transport lease with `Another exchange still owns this conversation's transport resource`
+  (`PI_AI_ERROR` at the caller). The shared transport owner
+  (`src/web-chat/transport/transport-lease.ts`) now carries a **bounded, event-driven, cancellable
+  admission** on the conversation key, taken before the continuity decision and released when the turn
+  ends, and the Qwen Code, Qwen Chat and DeepSeek Web compositions use it with
+  `DEFAULT_TRANSPORT_ADMISSION_WAIT_MS` (60 s, the harness housekeeping call's own measured deadline). A
+  transient overlap now waits and both turns complete; exclusivity is preserved (one conversation never
+  runs two provider turns at once); a genuine contention still fails closed with the same category and
+  message when the bound expires; and a registry constructed without a bound keeps the historical
+  immediate refusal for direct callers. Provider-neutral, outside `src/web-chat/core/**`, no new
+  dependency. ChatGPT Web already had its own bounded admission
+  (`ChatGptWebProviderCore.acquireConversationAdmission`); this is the same rule at the shared layer the
+  other providers use. Stated plainly: after this, a first message to a Qwen (or DeepSeek) provider is
+  DELAYED by the housekeeping call rather than failed, and the undeclared housekeeping call still shares
+  the session's conversation — making it ephemeral still requires the harness to declare its purpose,
+  which this build cannot do from configuration.
+
 - Relay a **drag** through the interactive sign-in surface, so a slider/puzzle verification can be
   answered at all (found while signing in to Qwen Code, issue #299). Two independent gaps blocked it:
   the neutral `AuthInput` vocabulary had no way to express a pressed pointer moved along a path, and
