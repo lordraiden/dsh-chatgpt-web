@@ -40,9 +40,11 @@ API as its surface.
 - **Storage:** one data volume holds the configuration, the provider session (credentials) and the
   durable conversation store.
 
-The shared semantics of the exchange live in a provider-neutral WebChat core; ChatGPT Web is the
-current provider. Qwen Chat and DeepSeek Chat are roadmap providers and are **not** current routes.
-See [`doc/architecture.md`](./doc/architecture.md) for the ownership model.
+The shared semantics of the exchange live in a provider-neutral WebChat core. ChatGPT Web, Qwen Code
+and Qwen Chat are served routes; DeepSeek Web is implemented but not usable for live turns yet and
+publishes no rows until the operator configures its measured `model_type` values
+([`doc/deepseek-web.md`](./doc/deepseek-web.md)). See [`doc/architecture.md`](./doc/architecture.md) for
+the ownership model.
 
 ## Quick start
 
@@ -341,9 +343,9 @@ A verified session answers exactly:
 {"ok":true,"provider":"qwen-code","verified":true,"verifiedAt":"2026-10-19T21:00:00.000Z","storedAt":"/data/providers/qwen-code/storage-state.json"}
 ```
 
-`deepseek-web` has **no adapter yet**, so its capture is stored but not usable. It answers
-`verified: false`, `verifiedAt: null` and a `message` saying so; no `.verified.json` marker is written,
-so nothing can mistake it for a working session. Every capture refusal is a 4xx with the existing
+`deepseek-web` has **no authenticated predicate yet** — the page token's provenance is unmeasured — so
+its capture is stored but not usable. It answers `verified: false`, `verifiedAt: null` and a `message`
+saying so; no `.verified.json` marker is written, so nothing can mistake it for a working session. Every capture refusal is a 4xx with the existing
 control error shape and a stable code:
 
 | code | status | meaning |
@@ -430,6 +432,16 @@ measured abilities. Select one with `reasoning_effort` (or `reasoning: {"effort"
 selection offers none. The model list is configuration with a measured seed and a public hint; refresh
 the cache with `dsh-chatgpt-web models refresh --provider qwen-chat` and restart to serve it. Full
 protocol, assumptions and the per-domain sign-in rule: [`doc/qwen-chat.md`](./doc/qwen-chat.md).
+
+**DeepSeek Web** (`deepseek-web/<model_type>`) is implemented as a fourth provider but is **not
+usable for live turns yet**, and it publishes no rows of its own: its model list is a session-only
+remote setting (no public endpoint, no refresh command), so the catalogue appears only once the
+operator configures the measured `model_type` values in
+`webChat.providers["deepseek-web"].modelTypes`. A `deepseek-web/...` request on a deployment that
+configured nothing is a typed `400` that says exactly that. Two steps are still unproven — the
+per-completion **proof of work** and the page token's provenance — so a turn fails with a typed
+`503`/`401` instead of being retried or faked. The exact unproven inventory, with the one observation
+that settles each item, is [`doc/deepseek-web.md`](./doc/deepseek-web.md) §6.
 
 The catalogue is resolved from the authenticated account's capability state, so it is not a promise
 that every account has every route: unknown or unverifiable capability state fails closed, and an

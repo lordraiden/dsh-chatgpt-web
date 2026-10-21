@@ -2,8 +2,11 @@
 
 This guide covers operational problems in the current production implementation of dsh-chatgpt-web.
 
-Today the production WebChat providers are **ChatGPT Web** and **Qwen Code**. DeepSeek Chat is a future
-text-only provider under the multi-provider architecture and is not a current user-facing route.
+Today the production WebChat providers are **ChatGPT Web**, **Qwen Code** and **Qwen Chat**. **DeepSeek
+Web** is implemented but not usable for live turns yet: the per-completion proof of work and the page
+token's provenance are unproven, and no route is advertised until the operator configures the measured
+`model_type` values. Its refusals are typed and say so; the exact inventory is
+[`doc/deepseek-web.md`](./doc/deepseek-web.md) §6.
 
 For the ownership model and future provider architecture, see doc/architecture.md.
 
@@ -339,11 +342,15 @@ The intended recovery choices are explicit:
 
 Do not reconstruct authoritative DSH state from browser-visible conversation text.
 
-## 13. Qwen Code or DeepSeek Chat cannot be selected
+## 13. Qwen Code or DeepSeek Web cannot be selected
 
 **Qwen Code is a supported route** (`qwen-code/<model>`) once this deployment has a verified session for
-it or a `webChat.providers["qwen-code"]` block. **DeepSeek Chat is still a roadmap provider**: its
-capture can be imported, but it is stored unverified and no route is advertised for it.
+it or a `webChat.providers["qwen-code"]` block. **DeepSeek Web** (`deepseek-web/<model_type>`) is
+implemented, but it publishes no rows until the operator configures the measured `model_type` values in
+`webChat.providers["deepseek-web"].modelTypes`, and it cannot complete a live turn yet: the
+per-completion proof of work and the page token's provenance are unproven, so a configured deployment
+still answers with a typed `503`/`401` that names the missing step. A stored DeepSeek capture is
+unverified by design. Details: [`doc/deepseek-web.md`](./doc/deepseek-web.md) §6–§7.
 
 Do not add ad-hoc DeepSeek routes to ChatGPT-specific code. A new provider requires the shared WebChat
 contracts to be implemented first, and it must pass the conformance suite.
