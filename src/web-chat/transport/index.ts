@@ -11,5 +11,5 @@ export {
   type WebChatExchangeOptions,
   type WebChatExchangeRunner,
 } from "./exchange-runner";
-export { createWebChatTransportLeaseRegistry, type WebChatTransportLease, type WebChatTransportLeaseAcquireOptions, type WebChatTransportLeaseRegistry, type WebChatTransportLeaseSnapshot, type WebChatTransportLeaseState, type WebChatTransportResource } from "./transport-lease";
+export { createWebChatTransportLeaseRegistry, DEFAULT_TRANSPORT_ADMISSION_WAIT_MS, type WebChatTransportAdmissionOptions, type WebChatTransportLease, type WebChatTransportLeaseAcquireOptions, type WebChatTransportLeaseRegistry, type WebChatTransportLeaseRegistryOptions, type WebChatTransportLeaseSnapshot, type WebChatTransportLeaseState, type WebChatTransportResource } from "./transport-lease";
 export type { WebChatTextTransport, WebChatTextTransportContext } from "./text-transport";

@@ -1241,6 +1241,21 @@ next attempt is refused with "the last attempt on this conversation was never co
 that never happened. A refused turn therefore leaves continuity exactly as it was, and the retry
 proceeds on the state the admitted turns established.
 
+**The shared transport layer owns the same rule for the text providers** (issue #336). The ChatGPT
+owner above is provider-specific; the Qwen Code, Qwen Chat and DeepSeek Web providers run one text
+exchange per turn through `src/web-chat/transport/**`, which is where their conversation exclusivity
+lives. A caller that cannot declare a purpose — `@earendil-works/pi-ai` never maps the harness's
+`GenerateOptions.purpose` onto an OpenAI-compatible wire, so this product's own harness sends its
+session-title call indistinguishably from a real turn — throws the harness's housekeeping round and the
+user's first message at the same conversation. Those providers therefore compose their lease registry
+with `DEFAULT_TRANSPORT_ADMISSION_WAIT_MS` and take `admitConversation` on the conversation key
+**before** reading continuity, releasing it when the turn ends. The mechanism is provider-neutral and lives
+outside `src/web-chat/core/**`: the registry's admission wait is the serialising half of its lease, the
+lease keeps the immediate refusal that owns the physical resource, and a registry constructed without a
+bound keeps the historical behaviour for every direct caller. A user turn longer than the bound can
+still fail a housekeeping call rather than delay it; the bound is chosen at the housekeeping call's own
+measured deadline so that call is aborted by the caller's cancellation instead.
+
 ### 15.2 Account sharing
 
 One authenticated provider account may serve multiple DSH sessions.

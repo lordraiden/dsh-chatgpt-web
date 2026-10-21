@@ -74,6 +74,7 @@ import {
 import {
   createWebChatExchange,
   createWebChatTransportLeaseRegistry,
+  DEFAULT_TRANSPORT_ADMISSION_WAIT_MS,
   type WebChatTextTransport,
   type WebChatTransportLeaseRegistry,
 } from "../../web-chat/transport";
@@ -361,7 +362,13 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
     provider,
     ...(options.now !== undefined ? { now: options.now } : {}),
   });
-  const leases: WebChatTransportLeaseRegistry = createWebChatTransportLeaseRegistry();
+  // The shared transport leases plus the serialising admission (issue #336): a transient overlap on
+  // one conversation waits for the current turn instead of failing the arriving one.
+  const leases: WebChatTransportLeaseRegistry = createWebChatTransportLeaseRegistry({
+    admissionWaitMs: DEFAULT_TRANSPORT_ADMISSION_WAIT_MS,
+  });
+  /** A unique holder identity per turn, so a repeated turn id cannot admit two distinct turns. */
+  const newAdmissionHolder = (): string => crypto.randomUUID();
   const binding: WebChatAccountBinding = qwenChatAccountBinding(provider);
   const driver = createQwenChatDriver({
     provider,
@@ -426,23 +433,31 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
     };
   };
 
+  /**
+   * The continuity scope of one turn: who it is addressed by, before any store read.
+   *
+   * Computed before the continuity decision because the shared transport's admission slot is taken on
+   * this identity's conversation key, so a transient overlap is serialised *before* the decision and a
+   * waiting turn never reads (or writes) a half-observed conversation.
+   */
+  const continuityScopeOf = (turn: QwenChatResolvedTurn) => ({
+    binding,
+    dshSession: { sessionId: qwenChatAffinitySessionId(turn) },
+    threadId: turn.threadId,
+    namespace: provider.namespace,
+  });
+
   /** The continuity decision of one conversational turn, and the chat it will use. */
   const decideContinuity = async (
     turn: QwenChatResolvedTurn,
+    scope: ReturnType<typeof continuityScopeOf>,
+    identity: WebChatConversationIdentity,
   ): Promise<{
     readonly identity: WebChatConversationIdentity;
     readonly conversation: WebChatConversation;
     readonly chat?: { readonly chatId: string; readonly parentId?: string };
     readonly replay: boolean;
   }> => {
-    const dshSession = { sessionId: qwenChatAffinitySessionId(turn) };
-    const scope = {
-      binding,
-      dshSession,
-      threadId: turn.threadId,
-      namespace: provider.namespace,
-    };
-    const identity = webChatContinuationIdentity(scope);
     const stored = await store.read(identity);
     const entry = state.read(identity.key);
     let intent: WebChatContinuationIntent;
@@ -639,65 +654,87 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
       yield* runExchange(handoff, signal, async () => undefined);
       return;
     }
-    let planned: Awaited<ReturnType<typeof decideContinuity>>;
+    const scope = continuityScopeOf(turn);
+    const identity = webChatContinuationIdentity(scope);
+    const admissionHolder = newAdmissionHolder();
+    // Admission first: a transient overlap with a housekeeping call on the same conversation waits
+    // here instead of failing this turn, and the continuity decision below therefore never reads a
+    // half-observed record.
     try {
-      planned = await decideContinuity(turn);
+      await leases.admitConversation({
+        holder: admissionHolder,
+        conversationKey: identity.key,
+        ...(signal ? { signal } : {}),
+      });
     } catch (error) {
       yield failureOf(error);
       return;
     }
-    const { identity, conversation } = planned;
-    const generation = conversation.generation;
-    let attempt;
     try {
-      attempt = await beginWebChatConversationAttempt(store, identity, { generation });
-    } catch (error) {
-      yield failureOf(error);
-      return;
-    }
-    const prompt = planned.replay ? compileQwenChatReplayPrompt(turn.history) : turn.userText;
-    const handoff = exchangeFor({
-      conversationKey: identity.key,
-      turnId: turn.turnId,
-      epoch: generation,
-      turn: {
-        model: turn.model,
-        ...(turn.mode === undefined ? {} : { mode: turn.mode }),
-        ...(turn.thinkingFormat === undefined ? {} : { thinkingFormat: turn.thinkingFormat }),
-        userText: prompt.length > 0 ? prompt : turn.userText,
-      },
-      ...(planned.chat ? { chat: planned.chat } : {}),
-      ephemeral: false,
-      onAnswer: (answer) => {
-        // The provider's own continuation state: the chat and the response cursor the next turn
-        // hangs off.
-        state.recordChat(identity.key, {
-          chatId: answer.chatId,
-          ...(answer.parentId !== undefined ? { parentId: answer.parentId } : {}),
-          ...(answer.responseId !== undefined ? { responseId: answer.responseId } : {}),
-          ...(answer.responseIndex !== undefined ? { responseIndex: answer.responseIndex } : {}),
-          status: "active",
-          updatedAt: now(),
-        });
-      },
-      onChatLost: (reason) => {
-        state.markLost(identity.key, reason);
-      },
-    });
-    yield* runExchange(handoff, signal, async () => {
+      let planned: Awaited<ReturnType<typeof decideContinuity>>;
       try {
-        await confirmWebChatConversation(store, identity, {
-          generation: attempt.generation,
-          turnId: turn.turnId,
-          at: now(),
-        });
+        planned = await decideContinuity(turn, scope, identity);
       } catch (error) {
-        // The turn's answer is already delivered; failing it here would not make the state truer.
-        console.warn(
-          `[qwen-chat] qwen_chat_turn_confirm_failed ${JSON.stringify({ detail: nonSecretDiagnosticText(error) })}`,
-        );
+        yield failureOf(error);
+        return;
       }
-    });
+      const { conversation } = planned;
+      const generation = conversation.generation;
+      let attempt;
+      try {
+        attempt = await beginWebChatConversationAttempt(store, identity, { generation });
+      } catch (error) {
+        yield failureOf(error);
+        return;
+      }
+      const prompt = planned.replay ? compileQwenChatReplayPrompt(turn.history) : turn.userText;
+      const handoff = exchangeFor({
+        conversationKey: identity.key,
+        turnId: turn.turnId,
+        epoch: generation,
+        turn: {
+          model: turn.model,
+          ...(turn.mode === undefined ? {} : { mode: turn.mode }),
+          ...(turn.thinkingFormat === undefined ? {} : { thinkingFormat: turn.thinkingFormat }),
+          userText: prompt.length > 0 ? prompt : turn.userText,
+        },
+        ...(planned.chat ? { chat: planned.chat } : {}),
+        ephemeral: false,
+        onAnswer: (answer) => {
+          // The provider's own continuation state: the chat and the response cursor the next turn
+          // hangs off.
+          state.recordChat(identity.key, {
+            chatId: answer.chatId,
+            ...(answer.parentId !== undefined ? { parentId: answer.parentId } : {}),
+            ...(answer.responseId !== undefined ? { responseId: answer.responseId } : {}),
+            ...(answer.responseIndex !== undefined ? { responseIndex: answer.responseIndex } : {}),
+            status: "active",
+            updatedAt: now(),
+          });
+        },
+        onChatLost: (reason) => {
+          state.markLost(identity.key, reason);
+        },
+      });
+      yield* runExchange(handoff, signal, async () => {
+        try {
+          await confirmWebChatConversation(store, identity, {
+            generation: attempt.generation,
+            turnId: turn.turnId,
+            at: now(),
+          });
+        } catch (error) {
+          // The turn's answer is already delivered; failing it here would not make the state truer.
+          console.warn(
+            `[qwen-chat] qwen_chat_turn_confirm_failed ${JSON.stringify({ detail: nonSecretDiagnosticText(error) })}`,
+          );
+        }
+      });
+    } finally {
+      // Released on every exit path — success, failure, cancellation, and a consumer that stops
+      // reading (leaving the generator runs this `finally`).
+      leases.releaseConversation(admissionHolder, identity.key);
+    }
   }
 
   const runtime: WebChatProviderRuntime = {
@@ -888,7 +925,9 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
     async close(): Promise<void> {
       // The session page and the durable chat state are this composition's. The conversation store is
       // **not**: it belongs to the deployment (one writer per file), so the listener's own shutdown
-      // releases it together with the other providers' views of the same store.
+      // releases it together with the other providers' views of the same store. Closing the leases
+      // refuses any admission still waiting instead of leaving it to its bound.
+      leases.close();
       await driver.shutdown();
       state.close?.();
     },
