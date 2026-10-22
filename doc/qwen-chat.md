@@ -144,6 +144,32 @@ not a disguise: no user-agent override, no stealth flag, no synthesized baxia/x5
 itself is challenged, the turn fails with an `AUTH_REQUIRED`/access-verification message telling the
 operator to complete it in the sign-in page — it is never retried past the challenge.
 
+### 3.1 A refusal keeps its evidence
+
+Both write requests answer **HTTP 200** for their refusals, so the status proves nothing; the body
+does. A non-stream answer on `chats/new` **and** on `chat/completions` therefore reaches the operator
+with three facts, in the error itself and in one `qwen_chat_refusal` log line:
+
+```text
+Qwen Chat answered the stream-a-completion request with an access-verification challenge
+(HTTP 200, content-type: application/json; body snippet: {"ret":["FAIL_SYS_USER_VALIDATE",…}).
+Open the operator sign-in surface /v1/control/auth/ …
+```
+
+The status, the `content-type` and a **bounded, redacted snippet of the actual body** come from the
+same machinery the Qwen Code probe uses, factored into `src/adapters/refusal-evidence.ts` (redaction by
+credential-shaped field name first and by token shape after, control characters stripped, bounded last)
+so there is no second scrubber. The category distinguishes the kinds, because they lead to different
+fixes:
+
+| Kind | `providerCode` | What it means |
+| --- | --- | --- |
+| access verification | `QWEN_CHAT_ACCESS_VERIFICATION` | the TMD/`x5sec` HTML page, the `aliyun_waf` page, or the `FAIL_SYS_USER_VALIDATE`/`RGV587_ERROR` JSON envelope — the operator completes it in the sign-in page |
+| session unauthorized | `QWEN_CHAT_SESSION_UNAUTHORIZED` | `401`/`403`, or the app's own dead-token envelope (`success:false` + `data.code` `Unauthorized`/`Invalid Token`) — re-sign-in |
+| chat lost | `QWEN_CHAT_CHAT_LOST` | `404`/`ChatNotFound` **on a chat this conversation was continuing** — continuity loss, explicit replay only |
+| request refused | `QWEN_CHAT_COMPLETION_REFUSED` | the provider answered its own refusal — the body is the diagnosis (§6) |
+| empty answer | `QWEN_CHAT_EMPTY_ANSWER` | HTTP `<status>` with an empty body instead of a stream |
+
 ## 4. Continuity and ephemeral turns
 
 **Continuity state** (`chat-state.ts`, `providers/qwen-chat/conversations.json`, mode 0600) is the
@@ -208,9 +234,12 @@ does **not** fabricate them; each is isolated:
 | Whether a generated chat id is accepted for an ephemeral turn | send it; never create a chat | `#resolveChat` (`text-transport.ts`) |
 | Whether `response.info` can terminate | treat as control only (recon's terminator list excludes it) | `createQwenChatCompletionAccumulator` (`sse.ts`) |
 | Whether the anonymous model list is the full menu | hint only; configuration wins | `qwenChatModelList` (`models.ts`) |
+| Which refusal the write paths answer with for a **signed-in** page (the recon measured the anonymous ones): a WAF/punish document, a dead session, an unknown chat, a body-shape refusal, or nothing | report the status, the content type and a redacted bounded body snippet, classified into those kinds; do not guess which one | `readQwenChatRefusal` / `qwenChatRefusal` (`network-turn.ts`) |
 
-A single signed-in HAR settles the first four; each is a named constant or one function, so the change
-is local and its tests already pin the surrounding behaviour.
+A single signed-in HAR settles the first four rows; each is a named constant or one function, so the
+change is local and its tests already pin the surrounding behaviour. The last row is not settled by a HAR: it
+is settled by the **next turn's own refusal**, which §3.1 now preserves verbatim. Nothing is
+re-measured and no shape is changed on a guess.
 
 ## 7. Tests
 
@@ -221,3 +250,4 @@ is local and its tests already pin the surrounding behaviour.
 | `tests/issue-333-qwen-chat-route.test.ts` | same key → same chat and cursor, lost-chat → typed loss → explicit replay, ephemeral with zero creations, mode selection through the real listener, auth refusal, route/model catalogue |
 | `tests/issue-333-qwen-chat-provider-conformance.test.ts` | the shared conformance suite over the production transport/continuity path |
 | `tests/issue-333-qwen-chat-session-store.test.ts` | the per-domain capture rule (a Qwen Code capture is refused), origin sanitisation, and the provider-scoped session layout |
+| `tests/issue-333-qwen-chat-refusal.test.ts` | every refusal kind (punish HTML/JSON, auth, unknown chat, request refusal, empty body), the message and the one `qwen_chat_refusal` log line carrying status + content-type + a redacted snippet, the production facility preserving the raw answer for `chats/new` and `completions`, and a successful stream unaffected |

@@ -61,9 +61,23 @@
 import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
 
-import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import { requestInPageContext } from "../page-context-request";
 import { waitForPageHydration } from "../page-hydration";
+// The refusal-evidence rules (redaction, body-shape classification, content-type rendering) are the
+// provider-neutral ones the Qwen Chat transport needs too, so they live in one module and are used
+// here rather than reimplemented. What stays in this file is what is specific to `task/list`: the
+// envelope scanner for a cut account-sized list, and the sentence this probe's refusal composes.
+import {
+  REFUSAL_MESSAGE_CHARS,
+  REFUSAL_MESSAGE_KEYS,
+  answerBodyShape,
+  contentTypePart,
+  providerAnswerReason,
+  sanitizedProviderText,
+  shapeFragment,
+  truncateWithEllipsis,
+  type AnswerBodyShape,
+} from "../refusal-evidence";
 import {
   QWEN_CODE_ACCESS_TOKEN_STORAGE_KEY,
   QWEN_CODE_AUTH_PROBE_TIMEOUT_MS,
@@ -180,84 +194,6 @@ export function qwenTaskListAuthenticated(payload: unknown): boolean {
  * of a provider failure, so the probe refusal is composed to fit that budget exactly.
  */
 const PROBE_REFUSAL_MAX_CHARS = 300;
-
-/** How much of the body a snippet may consider before the message budget cuts it. */
-const REFUSAL_BODY_CHARS = 200;
-
-/** The longest `content-type` value the refusal will spend characters on; the rest is dropped. */
-const REFUSAL_CONTENT_TYPE_CHARS = 32;
-
-/** A body fragment shorter than this is not worth spending the budget on. */
-const REFUSAL_MIN_FRAGMENT_CHARS = 8;
-
-/** The provider's own free-text explanation, when the body carries one. */
-const REFUSAL_MESSAGE_KEYS = ["message", "detail", "error", "msg"] as const;
-
-/** Bounds a provider's own free-text message so it stays one readable fragment. */
-const REFUSAL_MESSAGE_CHARS = 60;
-
-/**
- * Shapes that are secrets wherever they appear in a provider's answer.
- *
- * Long alphanumeric runs are redacted on purpose even when they are not a known token format: a
- * session token does not advertise itself, and a snippet is exactly where one would otherwise surface.
- */
-const TOKEN_LIKE_REDACTIONS: readonly (readonly [RegExp, string])[] = [
-  // A value assigned to a credential-named field is a secret whatever its length (JSON or HTML), so
-  // it is redacted by name before the length-based rules ever see it.
-  [
-    /(["'])([A-Za-z0-9_-]*(?:token|secret|password|authorization|cookie|api[-_]?key))\1(\s*[:=]\s*)(["'])([^"']*)\4/gi,
-    "$1$2$1$3$4[redacted]$4",
-  ],
-  [
-    /\b([A-Za-z0-9_-]*(?:token|secret|password|authorization|cookie|api[-_]?key))\s*=\s*(["'])([^"']*)\2/gi,
-    "$1=$2[redacted]$2",
-  ],
-  [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]"],
-  [/\beyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}/g, "[redacted]"],
-  [/\b[A-Za-z0-9_-]{24,}\b/g, "[redacted]"],
-  [/\b[A-Za-z0-9+/]{32,}={0,2}\b/g, "[redacted]"],
-];
-
-/** Redact bearer/JWT/long-token shapes before a value is allowed into a diagnostic. */
-function redactTokenLike(value: string): string {
-  let text = value;
-  for (const [pattern, replacement] of TOKEN_LIKE_REDACTIONS) text = text.replace(pattern, replacement);
-  return text;
-}
-
-/**
- * One bounded, credential-free fragment of the provider's answer.
- *
- * The body is first stripped of control characters, then token-shaped runs are redacted, and only then
- * is it bounded. Truncation always happens last so a token can never be cut into a shorter run that
- * the redaction patterns no longer recognise. URLs and repeated whitespace are left to the one
- * sanitizer (`nonSecretDiagnosticText`) that already owns that policy.
- */
-function sanitizedBodyFragment(value: string): string {
-  const stripped = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
-  if (stripped.length === 0) return "";
-  return nonSecretDiagnosticText(redactTokenLike(stripped)).slice(0, REFUSAL_BODY_CHARS);
-}
-
-/** Whether a body is a document rather than the JSON the API is expected to answer. */
-function looksLikeHtmlDocument(text: string): boolean {
-  const head = text.slice(0, 512);
-  return /^\s*(?:<!doctype\s+html|<html\b|<head\b|<body\b|<\?xml)/i.test(head)
-    || /<html[\s>]/i.test(head)
-    || /<title[\s>]/i.test(text);
-}
-
-/** The `title` or first line of a non-JSON document, sanitized and bounded. */
-function htmlDocumentFragment(text: string): string {
-  const title = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(text);
-  if (title) {
-    const name = sanitizedBodyFragment(title[1].replace(/<[^>]*>/g, " ").trim()).replace(/"/g, "'");
-    if (name.length > 0) return `title "${name}"`;
-  }
-  const firstLine = text.split(/\r?\n/).map(line => line.trim()).find(line => line.length > 0) ?? text;
-  return sanitizedBodyFragment(firstLine);
-}
 
 /**
  * What the leading `{ success, data }` envelope of a **cut** body says.
@@ -417,12 +353,12 @@ function qwenEnvelopeRefusalReason(
   freeText: { readonly key: string; readonly value: string } | undefined,
 ): string | undefined {
   if (code !== undefined && code.trim().length > 0) {
-    const safeCode = qwenProviderCode(code);
-    const safeDetails = details === undefined ? undefined : qwenProviderCode(details);
+    const safeCode = sanitizedProviderText(code);
+    const safeDetails = details === undefined ? undefined : sanitizedProviderText(details);
     return safeDetails === undefined ? safeCode : `${safeCode} ${safeDetails}`;
   }
   if (freeText !== undefined) {
-    const text = nonSecretDiagnosticText(redactTokenLike(freeText.value.trim()));
+    const text = sanitizedProviderText(freeText.value);
     return `${freeText.key}: ${truncateWithEllipsis(text, REFUSAL_MESSAGE_CHARS)}`;
   }
   return undefined;
@@ -519,151 +455,6 @@ function readQwenTruncatedEnvelope(text: string): QwenTruncatedEnvelopeRead {
   return { verdict: "authenticated" };
 }
 
-/** One distinguishable rendering of the body, ordered from most to least useful. */
-interface QwenAnswerBodyShape {
-  /** What the body is, in the operator's words. */
-  readonly tag: string;
-  /** The same fact without the explanatory words, when the budget is tight. */
-  readonly shortTag: string;
-  /** The shortest possible label, when even {@link shortTag} does not fit. */
-  readonly minimalTag: string;
-  /** Distinguishing fragments, best first; each is already sanitized. */
-  readonly details: readonly string[];
-}
-
-/** The raw text of an answer, whether the sender observed it or only the parsed payload survives. */
-function qwenAnswerBodyText(payload: unknown, bodyText: string | undefined): string {
-  if (typeof bodyText === "string") return bodyText;
-  if (payload === undefined || payload === null) return "";
-  if (typeof payload === "string") return payload;
-  try {
-    return JSON.stringify(payload) ?? String(payload);
-  } catch {
-    return String(payload);
-  }
-}
-
-/** Whether the body was the JSON the API is expected to answer (even if its envelope is unfamiliar). */
-function qwenAnswerIsJson(payload: unknown, bodyText: string | undefined): boolean {
-  if (typeof bodyText === "string") {
-    if (bodyText.trim().length === 0) return false;
-    try {
-      JSON.parse(bodyText);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  // A seam that only handed over a payload: an object/array/primitive is parsed JSON, a string is the
-  // legacy "non-JSON body" representation and must not be re-labelled as JSON.
-  return payload !== undefined && typeof payload !== "string";
-}
-
-/**
- * Classify a body this module does not recognise, keeping the evidence that identifies it.
- *
- * Every branch names what actually arrived instead of pretending it was JSON: an empty body, a
- * non-JSON document (an HTML block/challenge page is a real possibility), an unfamiliar JSON envelope,
- * or some other non-JSON text. A **cut** body is its own branch, before the generic text one: "the
- * transport stopped reading" is a different fact from "this is not JSON", and reporting the first as
- * the second is exactly the misdiagnosis this module had to stop making. A cut HTML document is still
- * named as the document it is, because that is the more actionable fact.
- */
-function qwenAnswerBodyShape(
-  payload: unknown,
-  bodyText: string | undefined,
-  truncated = false,
-): QwenAnswerBodyShape {
-  const text = qwenAnswerBodyText(payload, bodyText).trim();
-  if (text.length === 0) {
-    return {
-      tag: "the provider answered with an empty body",
-      shortTag: "empty body",
-      minimalTag: "empty",
-      details: [],
-    };
-  }
-
-  if (qwenAnswerIsJson(payload, bodyText)) {
-    const snippet = sanitizedBodyFragment(text);
-    return {
-      tag: "body snippet",
-      shortTag: "unknown JSON",
-      minimalTag: "JSON",
-      details: snippet.length === 0 ? [] : [snippet],
-    };
-  }
-
-  if (looksLikeHtmlDocument(text)) {
-    const fragment = htmlDocumentFragment(text);
-    return {
-      tag: "the provider answered with a non-JSON document",
-      shortTag: "non-JSON document",
-      minimalTag: "HTML",
-      details: fragment.length === 0 ? [] : [fragment],
-    };
-  }
-
-  if (truncated) {
-    const snippet = sanitizedBodyFragment(text);
-    return {
-      tag: `the provider's answer was cut at ${text.length} characters before its JSON envelope was complete`,
-      shortTag: `cut at ${text.length} characters`,
-      minimalTag: "truncated",
-      details: snippet.length === 0 ? [] : [snippet],
-    };
-  }
-
-  const snippet = sanitizedBodyFragment(text);
-  return {
-    tag: "the provider answered with a non-JSON body",
-    shortTag: "non-JSON body",
-    minimalTag: "text",
-    details: snippet.length === 0 ? [] : [snippet],
-  };
-}
-
-/** Cut `text` to `max` characters with an ellipsis, so a truncation is visibly a truncation. */
-function truncateWithEllipsis(text: string, max: number): string {
-  if (max <= 0) return "";
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(1, max - 1))}…`;
-}
-
-/**
- * Render the body shape into whatever the message budget allows.
- *
- * Order of preference: the full explanation plus the complete distinguishing fragment; then a shorter
- * label plus the complete fragment; then the leading fragment (visibly cut) under the descriptive
- * label; then a label alone. Nothing is invented when the budget runs out: an empty string simply
- * leaves the status and content-type to identify the answer, which is the documented priority.
- */
-function qwenShapeFragment(shape: QwenAnswerBodyShape, budget: number): string {
-  if (budget <= 0) return "";
-  for (const detail of shape.details) {
-    for (const label of [shape.tag, shape.shortTag]) {
-      const candidate = `; ${label}: ${detail}`;
-      if (candidate.length <= budget) return candidate;
-    }
-  }
-  const preferred = shape.details[0];
-  if (preferred !== undefined) {
-    const prefix = `; ${shape.tag}: `;
-    const room = budget - prefix.length;
-    if (room >= REFUSAL_MIN_FRAGMENT_CHARS) return `${prefix}${truncateWithEllipsis(preferred, room)}`;
-  }
-  for (const label of [shape.tag, shape.shortTag, shape.minimalTag]) {
-    const candidate = `; ${label}`;
-    if (candidate.length <= budget) return candidate;
-  }
-  return "";
-}
-
-/** The provider code/details, reduced to non-secret bounded text. */
-function qwenProviderCode(value: string): string {
-  return nonSecretDiagnosticText(redactTokenLike(value.trim()));
-}
-
 /** What one body said, as the diagnostic vocabulary reads it. */
 interface QwenTaskListRefusalRead {
   /** The non-secret rendering of the answer, without the HTTP status. */
@@ -675,7 +466,7 @@ interface QwenTaskListRefusalRead {
    */
   readonly recognised: boolean;
   /** The classified body shape, present only when {@link recognised} is `false`. */
-  readonly shape?: QwenAnswerBodyShape;
+  readonly shape?: AnswerBodyShape;
 }
 
 /**
@@ -685,34 +476,15 @@ interface QwenTaskListRefusalRead {
  * free-text `message`/`detail`/`error`). Those are the shapes the capture and the sign-in path already
  * understand, so their text is unchanged. A body the transport had to **cut** cannot be parsed, so its
  * leading envelope is read instead; a refused envelope reports the provider's own reason exactly like
- * a parsed one. Everything else is classified into an {@link QwenAnswerBodyShape}: the refusal then
+ * a parsed one. Everything else is classified into an {@link AnswerBodyShape}: the refusal then
  * reports what actually arrived instead of guessing.
  */
 function readQwenTaskListRefusal(
   payload: unknown,
   answer: Pick<QwenTaskListAnswer, "bodyText" | "truncated"> = {},
 ): QwenTaskListRefusalRead {
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    const record = payload as Record<string, unknown>;
-    const data = (record["data"] && typeof record["data"] === "object" ? record["data"] : {}) as Record<string, unknown>;
-    const code = data["code"];
-    const details = data["details"];
-    if (typeof code === "string") {
-      const safeCode = qwenProviderCode(code);
-      const safeDetails = typeof details === "string" ? qwenProviderCode(details) : undefined;
-      return { recognised: true, text: safeDetails === undefined ? safeCode : `${safeCode} ${safeDetails}` };
-    }
-    for (const key of REFUSAL_MESSAGE_KEYS) {
-      const value = record[key];
-      if (typeof value === "string" && value.trim().length > 0) {
-        const text = nonSecretDiagnosticText(redactTokenLike(value.trim()));
-        return {
-          recognised: true,
-          text: `${key}: ${truncateWithEllipsis(text, REFUSAL_MESSAGE_CHARS)}`,
-        };
-      }
-    }
-  }
+  const reason = providerAnswerReason(payload);
+  if (reason !== undefined) return { recognised: true, text: reason };
 
   if (answer.truncated === true && typeof answer.bodyText === "string") {
     const envelope = readQwenTruncatedEnvelope(answer.bodyText);
@@ -721,8 +493,8 @@ function readQwenTaskListRefusal(
     }
   }
 
-  const shape = qwenAnswerBodyShape(payload, answer.bodyText, answer.truncated === true);
-  const rendering = qwenShapeFragment(shape, Number.POSITIVE_INFINITY).replace(/^; /, "");
+  const shape = answerBodyShape(payload, answer.bodyText, answer.truncated === true);
+  const rendering = shapeFragment(shape, Number.POSITIVE_INFINITY).replace(/^; /, "");
   return {
     recognised: false,
     text: rendering.length === 0 ? "an unrecognised body" : `an unrecognised body (${rendering})`,
@@ -1036,26 +808,6 @@ function qwenTokenProblemText(problem: QwenAccessTokenProblem): string {
 }
 
 /**
- * The answer's content type, reduced to what the refusal can afford to show.
- *
- * The media type is preferred over its parameters when the full header does not fit, and the value is
- * bounded and control-character-free. An injected probe that could not observe headers says so
- * (`(none)`) instead of implying the provider sent none.
- */
-function qwenContentTypePart(contentType: string | undefined): string {
-  const raw = typeof contentType === "string"
-    ? contentType.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim()
-    : "";
-  if (raw.length === 0) return ", content-type: (none)";
-  if (raw.length <= REFUSAL_CONTENT_TYPE_CHARS) return `, content-type: ${raw}`;
-  const mediaType = raw.split(";")[0]!.trim();
-  const fitted = mediaType.length > 0 && mediaType.length <= REFUSAL_CONTENT_TYPE_CHARS
-    ? mediaType
-    : truncateWithEllipsis(raw, REFUSAL_CONTENT_TYPE_CHARS);
-  return `, content-type: ${fitted}`;
-}
-
-/**
  * The shortest honest "what to do" clause for an answer this module cannot interpret.
  *
  * An unrecognised body is not proof that the session was revoked, so the old interpretation ("the
@@ -1208,12 +960,12 @@ export function qwenTaskListProbeRefusal(
   // The answer did not match a known shape. Report the identifying fields in priority order: HTTP
   // status, content-type, then as much of the actual body as the remaining budget allows.
   const head = `the task list answered HTTP ${observation.status}`;
-  const contentType = qwenContentTypePart(observation.contentType);
+  const contentType = contentTypePart(observation.contentType);
   const action = qwenUnrecognisedAction(observation);
   const shapeBudget = PROBE_REFUSAL_MAX_CHARS - head.length - contentType.length - action.length;
-  const shape = qwenShapeFragment(
+  const shape = shapeFragment(
     read.shape
-      ?? qwenAnswerBodyShape(observation.payload, observation.bodyText, observation.truncated === true),
+      ?? answerBodyShape(observation.payload, observation.bodyText, observation.truncated === true),
     shapeBudget,
   );
   return `${head}${contentType}${shape}${action}`;

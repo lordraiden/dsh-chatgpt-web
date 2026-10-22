@@ -32,9 +32,20 @@
 import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
 
-import { isWebChatError, webChatError, type WebChatError } from "../../web-chat/core";
+import { isWebChatError, webChatError, type WebChatError, type WebChatErrorCategory } from "../../web-chat/core";
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
 import { qwenAuthorizationHeaderFromPage } from "../qwen-code/session-probe";
+// The refusal-evidence rules are the shared ones (`../refusal-evidence`, factored out of the Qwen Code
+// probe so both products reduce a provider answer the same way). Nothing here writes a second
+// scrubber: a snippet, its redaction, its bound and its body-shape classification all come from there.
+import {
+  answerBodyShape,
+  answerBodyText,
+  contentTypePart,
+  looksLikeHtmlDocument,
+  providerAnswerReason,
+  shapeFragment,
+} from "../refusal-evidence";
 import {
   QWEN_CHAT_CHAT_MODE,
   QWEN_CHAT_CHAT_TYPE,
@@ -53,7 +64,26 @@ import {
 /** The HTTP result of a JSON POST issued from inside the page. */
 export interface QwenChatJsonPostResult {
   readonly status: number;
+  /** The parsed body, or the raw text when it was not JSON. */
   readonly body: unknown;
+  /**
+   * The answer's `content-type`, when the issuing seam could observe it.
+   *
+   * Diagnostics only, but load-bearing ones: the read/write surfaces answer **HTTP 200** for their
+   * refusals, so a refusal's category follows the body and the content type, never the status alone.
+   * An injected facility that cannot observe headers may omit it; the refusal then says so instead of
+   * inventing one.
+   */
+  readonly contentType?: string;
+  /**
+   * The (bounded) raw body text, when the issuing seam could observe it.
+   *
+   * This is the field that used to be thrown away: a JSON body was parsed and the bytes that
+   * identified it — the anti-bot `ret`/`FAIL_SYS_USER_VALIDATE` envelope, the provider's own
+   * `data.code` — were reduced to "a refusal" with no evidence. It is reduced to a redacted snippet
+   * before it can reach a refusal (see `../refusal-evidence`), and it is never a credential.
+   */
+  readonly bodyText?: string;
 }
 
 /** The result of a streaming POST. `bodyText` is present only when the answer was not a stream. */
@@ -134,6 +164,7 @@ export function createQwenChatPageRequestFacility(page: Page): QwenChatTurnReque
           body: JSON.stringify(payload),
           credentials: "same-origin",
         });
+        const contentType = response.headers.get("content-type") ?? "";
         const text = await response.text();
         let parsed: unknown = text;
         try {
@@ -141,9 +172,16 @@ export function createQwenChatPageRequestFacility(page: Page): QwenChatTurnReque
         } catch {
           // A non-JSON body (an HTML anti-bot page) is kept as text; the caller reports the status.
         }
-        return { status: response.status, body: parsed };
+        return { status: response.status, contentType, text, body: parsed };
       }, { url: qwenChatUrl(path), payload: body, headers });
-      return { status: result.status, body: result.body };
+      // The parsed body answers the protocol; the status, the content type and the raw text are the
+      // evidence a refusal needs. None of them is dropped on the floor here.
+      return {
+        status: result.status,
+        body: result.body,
+        contentType: result.contentType,
+        bodyText: result.text,
+      };
     },
 
     async postEventStream(
@@ -268,68 +306,238 @@ export function createQwenChatPageRequestFacility(page: Page): QwenChatTurnReque
 }
 
 /**
- * A chat-creation refusal, classified by the provider's own answer.
+ * The kinds of refusal a Qwen Chat answer is reduced to.
  *
- * The read/write surfaces answer HTTP 200 for their refusals, so the category follows the body and
- * the anti-bot markers, never the status alone. The anti-bot branch exists because the recon measured
- * exactly those pages (recon §1.7); it is reported as an operator action, never retried.
+ * The read/write surfaces answer HTTP 200 for their refusals, so the category follows the **body** and
+ * the anti-bot markers, never the status alone. The kinds exist because they lead to different fixes:
+ * a WAF/punish document is the operator's verification, an authentication refusal is a re-sign-in, an
+ * unknown chat on a continued conversation is continuity loss, and any other JSON refusal is a
+ * body-shape question.
  */
-export function qwenChatRefusal(input: {
+export type QwenChatRefusalKind =
+  | "access-verification"
+  | "session-unauthorized"
+  | "chat-lost"
+  | "request-refused"
+  | "empty-answer";
+
+/** What was being attempted, for the message. */
+export type QwenChatRefusalWhat = "create-a-chat" | "stream-a-completion";
+
+/** Everything the classifier may look at. All of it is the provider's own answer, never a credential. */
+export interface QwenChatRefusalInput {
   readonly status: number;
   readonly contentType?: string;
+  /** The raw body text, when the issuing seam observed it (the primary evidence). */
   readonly bodyText?: string;
+  /** The parsed body, when it was JSON. */
   readonly body?: unknown;
-  /** What was being attempted, for the message. */
-  readonly what: "create-a-chat" | "stream-a-completion";
+  readonly what: QwenChatRefusalWhat;
   /** Whether a conversation's recorded chat was the target (a refusal then means "lost"). */
   readonly continuedChat: boolean;
-}): WebChatError {
-  const text = input.bodyText ?? "";
-  const botWall = /_____tmd_____|x5secdata|aliyun_waf|punish\?|action=captchaconnect/i.test(text);
-  if (botWall) {
-    return webChatError(
-      "AUTH_REQUIRED",
-      `Qwen Chat answered the ${input.what} request with an access-verification challenge. `
-      + "Open the operator sign-in surface /v1/control/auth/ (choose \"Qwen Chat\"), complete the "
-      + "verification in that page, and retry — this provider never retries past a challenge itself.",
-      { providerId: QWEN_CHAT_PROVIDER_ID, providerCode: "QWEN_CHAT_ACCESS_VERIFICATION" },
-    );
-  }
-  const unauthorized = input.status === 401
-    || input.status === 403
-    || /"?Unauthorized"?/i.test(text)
-    || (input.body !== undefined && bodySaysUnauthorized(input.body));
-  const missing = input.status === 404 || /chat[^a-z]{0,4}not[^a-z]{0,4}found|ChatNotFound/i.test(text);
-  if (missing && input.continuedChat) {
-    return webChatError(
-      "CONVERSATION_LOST",
-      `Qwen Chat no longer has the chat this conversation was continuing (HTTP ${input.status}), so it `
-      + "was not reused; a new chat requires an explicit replay",
-      { providerId: QWEN_CHAT_PROVIDER_ID, providerCode: "QWEN_CHAT_CHAT_LOST" },
-    );
-  }
-  if (unauthorized) {
-    return webChatError(
-      "AUTH_REQUIRED",
-      `Qwen Chat refused to ${input.what}: the stored session is no longer accepted (HTTP ${input.status}). `
-      + "Sign in again at the operator sign-in surface /v1/control/auth/ (choose \"Qwen Chat\").",
-      { providerId: QWEN_CHAT_PROVIDER_ID, providerCode: "QWEN_CHAT_SESSION_UNAUTHORIZED" },
-    );
-  }
-  return webChatError(
-    "UPSTREAM_ERROR",
-    `Qwen Chat refused to ${input.what} (HTTP ${input.status}, ${input.contentType || "no content type"})`,
-    { providerId: QWEN_CHAT_PROVIDER_ID, providerCode: "QWEN_CHAT_COMPLETION_REFUSED" },
-  );
 }
 
-/** Whether a parsed envelope says `success:false` + `Unauthorized`. */
+/** The classification of one refusal, before it becomes a `WebChatError`. */
+export interface QwenChatRefusalRead {
+  readonly kind: QwenChatRefusalKind;
+  readonly category: WebChatErrorCategory;
+  readonly providerCode: string;
+  /** The operator-facing sentence: it always carries status, content-type and the body evidence. */
+  readonly message: string;
+  /** The bounded, redacted body fragment the one log line repeats (never a secret). */
+  readonly evidence: string;
+  /** The provider's own code/details, when the body carried them. */
+  readonly reason?: string;
+}
+
+/**
+ * The anti-bot markers this site's write paths answer with (recon §1.7).
+ *
+ * Two measured variants: the Alibaba TMD/`x5sec` page (`_____tmd_____`, `x5secdata`, a
+ * `punish?`/`action=captchaconnect` URL) and the `aliyun_waf` block page (`aliyun_waf`). A
+ * JSON-accepting client gets the TMD envelope instead, whose `ret` names `FAIL_SYS_USER_VALIDATE` /
+ * `RGV587_ERROR`. The previous matcher missed that JSON variant's own tokens, which is one of the two
+ * ways a punish answer could be reported as a generic refusal; both are matched here.
+ */
+const QWEN_CHAT_BOT_WALL_MARKERS =
+  /_____tmd_____|x5secdata|aliyun_waf|FAIL_SYS_USER_VALIDATE|RGV587_ERROR|action=captchaconnect|punish\?/i;
+
+/**
+ * Whether a parsed envelope means "this HTTP 200 is a dead token".
+ *
+ * The vendor's own client decides exactly this way (its global `fetch` wrapper treats a JSON body with
+ * `success:false` and a `data.code` of `Unauthorized`/`Invalid Token` as a 401 and refreshes), so the
+ * adapter uses the provider's vocabulary rather than a private one. A bare 401/403 status is accepted
+ * too.
+ */
 function bodySaysUnauthorized(body: unknown): boolean {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
   const record = body as Record<string, unknown>;
+  if (record["success"] !== false) return false;
   const data = (record["data"] && typeof record["data"] === "object" ? record["data"] : {}) as Record<string, unknown>;
   const code = data["code"];
-  return record["success"] === false && (code === "Unauthorized" || code === 401 || code === "401");
+  if (code === 401 || code === "401") return true;
+  return typeof code === "string" && ["unauthorized", "invalid token"].includes(code.toLowerCase());
+}
+
+/** The evidence clause every refusal carries: status, content-type, and what the body actually was. */
+interface QwenChatRefusalEvidence {
+  /** The parenthesised clause, e.g. `(HTTP 200, content-type: application/json; body snippet: …)`. */
+  readonly clause: string;
+  /** The bounded, redacted fragment the log line names (empty when the body was empty). */
+  readonly fragment: string;
+  /** The provider's own code/details, when the body carried legible ones. */
+  readonly reason?: string;
+}
+
+/**
+ * The parsed body when the caller did not have one, derived from the text it did observe.
+ *
+ * The streaming facility hands over the bytes rather than a parsed object (it has to decide the
+ * content type first), so the classifier parses the same text it is about to reduce to a snippet. A
+ * text that is not a JSON object stays `undefined`: nothing is invented from a body that is not JSON.
+ */
+function parsedAnswerBody(input: QwenChatRefusalInput): unknown {
+  if (input.body !== undefined) return input.body;
+  if (typeof input.bodyText !== "string") return undefined;
+  const trimmed = input.bodyText.trim();
+  if (!trimmed.startsWith("{")) return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function qwenChatRefusalEvidence(input: QwenChatRefusalInput): QwenChatRefusalEvidence {
+  const body = parsedAnswerBody(input);
+  const shape = answerBodyShape(body, input.bodyText);
+  const rendered = shapeFragment(shape, Number.POSITIVE_INFINITY).replace(/^; /, "");
+  const reason = providerAnswerReason(body);
+  const clause = `(HTTP ${input.status}${contentTypePart(input.contentType)}`
+    + (reason === undefined ? "" : `; the provider's own code/details: ${reason}`)
+    + (rendered.length === 0 ? "" : `; ${rendered}`)
+    + ")";
+  return {
+    clause,
+    fragment: shape.details[0] ?? "",
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
+/**
+ * Classify one refusal by the provider's own answer. Pure: no logging, no error construction.
+ *
+ * Order matters, because the answers overlap: an anti-bot document is reported as the verification it
+ * is before an `Unauthorized`-looking envelope can claim the session is dead; a chat this adapter
+ * proved gone is continuity loss, not a generic refusal.
+ */
+export function readQwenChatRefusal(input: QwenChatRefusalInput): QwenChatRefusalRead {
+  const text = answerBodyText(input.body, input.bodyText);
+  const evidence = qwenChatRefusalEvidence(input);
+  const { clause, reason } = evidence;
+
+  const botWall = QWEN_CHAT_BOT_WALL_MARKERS.test(text)
+    // The recon measured both write paths answering an *HTML* access-verification page. Any HTML
+    // document on a JSON endpoint is that class of answer; a non-2xx document stays an upstream
+    // failure below, so a CDN error page is not dressed up as a challenge.
+    || (input.status === 200 && looksLikeHtmlDocument(text));
+  if (botWall) {
+    return {
+      kind: "access-verification",
+      category: "AUTH_REQUIRED",
+      providerCode: "QWEN_CHAT_ACCESS_VERIFICATION",
+      message: `Qwen Chat answered the ${input.what} request with an access-verification challenge `
+        + `${clause}. Open the operator sign-in surface /v1/control/auth/ (choose "Qwen Chat"), `
+        + "complete the verification in that page, and retry — this provider never retries past a "
+        + "challenge itself.",
+      evidence: evidence.fragment,
+      ...(reason === undefined ? {} : { reason }),
+    };
+  }
+
+  const missing = input.status === 404 || /chat[^a-z]{0,4}not[^a-z]{0,4}found|ChatNotFound/i.test(text);
+  if (missing && input.continuedChat) {
+    return {
+      kind: "chat-lost",
+      category: "CONVERSATION_LOST",
+      providerCode: "QWEN_CHAT_CHAT_LOST",
+      message: `Qwen Chat no longer has the chat this conversation was continuing ${clause}, so it `
+        + "was not reused; a new chat requires an explicit replay",
+      evidence: evidence.fragment,
+      ...(reason === undefined ? {} : { reason }),
+    };
+  }
+
+  const unauthorized = input.status === 401
+    || input.status === 403
+    || /"?Unauthorized"?/i.test(text)
+    || bodySaysUnauthorized(parsedAnswerBody(input));
+  if (unauthorized) {
+    return {
+      kind: "session-unauthorized",
+      category: "AUTH_REQUIRED",
+      providerCode: "QWEN_CHAT_SESSION_UNAUTHORIZED",
+      message: `Qwen Chat refused to ${input.what}: the stored session is no longer accepted ${clause}. `
+        + "Sign in again at the operator sign-in surface /v1/control/auth/ (choose \"Qwen Chat\").",
+      evidence: evidence.fragment,
+      ...(reason === undefined ? {} : { reason }),
+    };
+  }
+
+  if (text.trim().length === 0) {
+    return {
+      kind: "empty-answer",
+      category: "UPSTREAM_ERROR",
+      providerCode: "QWEN_CHAT_EMPTY_ANSWER",
+      message: `Qwen Chat refused to ${input.what}: the provider answered HTTP ${input.status}`
+        + `${contentTypePart(input.contentType)}, with an empty body instead of a stream`,
+      evidence: "",
+    };
+  }
+
+  return {
+    kind: "request-refused",
+    category: "UPSTREAM_ERROR",
+    providerCode: "QWEN_CHAT_COMPLETION_REFUSED",
+    message: `Qwen Chat refused to ${input.what}: the provider answered its own refusal instead of a `
+      + `stream ${clause}`,
+    evidence: evidence.fragment,
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
+/**
+ * The typed refusal for one refused request, with the provider's own answer preserved.
+ *
+ * The answer reaches **both** the error the operator sees and one structured log line: a thrown-away
+ * body is a refusal nobody can act on, and an operator should not need a second round trip to learn
+ * what the provider said. The status, the content type and the body are the same fields in both, and
+ * the body is the shared redaction's bounded snippet — never a cookie, a token or a request header.
+ */
+export function qwenChatRefusal(input: QwenChatRefusalInput): WebChatError {
+  const read = readQwenChatRefusal(input);
+  console.warn(
+    `[qwen-chat] qwen_chat_refusal ${JSON.stringify({
+      provider: QWEN_CHAT_PROVIDER_ID,
+      what: input.what,
+      kind: read.kind,
+      status: input.status,
+      contentType: input.contentType ?? "",
+      body: read.evidence,
+    })}`,
+  );
+  return webChatError(read.category, read.message, {
+    providerId: QWEN_CHAT_PROVIDER_ID,
+    providerCode: read.providerCode,
+    providerDetail: {
+      kind: read.kind,
+      status: input.status,
+      contentType: input.contentType ?? "",
+      ...(read.reason === undefined ? {} : { reason: read.reason }),
+      body: read.evidence,
+    },
+  });
 }
 
 /** One user message, in the recorded chat shape (recon §1.3). */
@@ -453,26 +661,27 @@ export function qwenChatChatNewRequest(input: {
   };
 }
 
-/** The id `chats/new` returned, or a typed failure explaining why the turn could not start. */
-export function readQwenChatCreatedChatId(body: unknown, status: number): string {
-  // A non-JSON answer (the anti-bot HTML page) is kept as text so the refusal can recognize it.
-  const bodyText = typeof body === "string" ? body : undefined;
-  if (status < 200 || status >= 300) {
-    throw qwenChatRefusal({
-      status,
-      ...(bodyText === undefined ? { body } : { bodyText }),
-      what: "create-a-chat",
-      continuedChat: false,
-    });
+/**
+ * The id `chats/new` returned, or a typed failure explaining why the turn could not start.
+ *
+ * The whole answer is handed to the refusal — status, content type, the parsed body **and** the raw
+ * text — because a `chats/new` refusal is either a JSON envelope that names its own reason or an
+ * anti-bot document, and neither is readable from the status alone. Dropping the raw text here is what
+ * used to make a JSON punish envelope answer as an unexplained refusal.
+ */
+export function readQwenChatCreatedChatId(result: QwenChatJsonPostResult): string {
+  const evidence = {
+    status: result.status,
+    ...(result.contentType === undefined ? {} : { contentType: result.contentType }),
+    ...(result.bodyText === undefined ? {} : { bodyText: result.bodyText }),
+    body: result.body,
+  };
+  if (result.status < 200 || result.status >= 300) {
+    throw qwenChatRefusal({ ...evidence, what: "create-a-chat", continuedChat: false });
   }
-  const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const record = (result.body && typeof result.body === "object" ? result.body : {}) as Record<string, unknown>;
   if (record["success"] !== true) {
-    throw qwenChatRefusal({
-      status,
-      ...(bodyText === undefined ? { body } : { bodyText }),
-      what: "create-a-chat",
-      continuedChat: false,
-    });
+    throw qwenChatRefusal({ ...evidence, what: "create-a-chat", continuedChat: false });
   }
   const data = (record["data"] && typeof record["data"] === "object" ? record["data"] : {}) as Record<string, unknown>;
   const id = data["id"];
