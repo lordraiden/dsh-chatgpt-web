@@ -130,10 +130,52 @@ POST /api/v2/chat/completions?chat_id=<id>
 ```
 
 The recorded body keys and message keys are quoted in recon §1.3. The stream is parsed as `data:`-only
-SSE (recon §1.4): `choices[].delta.content` is concatenated in order; `phase:"KeepAlive"` is neither
-content nor a terminator; `sources` is citations. Termination is exactly one of `[DONE]`,
-`response.stopped`, a delta `status` other than `typing` (`finished`), an in-band `error`, or the
-stream closing.
+SSE (recon §1.4): the **answer** phases' `choices[].delta.content` is concatenated in order (§3.0);
+`phase:"KeepAlive"` is neither content nor a terminator; `sources` is citations.
+
+**The request body is now measured, not assumed.** The operator's signed-in HAR of one turn confirms
+the shape below: `stream: true`, `version: "2.1"`, `incremental_output: true`, `chatId`/`chat_id`,
+`chat_mode`, `model`, `messages[]` and `timestamp`, with **no `headers` or `X-Request-Id` inside the
+body** (the app builds the id in the body and strips it, and this adapter sends it as the `X-Request-Id`
+header instead), `parentId` a **string** at the top level and `parent_id: null` for a first turn. The
+`messages[]` key set, `sub_chat_type`/`chat_type`, `source` and the ephemeral-chat-id question in §6
+remain as recorded there. `response_index` arrives in `response.created` and is kept with the
+continuity record for diagnosis; the cursor a continuation sends stays `response_id` (falling back to
+`parent_id`) until a second recorded turn proves the index is what the next turn expects.
+
+### 3.0 What a recorded turn looks like: phases, statuses, and the bug they caused
+
+The operator's HAR of one real turn (2026-10-22) is 28 frames:
+
+```text
+frame 0     {response.created: {chat_id, parent_id, response_id, response_index}}
+frames 1-5  thinking_summary ×5 (empty content), the last of them closing with status "finished"
+frames 6-27 answer ×22, of which 19 carry content (278 characters) and the last closes "finished"
+statuses: typing ×25, finished ×2     phases: thinking_summary ×5, answer ×22
+```
+
+The first `finished` closes **`thinking_summary`** — before the first `answer` delta. The rule this
+adapter had inherited from the Qwen Code parser treated *any* status other than `typing` as the end of
+the turn, so it stopped after frame 5 and reported an empty answer: that is the `EMPTY_RESPONSE` the
+harness showed, with the operator's chat left without its message.
+
+**Termination is exactly one of** `[DONE]`, `response.stopped`, an in-band `error`, a delta
+`status:"finished"` that closes the answer, or the stream closing. The delta-status rule is the
+**narrow** one, because a status closes a *phase*, not the turn (recon §1.4's status enum is
+`typing|waiting_input|finished|error|pause`; the vendor bundle's stream only reports `done` for
+`[DONE]`/`response.stopped`/`error`/the reader closing, and its merge rules stop merging a phase once
+that phase's status leaves `typing`). `waiting_input` frames are dropped by the app outright. So a
+delta ends the turn only when its `status` is `finished` **and** it closes the answer phase, or — with
+no phase at all — only once the answer has produced content. The single owner of that rule is
+`qwenChatDeltaClosesTurn` (`sse.ts`); the coder's looser rule is deliberately **not** transferred.
+
+**The answer is the `answer` phase.** The measured turn streams `thinking_summary` (the model thinking
+aloud, empty in this capture) before `answer`, so content is taken from the answer phases
+(`answer`/`slides`) and from phase-less deltas only (`qwenChatDeltaCarriesAnswer`). A reasoning phase's
+text is not returned as the caller's answer; it is **counted** — `excludedChars`/`reasoningChars` in
+the turn's frame observation, and the characters-and-reasoning clause of the empty-answer diagnostic —
+so it is never dropped silently. Exposing reasoning as its own explicit channel is not done: the
+common contract is text-only and nothing would consume it.
 
 **The server can re-route the model.** A `selected_model_id` frame is surfaced (the turn result and one
 `model-rerouted` diagnostic line); the requested model is never silently overwritten.
@@ -169,6 +211,29 @@ fixes:
 | chat lost | `QWEN_CHAT_CHAT_LOST` | `404`/`ChatNotFound` **on a chat this conversation was continuing** — continuity loss, explicit replay only |
 | request refused | `QWEN_CHAT_COMPLETION_REFUSED` | the provider answered its own refusal — the body is the diagnosis (§6) |
 | empty answer | `QWEN_CHAT_EMPTY_ANSWER` | HTTP `<status>` with an empty body instead of a stream |
+
+### 3.2 A completed stream with no answer text is a typed failure, with the frame evidence
+
+An empty answer used to be a *successful* turn: the transport published `completed` with `""`, the
+harness reported only `EMPTY_RESPONSE` ("a completed response with no content"), and the frames the
+provider actually sent were thrown away. The measured bug behind the first `EMPTY_RESPONSE` is fixed
+in §3.0, and this failure is now the **safety net**: if a future turn still extracts nothing, it is a
+typed `UPSTREAM_ERROR` whose provider code is `QWEN_CHAT_EMPTY_STREAM`, and the operator's message and
+**one** `qwen_chat_empty_stream` log line carry the same bounded, redacted evidence:
+
+- how many frames were seen;
+- the distinct frame **shapes** with their counts — key paths and value kinds only, never a value
+  (`qwenChatFrameShape`: the `scripts/har-shape.mjs` frame-shape idea applied to this vocabulary);
+- which signal ended the stream (`done`/`response_stopped`/`delta_status`/`stream_end`, with the
+  terminal status when there is one);
+- how many `delta` frames carried a `content` field at all, how many of those held a non-string, and
+  how many characters arrived in phases that are not the answer (naming the reasoning share) — so
+  "the model only reasoned" is distinguishable from "the provider sent nothing";
+- at most one short redacted payload fragment: the last frame the parser could not model.
+
+Redaction and bounding are the shared refusal-evidence rules (`sanitizedBodyFragment`,
+`truncateWithEllipsis`), so there is no second scrubber. This is not a guess: if a turn still comes
+back empty, that one line names the shape the answer is hiding in.
 
 ## 4. Continuity and ephemeral turns
 
@@ -227,12 +292,14 @@ does **not** fabricate them; each is isolated:
 
 | Unknown | Most defensible shape used | Correction point |
 | --- | --- | --- |
-| Exact accepted `messages[]` key set | the recorded coder message keys plus every key the chat bundle is shown writing | `qwenChatCompletionRequest` (`network-turn.ts`) |
+| Exact accepted `messages[]` key set | the recorded coder message keys plus every key the chat bundle is shown writing; the operator's HAR confirms the app sends no `headers`/`X-Request-Id` in the body, a string `parentId`, and `parent_id: null` — which keys the server *ignores* is still unmeasured | `qwenChatCompletionRequest` (`network-turn.ts`) |
 | Plain-text `sub_chat_type` | `t2t` (the enum's text-to-text value) | `QWEN_CHAT_SUB_CHAT_TYPE` (`provider.ts`) |
 | Plain-text `chat_type` | `t2t` | `QWEN_CHAT_CHAT_TYPE` (`provider.ts`) |
 | `source` header value | `web` (the sibling Qwen web capture's value) | `QWEN_CHAT_SOURCE` (`provider.ts`) |
 | Whether a generated chat id is accepted for an ephemeral turn | send it; never create a chat | `#resolveChat` (`text-transport.ts`) |
 | Whether `response.info` can terminate | treat as control only (recon's terminator list excludes it) | `createQwenChatCompletionAccumulator` (`sse.ts`) |
+| Whether a continuation cursor is `response_id` or `response_index` | keep `response_id` (falling back to `parent_id`) as the cursor, and record `response_index` in the continuity state for diagnosis only — nothing is switched on an unproven cursor | `#execute` (`text-transport.ts`), `chat-state.ts` |
+| Which phase/status closes the turn | §3.0: a status closes a phase (the measured turn's first `finished` closes `thinking_summary`); only the answer phase's `finished`, `[DONE]`, `response.stopped`, an in-band error or the stream close end the turn | `qwenChatDeltaClosesTurn` (`sse.ts`) |
 | Whether the anonymous model list is the full menu | hint only; configuration wins | `qwenChatModelList` (`models.ts`) |
 | Which refusal the write paths answer with for a **signed-in** page (the recon measured the anonymous ones): a WAF/punish document, a dead session, an unknown chat, a body-shape refusal, or nothing | report the status, the content type and a redacted bounded body snippet, classified into those kinds; do not guess which one | `readQwenChatRefusal` / `qwenChatRefusal` (`network-turn.ts`) |
 
@@ -246,6 +313,7 @@ re-measured and no shape is changed on a guess.
 | File | What it pins |
 | --- | --- |
 | `tests/issue-333-qwen-chat-sse.test.ts` | recorded frame shape, content order, KeepAlive ignored, every terminator, in-band error, model re-route, chunk boundaries |
+| `tests/issue-333-qwen-chat-empty-stream.test.ts` | the operator's **measured** turn (28 frames: `thinking_summary`×5 closing `finished`, then `answer`×22) producing its 278 characters instead of an empty answer; a reasoning phase's `finished` is a phase close; a role-only opening delta cannot end the stream; the answer is the `answer` phase (reasoning is counted, not returned); `[DONE]`/`response.stopped`/error/stream-close still terminate; the frame observation (frames/shapes/content deltas/excluded chars/signal); the redacted bounded empty-stream message and its single log line; and the transport failing an empty extraction instead of reporting success |
 | `tests/issue-333-qwen-chat-modes.test.ts` | the `mv`/`gv` mode matrix, `feature_config` per mode, completion body shape, catalogue levels per ability, public-list parsing/refresh/seed |
 | `tests/issue-333-qwen-chat-route.test.ts` | same key → same chat and cursor, lost-chat → typed loss → explicit replay, ephemeral with zero creations, mode selection through the real listener, auth refusal, route/model catalogue |
 | `tests/issue-333-qwen-chat-provider-conformance.test.ts` | the shared conformance suite over the production transport/continuity path |

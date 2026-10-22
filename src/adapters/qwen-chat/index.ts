@@ -113,6 +113,7 @@ export {
   qwenChatChatNewRequest,
   qwenChatCompletionPath,
   qwenChatCompletionRequest,
+  qwenChatEmptyStream,
   qwenChatRefusal,
   qwenChatTransportFailure,
   readQwenChatCreatedChatId,
@@ -131,14 +132,26 @@ export {
 } from "./network-turn";
 
 export {
+  QWEN_CHAT_ANSWER_PHASES,
+  QWEN_CHAT_FRAME_SHAPE_CHARS,
+  QWEN_CHAT_REASONING_PHASES,
+  QWEN_CHAT_SHAPES_SHOWN,
   QWEN_CHAT_TERMINATIONS,
+  QWEN_CHAT_TERMINAL_STATUS,
   QwenChatSseParser,
   createQwenChatCompletionAccumulator,
   parseQwenChatSsePayload,
+  qwenChatDeltaCarriesAnswer,
+  qwenChatDeltaClosesTurn,
+  qwenChatEmptyStreamSummary,
+  qwenChatFrameShape,
   type QwenChatCompletionAccumulator,
   type QwenChatCompletionAccumulatorOptions,
   type QwenChatCompletionResult,
+  type QwenChatEmptyStreamDetail,
+  type QwenChatFrameShapeCount,
   type QwenChatSseFrame,
+  type QwenChatStreamObservation,
   type QwenChatTermination,
 } from "./sse";
 

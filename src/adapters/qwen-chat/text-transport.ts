@@ -61,6 +61,7 @@ import {
   qwenChatChatNewRequest,
   qwenChatCompletionPath,
   qwenChatCompletionRequest,
+  qwenChatEmptyStream,
   qwenChatRefusal,
   qwenChatTransportFailure,
   readQwenChatCreatedChatId,
@@ -443,6 +444,18 @@ class QwenChatTextTransport implements WebChatTextTransport {
         );
       }
       const termination = completionResult.termination;
+      if (completionResult.text.trim().length === 0) {
+        // A completed stream this driver read nothing out of is a failure with evidence, never a
+        // successful empty turn: the operator used to see only "a completed response with no content"
+        // (the harness's `EMPTY_RESPONSE`) and had no way to learn which frames the provider sent.
+        // The frame witness is the parser's (`observation()`), so the sentence can name the frame
+        // count, the distinct shapes, the ending signal and the content facts.
+        throw qwenChatEmptyStream({
+          observation: this.#parser.observation(),
+          termination,
+          ...(completionResult.terminalStatus === undefined ? {} : { terminalStatus: completionResult.terminalStatus }),
+        });
+      }
       this.#terminal = true;
       const chatIdOfAnswer = completionResult.chatId ?? chatId;
       // The next turn hangs off the assistant message this response produced. `response.created`'s
