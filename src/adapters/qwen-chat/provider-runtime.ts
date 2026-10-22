@@ -35,8 +35,9 @@
  * abilities **once**, and the transport sends exactly that mode. A mode the model does not offer is a
  * typed 400, never a silent fallback.
  *
- * Everything provider-private stays here: the chat id, the cursor, the request shapes, the replay
- * prompt and the fact that the route is qualified by this provider's id. No rule here enters
+ * Everything provider-private stays here: the chat id, the cursor, the request shapes, the continuity
+ * intent and the fact that the route is qualified by this provider's id. What text a turn carries —
+ * the install header, the replay projection — is compiled by `./prompt`; no rule here enters
  * `src/web-chat/core/**`.
  */
 import type { AdapterEvent } from "../../types";
@@ -97,7 +98,9 @@ import {
   type QwenChatConversationState,
 } from "./chat-state";
 import { createQwenChatBrowserSession, type QwenChatRequestSession } from "./browser-session";
+import { projectIdentityHeader } from "../../project-identity";
 import { createQwenChatTextTransport, type QwenChatTurnAnswer } from "./text-transport";
+import { compileQwenChatInstallPrompt, compileQwenChatReplayPrompt } from "./prompt";
 import {
   qwenChatAccountBinding,
   qwenChatCatalogueRows,
@@ -212,24 +215,6 @@ export function qwenChatReplayHistory(messages: readonly ApiConversationMessage[
     // Every other role (`tool`, `toolResult`, a harness-only kind) is transport state, not text.
   }
   return history;
-}
-
-/**
- * Compile canonical history into the one prompt a replay sends.
- *
- * A replay creates a **new** chat, so the rebuilt conversation has to arrive as text: `User:` /
- * `Assistant:` lines, the same convention the ChatGPT and Qwen Code compilers use, built only from
- * the canonical messages the caller sent (never from provider state and never from a stored
- * transcript).
- */
-export function compileQwenChatReplayPrompt(history: readonly WebChatReplayMessage[]): string {
-  const lines: string[] = [];
-  for (const message of history) {
-    if (message.text.trim().length === 0) continue;
-    const label = message.role === "assistant" ? "Assistant" : message.role === "user" ? "User" : message.role === "system" ? "System" : "Developer";
-    lines.push(`${label}: ${message.text}`);
-  }
-  return lines.join("\n");
 }
 
 /** The current turn's human text: the newest `user` line of the transmitted set. */
@@ -688,6 +673,16 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
         return;
       }
       const prompt = planned.replay ? compileQwenChatReplayPrompt(turn.history) : turn.userText;
+      const humanText = prompt.length > 0 ? prompt : turn.userText;
+      // The project header is initialization metadata for the FIRST physical message of a brand-new
+      // conversation: the turn that is about to create this conversation's chat and is not a rebuild.
+      // This mirrors the ChatGPT minimal Chat Mode install condition (normal Chat Mode + generation 1)
+      // in the facts this provider actually has - the core advances the generation only on an explicit
+      // replay, and a continuation is exactly a recorded provider chat - so a continuation sends only
+      // the new human text and a replay/rebuild carries the canonical history with no header.
+      // The ephemeral path above and the Advisor's neutral `openTextExchange` seam never reach here.
+      const installsConversation = !planned.replay && planned.chat === undefined;
+      const text = installsConversation ? compileQwenChatInstallPrompt(humanText, projectIdentityHeader()) : humanText;
       const handoff = exchangeFor({
         conversationKey: identity.key,
         turnId: turn.turnId,
@@ -696,7 +691,7 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
           model: turn.model,
           ...(turn.mode === undefined ? {} : { mode: turn.mode }),
           ...(turn.thinkingFormat === undefined ? {} : { thinkingFormat: turn.thinkingFormat }),
-          userText: prompt.length > 0 ? prompt : turn.userText,
+          userText: text,
         },
         ...(planned.chat ? { chat: planned.chat } : {}),
         ephemeral: false,
