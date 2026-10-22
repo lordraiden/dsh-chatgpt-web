@@ -1653,7 +1653,10 @@ conversational transport to the provider:
   descriptions or memory content into the request;
 - the project header is generated programmatically from authoritative package metadata
   (`package.json`), never inferred from the user's message, the working directory or a model answer;
-  when that metadata cannot be resolved, the repository line is omitted rather than fabricated;
+  when that metadata cannot be resolved, the repository line is omitted rather than fabricated. The
+  identity compiler is provider-neutral (`src/project-identity.ts`) and every provider's normal Chat
+  Mode install compiles from it, so one repository produces the same header on ChatGPT Web and on
+  Qwen Chat;
 - a message is eligible to become the user turn only when the DSH host marked it as the human turn
   (`source.kind === "user"`). Every injected block — the skills catalogue, runtime context, the Aegis
   bootstrap, Hindsight recall, the time snapshot — is dropped at the projection boundary by that

@@ -235,6 +235,34 @@ Redaction and bounding are the shared refusal-evidence rules (`sanitizedBodyFrag
 `truncateWithEllipsis`), so there is no second scrubber. This is not a guess: if a turn still comes
 back empty, that one line names the shape the answer is hiding in.
 
+### 3.3 The first message of a conversation installs the project identity
+
+The first physical message of a normal Chat Mode conversation is not the operator's bare text: it is
+the deterministic project header plus the current user turn, exactly as on ChatGPT
+([`architecture.md`](./architecture.md) §20.1):
+
+```text
+Project: "<package name>"
+github: "<package repository URL>"
+
+<the current user turn>
+```
+
+- The identity comes from the installed package's own `package.json` through the provider-neutral
+  owner `src/project-identity.ts` — the **same** owner the ChatGPT minimal Chat Mode install compiles
+  from. The name is a package name (never a filesystem path) and the URL is the manifest's own
+  repository URL normalised to an `https:`/`http:` URL. Metadata that cannot be resolved is
+  **omitted, never fabricated**: no name, no URL, no header.
+- The header is initialization metadata for the **first physical message only**. A continuation sends
+  just the new human text (the provider chat already carries the conversation), and an explicit
+  replay/rebuild re-projects canonical host history alone, so the header is never re-injected and can
+  never be duplicated (injection is idempotent by construction).
+- A declared-purpose (ephemeral) turn is **not** an install and carries no header, and neither does
+  the Advisor's neutral text seam. No host-context snapshot, runtime block, tool or system text
+  travels with any of them.
+- An install that would carry no human message is refused — the compiler refuses it, and the route's
+  own projection reports `no_user_message` — exactly like the ChatGPT install.
+
 ## 4. Continuity and ephemeral turns
 
 **Continuity state** (`chat-state.ts`, `providers/qwen-chat/conversations.json`, mode 0600) is the
@@ -319,3 +347,4 @@ re-measured and no shape is changed on a guess.
 | `tests/issue-333-qwen-chat-provider-conformance.test.ts` | the shared conformance suite over the production transport/continuity path |
 | `tests/issue-333-qwen-chat-session-store.test.ts` | the per-domain capture rule (a Qwen Code capture is refused), origin sanitisation, and the provider-scoped session layout |
 | `tests/issue-333-qwen-chat-refusal.test.ts` | every refusal kind (punish HTML/JSON, auth, unknown chat, request refusal, empty body), the message and the one `qwen_chat_refusal` log line carrying status + content-type + a redacted snippet, the production facility preserving the raw answer for `chats/new` and `completions`, and a successful stream unaffected |
+| `tests/issue-333-qwen-chat-project-header.test.ts` | the install is the deterministic project header plus the user's message only, byte-for-byte the ChatGPT install's identity (§3.3); the continuation sends only the new text; the refusal when an install carries no human message; unresolvable metadata omits the header instead of fabricating one; idempotent injection; the declared-purpose turn and the Advisor seam carry no header; the replay rebuilds canonical history and never duplicates the header |

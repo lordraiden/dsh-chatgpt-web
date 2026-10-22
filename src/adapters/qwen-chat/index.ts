@@ -190,7 +190,6 @@ export {
 export { createQwenChatDriver, qwenChatAffinityKey, qwenChatConversationHandle } from "./driver";
 
 export {
-  compileQwenChatReplayPrompt,
   createQwenChatProvider,
   qwenChatAffinitySessionId,
   qwenChatDefaultModel,
@@ -203,6 +202,8 @@ export {
   type QwenChatProviderOptions,
   type QwenChatResolvedTurn,
 } from "./provider-runtime";
+
+export { compileQwenChatInstallPrompt, compileQwenChatReplayPrompt } from "./prompt";
 
 export { qwenChatResponsesRequest, type QwenChatResponsesRequestOptions } from "./responses";
 

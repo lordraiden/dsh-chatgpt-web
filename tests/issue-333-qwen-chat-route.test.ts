@@ -27,6 +27,7 @@ import {
   webChatContinuationIdentity,
   type WebChatConversationStore,
 } from "../src/web-chat/core";
+import { projectIdentityHeader } from "../src/project-identity";
 import type { WebChatTextTransportContext } from "../src/web-chat/transport";
 
 /**
@@ -42,6 +43,13 @@ const CONTROL_TOKEN = "issue-333-qwen-chat-route-control-token";
 const MODEL_ID = "qwen3.7-plus";
 const MODEL_ROUTE = `${QWEN_CHAT_PROVIDER_ID}/${MODEL_ID}`;
 const ACCOUNT = "issue-333-qwen-chat-route-account";
+
+/**
+ * The deterministic header a **new** conversation installs (the package's own identity). Taken from
+ * the neutral owner rather than copied, so this suite pins the install shape without restating the
+ * identity - the identity itself is pinned by the ChatGPT suite and the qwen-chat project-header one.
+ */
+const INSTALL_HEADER = projectIdentityHeader();
 
 let home: string;
 let savedHome: SavedChatGptWebHome;
@@ -281,8 +289,11 @@ describe("issue #333 — Qwen Chat: one conversation key, one chat", () => {
     // No second chat: the recorded one was continued, in the same conversation.
     expect(network.chatNewCalls).toBe(1);
     expect(network.completionPaths[1]).toContain("chat_id=chat-1");
-    // Only the new user text is compiled on a continuation: the provider chat is the history.
-    expect(network.prompts).toEqual(["hola", "again"]);
+    // Only the new user text is compiled on a continuation: the provider chat is the history. The
+    // FIRST turn of the conversation installed the deterministic project header plus only the user's
+    // message, so the provider knows the project without any DSH context travelling with it.
+    expect(INSTALL_HEADER).toBeDefined();
+    expect(network.prompts).toEqual([`${INSTALL_HEADER}\n\nhola`, "again"]);
     // The second turn names the first response's id as its parent cursor, in both recorded places.
     expect(network.bodies[1]!["parentId"]).toBe("response-1");
     expect(network.bodies[1]!["parent_id"]).toBe("response-1");
@@ -366,8 +377,11 @@ describe("issue #333 — Qwen Chat: one conversation key, one chat", () => {
     // The recovery is explicit and visible: a NEW chat, and a generation that advanced by one.
     expect(network.chatNewCalls).toBe(2);
     expect(network.completionPaths[2]).toContain("chat_id=chat-2");
-    // The canonical history was compiled into the rebuilt conversation.
+    // The canonical history was compiled into the rebuilt conversation. A replay is not an install:
+    // the header is initialization metadata of a brand-new conversation, so the rebuilt prompt is the
+    // canonical history alone and never a second copy of the header.
     expect(network.prompts[2]).toContain("User: hola\nAssistant: first\nUser: again please");
+    expect(network.prompts[2]!.match(/Project: /g)).toBeNull();
     const record = await store.read(identity);
     expect(record?.generation).toBe(2);
     expect(record?.checkpoint).toBe("confirmed");
@@ -391,6 +405,9 @@ describe("issue #333 — Qwen Chat: one conversation key, one chat", () => {
     expect(network.completionCalls).toBe(1);
     // The answer streamed into a process-generated chat id, not the caller's conversation.
     expect(network.completionPaths[0]).not.toContain("chat_id=chat-1");
+    // A housekeeping turn is not a conversation install, so it carries no project header: the title
+    // request is exactly the caller's text.
+    expect(network.prompts).toEqual(["name this session"]);
     // …and it leaves no conversation record this deployment could ever continue.
     expect(await store.list()).toEqual([]);
     expect(state.entries()).toEqual([]);
@@ -458,7 +475,8 @@ describe("issue #333 — Qwen Chat: one conversation key, one chat", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("x-dsh-chatgpt-web-ignored-features")).toBe("tools");
-    expect(network.prompts).toEqual(["use the weather tool"]);
+    // The tool definition is dropped; the one user turn is this conversation's install (header + text).
+    expect(network.prompts).toEqual([`${INSTALL_HEADER}\n\nuse the weather tool`]);
     // The tool definition is nowhere in the provider payload; only the user's own text is.
     expect(JSON.stringify(network.bodies)).not.toContain("parameters");
   });
@@ -568,9 +586,10 @@ describe("issue #333 — Qwen Chat through the real listener", () => {
       .toBe("Hola desde Qwen Chat");
     expect(chunks.some(chunk => chunk.choices?.[0]?.finish_reason === "stop")).toBe(true);
     expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
-    // The provider really ran the turn, and the caller's reasoning selection reached the payload.
+    // The provider really ran the turn, and the caller's reasoning selection reached the payload. The
+    // first physical message installed the deterministic project header plus only the user's text.
     expect(network.chatNewCalls).toBe(1);
-    expect(network.prompts).toEqual(["hola"]);
+    expect(network.prompts).toEqual([`${INSTALL_HEADER}\n\nhola`]);
     const message = (network.bodies[0]!["messages"] as Record<string, unknown>[])[0]!;
     expect((message["feature_config"] as Record<string, unknown>)["thinking_mode"]).toBe("Thinking");
   });

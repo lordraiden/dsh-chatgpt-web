@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { chatGptRetainedDeltaEmptyError } from "./adapter-error";
+import { projectIdentityHeader, withProjectIdentityHeader } from "../../project-identity";
 import { sanitizeConversationText } from "../../conversation-sanitizer";
 import { type CodexMessage, type CodexParsedRequest } from "../../types";
 import {
@@ -284,78 +284,16 @@ export function projectContextName(cwd: string | undefined): string | undefined 
   return name && name.length > 0 ? name : undefined;
 }
 
-type PackageMetadata = {
-  name?: unknown;
-  repository?: unknown;
-};
-
-const packageRequire = createRequire(import.meta.url);
-
 /**
- * Deterministic project name from authoritative package metadata. A name is a
- * name, never a filesystem path; `undefined` means the metadata carries none.
+ * The deterministic project identity and its first-message header are provider-neutral
+ * (`src/project-identity.ts`): Qwen Chat's conversation install compiles the same header from the same
+ * one implementation, so neither provider owns a private copy. These two names stay exported here for
+ * the ChatGPT suite that pins the package-metadata rules; they are re-exports, never a second source.
  */
-export function chatGptWebProjectName(name: unknown): string | undefined {
-  const value = typeof name === "string" ? name.trim() : "";
-  const last = value.split("/").filter(Boolean).pop();
-  return last && last.length > 0 ? last : undefined;
-}
-
-/**
- * Deterministic repository URL from authoritative package metadata. The package
- * manifest is the single source of repository identity: the URL is never
- * inferred from the user's message, the conversation, the working directory, or
- * a model answer, and invalid/missing metadata returns `undefined` instead of a
- * fabricated URL.
- */
-export function chatGptWebRepositoryUrl(repository: unknown): string | undefined {
-  const value = typeof repository === "string"
-    ? repository.trim()
-    : repository && typeof repository === "object" && typeof (repository as { url?: unknown }).url === "string"
-      ? (repository as { url: string }).url.trim()
-      : "";
-  if (!value) return undefined;
-  const normalized = (value.startsWith("git+") ? value.slice(4) : value).replace(/\.git$/, "");
-  try {
-    const url = new URL(normalized);
-    if (url.protocol !== "https:" && url.protocol !== "http:") return undefined;
-  } catch {
-    return undefined;
-  }
-  return normalized;
-}
-
-/** Read the installed package's own metadata; source and bundled layouts differ. */
-function chatPackageMetadata(): { name: string; repositoryUrl: string } | undefined {
-  for (const candidate of [
-    "@lordraiden/dsh-chatgpt-web/package.json",
-    "../package.json",
-    "../../../package.json",
-  ]) {
-    try {
-      const loaded = packageRequire(candidate) as PackageMetadata & { default?: PackageMetadata };
-      const metadata = loaded.default ?? loaded;
-      const name = chatGptWebProjectName(metadata.name);
-      const repositoryUrl = chatGptWebRepositoryUrl(metadata.repository);
-      if (name && repositoryUrl) return { name, repositoryUrl };
-    } catch {
-      // Package metadata is optional at runtime; invalid/missing metadata is omitted.
-    }
-  }
-  return undefined;
-}
-
-/**
- * Deterministic first-message header for normal Chat Mode. The project name and
- * its authoritative GitHub URL are generated programmatically from package
- * metadata, never by the model, and are initialization metadata for the first
- * physical message of a conversation only.
- */
-function normalChatProjectHeader(): string | undefined {
-  const metadata = chatPackageMetadata();
-  if (!metadata) return undefined;
-  return `Project: "${metadata.name}"\ngithub: "${metadata.repositoryUrl}"`;
-}
+export {
+  projectNameFromPackageName as chatGptWebProjectName,
+  repositoryUrlFromPackageMetadata as chatGptWebRepositoryUrl,
+} from "../../project-identity";
 
 function chatUserMessageContent(message: CodexMessage): { text: string; images: ChatGptWebPromptImage[] } {
   const textParts: string[] = [];
@@ -400,17 +338,19 @@ function currentChatUserMessage(messages: readonly CodexMessage[]): { text: stri
 
 /**
  * Normal Chat Mode install (the first physical message of a conversation): the
- * deterministic project header plus ONLY the current user turn. No DSH system
- * prompt, no previous user/assistant history, and no runtime, repository, tool
- * or memory context: ChatGPT Web owns the conversation from here on. Advisor
- * Mode and the DSH tool-execution route keep their own compilers.
+ * deterministic project header — compiled by the provider-neutral owner
+ * (`src/project-identity.ts`, so Qwen Chat's install carries the identical
+ * header) — plus ONLY the current user turn. No DSH system prompt, no previous
+ * user/assistant history, and no runtime, repository, tool or memory context:
+ * ChatGPT Web owns the conversation from here on. Advisor Mode and the DSH
+ * tool-execution route keep their own compilers.
  */
 export function compileChatGptWebInstall(parsed: CodexParsedRequest): CompiledChatGptWebPrompt {
   if (parsed._compactionRequest) throw new Error("A compaction request cannot use normal Chat Mode install");
   const current = currentChatUserMessage(parsed.context.messages);
   if (!current.text) throw new Error("A normal Chat Mode install must carry a human message");
   return {
-    text: [normalChatProjectHeader(), current.text].filter(Boolean).join("\n\n"),
+    text: withProjectIdentityHeader(current.text, projectIdentityHeader()),
     images: current.images,
   };
 }
