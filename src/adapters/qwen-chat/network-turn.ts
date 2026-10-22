@@ -60,6 +60,13 @@ import {
   qwenChatUrl,
   type QwenChatMode,
 } from "./provider";
+// The frame vocabulary is the stream's own (`./sse`); this module only gives an empty answer the same
+// treatment a refusal gets — one sentence and one structured log line, both bounded and redacted.
+import {
+  qwenChatEmptyStreamSummary,
+  type QwenChatStreamObservation,
+  type QwenChatTermination,
+} from "./sse";
 
 /** The HTTP result of a JSON POST issued from inside the page. */
 export interface QwenChatJsonPostResult {
@@ -537,6 +544,40 @@ export function qwenChatRefusal(input: QwenChatRefusalInput): WebChatError {
       ...(read.reason === undefined ? {} : { reason: read.reason }),
       body: read.evidence,
     },
+  });
+}
+
+/**
+ * The typed failure of a stream that **completed with no extracted answer text**.
+ *
+ * Until this existed the transport treated such a turn as a success and published an empty answer,
+ * so the operator's harness reported a completed response with no content and nothing else — the
+ * frame vocabulary the provider actually used was thrown away. The category stays `UPSTREAM_ERROR`;
+ * the provider code is this case's own, and the evidence is the same kind of bounded, redacted
+ * summary a refusal carries: frame count, the distinct frame shapes with their counts (key paths
+ * only), the signal that ended the stream, how many delta frames carried a content field at all, and
+ * at most one short redacted payload fragment.
+ *
+ * It is deliberately **not** a `QwenChatRefusalKind`: a refusal is the provider answering instead of
+ * streaming, while this is the provider streaming and this driver reading nothing out of it. They
+ * lead to different fixes, so they stay distinguishable.
+ */
+export function qwenChatEmptyStream(input: {
+  readonly observation: QwenChatStreamObservation;
+  readonly termination: QwenChatTermination;
+  readonly terminalStatus?: string;
+}): WebChatError {
+  const read = qwenChatEmptyStreamSummary(input);
+  console.warn(
+    `[qwen-chat] qwen_chat_empty_stream ${JSON.stringify({
+      provider: QWEN_CHAT_PROVIDER_ID,
+      ...read.detail,
+    })}`,
+  );
+  return webChatError("UPSTREAM_ERROR", read.message, {
+    providerId: QWEN_CHAT_PROVIDER_ID,
+    providerCode: "QWEN_CHAT_EMPTY_STREAM",
+    providerDetail: read.detail,
   });
 }
 
