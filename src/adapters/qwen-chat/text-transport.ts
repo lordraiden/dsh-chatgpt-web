@@ -541,8 +541,9 @@ class QwenChatTextTransport implements WebChatTextTransport {
       qwenChatChatNewRequest({ model: this.#options.model, timestampMs: this.#startedAt }),
     );
     // A refusal here is the provider's own category (auth, anti-bot or upstream); the caller's text
-    // was never sent, which is what makes the turn retry-safe.
-    const chatId = readQwenChatCreatedChatId(created.body, created.status);
+    // was never sent, which is what makes the turn retry-safe. The reader is handed the whole answer
+    // so its refusal can carry the status, the content type and the body it actually received.
+    const chatId = readQwenChatCreatedChatId(created);
     this.#diagnose({ stage: "chat-created", chatDigest: qwenChatChatDigest(chatId) });
     return chatId;
   }
