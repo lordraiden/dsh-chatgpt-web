@@ -47,6 +47,13 @@ import {
   type AuthImportProvider,
 } from "./auth-import";
 import { AUTH_IMPORT_REFUSAL_CODES, isAuthImportRefusal } from "./auth-import-errors";
+import {
+  createAuthHealthSurface,
+  defaultAuthHealthProviders,
+  type AuthHealthProvider,
+  type AuthHealthSnapshot,
+  type AuthHealthSurface,
+} from "./auth-health";
 import { WEB_CHAT_AUTH_PAGE_HTML, WEB_CHAT_AUTH_PAGE_PATHS } from "./web-chat/host/auth-page";
 import {
   createWebChatAuthSurface,
@@ -100,7 +107,7 @@ import {
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody, RequestBodyTooLargeError } from "./http-body";
 import { HttpClientDisconnectedError, httpStatusFromTerminalError } from "./lib/errors";
-import { safeErrorDescriptor } from "./lib/safe-diagnostics";
+import { nonSecretDiagnosticText, safeErrorDescriptor } from "./lib/safe-diagnostics";
 import { augmentNativeModelCatalog, buildChatGptWebModelCatalog, buildPublicModelCatalog, publicModelRouteIds } from "./model-catalog";
 import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
 import {
@@ -1301,6 +1308,37 @@ function authProviderListResponse(surface: WebChatAuthSurface): Response {
 }
 
 /**
+ * `GET /v1/control/auth/health` — what every stored session does **right now**.
+ *
+ * The question the operator used to answer by sending a message and waiting for `AUTH_REQUIRED`:
+ * is the capture I imported still a working session? The answer is produced by the import pipeline's
+ * own predicate (`proveProviderCapture`), cached briefly server-side, and carries no cookie, token,
+ * storage entry or path.
+ *
+ * The request is empty: the surface already knows the providers this deployment serves. A provider
+ * with no captured session is still reported, as `absent`, so a row never silently disappears.
+ */
+async function authHealthResponse(health: AuthHealthSurface): Promise<Response> {
+  let snapshot: AuthHealthSnapshot;
+  try {
+    snapshot = await health.snapshot();
+  } catch (error) {
+    return Response.json(
+      {
+        ok: false,
+        code: "auth_health_unavailable",
+        message: `The session check could not be produced: ${nonSecretDiagnosticText(error)}`,
+      },
+      { status: 500, headers: controlCorsHeaders() },
+    );
+  }
+  return Response.json(
+    { ok: true, ...snapshot },
+    { headers: { ...controlCorsHeaders(), "Cache-Control": "no-store" } },
+  );
+}
+
+/**
  * The refusal categories that are the *caller's* own mistake on the sign-in surface.
  *
  * One owner for the classification: the honest status and the actionable message both derive from
@@ -1560,6 +1598,7 @@ async function authImportRequest(
   req: Request,
   providers: ReadonlyMap<string, AuthImportProvider>,
   now: () => number,
+  health?: AuthHealthSurface,
 ): Promise<Response> {
   let raw: unknown;
   try {
@@ -1636,6 +1675,9 @@ async function authImportRequest(
         ...(result.reading === undefined ? {} : { reading: result.reading }),
       })}`,
     );
+    // The import just proved the session, so the next health read must not launch a browser to
+    // discover the same fact: seed the one cache with this verification, timestamp included.
+    if (result.verified) health?.noteVerified(providerId, result.verifiedAt);
     return Response.json({
       ok: true,
       provider: providerId,
@@ -1771,6 +1813,20 @@ export function startServer(
       readonly providers?: readonly AuthImportProvider[];
       /** Clock seam for the freshness checks and the reported `verifiedAt`; defaults to `Date.now`. */
       readonly now?: () => number;
+    };
+    /**
+     * The session-health providers this listener reports (`GET /v1/control/auth/health`).
+     *
+     * Production leaves this out and resolves each provider's stored-capture path and its import
+     * descriptor with the same owners `auth import` uses. Tests inject a path and a deterministic
+     * descriptor per provider, so every state (verified, expired, absent, unverifiable) is reachable
+     * without a browser; an explicit list replaces the default entirely.
+     */
+    authHealth?: {
+      readonly providers?: readonly AuthHealthProvider[];
+      readonly now?: () => number;
+      readonly cacheTtlMs?: number;
+      readonly probeTimeoutMs?: number;
     };
     /**
      * Non-ChatGPT WebChat providers this listener serves.
@@ -1972,6 +2028,20 @@ export function startServer(
   const authImportNow = dependencies.authImport?.now ?? Date.now;
 
   /**
+   * The session-health surface (issue #276 follow-up): one owner for the life of this listener,
+   * built from the same import descriptors as the import registry above and never a second probe.
+   *
+   * It is composed for every listener, including a test one with no stored sessions: with no capture
+   * the rows say `absent` without launching anything, so composing it is inert.
+   */
+  const authHealth: AuthHealthSurface = createAuthHealthSurface({
+    providers: dependencies.authHealth?.providers ?? defaultAuthHealthProviders(config),
+    ...(dependencies.authHealth?.now === undefined ? {} : { now: dependencies.authHealth.now }),
+    ...(dependencies.authHealth?.cacheTtlMs === undefined ? {} : { cacheTtlMs: dependencies.authHealth.cacheTtlMs }),
+    ...(dependencies.authHealth?.probeTimeoutMs === undefined ? {} : { probeTimeoutMs: dependencies.authHealth.probeTimeoutMs }),
+  });
+
+  /**
    * The port the listening socket is actually bound to.
    *
    * `config.port` is the *requested* port and may be `0` (an ephemeral port, which the test suites and
@@ -2092,7 +2162,10 @@ export function startServer(
       return authProviderListResponse(authSurface);
     }
     if (url.pathname === "/v1/control/auth/import" && req.method === "POST") {
-      return authImportRequest(req, authImportProviders, authImportNow);
+      return authImportRequest(req, authImportProviders, authImportNow, authHealth);
+    }
+    if (url.pathname === "/v1/control/auth/health" && req.method === "GET") {
+      return authHealthResponse(authHealth);
     }
     if (url.pathname === "/v1/control/auth/sessions" && req.method === "POST") {
       return authOpenRequest(req, authSurface);

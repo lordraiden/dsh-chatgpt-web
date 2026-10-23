@@ -409,6 +409,7 @@ rest of `/v1/control/*`: the API key does not open it, and the control token sti
 | --- | --- |
 | `GET /v1/control/auth/` | the page itself; served anonymously by design (a navigation cannot carry a header) |
 | `GET /v1/control/auth/providers` | the providers offering interactive sign-in |
+| `GET /v1/control/auth/health` | what each stored session does **now** (`verified`/`expired`/`absent`/`unverifiable`/`unknown`), using the import pipeline's own predicate; bounded and cached for 60 s |
 | `POST /v1/control/auth/sessions` | open one: `{"providerId":"chatgpt-web"}` (409 when that provider is already signing in) |
 | `GET /v1/control/auth/sessions/<id>` | the session view: state, TTL, viewport — never a cookie, a storage state or a page URL |
 | `GET /v1/control/auth/sessions/<id>/stream` | SSE frame/state relay (~2.5 fps, plus an immediate frame after every input) |

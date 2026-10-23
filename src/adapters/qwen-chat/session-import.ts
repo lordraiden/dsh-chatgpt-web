@@ -54,6 +54,16 @@ export type QwenChatImportedSessionProbe = (storageState: unknown) => Promise<Qw
 /** One opened provider page, and the only handle that may close it. */
 export interface QwenChatImportedSessionPage {
   readonly page: Page;
+  /**
+   * The session state the live page holds **now**, including anything the app renewed while it
+   * restored itself (`refresh_token` rotation, the new `qwen_access_token_state`).
+   *
+   * Reading it is what stops a verification from consuming the capture it just proved: the page
+   * refreshed with the stored cookie and the server rotated it, so the state to persist is this one,
+   * not the snapshot that was handed in. Optional so a simulated page stays valid.
+   */
+  storageState?(): Promise<unknown>;
+  /** Idempotent. */
   close(): Promise<void>;
 }
 
@@ -73,6 +83,13 @@ export interface QwenChatImportedSessionVerification {
   readonly read: QwenChatProbeReadSource;
   /** How many characters of the answer were read, when the envelope decided a cut one. */
   readonly bodyChars?: number;
+  /**
+   * The session state the page held after it proved itself, when the page could be read back.
+   *
+   * This is the state to persist. It is absent for a probe seam that has no page behind it, and the
+   * caller then keeps the capture it already accepted.
+   */
+  readonly storageState?: unknown;
 }
 
 /** Options for {@link verifyQwenChatImportedSession}. */
@@ -119,6 +136,13 @@ async function openBrowserPage(
     const openedContext = context;
     return {
       page,
+      // The same browsing context that just proved the session is asked for its state, so a token
+      // the app renewed during hydration (and the rotated `refresh_token` cookie) is what gets
+      // stored. Reading is bounded by the caller's `close()`; an unreadable context degrades to the
+      // accepted capture instead of failing a verified session.
+      async storageState() {
+        return await openedContext.storageState();
+      },
       async close() {
         try { await openedContext.close(); } finally { await browser.close(); }
       },
@@ -151,12 +175,16 @@ function flatten(observation: QwenChatProbeObservation): QwenChatImportedSession
  * Prove that an imported capture is a live, authenticated Qwen Chat session.
  *
  * Rejects with a non-secret diagnostic when the predicate says unauthenticated (or the browser
- * cannot be started). Nothing is written here: the caller stores only after this resolves.
+ * cannot be started). Nothing is written here: the caller stores only after this resolves — and it
+ * stores {@link QwenChatImportedSessionVerification.storageState} when the page could be read back,
+ * because the page may have renewed the session with the very capture that was handed in.
  */
 export async function verifyQwenChatImportedSession(
   storageState: unknown,
   options: QwenChatImportedSessionOptions = {},
 ): Promise<QwenChatImportedSessionVerification> {
+  /** The live page's own state, when the default opener (not an injected probe) could read it. */
+  let provedState: unknown;
   const probe: QwenChatImportedSessionProbe = options.probe ?? (async state => {
     const openPage = options.openPage ?? (async (capture: unknown) => {
       if (!options.chromeExecutablePath) {
@@ -168,7 +196,13 @@ export async function verifyQwenChatImportedSession(
     });
     const opened = await openPage(state);
     try {
-      return flatten(await probeQwenChatFromPageAfterHydration(opened.page, options.hydration ?? {}));
+      const observation = flatten(await probeQwenChatFromPageAfterHydration(opened.page, options.hydration ?? {}));
+      if (opened.storageState !== undefined) {
+        // Read before `close()`: a context that has been closed cannot answer. A context that will
+        // not serialize is not a session failure — the accepted capture stays the state to persist.
+        try { provedState = await opened.storageState(); } catch { provedState = undefined; }
+      }
+      return observation;
     } finally {
       await opened.close();
     }
@@ -203,6 +237,7 @@ export async function verifyQwenChatImportedSession(
     ...(verdict.source === "truncated-envelope" && typeof result.bodyText === "string"
       ? { bodyChars: result.bodyText.length }
       : {}),
+    ...(provedState === undefined ? {} : { storageState: provedState }),
   };
 }
 

@@ -368,6 +368,54 @@ writes the same layout as `auth import` (and, for a verified provider, the same 
 marker), and — like the CLI route — it does not refresh the running process's startup-resolved
 account facts, so restart the service when the next turn must pick the capture up immediately.
 
+### Is the stored session still working? (`GET /v1/control/auth/health`)
+
+A capture that verified an hour ago can stop working without anything in the service changing: the
+provider's own token expires and the page cannot renew it. Until now the only way to find out was to
+send a message and wait for an `AUTH_REQUIRED` refusal. This endpoint answers the question **before**
+the send. **Control token only**, like the rest of `/v1/control/*`.
+
+```bash
+curl -sS http://127.0.0.1:17841/v1/control/auth/health \
+  -H "Authorization: Bearer $CONTROL_TOKEN"
+```
+
+```json
+{
+  "ok": true,
+  "checkedAt": "2026-10-23T16:40:00.000Z",
+  "cache": { "ttlMs": 60000 },
+  "providers": [
+    {
+      "providerId": "qwen-chat",
+      "label": "Qwen Chat",
+      "state": "expired",
+      "capturePresent": true,
+      "verifiedAt": "2026-10-22T13:51:35.003Z",
+      "checkedAt": "2026-10-23T16:40:00.000Z",
+      "code": "import_predicate_failed",
+      "reason": "Qwen Chat is not signed in: the live page's token has expired. Sign in at /v1/control/auth/ (choose \"Qwen Chat\")."
+    }
+  ]
+}
+```
+
+| `state` | meaning |
+| --- | --- |
+| `verified` | a capture is stored and the provider's **own** authenticated predicate accepts it now |
+| `expired` | a capture is stored and the predicate refused it (or its own validator rejected it); `code`/`reason` say why, and `verifiedAt` is the last time it did verify |
+| `absent` | no capture is stored for this provider |
+| `unverifiable` | the provider has no authenticated predicate (DeepSeek Web today), so no capture can be proved — never reported as `expired` |
+| `unknown` | the check could not be completed inside its bound; the session was **not** judged |
+
+Every provider the deployment serves is listed, so a row never disappears. The check runs the import
+pipeline's own acceptance rule and predicate — no second probe, and the same `import_*` refusal codes.
+It is bounded (90 s per provider, checked one at a time) and its verdict is cached for 60 s, so opening
+the sign-in page twice does not launch a browser twice; a successful `POST /v1/control/auth/import`
+seeds the cache with the verification it just performed. A provider whose page renews the session
+while being checked (Qwen Chat) has that renewal stored through the same single writer, so the check
+cannot shorten the capture's life. The answer carries no cookie, token, storage entry or path.
+
 ### Fallback when a flow rejects headless
 
 `authBrowserMode: "display"` in `config.json` launches a real window instead of headless. `headless` is
