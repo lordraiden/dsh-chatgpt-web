@@ -146,6 +146,34 @@ export function loginVerificationMarkerPath(storageStatePath: string): string {
   return storageStateMarkerPath(storageStatePath);
 }
 
+/**
+ * Read one provider's verification marker, the file {@link storeProviderSession} writes.
+ *
+ * The marker is the deployment-wide promise "this session was proved at `verifiedAt`". This reader
+ * exists for surfaces that report **when** a capture last verified (the session-health endpoint);
+ * the `*SessionVerified` helpers keep their own boolean reading, and nothing here interprets a
+ * cookie or a token. A marker that cannot be read is simply not a marker.
+ *
+ * @returns the marker facts, or `null` when there is no readable, authentic marker beside the capture.
+ */
+export function readVerificationMarker(
+  storageStatePath: string,
+): { readonly verifiedAt: string } | null {
+  const markerPath = storageStateMarkerPath(storageStatePath);
+  if (!existsSync(markerPath)) return null;
+  try {
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      version?: unknown;
+      authenticated?: unknown;
+      verifiedAt?: unknown;
+    };
+    if (marker.version !== 1 || marker.authenticated !== true || typeof marker.verifiedAt !== "string") return null;
+    return { verifiedAt: marker.verifiedAt };
+  } catch {
+    return null;
+  }
+}
+
 /** The provider a capture is stored for, plus an optional explicit data home (tests). */
 export interface ProviderSessionTarget {
   /** Provider whose credential directory owns the session. Defaults to `chatgpt-web`. */

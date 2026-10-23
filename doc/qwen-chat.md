@@ -313,6 +313,97 @@ from the live page at call time and issues the request from inside that page.
 `doctor` reports `webchat-qwen-chat` on the same terms as the other providers, once configured or
 signed in.
 
+### 5.1 What the refresh actually needs, measured
+
+The operator's stored capture (`providers/qwen-chat/storage-state.json`) stopped authenticating a day
+after it was imported, although a real answer had been delivered from it hours earlier. The service
+reported, after a 20 s wait, that *the app still reports no token*. This is what the capture and the
+app's own token manager say about why, measured on the deployment on **2026-10-23** with a read of
+that file that printed **names, domains, expiry classes and local-storage keys only** — never a cookie
+value, a token or a storage value.
+
+#### 5.1.1 The cookie inventory
+
+| Fact | Measured |
+| --- | --- |
+| Cookies in the capture | 16, **all persistent** (every `expires` is a future epoch; none is `-1`) |
+| The refresh credential | `refresh_token`, domain `.qwen.ai`, `httpOnly`, `secure`, `SameSite=Lax`, expires **2026-11-21T13:51:21Z** — exactly 30 days after the sign-in |
+| Anti-bot / analytics | `alicfw`, `alicfw_gfver` (24 h), `acw_tc` (30 min), `xlly_s`, `cna`, `cnaui`, `aui`, `isg`, `tfstk`, `ssxmod_itna*`, `_c_WBKFRo` |
+| UI | `qwen-locale`, `qwen-theme` |
+| Session-only cookies | **none** |
+| Access token | `localStorage["qwen_access_token_state"]` — a 281-character JWT, `expiresAt` **2026-10-22T14:06:22Z**, i.e. **899 seconds** (≈15 min) after `updatedAt` |
+| Capture / verification | `2026-10-22T13:51:35Z` (the marker beside the file) |
+
+**The blocker is not the Firefox session-cookie limitation.** Firefox never writes session-only
+cookies to disk, which would make this path structurally unable to capture a session that needs one —
+but this capture contains no session cookie at all, and the one credential the refresh uses
+(`refresh_token`) is a persistent, 30-day cookie that a Firefox profile *does* contain. A capture can
+therefore hold the refresh credential.
+
+#### 5.1.2 How the refresh is performed
+
+The app's token manager (`KY.refreshToken()` → `performRefresh()` → `performHttpRefresh()` in the
+vendor bundle) calls `GET https://auth.qwen.ai/api/v2/auths/refresh` with `withCredentials: true` and
+**no** `Authorization` header — the interceptor deliberately omits the bearer for `/auths/refresh`. The
+browser therefore supplies the cookies, which is how the httpOnly `refresh_token` reaches the auth host;
+the JavaScript never reads that cookie, and the renewed access token is written back into
+`qwen_access_token_state`.
+
+#### 5.1.3 Why the snapshot stopped working
+
+The timeline the deployment recorded:
+
+```text
+2026-10-22 13:51:35Z  capture verified; access token valid until 14:06:22Z
+        (hours later) one real answer was delivered — the token had expired, so the app refreshed
+                      at least once, using the stored `refresh_token`
+2026-10-23 14:09Z     the service container restarted (its log starts here)
+2026-10-23 16:30Z     a turn failed: "after 20000ms the app still reports no token"
+```
+
+An access token that lives 15 minutes cannot explain a failure *after* a successful turn hours later,
+and the `refresh_token` cookie was still unexpired (until November 21) when the failure happened. What
+fits every recorded fact is that the auth host **rotates** the refresh token when it renews: the new
+cookie exists only in the browsing context that performed the refresh, and that context is deliberately
+thrown away (a probe, the import verification, or a turn's session). The file on disk kept the
+**consumed** token, so once the process that held the live context was gone, nothing could renew again.
+
+This rotation is an **inference**, not an observed header: seeing the refresh response's `Set-Cookie`
+requires a signed-in capture of that response, which this work did not make. What *is* measured is the
+credential class (persistent httpOnly cookie), its 30-day life, the 15-minute access token, and the
+success-then-failure timeline above. No other explanation accounts for all four; a session-only cookie
+is ruled out by §5.1.1.
+
+#### 5.1.4 What was changed, and what remains the operator's step
+
+A snapshot cannot follow a credential the server rotates, but the deployment can stop **throwing the
+rotation away**. Three call sites now keep the state the page produced, all through the one session
+writer (`storeProviderSession`, via `storeQwenChatSession`) and only when it changed:
+
+1. **Import** (`session-import.ts`, `auth-import.ts`): the verification page's own `storageState()` is
+   what gets stored, not the capture the verification just consumed. An import can therefore no longer
+   shorten the session it proves.
+2. **A turn** (`browser-session.ts`): after a successful hydration and after the turn settles, the live
+   context's state is compared with the file and written back when it moved. A restart now resumes from
+   the last rotated `refresh_token`, not from the one a previous turn consumed.
+3. **The session-health check** (`auth-health.ts`): a check that made the page renew persists the
+   renewal; a failed check writes nothing.
+
+**The shared-credential caveat, stated rather than hidden.** The session check and a live turn can
+both hold the same stored credential at once, and the app refreshes on *every* page load whose
+token is near expiry (its threshold is 15–18 min; the token's own life is 15 min), so a check is
+normally also a renewal. Each renewal is written back (§5.1.4), which is what makes the deployment
+recover, but the context that lost the race still holds the old cookie: a turn running across that
+rotation can fail one `AUTH_REQUIRED` boundary and then recover from the persisted state on the next
+attempt, and the row will say `expired` in between rather than pretending otherwise. Serializing the
+check against turns would need a lock shared by two owners that currently do not have one, and was
+not invented for this change.
+
+What cannot be fixed from here: once the *server-side* refresh chain ends — a rotation the deployment
+was down for, a sign-out on another device, or the 30-day expiry — no stored snapshot can renew, and
+the only recovery is a new sign-in. That is why the plugin row shows **Expired — renew** and the
+renew action starts the sign-in flow, instead of the operator discovering it by sending a message.
+
 ## 6. Recon unknowns, and the single correction point
 
 Recon §1.9 is explicit that a signed-in capture is required to settle several facts. This provider
@@ -346,5 +437,7 @@ re-measured and no shape is changed on a guess.
 | `tests/issue-333-qwen-chat-route.test.ts` | same key → same chat and cursor, lost-chat → typed loss → explicit replay, ephemeral with zero creations, mode selection through the real listener, auth refusal, route/model catalogue |
 | `tests/issue-333-qwen-chat-provider-conformance.test.ts` | the shared conformance suite over the production transport/continuity path |
 | `tests/issue-333-qwen-chat-session-store.test.ts` | the per-domain capture rule (a Qwen Code capture is refused), origin sanitisation, and the provider-scoped session layout |
+| `tests/issue-333-qwen-chat-session-renewal.test.ts` | the capture survives the renewal it causes: an import stores the page's post-verification state (not the snapshot its probe consumed), a live session writes back a changed state after `ready()` and after a turn, an unchanged state and a failed hydration write nothing, and a configured custom path is left to the writer that owns it |
+| `tests/session-health-endpoint.test.ts` | `GET /v1/control/auth/health`: present+verified, present+expired (the provider's own validator and its predicate), absent, unverifiable, unreadable, `unknown` on a bound, the cache/TTL, single-flight, the import-seeded cache, the control-token authority, no secret or path in any body, and a renewal written through the single writer |
 | `tests/issue-333-qwen-chat-refusal.test.ts` | every refusal kind (punish HTML/JSON, auth, unknown chat, request refusal, empty body), the message and the one `qwen_chat_refusal` log line carrying status + content-type + a redacted snippet, the production facility preserving the raw answer for `chats/new` and `completions`, and a successful stream unaffected |
 | `tests/issue-333-qwen-chat-project-header.test.ts` | the install is the deterministic project header plus the user's message only, byte-for-byte the ChatGPT install's identity (§3.3); the continuation sends only the new text; the refusal when an install carries no human message; unresolvable metadata omits the header instead of fabricating one; idempotent injection; the declared-purpose turn and the Advisor seam carry no header; the replay rebuilds canonical history and never duplicates the header |

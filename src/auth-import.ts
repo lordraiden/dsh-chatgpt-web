@@ -286,16 +286,27 @@ export function readImportedStorageState(
 }
 
 /**
- * Run the shared middle of an import: accept, authenticate, store.
+ * Validate one capture and run its provider's authenticated predicate. **Writes nothing.**
  *
- * Validation precedes probing, and probing precedes the single write: a capture that fails any step
- * writes nothing, so an unusable session can never masquerade as a working one.
+ * This is the shared middle of an import (the CLI, the control API) *and* of a session-health check:
+ * one acceptance policy, one predicate, one refusal vocabulary. The caller decides whether the
+ * proved material is stored (`runProviderImport` does; the session-health surface stores only a
+ * renewal it produced) and what a refusal means to it.
+ *
+ * `authentication.storageState` is **the state to persist**, which is not necessarily the state that
+ * was handed in: a provider whose predicate drives its own page (Qwen Chat) returns what the page
+ * holds after it renewed its token, so the caller stores the renewal rather than the snapshot the
+ * provider just consumed.
+ *
+ * @throws {AuthImportRefusal} `import_expired`/`import_foreign_domain`/… for a capture the provider
+ *   will not accept, or `import_predicate_failed` for one its predicate rejected (the provider's own
+ *   sentence is preserved as `cause`).
  */
-async function runProviderImport(
+export async function proveProviderCapture(
   provider: AuthImportProvider,
   parsed: ImportedStorageState,
   clock: () => number,
-): Promise<AuthImportResult> {
+): Promise<AuthImportAuthentication> {
   let accepted: ImportedStorageState;
   try {
     accepted = provider.accept(parsed, clock());
@@ -309,31 +320,45 @@ async function runProviderImport(
     );
   }
 
-  let authentication: AuthImportAuthentication;
   if (provider.verification === "unverified") {
-    authentication = {
+    return {
       storageState: accepted,
       detail: provider.unverifiedMessage
         ?? `${provider.label} captures are stored, but this provider has no adapter to verify them yet`,
       verified: false,
     };
-  } else {
-    if (!provider.authenticate) {
-      throw new Error(
-        `The ${provider.label} import provider declares authenticated verification but supplies no predicate`,
-      );
-    }
-    try {
-      authentication = { ...(await provider.authenticate(accepted)), verified: true };
-    } catch (error) {
-      throw new AuthImportRefusal(
-        AUTH_IMPORT_REFUSAL_CODES.predicateFailed,
-        `The capture could not be verified against the ${provider.label} login surface, so nothing was written: `
-        + `${nonSecretDiagnosticText(error)}`,
-      );
-    }
   }
+  if (!provider.authenticate) {
+    throw new Error(
+      `The ${provider.label} import provider declares authenticated verification but supplies no predicate`,
+    );
+  }
+  try {
+    return { ...(await provider.authenticate(accepted)), verified: true };
+  } catch (error) {
+    throw new AuthImportRefusal(
+      AUTH_IMPORT_REFUSAL_CODES.predicateFailed,
+      `The capture could not be verified against the ${provider.label} login surface, so nothing was written: `
+      + `${nonSecretDiagnosticText(error)}`,
+      // The provider's own sentence, for a surface whose question is "does this session still work?"
+      // rather than "may I write this capture?". Preserved here, never re-implemented there.
+      { cause: error },
+    );
+  }
+}
 
+/**
+ * Run the shared middle of an import: accept, authenticate, store.
+ *
+ * Validation precedes probing, and probing precedes the single write: a capture that fails any step
+ * writes nothing, so an unusable session can never masquerade as a working one.
+ */
+async function runProviderImport(
+  provider: AuthImportProvider,
+  parsed: ImportedStorageState,
+  clock: () => number,
+): Promise<AuthImportResult> {
+  const authentication = await proveProviderCapture(provider, parsed, clock);
   const path = provider.store(authentication);
   return {
     path,
@@ -463,8 +488,21 @@ export function qwenChatAuthImportProvider(options: QwenChatAuthImportOptions = 
         ...(options.openPage === undefined ? {} : { openPage: options.openPage }),
         ...(options.hydration === undefined ? {} : { hydration: options.hydration }),
       });
+      // The page restored its own session with this capture, and a renewal it performed while doing
+      // so rotates the credential the capture held (`refresh_token`). Persisting the page's own
+      // state means the stored session is the one that was just proved, not the snapshot the proof
+      // consumed — otherwise the first verification would shorten the capture's life. A page state
+      // that cannot be read back is ignored: it must never discard a session the page just proved.
+      let storageState = state;
+      if (verification.storageState !== undefined) {
+        try {
+          storageState = validateImportedStorageState(verification.storageState, "the session page state");
+        } catch {
+          storageState = state;
+        }
+      }
       return {
-        storageState: state,
+        storageState,
         detail: verification.read === "truncated-envelope"
           ? `Authenticated: /api/v2/chats answered success:true (HTTP ${verification.status}); `
             + `the body was cut at ${verification.bodyChars ?? 0} characters, so its leading envelope `
