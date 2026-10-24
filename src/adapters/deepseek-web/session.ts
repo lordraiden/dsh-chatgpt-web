@@ -11,9 +11,8 @@
  *
  * ## What readiness can honestly mean here
  *
- * The Qwen adapters can wait for their app to restore a token from `localStorage`. **No equivalent
- * observable was measured for DeepSeek** (recon §2.7 names the token manager and the storage keys the
- * app caches its *settings* in, not a token key), so this adapter does not pretend to have one:
+ * The signed-in capture settled the page's own token handle (`localStorage["userToken"]`), and
+ * `network-turn.ts` reads it per request. This session still does **not** poll for it:
  *
  * 1. the deployment's `.verified.json` marker must exist (the deployment's own proof that an
  *    authenticated predicate accepted this session);
@@ -57,11 +56,13 @@ import { deepSeekSessionVerified, type DeepSeekProviderConfig } from "./provider
 /** The operator's next action when no usable session exists. Never a cookie, never a token. */
 export const DEEPSEEK_WEB_SIGN_IN_INSTRUCTION =
   "Sign in to DeepSeek at https://chat.deepseek.com in the browser that holds the account, then store "
-  + "the capture with `auth import --provider deepseek-web`. This build verifies no DeepSeek capture "
-  + "itself (doc/deepseek-web.md §6), so a capture is stored unverified and no turn uses it yet.";
+  + "the capture with `auth import --provider deepseek-web`. The capture must include the cookies "
+  + "(WAF/session) and this origin's `localStorage` — the `userToken`, `deepseek-device-id:chat` and "
+  + "`hif_leim_cached` entries are what the page's own requests carry. An import runs the authenticated "
+  + "predicate before storing (doc/deepseek-web.md §7), so a capture it cannot prove is refused.";
 
 /** The established headless launch shape, kept beside the only place that uses it. */
-function deepSeekWebLaunchArgs(): string[] {
+export function deepSeekWebLaunchArgs(): string[] {
   return [
     "--headless=new",
     "--disable-blink-features=AutomationControlled",
@@ -69,6 +70,67 @@ function deepSeekWebLaunchArgs(): string[] {
     "--no-default-browser-check",
     `--window-size=${DEEPSEEK_WEB_VIEWPORT.width},${DEEPSEEK_WEB_VIEWPORT.height}`,
   ];
+}
+
+/** One opened provider page, the context state behind it, and the only handle that may close it. */
+export interface DeepSeekOpenedPage {
+  readonly page: Page;
+  /**
+   * The browsing context's state **now**, including anything the app rewrote while it loaded.
+   *
+   * Read by the import check, so a token the page rotated during the proof is what gets stored instead
+   * of the snapshot the proof consumed. Optional so a simulated page stays valid.
+   */
+  storageState?(): Promise<unknown>;
+  /** Idempotent. */
+  close(): Promise<void>;
+}
+
+/**
+ * Open the app on a capture: **one** launch shape for the turn path and the import check.
+ *
+ * The page is what makes the predicate's request the page's own (same-origin `fetch`, the app's
+ * cookies, `Origin`, `Referer` and `Sec-Fetch-*`), and it is what lets the page's own token handle be
+ * read at call time. Nothing about the page's markup is read.
+ *
+ * A failure here is a **transport** failure and is rethrown unchanged: the capture was not judged, and
+ * a caller must not report "the session is wrong" for a browser that could not start.
+ */
+export async function openDeepSeekPage(
+  chromeExecutablePath: string,
+  storageState: unknown,
+): Promise<DeepSeekOpenedPage> {
+  const browser: Browser = await chromium.launch({
+    executablePath: chromeExecutablePath,
+    headless: false,
+    args: deepSeekWebLaunchArgs(),
+  });
+  let context: BrowserContext | undefined;
+  try {
+    context = await browser.newContext({
+      storageState: storageState as NonNullable<BrowserContextOptions["storageState"]>,
+      viewport: { width: DEEPSEEK_WEB_VIEWPORT.width, height: DEEPSEEK_WEB_VIEWPORT.height },
+    });
+    const page = await context.newPage();
+    await page.goto(DEEPSEEK_WEB_ROOT_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: DEEPSEEK_WEB_NAVIGATION_TIMEOUT_MS,
+    });
+    const opened = context;
+    return {
+      page,
+      async storageState() {
+        return await opened.storageState();
+      },
+      async close() {
+        try { await opened.close(); } finally { await browser.close(); }
+      },
+    };
+  } catch (error) {
+    await context?.close().catch(() => undefined);
+    await browser.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 /** One opened provider page and the only handle that may close it. */
@@ -108,9 +170,9 @@ export interface DeepSeekBrowserSessionOptions {
   readonly provider: DeepSeekProviderConfig;
   /** Test/in-process seam; production launches Chromium on the capture. */
   readonly openPage?: DeepSeekSessionPageOpener;
-  /** The proof solver. Defaults to the typed refusal (`unprovenDeepSeekProofOfWork`). */
+  /** The proof solver. Defaults to the page's own worker (`createDeepSeekPageProofAnswerer`). */
   readonly proofOfWork?: DeepSeekProofOfWorkSolver;
-  /** The `Authorization` reader. Defaults to "none" (no measured token provenance). */
+  /** The `Authorization` reader. Defaults to the page's own `localStorage["userToken"]` at call time. */
   readonly authorization?: () => Promise<string | undefined>;
   /** Clock seam, for the diagnostics' own timing. */
   readonly now?: () => number;
@@ -138,42 +200,21 @@ function readVerifiedStorageState(provider: DeepSeekProviderConfig): unknown {
 }
 
 /**
- * The default opener: launch Chromium on the capture and open the app shell.
+ * The default opener for the turn path: launch Chromium on the capture and open the app shell.
  *
  * No user-agent override and no stealth flag: the recorded block here is WAF/PoW, not UA sensitivity
  * (recon §2.6 measured identical answers with and without a UA), and a page-level challenge is the
- * operator's to clear, not a disguise's to bypass.
+ * operator's to clear, not a disguise's to bypass. The launch itself is {@link openDeepSeekPage}, so
+ * the import check opens exactly the same page.
  */
 async function defaultOpenPage(
   provider: DeepSeekProviderConfig,
   storageState: unknown,
 ): Promise<DeepSeekSessionPage> {
-  const browser: Browser = await chromium.launch({
-    executablePath: provider.chromeExecutablePath,
-    headless: false,
-    args: deepSeekWebLaunchArgs(),
-  });
-  let context: BrowserContext | undefined;
   try {
-    context = await browser.newContext({
-      storageState: storageState as NonNullable<BrowserContextOptions["storageState"]>,
-      viewport: { width: DEEPSEEK_WEB_VIEWPORT.width, height: DEEPSEEK_WEB_VIEWPORT.height },
-    });
-    const page = await context.newPage();
-    await page.goto(DEEPSEEK_WEB_ROOT_URL, {
-      waitUntil: "domcontentloaded",
-      timeout: DEEPSEEK_WEB_NAVIGATION_TIMEOUT_MS,
-    });
-    const opened = context;
-    return {
-      page,
-      async close() {
-        try { await opened.close(); } finally { await browser.close(); }
-      },
-    };
+    const opened = await openDeepSeekPage(provider.chromeExecutablePath, storageState);
+    return { page: opened.page, close: opened.close };
   } catch (error) {
-    await context?.close().catch(() => undefined);
-    await browser.close().catch(() => undefined);
     throw webChatError(
       "TRANSPORT_UNAVAILABLE",
       `The DeepSeek page could not be opened (${nonSecretDiagnosticText(error)}).`,

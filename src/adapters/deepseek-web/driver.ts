@@ -293,9 +293,11 @@ export function createDeepSeekDriver(options: DeepSeekDriverOptions): WebChatPro
         return {
           ok: false,
           detail: deepSeekCapturePresent(provider.storageStatePath)
-            ? "a DeepSeek capture is stored but it is not a verified session: no authenticated predicate "
-              + "has accepted it (doc/deepseek-web.md §6)"
-            : "no DeepSeek session is stored for this deployment",
+            ? "a DeepSeek capture is stored but it is not a verified session: the import's settings "
+              + "predicate has not accepted it — re-run `auth import --provider deepseek-web` "
+              + "(doc/deepseek-web.md §7)"
+            : "no DeepSeek session is stored for this deployment: import a capture with "
+              + "`auth import --provider deepseek-web` (doc/deepseek-web.md §7)",
         };
       }
       return { ok: true, detail: `${models.length} model_type(s) available` };

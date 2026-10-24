@@ -34,12 +34,15 @@ Implemented, and covered by tests that need no network:
   becomes `AUTH_REQUIRED`;
 - the **provider skeleton**: configurable catalogue rows with no invented ids, continuity keyed to
   `chat_session_id` + `parent_message_id`, ephemeral turns that create no session, and the two-layer
-  envelope refusal mapping.
+  envelope refusal mapping;
+- the **authenticated import predicate** (`session-probe.ts`, row 14): the measured settings call whose
+  nested `data.biz_code` decides, wired into `auth import` as this provider's `authenticate` step
+  (`session-import.ts` + `session-store.ts`). A good capture is therefore stored **verified**, writes
+  the `.verified.json` marker, and the session's `ready()` gate no longer refuses it for lack of proof.
 
-**Not implemented, on purpose:** the interactive sign-in controller and the authenticated **import
-predicate** (§7). A fresh `auth import --provider deepseek-web` still stores the capture *unverified*,
-and the session's `ready()` gate refuses before launching the page. That is the one rung between a good
-capture and a live turn; §6 and §7 name it.
+**Not implemented, on purpose:** the interactive sign-in controller, so `GET /v1/control/auth/` still
+does not list DeepSeek; its operator path is a capture plus `auth import` (§7). Every provider this
+deployment serves now has an authenticated predicate, so `unverifiable` is no longer reachable here.
 
 - **Provider id / public route:** `deepseek-web`. A row is `deepseek-web/<model_type>`.
 - **Files:** `src/adapters/deepseek-web/**`; tests
@@ -183,6 +186,7 @@ one observation that settles it. No row is dropped.
 | 8 | **`chat_session/create` takes `{}` and answers the measured envelope**; the id is at `data.biz_data.chat_session.id`. The full success shape carries `model_type`, `title`, `seq_id`, `ttl_seconds`, `is_empty`, `current_message_id`, … | The captured create request and answer. | `DEEPSEEK_WEB_SESSION_ID_PATHS`, `readDeepSeekCreatedSessionId` |
 | 9 | **`Authorization` is `Bearer <64-char opaque token>`** (not a JWT), and the page keeps it in `localStorage["userToken"]` as `{"value": …, "__version": "0"}`. Its client reads it through the same storage handle for every API call. | The captured completion/settings/create requests carry the header; the live app bundle's storage handle `userToken` and token manager read that key. | `page-identity.ts` — read at call time, per request |
 | 11 | **`BATCH` children are relative** to the batch path. The captured frame is `p:"response", o:"BATCH", v:[{p:"accumulated_token_usage"},{p:"quasi_status"}]`. | The captured stream, and the bundle's `SI.parse` prepends `s + "/"`. | `DeepSeekDeltaParser` |
+| 14 | **The authenticated predicate is the settings call.** `GET /api/v0/client/settings?did=<uuid>&scope=model` answers **HTTP 200 in every case**, so the verdict is the **nested** `data.biz_code`: `0` for a signed-in session, `1` (`SETTINGS_NOT_FOUND`) for an anonymous one, and the `40002`/`40003` token family when the bearer is missing or expired. The top-level `code` alone is never the answer. | The signed-in capture's settings answer (`code:0` + `data.biz_code:0`), the recon's anonymous answer (`biz_code:1 SETTINGS_NOT_FOUND`), and the token codes recorded in recon §2.2. | `DEEPSEEK_WEB_SETTINGS_PATH`, `session-probe.ts` (`deepSeekSettingsVerdict`), `session-import.ts`, `session-store.ts` |
 | 13a | **The exact `x-client-*` / `x-device-*` names** are `x-client-bundle-id`, `x-client-platform`, `x-client-version`, `x-client-locale`, `x-client-timezone-offset`, `x-device-id`, `x-device-model`, and `x-hif-leim`. Their measured shapes: bundle id `com.deepseek.chat` (region-mapped), platform `web`, version `2.7.0`, locale `en_US`, offset in seconds (`7200`), device id a UUID, device model empty, leim a cached fingerprint token (its `hif_leim_cached` handle is a JSON string). | Every captured API request carries the set; the live bundle builds it from `staticEnv` + `navigator.language` + the browser offset + `localStorage`. | `page-identity.ts` — values read from the page, except the two documented build constants (`web`, `2.7.0`) |
 
 ### 6.2 Still open, with the one observation that settles each
@@ -191,6 +195,7 @@ one observation that settles it. No row is dropped.
 | --- | --- | --- | --- |
 | 10 | Which event/name carries an **in-band stream error** | The two-layer envelope is applied to every frame; a frame with no code is still a provider error. No captured stream carried one. | A rejected completion mid-stream (expired token, quota, `POW_HEADER_ERROR`/`INVALID_POW_RESPONSE`) and the frame it arrives as |
 | 12 | Whether an **ephemeral turn** is accepted with a process-generated session id | Sent, never created; a refusal is that turn's typed failure, never a fallback to creating a session | A completion request carrying a `chat_session_id` the provider never issued |
+| 15 | Whether the **settings call keys on the page's device identity** or on the app's own `__ds_remote_feature_did` (row 4 measured the two apart) | The predicate sends the page's device identity as `did` — the value the capture's required `deepseek-device-id:chat` entry holds — and reports the provider's own answer: if the server keys settings on the other id, the answer is `settings-refused`, never `authenticated` | A live import whose settings answer is `data.biz_code:0` with `did` taken from the device identity (or a capture carrying `__ds_remote_feature_did` beside both ids) |
 | 13b | Which client/device headers are **required** (as opposed to merely sent) | All measured ones are sent from the page; none is fabricated. Requirement cannot be proven from one capture. | A signed-in completion with exactly one of them omitted, and the provider's answer |
 
 ### 6.3 The catalogue example these values produce
@@ -223,47 +228,72 @@ exactly what is configured.
 
 ## 7. Sign-in, import and the current operator ladder
 
-This slice deliberately still does **not** add:
+What this provider still does **not** add: an interactive sign-in controller. `GET /v1/control/auth/`
+does not list DeepSeek, and the operator path is a capture plus `auth import`. What it **does** add is
+the authenticated **predicate** (row 14), so an import is no longer a bare capture.
 
-- an interactive sign-in controller, so `GET /v1/control/auth/` does not list DeepSeek yet;
-- an authenticated **predicate**, so `auth import --provider deepseek-web` still stores a capture
-  **unverified** (no `.verified.json` marker). The import's message says exactly that.
-
-The capture now has a measured shape, so what it must contain is no longer a guess:
+What a capture must contain is measured, not a guess — and the import checks all of it **before a
+browser starts**, naming the missing entry when one is absent:
 
 ```text
-cookies                        the WAF/session cookies of chat.deepseek.com
+cookies                        the WAF/session cookies of chat.deepseek.com (required)
 origins[chat.deepseek.com].localStorage
-  userToken                    {"value": "<opaque bearer>", "__version": "0"}
-  deepseek-device-id:chat      the browser's UUID device identity
-  hif_leim_cached              the page's cached HIF leim token (optional; omitted when absent)
+  userToken                    {"value": "<opaque bearer>", "__version": "0"}   (required)
+  deepseek-device-id:chat      the browser's UUID device identity                (required)
+  hif_leim_cached              the page's cached HIF leim token                  (optional)
 ```
 
 A capture with cookies only is **not** enough: every API call carries the page's bearer, and the page
 reads it from `userToken`. A capture with `userToken` only is not enough either: the WAF/session cookies
-are the page's own. The storage state is what `auth import` already stores, so no new format is
-introduced.
+are the page's own. `hif_leim_cached` is optional because the app's own header builder omits
+`x-hif-leim` when its cache is empty. The storage state is what `auth import` already stores, so no new
+format is introduced.
+
+**The predicate.** The import opens `chat.deepseek.com` in the captured context, reads the page's
+identity at call time (`page-identity.ts`: `userToken`, device id, leim, locale, timezone, bundle id)
+and issues `GET /api/v0/client/settings?did=<uuid>&scope=model` **from inside that page**, same-origin,
+through `requestInPageContext` — the WAF answers a real browser, and a Node client is not the page. The
+answer is classified by `deepSeekSettingsVerdict`, and only one class authenticates:
+
+| Answer | Class | What it means |
+| --- | --- | --- |
+| `code:0` **and** `data.biz_code:0` (HTTP 200) | `authenticated` | a signed-in session; the marker is written |
+| `40002`/`40003`/`INVALID_TOKEN`, at either layer | `token-refused` | the bearer is not accepted (code preserved) |
+| `data.biz_code:1` / `SETTINGS_NOT_FOUND`, or any other non-zero business code | `settings-refused` | HTTP 200 with a refusal nested in it (code preserved) |
+| a WAF/challenge answer | `access-verification` | clear the challenge in a browser; not a wrong session |
+| a non-2xx answer with no envelope (401/403 included) | `http-refused` | the edge refused before the API |
+| a 2xx answer that is not JSON, is empty, or has no business layer | `unreadable` | nothing was claimed |
+
+The `did` the predicate sends is the page's own device identity (the capture's required
+`deepseek-device-id:chat` entry); row 4 measured that the app keeps a separate
+`__ds_remote_feature_did`, so which id the settings lookup keys on is row 15 — an open question whose
+answer can only ever move a good session between `authenticated` and `settings-refused`.
+
+The HTTP status is never the answer, and the top-level `code` alone is never the answer: the anonymous
+answer is `code:0` with `data.biz_code:1`. The provider's own code survives every refusal, no class is
+reported as `authenticated` when it carries a refusal, and every refusal sentence is short enough to
+reach the operator intact through `nonSecretDiagnosticText` (no absolute URL, under the 300-character
+bound).
 
 The ladder today, in the order each rung blocks the next:
 
-1. **Capture** — `auth import --provider deepseek-web --from <file>` stores the session in the standard
-   provider layout. It is *not* proof: no predicate has accepted it.
-2. **Verified session** — **the one remaining rung.** `ready()` requires the deployment's verified
-   marker, so it refuses before launching a browser. Nothing in this slice writes that marker, because
-   writing it without a predicate would be a claim the deployment cannot prove. The measurement a
-   predicate can be built on is now known and cheap: the page's own token makes
-   `GET /api/v0/client/settings?did=<uuid>&scope=model` answer `code:0` + `data.biz_code:0` for a signed-in
-   session and `data.biz_msg:"SETTINGS_NOT_FOUND"` for an anonymous one (both measured).
-3. **A turn** — ready to run once rung 2 exists: the proof, the bearer, the client/device headers and the
-   measured stream are implemented and pinned by tests. This slice cannot prove a live run without an
-   authenticated session.
+1. **Capture** — `auth import --provider deepseek-web --from <file>` shape-checks the file and the
+   provider's required material. A capture without `userToken` or the device id is refused **there**,
+   with no browser started.
+2. **Verified session** — the predicate above runs, and a settings answer whose **nested** business code
+   is `0` writes the `.verified.json` marker through the single session writer. `ready()` requires that
+   marker, so this is the rung that unblocks a turn. A refusing answer is `import_predicate_failed` and
+   writes nothing.
+3. **A turn** — the proof, the bearer, the client/device headers and the measured stream are implemented
+   and pinned by tests. A live run needs an authenticated session (a verified capture); this document
+   still does not claim one.
 4. **A catalogue** — configuration, not discovery: the model list is a session-only remote setting, so
    there is no public endpoint and no `models refresh` command for this provider. §6.3 is the example
    with the measured values.
 
 `doctor` reports `webchat-deepseek-web` once a `model_type` is configured, and its health detail states
-the exact missing rung. A deployment that only stored a capture gets no doctor check, because an
-unverified capture is not an account.
+the exact missing rung. `GET /v1/control/auth/health` now runs the same predicate for this provider, so
+a stored session is reported `verified`/`expired`/`absent`/`unknown` — **never** `unverifiable`.
 
 ## 8. Deliberately not implemented
 
@@ -277,8 +307,8 @@ unverified capture is not an account.
 - **Tools / MCP / provider-native loops** — refused-or-discarded by the shared rule
   (`rejectUnsupportedWebChatFeatures`), never forwarded.
 - **The shared conformance suite** — it drives a *successful* turn through the real path, whose session
-  gate needs a verified capture. The protocol/PoW/route tests cover the vocabulary with injected seams,
-  and no test claims a live authenticated run.
+  gate needs a verified capture, which needs a real signed-in DeepSeek account. The protocol/PoW/route
+  tests cover the vocabulary with injected seams, and no test claims a live authenticated run.
 - **Automatic retry after a rejected proof or a `close:"retry"`** — both are typed failures. A confirmed
   submission is never resent, and a rejected proof is never replayed.
 - **A synthesized `x-device-id`** — when the page has none, the page generates one with its own
@@ -292,6 +322,7 @@ unverified capture is not an account.
 | `tests/deepseek-web-sse.test.ts` | the measured frame sequence (snapshot, inherited `{v}`, `-1`, relative `BATCH`, `close` termination); named-SSE framing (comments, multi-line data, CRLF split, trailing event); the sticky/default delta parser; `SET`/`APPEND`/`BATCH` semantics; `THINK` excluded and counted, unmodelled types reported; every terminator; `update_session` mid-stream; an in-band envelope error at either layer; each malformed patch refused with its typed code |
 | `tests/deepseek-web-protocol.test.ts` | the measured nine-key completion body (`action:null`, `preempt:false`, no `source`), `parent_message_id:null` on a first turn, the measured session-id path, both envelope layers, the auth / PoW / WAF / lost-session / upstream refusal mapping, the challenge location, the no-solver seam, catalogue visibility and the §6.3 example |
 | `tests/deepseek-web-pow.test.ts` | the header/value shape (base64 JSON, recorded keys/order), a fresh proof per call, the page answerer's worker call (`expireAt` mapping), solver success/refusal/unavailable/timeout/mismatched-challenge/unknown-algorithm, the page token storage shape, the bundle-id region mapping, the client/device header family, read-at-call-time rotation, facility wiring (auth + client headers on JSON calls, proof only on the completion), and the measured storage keys/header names |
+| `tests/deepseek-web-import.test.ts` | the predicate's verdict classes (`authenticated`, `token-refused`, `settings-refused`, `access-verification`, `http-refused`, `unreadable`), the nested `data.biz_code` deciding over a success-shaped top level, the provider's code preserved, the settings request's URL/headers built from the page's identity, read-at-call-time token rotation, the verified import (marker written once, health reports `verified`), the refusals writing nothing, the capture refusals that happen before any browser, and the absence of every token/cookie/leim from refusals, logs and responses |
 | `tests/deepseek-web-route.test.ts` | same key → same `chat_session_id` and `parent_message_id`; lost session → typed loss → explicit replay; ephemeral with zero creations; PoW-unavailable failing before anything is created; auth refusal mapped from `code:40003`; reasoning selection refused; capability declaration discarded and declared; the configured and unconfigured listener paths (rows, stream, honest `not_configured`); a `ready.model_type` that differs from the requested one surfaced, never hidden |
 
 ## 10. What the capture changed

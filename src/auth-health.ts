@@ -14,8 +14,9 @@
  * is described by the very {@link AuthImportProvider} `auth import` uses, so a health check runs the
  * same `accept` → `authenticate` steps the import pipeline runs ({@link proveProviderCapture}),
  * reports the same `AuthImportRefusal` codes, and stores a renewal through the same single writer.
- * A provider with no authenticated predicate (`verification: "unverified"`, today DeepSeek Web) is
- * reported `unverifiable` — never probed, never dressed up as expired.
+ * A provider that declares no authenticated predicate (`verification: "unverified"`) is reported
+ * `unverifiable` — never probed, never dressed up as expired. Every provider this deployment serves
+ * (ChatGPT Web, Qwen Code, Qwen Chat, DeepSeek Web) declares one today.
  *
  * ## Cheap, bounded, cached
  *
@@ -304,7 +305,7 @@ export function createAuthHealthSurface(options: AuthHealthSurfaceOptions): Auth
       });
     }
 
-    // A provider with no authenticated predicate is never probed: a capture is not proof.
+    // A provider that declares no authenticated predicate is never probed: a capture is not proof.
     if (provider.importProvider.verification === "unverified") {
       return row(provider, "unverifiable", {
         capturePresent: true,
