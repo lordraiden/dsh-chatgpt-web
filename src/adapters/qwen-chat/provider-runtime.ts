@@ -442,6 +442,8 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
     readonly conversation: WebChatConversation;
     readonly chat?: { readonly chatId: string; readonly parentId?: string };
     readonly replay: boolean;
+    /** Whether this conversation already sent its first human message (the recorded install fact). */
+    readonly humanMessageSent: boolean;
   }> => {
     const stored = await store.read(identity);
     const entry = state.read(identity.key);
@@ -504,7 +506,13 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
       : recordedChat?.status === "active"
         ? { chatId: recordedChat.chatId, ...(cursor !== undefined ? { parentId: cursor } : {}) }
         : undefined;
-    return { identity, conversation: plan.conversation, ...(chat ? { chat } : {}), replay: plan.outcome === "replay" };
+    return {
+      identity,
+      conversation: plan.conversation,
+      ...(chat ? { chat } : {}),
+      replay: plan.outcome === "replay",
+      humanMessageSent: entry?.humanMessageSent === true,
+    };
   };
 
   /**
@@ -674,14 +682,15 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
       }
       const prompt = planned.replay ? compileQwenChatReplayPrompt(turn.history) : turn.userText;
       const humanText = prompt.length > 0 ? prompt : turn.userText;
-      // The project header is initialization metadata for the FIRST physical message of a brand-new
-      // conversation: the turn that is about to create this conversation's chat and is not a rebuild.
-      // This mirrors the ChatGPT minimal Chat Mode install condition (normal Chat Mode + generation 1)
-      // in the facts this provider actually has - the core advances the generation only on an explicit
-      // replay, and a continuation is exactly a recorded provider chat - so a continuation sends only
-      // the new human text and a replay/rebuild carries the canonical history with no header.
-      // The ephemeral path above and the Advisor's neutral `openTextExchange` seam never reach here.
-      const installsConversation = !planned.replay && planned.chat === undefined;
+      // The project header is initialization metadata for the FIRST turn of a conversation that
+      // carries a human message. It is decided from this deployment's **recorded** install fact, never
+      // from "does the provider chat exist yet": a chat can be created by something that is not the
+      // caller's human turn (the Advisor's neutral seam, or a housekeeping call the caller did not
+      // declare), and that must not consume the conversation's opening. A replay/rebuild carries the
+      // canonical history and installs nothing; a continuation (the recorded human message already
+      // sent) sends only the new human text. The ephemeral path above and the Advisor's neutral
+      // `openTextExchange` seam never record the fact, so neither can install.
+      const installsConversation = !planned.replay && !planned.humanMessageSent;
       const text = installsConversation ? compileQwenChatInstallPrompt(humanText, projectIdentityHeader()) : humanText;
       const handoff = exchangeFor({
         conversationKey: identity.key,
@@ -697,7 +706,10 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
         ephemeral: false,
         onAnswer: (answer) => {
           // The provider's own continuation state: the chat and the response cursor the next turn
-          // hangs off.
+          // hangs off. The same completed turn is the conversation's first **human** message, so the
+          // install fact is recorded here (and only here): a turn that never completed sends no text
+          // this conversation keeps, and must not consume the header.
+          state.recordHumanMessage(identity.key);
           state.recordChat(identity.key, {
             chatId: answer.chatId,
             ...(answer.parentId !== undefined ? { parentId: answer.parentId } : {}),

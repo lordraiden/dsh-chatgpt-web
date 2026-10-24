@@ -235,10 +235,10 @@ Redaction and bounding are the shared refusal-evidence rules (`sanitizedBodyFrag
 `truncateWithEllipsis`), so there is no second scrubber. This is not a guess: if a turn still comes
 back empty, that one line names the shape the answer is hiding in.
 
-### 3.3 The first message of a conversation installs the project identity
+### 3.3 The first human message of a conversation installs the project identity
 
-The first physical message of a normal Chat Mode conversation is not the operator's bare text: it is
-the deterministic project header plus the current user turn, exactly as on ChatGPT
+The first **turn that carries a human message** is not the operator's bare text: it is the
+deterministic project header plus the current user turn, exactly as on ChatGPT
 ([`architecture.md`](./architecture.md) §20.1):
 
 ```text
@@ -253,15 +253,35 @@ github: "<package repository URL>"
   from. The name is a package name (never a filesystem path) and the URL is the manifest's own
   repository URL normalised to an `https:`/`http:` URL. Metadata that cannot be resolved is
   **omitted, never fabricated**: no name, no URL, no header.
-- The header is initialization metadata for the **first physical message only**. A continuation sends
-  just the new human text (the provider chat already carries the conversation), and an explicit
-  replay/rebuild re-projects canonical host history alone, so the header is never re-injected and can
-  never be duplicated (injection is idempotent by construction).
+- **The decision is recorded state, not the provider chat.** The conversation record
+  (`chat-state.ts`, `humanMessageSent`) says whether this conversation has already sent its first
+  human message; the header installs on the first turn where that fact is absent. It is deliberately
+  **not** derived from "does a Qwen chat id exist yet": a chat can be created by something that is not
+  the caller's human turn — the Advisor's neutral seam, an operator's own browser, or a housekeeping
+  call whose caller did not declare it — and none of those may consume the conversation's opening. The
+  fact is recorded by the turn that completes the install, survives a replay (a generation change) and
+  is never re-injected, so injection cannot duplicate the header (it is idempotent by construction).
+  A state file written before this fact existed records a chat without the flag and is adopted as
+  "already installed": re-headering a live conversation would duplicate the header, so the fail-safe
+  direction wins.
+- A continuation sends just the new human text (the provider chat already carries the conversation),
+  and an explicit replay/rebuild re-projects canonical host history alone.
 - A declared-purpose (ephemeral) turn is **not** an install and carries no header, and neither does
   the Advisor's neutral text seam. No host-context snapshot, runtime block, tool or system text
   travels with any of them.
 - An install that would carry no human message is refused — the compiler refuses it, and the route's
   own projection reports `no_user_message` — exactly like the ChatGPT install.
+
+**The harness's half.** An undeclared housekeeping call (a `session-title`/`compaction` call whose
+caller dropped its `purpose` on the way to the wire) is *indistinguishable* from a human turn at the
+adapter's boundary, so if it reaches the provider first it is the conversation's first turn and it
+consumes the install. The bridge honours every declared channel — `purpose` in
+`client_metadata["x-codex-turn-metadata"]`, or the `x-dsh-turn-purpose` request header a static
+per-route header can carry — and the OpenAI-compatible adapter this deployment uses
+(`@earendil-works/pi-ai`) forwards neither, so it must be declared where the harness can: point the
+title/compaction route at a provider entry whose static headers include
+`x-dsh-turn-purpose: session-title`. With that, the housekeeping call is answered and kept nowhere and
+the operator's first message is the install, as §3.3's rule requires.
 
 ## 4. Continuity and ephemeral turns
 
@@ -440,4 +460,4 @@ re-measured and no shape is changed on a guess.
 | `tests/issue-333-qwen-chat-session-renewal.test.ts` | the capture survives the renewal it causes: an import stores the page's post-verification state (not the snapshot its probe consumed), a live session writes back a changed state after `ready()` and after a turn, an unchanged state and a failed hydration write nothing, and a configured custom path is left to the writer that owns it |
 | `tests/session-health-endpoint.test.ts` | `GET /v1/control/auth/health`: present+verified, present+expired (the provider's own validator and its predicate), absent, unverifiable, unreadable, `unknown` on a bound, the cache/TTL, single-flight, the import-seeded cache, the control-token authority, no secret or path in any body, and a renewal written through the single writer |
 | `tests/issue-333-qwen-chat-refusal.test.ts` | every refusal kind (punish HTML/JSON, auth, unknown chat, request refusal, empty body), the message and the one `qwen_chat_refusal` log line carrying status + content-type + a redacted snippet, the production facility preserving the raw answer for `chats/new` and `completions`, and a successful stream unaffected |
-| `tests/issue-333-qwen-chat-project-header.test.ts` | the install is the deterministic project header plus the user's message only, byte-for-byte the ChatGPT install's identity (§3.3); the continuation sends only the new text; the refusal when an install carries no human message; unresolvable metadata omits the header instead of fabricating one; idempotent injection; the declared-purpose turn and the Advisor seam carry no header; the replay rebuilds canonical history and never duplicates the header |
+| `tests/issue-333-qwen-chat-project-header.test.ts` | the install is the deterministic project header plus the user's message only, byte-for-byte the ChatGPT install's identity (§3.3); the continuation sends only the new text; the refusal when an install carries no human message; unresolvable metadata omits the header instead of fabricating one; idempotent injection; the declared-purpose turn and the Advisor seam carry no header; the install is decided from recorded state (a provider chat with no human message does not consume it, and a pre-recorded legacy entry is adopted as installed); the replay rebuilds canonical history and never duplicates the header |

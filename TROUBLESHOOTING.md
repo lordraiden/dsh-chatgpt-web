@@ -346,10 +346,12 @@ Do not reconstruct authoritative DSH state from browser-visible conversation tex
 ## 13. Qwen Code or DeepSeek Web cannot be selected
 
 **Qwen Code is a supported route** (`qwen-code/<model>`) once this deployment has a verified session for
-it or a `webChat.providers["qwen-code"]` block. **DeepSeek Web** (`deepseek-web/<model_type>`) is
-implemented and publishes no rows until the operator configures the measured `model_type` values in
-`webChat.providers["deepseek-web"].modelTypes`. Its turn path is measured (page-owned proof of work,
-page bearer and client/device headers, the recorded SSE patch stream), and a live turn needs a
+it or a `webChat.providers["qwen-code"]` block. **DeepSeek Web** (`deepseek-web/default`) needs **no
+configuration**: the provider seeds the measured enabled row (`deepseek-web/default`, "DeepSeek Chat",
+both toggles on) and `/v1/models` publishes it out of the box. Configuring
+`webChat.providers["deepseek-web"].modelTypes` overrides that row or extends it, and an explicit empty
+list is the only state that publishes no DeepSeek route. Its turn path is measured (page-owned proof of
+work, page bearer and client/device headers, the recorded SSE patch stream), and a live turn needs a
 **verified** session: `auth import --provider deepseek-web` runs the measured settings predicate and
 writes the verified marker, so a `ready()` refusal on a stored capture means the predicate refused it
 (SETTINGS_NOT_FOUND, a token code, a WAF challenge or an unreadable answer — the import's message says

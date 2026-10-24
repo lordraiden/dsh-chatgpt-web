@@ -32,9 +32,10 @@ Implemented, and covered by tests that need no network:
   `x-client-*` / `x-device-*` family and `x-hif-leim`, all read from the page **at call time**
   (`page-identity.ts`); a page without a token sends no bearer and the provider's `40002`/`40003`
   becomes `AUTH_REQUIRED`;
-- the **provider skeleton**: configurable catalogue rows with no invented ids, continuity keyed to
-  `chat_session_id` + `parent_message_id`, ephemeral turns that create no session, and the two-layer
-  envelope refusal mapping;
+- the **provider skeleton**: catalogue rows with no invented ids — **one seeded default row**, so the
+  model is selectable with no configuration at all — continuity keyed to `chat_session_id` +
+  `parent_message_id`, ephemeral turns that create no session, and the two-layer envelope refusal
+  mapping;
 - the **authenticated import predicate** (`session-probe.ts`, row 14): the measured settings call whose
   nested `data.biz_code` decides, wired into `auth import` as this provider's `authenticate` step
   (`session-import.ts` + `session-store.ts`). A good capture is therefore stored **verified**, writes
@@ -81,12 +82,26 @@ and no value for `action`/`preempt`; the capture shows `source` is **not** sent 
 longer omits the two booleans and no longer models `source`
 (`DEEPSEEK_WEB_RECORDED_BODY_KEYS`, `DEEPSEEK_WEB_UNSENT_BODY_KEYS = []`).
 
+**The two turns differ, and the adapter reproduces the difference.** The capture's first interaction and
+its second interaction (same `chat_session_id`) are:
+
+| Key | First turn (session created) | Second turn (continuation) |
+| --- | --- | --- |
+| `parent_message_id` | `null` | the previous answer's `ready.response_message_id`, **as a JSON number** |
+| `model_type` | the deployment's `model_type` (`default`) | `null` — the session owns the model |
+| `thinking_enabled` / `search_enabled` | `true` / `true` | `true` / `true` |
+
+So a session's first turn declares the model and a continuation does not, and the cursor goes back
+exactly as the provider announced it (the ids are numbers in this capture; they are never stringified).
+The provider echoes the answering model in `ready.model_type`, and a difference from the requested row is
+surfaced by the re-route diagnostic instead of being hidden.
+
 `thinking_enabled` and `search_enabled` are the recorded plain booleans (recon §2.5). They are
 **deployment configuration per model**, not caller-selectable modes: no named mode labels were measured,
 so the catalogue publishes `supported_reasoning_levels: []` and a caller that selects a reasoning level
-gets a typed `400 unknown_reasoning_mode` that says exactly that. The default for both is `false` — the
-off switch is the only value this build can defend without claiming a reasoning pass or a web search the
-caller did not ask for.
+gets a typed `400 unknown_reasoning_mode` that says exactly that. Both captured completions carried both
+toggles **on**, and the site's own account had them on, so the seeded default row serves them **on**; a
+configured entry can override either one to `false`.
 
 ## 4. The stream parser (the part that is independent of the model list)
 
@@ -178,10 +193,10 @@ one observation that settles it. No row is dropped.
 | --- | --- | --- | --- |
 | 1 | **`x-ds-pow-response` is the proof header.** Its value is `base64(JSON)` with exactly `{algorithm, challenge, salt, answer, signature, target_path}` (a 368-char value decoding to 274 chars of JSON on both completions). | Both completion requests carry it; `algorithm` is `DeepSeekHashV1`; the second completion's proof matches the captured `create_pow_challenge` answer. | `DEEPSEEK_WEB_POW_HEADER`, `pow.ts` |
 | 2 | **The solver contract is the page's own worker.** Algorithm `DeepSeekHashV1`; the page starts a classic worker from its static asset (`static/37627.<hash>.js`, discovered through `new Worker(new URL(publicPath + "static/" + id + "." + hash + ".js", base))`), posts `{type:"pow-challenge", challenge:{…, expireAt}}`, and receives `{type:"pow-answer", answer:{algorithm, challenge, salt, answer, signature}}`. The worker's `answer` is `wasm_solve(challenge, `${salt}_${expireAt}_`, difficulty)`. | The captured worker bundle carries that message switch; the captured `sha3_wasm_bg.*.wasm` reproduces the recorded `answer` for the recorded challenge, salt, `expire_at` and difficulty (checked locally by instantiating the captured WASM, without printing any value). A **fresh proof per completion** is proven by the capture's two distinct proofs for two completions. | `pow.ts` — drives the page's worker; nothing is re-hashed |
-| 3 | **The real `model_type` values** are `default`, `expert`, `vision`. `default` = "Instant" (`enabled: true`, `switchable: true`, `is_default: true`); `expert` = "Expert" and `vision` = "Vision" are both `enabled: false`, `switchable: false`. | `GET /api/v0/client/settings?did=…&scope=model` → `code:0`, `data.biz_code:0`, `data.biz_data.settings.model_configs = {id, value:[…]}`. Note the shape: a `{id, value}` wrapper, **not** the `biz_data.entries` array the pre-capture guess named. | Configuration (`webChat.providers["deepseek-web"].modelTypes`); §6.3 example |
+| 3 | **The real `model_type` values** are `default`, `expert`, `vision`. `default` = "Instant" (`enabled: true`, `switchable: true`, `is_default: true`); `expert` = "Expert" and `vision` = "Vision" are both `enabled: false`, `switchable: false`. | `GET /api/v0/client/settings?did=…&scope=model` → `code:0`, `data.biz_code:0`, `data.biz_data.settings.model_configs = {id, value:[…]}`. Note the shape: a `{id, value}` wrapper, **not** the `biz_data.entries` array the pre-capture guess named. | The seeded row (`DEEPSEEK_WEB_DEFAULT_MODEL_TYPES`, `default` only — the measured enabled one); configuration overrides/extends it (§6.3) |
 | 4 | **The `did` is a UUID** and is **not** the `x-device-id` of the completion (compare the two captured values). The app persists its own `__ds_remote_feature_did` for it. | The settings query is `?did=<uuid>&scope=model`; the completion's `x-device-id` is a different UUID. | Nothing on the turn path sends it; the settings call is not part of a turn |
 | 5 | **A plain answer's fragment types are `THINK` and `RESPONSE`.** The complete response document is the first `delta` frame, with the `THINK` fragment already open; the `RESPONSE` fragment is appended later. | Both captured streams: `fragments` = `[{type:"THINK",…}]` then `APPEND response/fragments [{type:"RESPONSE",…}]`; answer = `RESPONSE` content, reasoning = `THINK`. | `DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE`, `DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE`, `sse.ts` |
-| 6 | **`source` is not sent; `action: null` and `preempt: false` are.** The completion body has exactly nine keys. | Both captured bodies (a first turn and a continuation). | `deepSeekCompletionRequest`, `DEEPSEEK_WEB_RECORDED_BODY_KEYS` |
+| 6 | **`source` is not sent; `action: null` and `preempt: false` are.** The completion body has exactly nine keys. The continuation also sends `parent_message_id` as the previous answer's **numeric** `response_message_id` and `model_type: null`; both toggles travel `true`/`true` on both turns. | Both captured bodies (a first turn and a continuation), compared key by key and scalar by scalar. | `deepSeekCompletionRequest`, `DEEPSEEK_WEB_RECORDED_BODY_KEYS`, `DeepSeekMessageId` |
 | 7 | **A normal text answer ends on `close`**, not `finish`. Order: `ready` → `update_session` → patches (including `response/status: "FINISHED"`) → `update_session` → `title` → `close {click_behavior:"none", auto_resume:false}`. `finish` appears in neither capture. | Both captured streams. | `sse.ts` terminators; `text-transport.ts` treats `close`/`finish`/stream end |
 | 8 | **`chat_session/create` takes `{}` and answers the measured envelope**; the id is at `data.biz_data.chat_session.id`. The full success shape carries `model_type`, `title`, `seq_id`, `ttl_seconds`, `is_empty`, `current_message_id`, … | The captured create request and answer. | `DEEPSEEK_WEB_SESSION_ID_PATHS`, `readDeepSeekCreatedSessionId` |
 | 9 | **`Authorization` is `Bearer <64-char opaque token>`** (not a JWT), and the page keeps it in `localStorage["userToken"]` as `{"value": …, "__version": "0"}`. Its client reads it through the same storage handle for every API call. | The captured completion/settings/create requests carry the header; the live app bundle's storage handle `userToken` and token manager read that key. | `page-identity.ts` — read at call time, per request |
@@ -198,9 +213,18 @@ one observation that settles it. No row is dropped.
 | 15 | Whether the **settings call keys on the page's device identity** or on the app's own `__ds_remote_feature_did` (row 4 measured the two apart) | The predicate sends the page's device identity as `did` — the value the capture's required `deepseek-device-id:chat` entry holds — and reports the provider's own answer: if the server keys settings on the other id, the answer is `settings-refused`, never `authenticated` | A live import whose settings answer is `data.biz_code:0` with `did` taken from the device identity (or a capture carrying `__ds_remote_feature_did` beside both ids) |
 | 13b | Which client/device headers are **required** (as opposed to merely sent) | All measured ones are sent from the page; none is fabricated. Requirement cannot be proven from one capture. | A signed-in completion with exactly one of them omitted, and the provider's answer |
 
-### 6.3 The catalogue example these values produce
+### 6.3 The catalogue these values produce — and why no configuration is needed
 
-The measured values become the documented configuration — nothing is published without configuration:
+The measured enabled row **is the seed**, so a deployment with no DeepSeek block at all already serves
+`deepseek-web/default` (`DEEPSEEK_WEB_DEFAULT_MODEL_TYPES`):
+
+| Route | Label | `thinking` | `search` | Source |
+| --- | --- | --- | --- | --- |
+| `deepseek-web/default` | "DeepSeek Chat" | on | on | the seeded row: the captured account's only `enabled` + `switchable` + `is_default` row, with both toggles as both completions carried them |
+
+`expert` and `vision` are **never seeded**: the same settings answer marks them `enabled: false`, and a
+catalogue must not offer a model the account cannot use. A configuration block is therefore **optional**
+— it is how an operator overrides the seed or extends it with a row their own account enabled:
 
 ```jsonc
 {
@@ -209,11 +233,10 @@ The measured values become the documented configuration — nothing is published
       "deepseek-web": {
         "accountIdentityFingerprint": "<the operator's recorded account label>",
         "modelTypes": [
-          // The only enabled + switchable row in the captured account.
+          // Overrides the seeded row: same id, a different label, and both toggles off.
           { "id": "default", "label": "Instant", "thinking": false, "search": false },
-          // Captured as enabled:false / switchable:false; configure only if the account offers them.
-          { "id": "expert", "label": "Expert" },
-          { "id": "vision", "label": "Vision" }
+          // Only if the account's own settings enable them.
+          { "id": "expert", "label": "Expert" }
         ]
       }
     }
@@ -221,10 +244,11 @@ The measured values become the documented configuration — nothing is published
 }
 ```
 
-`deepseek-web/default` is the route a normal deployment serves. The two toggles default to `false`,
-which is the only value the capture does not claim a reasoning pass or a web search for; a row may
-configure them when the operator wants them. No rows exist without this block, and `/v1/models` shows
-exactly what is configured.
+An entry keeps the seeded defaults of its id for the fields it omits (so `"default"` alone stays
+"DeepSeek Chat" with both toggles on), a non-seeded id takes the conservative defaults (`label` = id,
+both toggles off), an unknown field is a **typed configuration error**, and `"modelTypes": []` is the
+deliberate "serve nothing" state — the only one that publishes no DeepSeek route, and then `/v1/responses`
+answers with its typed `not_configured` reason.
 
 ## 7. Sign-in, import and the current operator ladder
 
@@ -287,12 +311,14 @@ The ladder today, in the order each rung blocks the next:
 3. **A turn** — the proof, the bearer, the client/device headers and the measured stream are implemented
    and pinned by tests. A live run needs an authenticated session (a verified capture); this document
    still does not claim one.
-4. **A catalogue** — configuration, not discovery: the model list is a session-only remote setting, so
-   there is no public endpoint and no `models refresh` command for this provider. §6.3 is the example
-   with the measured values.
+4. **A catalogue** — **already served**: the measured default row is the seed, so a deployment with no
+   DeepSeek block at all publishes `deepseek-web/default` and `/v1/chat/completions` accepts it. The
+   model list is a session-only remote setting, so there is no public endpoint and no `models refresh`
+   command: configuration (§6.3) overrides or extends the seed, and only an explicit empty list serves
+   nothing.
 
-`doctor` reports `webchat-deepseek-web` once a `model_type` is configured, and its health detail states
-the exact missing rung. `GET /v1/control/auth/health` now runs the same predicate for this provider, so
+`doctor` reports `webchat-deepseek-web` with its health detail, which now starts from the seeded row and
+states the exact missing rung. `GET /v1/control/auth/health` now runs the same predicate for this provider, so
 a stored session is reported `verified`/`expired`/`absent`/`unknown` — **never** `unverifiable`.
 
 ## 8. Deliberately not implemented
@@ -320,10 +346,10 @@ a stored session is reported `verified`/`expired`/`absent`/`unknown` — **never
 | File | What it pins |
 | --- | --- |
 | `tests/deepseek-web-sse.test.ts` | the measured frame sequence (snapshot, inherited `{v}`, `-1`, relative `BATCH`, `close` termination); named-SSE framing (comments, multi-line data, CRLF split, trailing event); the sticky/default delta parser; `SET`/`APPEND`/`BATCH` semantics; `THINK` excluded and counted, unmodelled types reported; every terminator; `update_session` mid-stream; an in-band envelope error at either layer; each malformed patch refused with its typed code |
-| `tests/deepseek-web-protocol.test.ts` | the measured nine-key completion body (`action:null`, `preempt:false`, no `source`), `parent_message_id:null` on a first turn, the measured session-id path, both envelope layers, the auth / PoW / WAF / lost-session / upstream refusal mapping, the challenge location, the no-solver seam, catalogue visibility and the §6.3 example |
+| `tests/deepseek-web-protocol.test.ts` | the measured nine-key completion body (`action:null`, `preempt:false`, no `source`), `parent_message_id:null` and the declared `model_type` on a first turn, the measured continuation (numeric cursor kept as a number, `model_type: null`, both toggles), the measured session-id path, both envelope layers, the auth / PoW / WAF / lost-session / upstream refusal mapping, the challenge location, the no-solver seam, and the catalogue rule: exactly the seeded `default` row with no configuration, configuration overriding/extending it, an explicit empty list serving nothing, and unknown entry fields as typed configuration errors |
 | `tests/deepseek-web-pow.test.ts` | the header/value shape (base64 JSON, recorded keys/order), a fresh proof per call, the page answerer's worker call (`expireAt` mapping), solver success/refusal/unavailable/timeout/mismatched-challenge/unknown-algorithm, the page token storage shape, the bundle-id region mapping, the client/device header family, read-at-call-time rotation, facility wiring (auth + client headers on JSON calls, proof only on the completion), and the measured storage keys/header names |
 | `tests/deepseek-web-import.test.ts` | the predicate's verdict classes (`authenticated`, `token-refused`, `settings-refused`, `access-verification`, `http-refused`, `unreadable`), the nested `data.biz_code` deciding over a success-shaped top level, the provider's code preserved, the settings request's URL/headers built from the page's identity, read-at-call-time token rotation, the verified import (marker written once, health reports `verified`), the refusals writing nothing, the capture refusals that happen before any browser, and the absence of every token/cookie/leim from refusals, logs and responses |
-| `tests/deepseek-web-route.test.ts` | same key → same `chat_session_id` and `parent_message_id`; lost session → typed loss → explicit replay; ephemeral with zero creations; PoW-unavailable failing before anything is created; auth refusal mapped from `code:40003`; reasoning selection refused; capability declaration discarded and declared; the configured and unconfigured listener paths (rows, stream, honest `not_configured`); a `ready.model_type` that differs from the requested one surfaced, never hidden |
+| `tests/deepseek-web-route.test.ts` | same key → same `chat_session_id` and `parent_message_id`; a numeric `ready.response_message_id` echoed as a number on the next turn; a continuation sending `model_type: null`; lost session → typed loss → explicit replay; ephemeral with zero creations; PoW-unavailable failing before anything is created; auth refusal mapped from `code:40003`; reasoning selection refused; capability declaration discarded and declared; the no-configuration listener path (the seeded row is listed, `/v1/chat/completions` accepts it and the turn runs) and the explicit-empty-list path (no rows, honest `not_configured`); a `ready.model_type` that differs from the requested one surfaced, never hidden |
 
 ## 10. What the capture changed
 

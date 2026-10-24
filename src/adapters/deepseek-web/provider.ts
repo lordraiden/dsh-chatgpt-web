@@ -492,6 +492,24 @@ export function deepSeekApiHeaders(extra: Readonly<Record<string, string>> = {})
 }
 
 /**
+ * A DeepSeek message id, exactly as the wire carries it.
+ *
+ * The signed-in capture (2026-10-24) shows the ids as **JSON numbers**: both `ready` frames carry
+ * `response_message_id`/`request_message_id` as numbers, the response document's `response.message_id`
+ * is a number, and the continuation sends that number back as `parent_message_id`. The bundle's own
+ * writer does not stringify them either. The type therefore keeps the scalar the provider sent instead
+ * of coercing it: a continuation has to hang off the id the answer actually announced, and re-typing it
+ * as a string would be a value this deployment made up.
+ */
+export type DeepSeekMessageId = string | number;
+
+/** Whether a value is a usable message id (a non-empty string or a finite number). */
+export function isDeepSeekMessageId(value: unknown): value is DeepSeekMessageId {
+  if (typeof value === "number") return Number.isFinite(value);
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
  * Build the one-turn completion body from the keys whose value the recon settles.
  *
  * ```js
@@ -500,9 +518,15 @@ export function deepSeekApiHeaders(extra: Readonly<Record<string, string>> = {})
  *   thinking_enabled, search_enabled, source, action, preempt }
  * ```
  *
- * `parent_message_id` is `null` for a session's first turn, exactly as the bundle writes it
+ * `parent_message_id` is `null` for a session's first turn and the previous answer's own id (with the
+ * scalar the provider sent it as) for a continuation, exactly as the captured app writes it
  * (`cH.o(parentMessageId) ? null : parentMessageId`). `ref_file_ids` is the recorded empty list for a
  * text turn: this bridge is text-only, so it never carries a file id.
+ *
+ * `model_type` is the deployment's `model_type` on a session's **first** turn and `null` on a
+ * continuation, which is what the capture measured (the session owns the model; the app does not
+ * re-declare it). The provider echoes the answering model in `ready.model_type`, and that difference is
+ * surfaced instead of assumed away.
  *
  * `action: null` and `preempt: false` are the measured values on both captured completions; they are
  * sent because the capture shows them (the pre-capture brief had no value for them).
@@ -510,8 +534,9 @@ export function deepSeekApiHeaders(extra: Readonly<Record<string, string>> = {})
 export function deepSeekCompletionRequest(input: {
   readonly chatSessionId: string;
   /** The cursor the session's previous answer ended on; omitted/`null` for a first turn. */
-  readonly parentMessageId?: string;
-  readonly modelType: string;
+  readonly parentMessageId?: DeepSeekMessageId;
+  /** The session's `model_type`, or `null` on a continuation (measured). */
+  readonly modelType: string | null;
   readonly prompt: string;
   /** `thinking_enabled`: the recorded plain boolean toggle (recon §2.5). */
   readonly thinkingEnabled: boolean;
@@ -521,14 +546,15 @@ export function deepSeekCompletionRequest(input: {
   if (input.chatSessionId.length === 0) {
     throw new TypeError("A DeepSeek completion requires a chat session id");
   }
-  if (input.modelType.length === 0) {
-    throw new TypeError("A DeepSeek completion requires a model type");
+  if (input.modelType !== null && input.modelType.length === 0) {
+    throw new TypeError("A DeepSeek completion requires a model type, or null on a continuation");
+  }
+  if (input.parentMessageId !== undefined && !isDeepSeekMessageId(input.parentMessageId)) {
+    throw new TypeError("A DeepSeek parent_message_id must be a non-empty string or a finite number");
   }
   return {
     chat_session_id: input.chatSessionId,
-    parent_message_id: input.parentMessageId !== undefined && input.parentMessageId.length > 0
-      ? input.parentMessageId
-      : null,
+    parent_message_id: input.parentMessageId ?? null,
     model_type: input.modelType,
     prompt: input.prompt,
     ref_file_ids: [],

@@ -10,17 +10,26 @@
  * - which provider-local **`model_type`** values this deployment serves;
  * - the **public** catalogue rows derived from them (`deepseek-web/<model_type>`).
  *
- * ## The model list is configuration, and only configuration
+ * ## The model list is configuration with a measured seed
  *
  * Recon §2.5 is unambiguous: DeepSeek's model list is a **session-only remote setting**
  * (`model_configs`, scope `model`), fetched with `GET /api/v0/client/settings?did=…&scope=model`, and
- * the anonymous answer is `SETTINGS_NOT_FOUND`. So:
+ * the anonymous answer is `SETTINGS_NOT_FOUND`. So there is no public endpoint to seed from and no
+ * refresh command (unlike `qwen-chat`). But the signed-in capture did read that setting (§6.1 row 3),
+ * and it names **exactly one enabled row**:
  *
- * - there is no public endpoint to seed from, and no refresh command (unlike `qwen-chat`);
- * - the bundle's deep-link prefill literal `["default","expert","vision"]` is **not** the catalogue
- *   (`DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES`), and is never used as a seed;
- * - with no `modelTypes` configured, this provider publishes **no rows** and says why
- *   ({@link deepSeekCatalogueNote}). It never falls back to a guess.
+ * - `default` — the account's `enabled: true`, `switchable: true`, `is_default: true` row;
+ * - `expert` and `vision` — both `enabled: false`, so a catalogue must never offer them.
+ *
+ * The bundle's deep-link prefill literal `["default","expert","vision"]` is still **not** the
+ * catalogue (`DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES`); it is never used as a seed. What is used is the
+ * measured enabled row, as {@link DEEPSEEK_WEB_DEFAULT_MODEL_TYPES}: with **no** configuration this
+ * provider publishes that one row (id `default`, label "DeepSeek Chat", both toggles on, because the
+ * site had them on in both captured completions), so the model is selectable without any config.
+ *
+ * Configuration still overrides and extends it: a configured entry with the same id overrides the
+ * seeded label/toggles, entries with other ids are added, an unknown field is a typed configuration
+ * error, and an **explicit empty list** is the deliberate "serve nothing" state.
  *
  * ## The account identity: recorded, never derived
  *
@@ -76,7 +85,7 @@ export interface DeepSeekProviderConfig {
   readonly chatStatePath: string;
   /** The configured Chrome executable (the session page uses it). */
   readonly chromeExecutablePath: string;
-  /** Provider-local `model_type` values this deployment serves. May be empty (and says why). */
+  /** Provider-local `model_type` values this deployment serves. Seeded, and empty only by explicit config. */
   readonly modelTypes: readonly DeepSeekModelType[];
   /** The account fingerprint a conversation binds to (recorded, or the documented placeholder). */
   readonly accountFingerprint: string;
@@ -107,18 +116,47 @@ function optionalBoolean(value: unknown, field: string): boolean | undefined {
   return value;
 }
 
+/** The field names one object-form `modelTypes` entry may carry. Anything else is a config error. */
+const MODEL_TYPE_ENTRY_FIELDS = new Set(["id", "label", "thinking", "search"]);
+
+/**
+ * The measured default row this deployment serves **without any configuration**.
+ *
+ * The signed-in capture settled it (`doc/deepseek-web.md` §6.1 row 3): the account's `model_configs`
+ * holds exactly one `enabled: true` + `switchable: true` + `is_default: true` row — `default` — while
+ * `expert` and `vision` are disabled server-side and must never be offered. Both toggles travelled
+ * **on** in both captured completions (`thinking_enabled: true`, `search_enabled: true`), which is the
+ * site's own state, so that is what the seed serves; `thinking`/`search: false` is available through
+ * configuration for an operator who wants that.
+ *
+ * Nothing is invented: the id is the measured `default`, the label is the product name an operator
+ * picks from ("DeepSeek Chat"), and no second id is seeded.
+ */
+export const DEEPSEEK_WEB_DEFAULT_MODEL_TYPES: readonly DeepSeekModelType[] = [
+  { id: "default", label: "DeepSeek Chat", thinking: true, search: true },
+];
+
+/** The conservative defaults of one id: the seed row when there is one, otherwise the bare id. */
+function modelTypeDefaults(id: string): DeepSeekModelType {
+  return DEEPSEEK_WEB_DEFAULT_MODEL_TYPES.find(seed => seed.id === id)
+    ?? { id, label: id, thinking: false, search: false };
+}
+
 /**
  * Read the configured `model_type` list.
  *
  * Accepts `["default", …]` and `[{ "id": "default", "label": …, "thinking": …, "search": … }, …]`.
  *
- * An absent list means "serve no DeepSeek rows", which is a legal state and the honest one: the model
- * list is not public. An **empty array is the same state**, not an error, because there is no seed to
- * fall back to — "configured nothing" and "served nothing" cannot diverge here. A non-array, an empty
- * id or a duplicate is a configuration error.
+ * An **absent** list serves the measured default row
+ * ({@link DEEPSEEK_WEB_DEFAULT_MODEL_TYPES}) — that is what makes this provider selectable with no
+ * configuration at all. A present list overrides and extends it: an entry keeps the seeded defaults of
+ * its id for the fields it omits (`default` therefore stays "DeepSeek Chat" with both toggles on unless
+ * it says otherwise), and an entry with any other id takes the conservative defaults. An explicit empty
+ * array is the deliberate "serve nothing" state, not an error, and an unknown entry field is a typed
+ * configuration error — never silently ignored.
  */
 function configuredModelTypes(value: unknown): readonly DeepSeekModelType[] {
-  if (value === undefined) return [];
+  if (value === undefined) return DEEPSEEK_WEB_DEFAULT_MODEL_TYPES.map(entry => ({ ...entry }));
   if (!Array.isArray(value)) {
     throw providerConfigError("modelTypes", "expected an array of model_type values");
   }
@@ -129,21 +167,30 @@ function configuredModelTypes(value: unknown): readonly DeepSeekModelType[] {
       if (id.length === 0) throw providerConfigError(`modelTypes[${index}]`, "expected a non-empty model_type");
       if (seen.has(id)) throw providerConfigError(`modelTypes[${index}]`, `duplicate model_type ${JSON.stringify(id)}`);
       seen.add(id);
-      return { id, label: id, thinking: false, search: false };
+      return { ...modelTypeDefaults(id) };
     }
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw providerConfigError(`modelTypes[${index}]`, "expected a model_type string or an object with an id");
     }
     const record = entry as Record<string, unknown>;
+    for (const field of Object.keys(record)) {
+      if (!MODEL_TYPE_ENTRY_FIELDS.has(field)) {
+        throw providerConfigError(
+          `modelTypes[${index}].${field}`,
+          "unknown field; expected id, label, thinking or search",
+        );
+      }
+    }
     const id = optionalString(record["id"], `modelTypes[${index}].id`);
     if (id === undefined) throw providerConfigError(`modelTypes[${index}].id`, "required");
     if (seen.has(id)) throw providerConfigError(`modelTypes[${index}].id`, `duplicate model_type ${JSON.stringify(id)}`);
     seen.add(id);
+    const defaults = modelTypeDefaults(id);
     return {
       id,
-      label: optionalString(record["label"], `modelTypes[${index}].label`) ?? id,
-      thinking: optionalBoolean(record["thinking"], `modelTypes[${index}].thinking`) ?? false,
-      search: optionalBoolean(record["search"], `modelTypes[${index}].search`) ?? false,
+      label: optionalString(record["label"], `modelTypes[${index}].label`) ?? defaults.label,
+      thinking: optionalBoolean(record["thinking"], `modelTypes[${index}].thinking`) ?? defaults.thinking,
+      search: optionalBoolean(record["search"], `modelTypes[${index}].search`) ?? defaults.search,
     };
   });
 }
@@ -263,7 +310,8 @@ export function deepSeekAccountBinding(provider: DeepSeekProviderConfig): WebCha
  *
  * No `reasoningModes`: the recon records a boolean `thinking_enabled` toggle, not a named mode menu,
  * so publishing mode labels would invent a capability. The toggle is deployment configuration per
- * model (see `doc/deepseek-web.md` §3).
+ * model; the seeded `default` row carries the site's measured state (both on), and an operator turns
+ * one off by configuring the entry (see `doc/deepseek-web.md` §3).
  */
 export function deepSeekModelDescriptors(
   provider: DeepSeekProviderConfig,
@@ -314,10 +362,10 @@ export function deepSeekCatalogueRows(provider: DeepSeekProviderConfig): readonl
 /**
  * Whether this deployment should advertise this provider's routes in `/v1/models`.
  *
- * Exactly one fact makes a route worth advertising: the operator configured at least one
- * `model_type`. A verified session is **not** enough, because the model list is server-side and
- * session-only (recon §2.5) — a session without a configured model type still names no model this
- * deployment could honestly serve.
+ * The measured default row is always served (see {@link DEEPSEEK_WEB_DEFAULT_MODEL_TYPES}), so this is
+ * true for any deployment that did not explicitly configure an empty list. A verified session adds
+ * nothing: the model list is server-side and session-only (recon §2.5), which is why its measured row
+ * is a seed rather than a discovery.
  */
 export function deepSeekCatalogueVisible(config: AppConfig): boolean {
   return resolveDeepSeekProviderConfig(config).modelTypes.length > 0;
@@ -332,18 +380,20 @@ export function deepSeekCatalogueVisible(config: AppConfig): boolean {
 export function deepSeekCatalogueNote(config: AppConfig): string {
   const provider = resolveDeepSeekProviderConfig(config);
   if (provider.modelTypes.length > 0) {
-    return `${provider.modelTypes.length} DeepSeek model_type value(s) configured: `
-      + provider.modelTypes.map(modelType => modelType.id).join(", ");
+    const ids = provider.modelTypes.map(modelType => modelType.id).join(", ");
+    const configured = providerBlock(config)["modelTypes"] !== undefined;
+    return configured
+      ? `${provider.modelTypes.length} DeepSeek model_type value(s) configured: ${ids}`
+      : `${provider.modelTypes.length} DeepSeek model_type value(s) served by default: ${ids} `
+        + "(the measured enabled row of the captured account, so no configuration is needed)";
   }
   const capture = !deepSeekCapturePresent(provider.storageStatePath)
     ? "no capture is stored for this provider"
     : deepSeekSessionVerified(provider.storageStatePath)
-      ? "a verified session is stored for this provider, and it names no model because none is configured"
+      ? "a verified session is stored for this provider, and it names no model because the configured list is empty"
       : "a capture is stored for this provider, but it is not a verified session";
-  return 'no DeepSeek model_type is configured in webChat.providers["deepseek-web"].modelTypes, so no '
-    + `DeepSeek route is published; ${capture}. DeepSeek's model list is a session-only remote setting `
-    + "(recon §2.5), so it cannot be discovered without a signed-in capture, and the bundle's deep-link "
-    + 'prefill literal ("default", "expert", "vision") is not a catalogue.';
+  return 'webChat.providers["deepseek-web"].modelTypes was configured as an empty list, so no DeepSeek '
+    + `route is published; ${capture}.`;
 }
 
 /** Every public route this provider serves, as `providerId/modelType`. */

@@ -140,9 +140,11 @@ describe("issue #78 Responses compatibility seam audit", () => {
 
   test("Web model catalog remains available when native Codex models are unavailable or malformed", async () => {
     // Hermetic: `/v1/models` is the deployment's composed catalogue, and a second provider's rows
-    // appear when that provider is configured or has a verified session on disk (issue #299, slice 2).
-    // The assertion below is about the ChatGPT rows surviving a native failure, so the test must not
-    // read whatever session this machine happens to hold.
+    // appear there — DeepSeek Web contributes its measured seeded row with no configuration at all,
+    // and the Qwen providers appear when configured or when a verified session exists on disk (issue
+    // #299). The assertion below is about the ChatGPT rows surviving a native failure, so it asserts
+    // that the `chatgpt-web/` routes are present and that nothing native leaks in; it must not claim the
+    // whole catalogue is ChatGPT's, nor read whatever session this machine happens to hold.
     const savedHome = captureChatGptWebHome();
     const modelsHome = useTemporaryChatGptWebHome("issue-78-models-home-", { clearFreeHome: true });
     try {
@@ -155,7 +157,9 @@ describe("issue #78 Responses compatibility seam audit", () => {
       expect(unavailable.status).toBe(200);
       const unavailableBody = await unavailable.json() as { models?: Array<{ slug?: string }> };
       expect(unavailableBody.models?.length).toBeGreaterThan(0);
-      expect(unavailableBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+      expect(unavailableBody.models?.some(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+      // No native Codex contamination: every published row is provider-qualified.
+      expect(unavailableBody.models?.every(model => /^[^/]+\/.+/.test(model.slug ?? ""))).toBe(true);
 
       const malformed = await modelsRequest(
         new Request("http://127.0.0.1/v1/models", { headers: { authorization: "Bearer test-token" } }),
@@ -164,7 +168,8 @@ describe("issue #78 Responses compatibility seam audit", () => {
       );
       expect(malformed.status).toBe(200);
       const malformedBody = await malformed.json() as { models?: Array<{ slug?: string }> };
-      expect(malformedBody.models?.every(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+      expect(malformedBody.models?.some(model => model.slug?.startsWith("chatgpt-web/"))).toBe(true);
+      expect(malformedBody.models?.every(model => /^[^/]+\/.+/.test(model.slug ?? ""))).toBe(true);
     } finally {
       restoreChatGptWebHome(savedHome, modelsHome);
     }

@@ -188,6 +188,7 @@ export {
 } from "./chat-state";
 
 export {
+  DEEPSEEK_WEB_DEFAULT_MODEL_TYPES,
   DEEPSEEK_WEB_UNRECORDED_ACCOUNT_FINGERPRINT,
   deepSeekAccountBinding,
   deepSeekCatalogueNote,

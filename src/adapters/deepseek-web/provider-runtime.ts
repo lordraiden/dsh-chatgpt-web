@@ -87,7 +87,7 @@ import { resolveSharedConversationStore } from "../../web-chat/host/provider-hos
 import { webChatPublicRoute } from "../../web-chat/host/text-turn";
 import { parseRequest } from "../../responses/parser";
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
-import { DEEPSEEK_WEB_PROVIDER_ID } from "./provider";
+import { DEEPSEEK_WEB_PROVIDER_ID, type DeepSeekMessageId } from "./provider";
 import { createDeepSeekDriver, deepSeekAffinityKey } from "./driver";
 import {
   createFileDeepSeekConversationState,
@@ -364,11 +364,11 @@ export function createDeepSeekWebProvider(options: DeepSeekWebProviderOptions): 
   const notServed = (route: string): DeepSeekWebRequestError => {
     if (provider.modelTypes.length === 0) {
       return new DeepSeekWebRequestError(
-        `DeepSeek is not configured on this deployment, so ${JSON.stringify(route)} is not a route it can `
-        + 'serve. Add the model_type values a signed-in capture shows to '
-        + 'webChat.providers["deepseek-web"].modelTypes; DeepSeek\'s model list is only available to a '
-        + 'signed-in session, so this service never discovers it, and the bundle\'s deep-link prefill '
-        + 'literal is not a catalogue.',
+        `DeepSeek serves no route on this deployment, so ${JSON.stringify(route)} cannot be answered. `
+        + 'webChat.providers["deepseek-web"].modelTypes was configured as an empty list; remove the '
+        + 'entry to serve the measured default row (`default`), or list the model_type values a '
+        + "signed-in capture shows. DeepSeek's model list is only available to a signed-in session, so "
+        + "this service never discovers it, and the bundle's deep-link prefill literal is not a catalogue.",
         "not_configured",
       );
     }
@@ -395,7 +395,7 @@ export function createDeepSeekWebProvider(options: DeepSeekWebProviderOptions): 
       readonly search: boolean;
       readonly userText: string;
     };
-    readonly chat?: { readonly chatSessionId: string; readonly parentMessageId?: string };
+    readonly chat?: { readonly chatSessionId: string; readonly parentMessageId?: DeepSeekMessageId };
     readonly ephemeral: boolean;
     readonly onAnswer?: (answer: DeepSeekTurnAnswer) => Promise<void> | void;
     readonly onChatLost?: (reason: string) => Promise<void> | void;
@@ -453,7 +453,7 @@ export function createDeepSeekWebProvider(options: DeepSeekWebProviderOptions): 
   ): Promise<{
     readonly identity: WebChatConversationIdentity;
     readonly conversation: WebChatConversation;
-    readonly chat?: { readonly chatSessionId: string; readonly parentMessageId?: string };
+    readonly chat?: { readonly chatSessionId: string; readonly parentMessageId?: DeepSeekMessageId };
     readonly replay: boolean;
   }> => {
     const stored = await store.read(identity);

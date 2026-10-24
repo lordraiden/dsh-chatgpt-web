@@ -140,7 +140,10 @@ describe("issue #193 — one effective provider configuration", () => {
       async () => new Response("native Codex unavailable", { status: 503 }),
     );
     expect(models.status).toBe(200);
-    expect(slugs(await models.json() as { models?: unknown })).toEqual(expectedSlugs);
+    // The composed catalogue also carries the other providers' rows (DeepSeek Web's measured seeded row
+    // needs no configuration), so this asserts the ChatGPT Web routes this configuration produces.
+    const published = slugs(await models.json() as { models?: unknown });
+    expect(published.filter(slug => slug.startsWith("chatgpt-web/"))).toEqual(expectedSlugs);
 
     // 5. `/v1/responses` routing: the Luna model resolves under the scoped facts...
     const responsesParsed = parsed();

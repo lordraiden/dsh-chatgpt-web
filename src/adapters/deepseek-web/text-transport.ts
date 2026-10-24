@@ -65,6 +65,7 @@ import {
   deepSeekSessionCreateRequest,
   deepSeekSessionDigest,
   deepSeekTransportFailure,
+  type DeepSeekMessageId,
   readDeepSeekCreatedSessionId,
   readDeepSeekProofChallenge,
 } from "./provider";
@@ -104,10 +105,10 @@ export const DEEPSEEK_WEB_SETTLE_TIMEOUT_MS = 5_000;
 export interface DeepSeekTurnAnswer {
   /** The chat session the answer came from (or the generated id of an ephemeral turn). */
   readonly chatSessionId: string;
-  /** The cursor the **next** turn sends as `parent_message_id`. */
-  readonly parentMessageId?: string;
+  /** The cursor the **next** turn sends as `parent_message_id` (kept with the provider's own scalar). */
+  readonly parentMessageId?: DeepSeekMessageId;
   /** The response message id the stream announced, kept for diagnosis. */
-  readonly responseMessageId?: string;
+  readonly responseMessageId?: DeepSeekMessageId;
   /** The model the provider says answered (`ready.model_type`), when it said. */
   readonly modelType?: string;
   readonly text: string;
@@ -177,7 +178,7 @@ export interface DeepSeekWebTextTransportOptions {
   /** `search_enabled` for this turn. */
   readonly search: boolean;
   /** The recorded session of this conversation, when it has one. */
-  readonly chat?: { readonly chatSessionId: string; readonly parentMessageId?: string };
+  readonly chat?: { readonly chatSessionId: string; readonly parentMessageId?: DeepSeekMessageId };
   /**
    * Answer without creating, continuing or recording any provider conversation.
    *
@@ -283,7 +284,7 @@ class DeepSeekWebTextTransport implements WebChatTextTransport {
   #turn: Promise<void> | undefined;
   #epoch = 0;
   #chatSessionId: string | undefined;
-  #parentMessageId: string | undefined;
+  #parentMessageId: DeepSeekMessageId | undefined;
   #continuedSession = false;
   #startedAt = 0;
   #started = false;
@@ -437,7 +438,10 @@ class DeepSeekWebTextTransport implements WebChatTextTransport {
       const body = deepSeekCompletionRequest({
         chatSessionId,
         ...(this.#parentMessageId === undefined ? {} : { parentMessageId: this.#parentMessageId }),
-        modelType: this.#options.modelType,
+        // A session's first turn declares the deployment's model_type; a continuation sends `null`,
+        // exactly as the captured app does — the session owns the model and the provider echoes the
+        // answering one in `ready.model_type` (surfaced by the re-route diagnostic below).
+        modelType: this.#continuedSession ? null : this.#options.modelType,
         prompt: context.turn.userText,
         thinkingEnabled: this.#options.thinking,
         searchEnabled: this.#options.search,

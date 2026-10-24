@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import {
   captureChatGptWebHome,
@@ -14,9 +16,11 @@ import {
   QWEN_CHAT_PROVIDER_ID,
   compileQwenChatInstallPrompt,
   compileQwenChatReplayPrompt,
+  createFileQwenChatConversationState,
   createMemoryQwenChatConversationState,
   createQwenChatProvider,
   qwenChatResponsesRequest,
+  type QwenChatConversationState,
   type QwenChatProviderComposition,
   type QwenChatRequestSession,
   type QwenChatTurnRequestFacility,
@@ -29,7 +33,11 @@ import {
   repositoryUrlFromPackageMetadata,
   withProjectIdentityHeader,
 } from "../src/project-identity";
-import { createMemoryConversationStore, webChatAccountBindingId } from "../src/web-chat/core";
+import {
+  createMemoryConversationStore,
+  webChatAccountBindingId,
+  webChatContinuationIdentity,
+} from "../src/web-chat/core";
 
 /**
  * Issue #333 — the deterministic project header of a Qwen Chat conversation install.
@@ -37,13 +45,15 @@ import { createMemoryConversationStore, webChatAccountBindingId } from "../src/w
  * `chat.qwen.ai` used to receive the caller's first message as bare text, while the same normal Chat
  * Mode install on ChatGPT carried the deterministic project header (`Project: "<name>"` plus the
  * authoritative `github:` URL). The header is the same provider-neutral identity on both providers
- * (`src/project-identity.ts`), it belongs to the **first physical message of a brand-new
- * conversation** only, and it carries no host context at all.
+ * (`src/project-identity.ts`), it belongs to the **first turn of a conversation that carries a human
+ * message**, and it carries no host context at all.
  *
  * This suite pins: the exact install content (and its byte-for-byte equality with the ChatGPT
  * install), the continuation that sends only the new text, the refusal when an install would carry no
  * human message, the omission of unresolvable metadata, the declared-purpose turn that is not an
- * install, and the replay that rebuilds canonical history without duplicating the header.
+ * install, the replay that rebuilds canonical history without duplicating the header, and the rule
+ * this provider decides from **recorded state**: a provider chat that exists without a human message
+ * having been sent (the reported sequence, and any non-installing seam) does not consume the install.
  */
 const MODEL_ID = "qwen3.7-plus";
 const MODEL_ROUTE = `${QWEN_CHAT_PROVIDER_ID}/${MODEL_ID}`;
@@ -153,8 +163,13 @@ function controlledSession(network: ControlledNetwork): QwenChatRequestSession {
 }
 
 /** Build one composition over a controlled network and in-memory durable state. */
-function composition(): { readonly provider: QwenChatProviderComposition; readonly network: ControlledNetwork } {
+function composition(): {
+  readonly provider: QwenChatProviderComposition;
+  readonly network: ControlledNetwork;
+  readonly state: QwenChatConversationState;
+} {
   const network = new ControlledNetwork();
+  const state = createMemoryQwenChatConversationState();
   const provider = createQwenChatProvider({
     config: {
       ...defaultConfig(),
@@ -169,9 +184,19 @@ function composition(): { readonly provider: QwenChatProviderComposition; readon
     } as never,
     session: controlledSession(network),
     store: createMemoryConversationStore(),
-    state: createMemoryQwenChatConversationState(),
+    state,
   });
-  return { provider, network };
+  return { provider, network, state };
+}
+
+/** The provider conversation key the composition derives for one declared identity. */
+function conversationKey(provider: QwenChatProviderComposition, sessionId: string, threadId: string): string {
+  return webChatContinuationIdentity({
+    binding: { providerId: QWEN_CHAT_PROVIDER_ID, accountFingerprint: ACCOUNT },
+    dshSession: { sessionId },
+    threadId,
+    namespace: provider.provider.namespace,
+  }).key;
 }
 
 /** The internal Responses body of one conversational turn. */
@@ -310,9 +335,9 @@ describe("issue #333 — the project header of a Qwen Chat conversation install"
     expect(headerLines(network.prompts[1]!)).toEqual([]);
   });
 
-  test("a declared-purpose turn is not a conversation install and carries no header", async () => {
+  test("a declared-purpose turn answers into no chat, and the first human message installs", async () => {
     const { provider, network } = composition();
-    network.scripts.push({ answer: "Session about Qwen" });
+    network.scripts.push({ answer: "Session about Qwen" }, { answer: "first answer" });
 
     const ephemeral = await runTurn(provider, body({
       sessionId: "session-a",
@@ -326,6 +351,65 @@ describe("issue #333 — the project header of a Qwen Chat conversation install"
     expect(network.chatNewCalls).toBe(0);
     expect(network.prompts).toEqual(["name this session"]);
     expect(headerLines(network.prompts[0]!)).toEqual([]);
+
+    // The reported sequence: the harness's housekeeping call comes first and the operator's own
+    // message follows it. The housekeeping call is answered and kept nowhere, so it cannot consume the
+    // conversation's opening — the first HUMAN message is the install.
+    const first = await runTurn(provider, body({ sessionId: "session-a", threadId: "thread-a", turnId: "turn-1", userText: "hola" }));
+    expect(first.at(-1)?.type).toBe("done");
+    expect(network.chatNewCalls).toBe(1);
+    expect(network.prompts[1]).toBe(qwenInstall("hola"));
+    expect(headerLines(network.prompts[1]!)).toHaveLength(1);
+  });
+
+  test("a provider chat created without a human message does not consume the install", async () => {
+    const { provider, network, state } = composition();
+    network.scripts.push({ answer: "first answer" }, { answer: "second answer" });
+    const key = conversationKey(provider, "session-a", "thread-a");
+    // The reported failure mode, reduced to the fact this provider owns: a chat exists (a
+    // non-installing seam recorded it), and this conversation has not sent a human message yet.
+    state.recordChat(key, { chatId: "chat-existing", status: "active", updatedAt: 1 });
+    expect(state.read(key)?.humanMessageSent).toBe(false);
+
+    const first = await runTurn(provider, body({ sessionId: "session-a", threadId: "thread-a", turnId: "turn-1", userText: "hola" }));
+    expect(first.at(-1)?.type).toBe("done");
+    // The recorded chat is continued — no second chat is created — AND the first human message is the
+    // install: the decision comes from the recorded fact, not from the provider chat id.
+    expect(network.chatNewCalls).toBe(0);
+    expect(network.prompts[0]).toBe(qwenInstall("hola"));
+    expect(state.read(key)?.humanMessageSent).toBe(true);
+
+    const second = await runTurn(provider, body({ sessionId: "session-a", threadId: "thread-a", turnId: "turn-2", userText: "again" }));
+    expect(second.at(-1)?.type).toBe("done");
+    expect(network.prompts[1]).toBe("again");
+    expect(headerLines(network.prompts[1]!)).toEqual([]);
+  });
+
+  test("a persisted conversation from before the recorded fact is adopted as already installed", () => {
+    const file = join(home, "providers", QWEN_CHAT_PROVIDER_ID, "legacy-conversations.json");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      conversations: {
+        "key-legacy": { generation: 2, chat: { chatId: "chat-legacy", status: "active", updatedAt: 1 } },
+      },
+    }));
+    const state = createFileQwenChatConversationState(file);
+    // A file written before this fact existed records a chat and no flag. It is adopted as sent: the
+    // fail-safe direction, because re-installing the header into a live conversation would duplicate
+    // it. A new conversation of this format records `false` explicitly and keeps the install.
+    expect(state.read("key-legacy")).toMatchObject({ generation: 2, humanMessageSent: true });
+    expect(state.read("key-new")).toBeUndefined();
+    state.recordChat("key-new", { chatId: "chat-new", status: "active", updatedAt: 1 });
+    expect(state.read("key-new")?.humanMessageSent).toBe(false);
+    state.recordHumanMessage("key-new");
+    expect(state.read("key-new")?.humanMessageSent).toBe(true);
+    // The fact survives a replay (a generation change) and a forgotten chat.
+    state.beginGeneration("key-new", 2);
+    expect(state.read("key-new")).toMatchObject({ generation: 2, humanMessageSent: true });
+    state.forgetChat("key-new");
+    expect(state.read("key-new")).toMatchObject({ generation: 2, humanMessageSent: true });
+    state.close?.();
   });
 
   test("a replay rebuilds canonical history and never duplicates the header", async () => {

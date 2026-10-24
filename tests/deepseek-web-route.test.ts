@@ -108,6 +108,8 @@ class ControlledNetwork {
   readonly prompts: string[] = [];
   readonly proofs: (DeepSeekProofOfWork | undefined)[] = [];
   readonly scripts: Script[] = [];
+  /** Emit the captured shape's numeric ids instead of the synthetic `message-N` strings. */
+  numericMessageIds = false;
 
   private readonly proof: DeepSeekProofOfWorkSolver;
 
@@ -172,7 +174,7 @@ class ControlledNetwork {
           bodyText: JSON.stringify({ code: 0, msg: "", data: { biz_code: 404, biz_msg: "SESSION_NOT_FOUND" } }),
         };
       }
-      const messageId = `message-${this.completionCalls}`;
+      const messageId = this.numericMessageIds ? this.completionCalls : `message-${this.completionCalls}`;
       const reportedModel = script.reportedModel ?? MODEL_TYPE;
       options.onOpen?.({ status: 200, contentType: "text/event-stream" });
       onChunk(event("ready", {
@@ -240,13 +242,23 @@ interface Composition {
 function providerBlock(): Record<string, unknown> {
   return {
     accountIdentityFingerprint: ACCOUNT,
-    modelTypes: [{ id: MODEL_TYPE, label: "DeepSeek Default" }],
+    // The toggles are stated explicitly: a configured entry inherits the seeded row's defaults for the
+    // fields it omits, and this fixture wants both off.
+    modelTypes: [{ id: MODEL_TYPE, label: "DeepSeek Default", thinking: false, search: false }],
   };
 }
 
-/** A configuration that declares the provider with NO model_type: the honest "serve nothing". */
+/** A configuration with **no** DeepSeek block at all: the seeded default row is served. */
 function emptyConfig(): never {
   return { ...defaultConfig() } as never;
+}
+
+/** The deliberate "serve nothing" configuration: an explicit empty `modelTypes` list. */
+function serveNothingConfig(): never {
+  return {
+    ...defaultConfig(),
+    webChat: { providers: { [DEEPSEEK_WEB_PROVIDER_ID]: { modelTypes: [] } } },
+  } as never;
 }
 
 /** Build one composition over a controlled network and in-memory durable state. */
@@ -362,6 +374,8 @@ describe("deepseek-web — one conversation key, one chat session and one parent
     expect(network.bodies[1]).toMatchObject({
       chat_session_id: "session-1",
       parent_message_id: "message-1",
+      // The measured continuation: the session owns the model, so the app does not re-declare it.
+      model_type: null,
       prompt: "again",
     });
     // Only the new user text is sent on a continuation: the provider session is the history.
@@ -384,6 +398,33 @@ describe("deepseek-web — one conversation key, one chat session and one parent
       modelType: MODEL_TYPE,
       status: "active",
     });
+  });
+
+  test("a numeric ready.response_message_id is the cursor, sent back as a number", async () => {
+    // The signed-in capture carries the message ids as JSON numbers, so the continuation's
+    // `parent_message_id` must be that number — not `null` (a cursor this build could not read) and not
+    // a stringified copy (a value this build invented).
+    const network = new ControlledNetwork();
+    network.numericMessageIds = true;
+    const { provider, state } = composition(network);
+    network.scripts.push({ answer: "first answer" }, { answer: "second answer" });
+
+    await runTurn(provider, body({ sessionId: "session-a", threadId: "thread-a", turnId: "turn-1", userText: "hola" }));
+    await runTurn(provider, body({ sessionId: "session-a", threadId: "thread-a", turnId: "turn-2", userText: "again" }));
+
+    expect(network.sessionCreates).toBe(1);
+    expect(network.bodies[0]?.["parent_message_id"]).toBeNull();
+    expect(network.bodies[1]?.["parent_message_id"]).toBe(1);
+    expect(typeof network.bodies[1]?.["parent_message_id"]).toBe("number");
+    expect(network.bodies[1]?.["model_type"]).toBeNull();
+
+    const key = webChatContinuationIdentity({
+      binding: { providerId: DEEPSEEK_WEB_PROVIDER_ID, accountFingerprint: ACCOUNT },
+      dshSession: { sessionId: "session-a" },
+      threadId: "thread-a",
+      namespace: provider.provider.namespace,
+    }).key;
+    expect(state.read(key)?.session).toMatchObject({ parentMessageId: 2, responseMessageId: 2 });
   });
 
   test("a different conversation gets a different session", async () => {
@@ -583,9 +624,30 @@ describe("deepseek-web — one conversation key, one chat session and one parent
     expect(JSON.stringify(network.bodies)).not.toContain("parameters");
   });
 
-  test("with nothing configured the provider answers with its honest typed error", async () => {
+  test("with no configuration at all the seeded default row is served and answers", async () => {
     const network = new ControlledNetwork();
+    network.scripts.push({ answer: "seeded answer" });
     const { provider } = composition(network, emptyConfig());
+    expect(provider.catalogue.map(row => row.slug)).toEqual([MODEL_ROUTE]);
+    expect(provider.modelOf(MODEL_ROUTE)).toBe(MODEL_TYPE);
+
+    const result = await runTurn(provider, body({
+      sessionId: "session-a", threadId: "thread-a", turnId: "turn-1", userText: "hola",
+    }));
+
+    expect(result.status).toBe(200);
+    expect(network.prompts).toEqual(["hola"]);
+    // The seeded row carries the site's measured state: the model type and both toggles on.
+    expect(network.bodies[0]).toMatchObject({
+      model_type: MODEL_TYPE,
+      thinking_enabled: true,
+      search_enabled: true,
+    });
+  });
+
+  test("an explicitly empty configured list is the honest typed error", async () => {
+    const network = new ControlledNetwork();
+    const { provider } = composition(network, serveNothingConfig());
     expect(provider.catalogue).toEqual([]);
     expect(provider.modelOf(MODEL_ROUTE)).toBe(MODEL_TYPE);
 
@@ -597,7 +659,7 @@ describe("deepseek-web — one conversation key, one chat session and one parent
     const error = result.payload["error"] as { code?: string; message?: string } | undefined;
     expect(error?.code).toBe("not_configured");
     expect(error?.message).toContain("modelTypes");
-    expect(error?.message).toContain("signed-in session");
+    expect(error?.message).toContain("empty list");
     expect(network.powChallenges).toBe(0);
     expect(network.sessionCreates).toBe(0);
   });
@@ -749,14 +811,41 @@ describe("deepseek-web — through the real listener", () => {
     expect(listed.data?.some(entry => entry.id === MODEL_ROUTE)).toBe(true);
   });
 
-  test("nothing configured means no rows, and a request answers with the honest error", async () => {
+  test("with no configuration the catalogue publishes the seeded row and chat-completions accepts it", async () => {
     const unconfiguredNetwork = new ControlledNetwork();
+    unconfiguredNetwork.scripts.push({ answer: "hola" });
     const unconfigured = composition(unconfiguredNetwork, emptyConfig()).provider;
-    // The catalogue is composed from configuration, not from a session: no block, no rows.
+    // The catalogue composes the measured default row without any configuration at all.
     expect((buildPublicModelCatalog(emptyConfig()) as { models?: { slug?: string }[] }).models
-      ?.some(row => row.slug?.startsWith(`${DEEPSEEK_WEB_PROVIDER_ID}/`))).toBe(false);
+      ?.some(row => row.slug === MODEL_ROUTE)).toBe(true);
 
     const server = startServer(emptyConfig(), { webChatProviders: [unconfigured] } as never);
+    running.push(server);
+
+    const listed = await (await fetch(`http://127.0.0.1:${server.port}/v1/models`)).json() as {
+      models?: { slug?: string }[];
+    };
+    expect(listed.models?.some(row => row.slug === MODEL_ROUTE)).toBe(true);
+
+    // The service's own catalogue is the routing authority, and it accepts what it advertises.
+    const chat = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: MODEL_ROUTE, messages: [{ role: "user", content: "hola" }] }),
+    });
+    expect(chat.status).toBe(200);
+    const chatPayload = await chat.json() as { choices?: { message?: { content?: string } }[] };
+    expect(chatPayload.choices?.[0]?.message?.content).toBe("hola");
+    expect(unconfiguredNetwork.completionCalls).toBe(1);
+  });
+
+  test("an explicitly empty configured list publishes no rows and answers with the honest error", async () => {
+    const unconfiguredNetwork = new ControlledNetwork();
+    const unconfigured = composition(unconfiguredNetwork, serveNothingConfig()).provider;
+    expect((buildPublicModelCatalog(serveNothingConfig()) as { models?: { slug?: string }[] }).models
+      ?.some(row => row.slug?.startsWith(`${DEEPSEEK_WEB_PROVIDER_ID}/`))).toBe(false);
+
+    const server = startServer(serveNothingConfig(), { webChatProviders: [unconfigured] } as never);
     running.push(server);
 
     const listed = await (await fetch(`http://127.0.0.1:${server.port}/v1/models`)).json() as {
@@ -787,7 +876,7 @@ describe("deepseek-web — through the real listener", () => {
     const payload = await responsesSurface.json() as { error?: { code?: string; message?: string } };
     expect(payload.error?.code).toBe("not_configured");
     expect(payload.error?.message).toContain("modelTypes");
-    expect(payload.error?.message).toContain("signed-in session");
+    expect(payload.error?.message).toContain("empty list");
     // Nothing was sent to the provider on either surface.
     expect(unconfiguredNetwork.powChallenges).toBe(0);
     expect(unconfiguredNetwork.completionCalls).toBe(0);

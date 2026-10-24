@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- The project header now opens the first turn that carries a **human message**, and the decision is
+  recorded state instead of an inference from the provider's chat id (Qwen Chat, operator report on
+  `chat.qwen.ai`). The install used to be "the turn that creates the chat"
+  (`!planned.replay && planned.chat === undefined`), so a conversation whose Qwen chat already existed —
+  created by anything that is not the caller's human turn — got **no** header on the first real message.
+  The provider's conversation record now stores the install fact (`humanMessageSent`,
+  `src/adapters/qwen-chat/chat-state.ts`), the header installs on the first turn where it is absent, and
+  the fact survives a replay's generation change. A state file written before the fact existed (a chat,
+  no flag) is adopted as "already installed": re-headering a live conversation would duplicate the
+  header. Every existing property holds — a continuation sends only the new text, a replay rebuilds
+  canonical history with no header, a declared-purpose turn and the Advisor seam carry none, an install
+  with no human message is refused, unresolvable metadata omits the header. **Stated plainly:** the
+  harness's session-title call still arrives *undeclared* (`@earendil-works/pi-ai` drops `purpose`), so
+  when that call reaches the provider first it is indistinguishable from a human turn and consumes the
+  install; the bridge honours both declared channels (`purpose` in the native metadata, or the
+  `x-dsh-turn-purpose` header a static per-route header carries), and `doc/qwen-chat.md` §3.3 records the
+  one-step operator fix (point the title route at a provider entry carrying that header).
+
+- DeepSeek Web publishes its measured model with **no configuration** (operator report: the model could
+  not be selected). The adapter used to publish no rows at all, because DeepSeek's model list is a
+  session-only remote setting. The signed-in capture read that setting and settled exactly one **enabled**
+  row, so the provider now seeds it: `deepseek-web/default`, label "DeepSeek Chat", and both toggles on
+  (`thinking`, `search` — the state both captured completions carried), while `expert`/`vision` stay
+  unseeded because the same answer marks them `enabled: false`. `/v1/models` publishes that row and
+  `/v1/chat/completions` accepts it out of the box. A `webChat.providers["deepseek-web"]` block is still
+  how an operator overrides the row or extends the list (an entry keeps the seeded defaults of its id for
+  the fields it omits), an unknown entry field is now a typed configuration error instead of being
+  silently ignored, and an explicit empty `modelTypes` list remains the only "serve nothing" state.
+  `doc/deepseek-web.md`, `README.md` and `TROUBLESHOOTING.md` no longer tell the operator to configure it.
+
+- DeepSeek Web's continuation is now the measured one (capture of 2026-10-24, second interaction). The
+  captured ids are **JSON numbers**, and the adapter read `ready.response_message_id` as a string only,
+  so it dropped the cursor and every continuation sent `parent_message_id: null` — not the cursor the
+  recorded app sends. The id is now kept with the scalar the provider sent it as (`DeepSeekMessageId`,
+  numbers included, never coerced) through the stream parser, the continuity state and the completion
+  body. The second measured difference is also reproduced: a session's first turn declares `model_type`
+  and a **continuation sends `null`** (the session owns the model; the provider's `ready.model_type` is
+  still surfaced by the re-route diagnostic). `doc/deepseek-web.md` §3 records the key-by-key
+  difference between the two captured turns.
+
 - A slow session-title call can no longer fail a ChatGPT Web turn (#336 follow-up, operator report on
   `chatgpt-web/think`). The harness's housekeeping call arrives **undeclared** (`@earendil-works/pi-ai`
   drops `purpose`), so it takes the same conversation as the user's real turn. The ChatGPT native route

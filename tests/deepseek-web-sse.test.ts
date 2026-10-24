@@ -128,6 +128,22 @@ describe("deepseek-web — named SSE frames are classified structurally", () => 
       requestMessageId: "request-fixture",
       modelType: "default",
     });
+    // The captured ids are JSON numbers; the scalar is kept as sent, never coerced to a string,
+    // because the continuation sends the very same value back as `parent_message_id`.
+    expect(parseDeepSeekSseEvent({ event: "ready", data: JSON.stringify({
+      response_message_id: 1713945000123,
+      request_message_id: 1713945000000,
+      model_type: "default",
+    }) })).toEqual({
+      kind: "ready",
+      responseMessageId: 1713945000123,
+      requestMessageId: 1713945000000,
+      modelType: "default",
+    });
+    // An id shape this build does not understand is absent, never a guessed value.
+    expect(parseDeepSeekSseEvent({ event: "ready", data: JSON.stringify({
+      response_message_id: { nested: true },
+    }) })).toEqual({ kind: "ready" });
     expect(parseDeepSeekSseEvent({ event: "close", data: JSON.stringify({ click_behavior: "retry" }) }))
       .toEqual({ kind: "close", clickBehavior: "retry" });
     expect(parseDeepSeekSseEvent({ event: "finish", data: "{}" })).toEqual({ kind: "finish" });

@@ -35,6 +35,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname } from "node:path";
 
 import { nonSecretDiagnosticText } from "../../lib/safe-diagnostics";
+import { isDeepSeekMessageId, type DeepSeekMessageId } from "./provider";
 
 /** One provider chat session this deployment created for an affinity. */
 export interface DeepSeekSessionRecord {
@@ -44,11 +45,13 @@ export interface DeepSeekSessionRecord {
    * The cursor the next turn sends as `parent_message_id`.
    *
    * This is the previous answer's assistant message id: `ready.response_message_id`, falling back to
-   * the `update_parent_message` payload only when the stream never announced one.
+   * the `update_parent_message` payload only when the stream never announced one. The scalar is kept
+   * exactly as the provider sent it — the signed-in capture shows JSON numbers — because the next
+   * turn has to send that same value back as `parent_message_id`.
    */
-  readonly parentMessageId?: string;
+  readonly parentMessageId?: DeepSeekMessageId;
   /** The response message id of the last settled turn, when the stream reported one. */
-  readonly responseMessageId?: string;
+  readonly responseMessageId?: DeepSeekMessageId;
   /** The `model_type` the provider said answered (`ready.model_type`), for diagnosis. */
   readonly modelType?: string;
   /** `active` continues the session; `lost` means the provider no longer accepts it. */
@@ -114,12 +117,8 @@ function parseSession(value: unknown): DeepSeekSessionRecord | undefined {
   if (typeof chatSessionId !== "string" || chatSessionId.length === 0) return undefined;
   const status = record["status"] === "lost" ? "lost" : record["status"] === "active" ? "active" : undefined;
   if (status === undefined) return undefined;
-  const parentMessageId = typeof record["parentMessageId"] === "string" && record["parentMessageId"].length > 0
-    ? record["parentMessageId"]
-    : undefined;
-  const responseMessageId = typeof record["responseMessageId"] === "string" && record["responseMessageId"].length > 0
-    ? record["responseMessageId"]
-    : undefined;
+  const parentMessageId = isDeepSeekMessageId(record["parentMessageId"]) ? record["parentMessageId"] : undefined;
+  const responseMessageId = isDeepSeekMessageId(record["responseMessageId"]) ? record["responseMessageId"] : undefined;
   const modelType = typeof record["modelType"] === "string" && record["modelType"].length > 0
     ? record["modelType"]
     : undefined;
@@ -211,12 +210,8 @@ class DeepSeekConversationStore implements DeepSeekConversationState {
       generation,
       session: {
         chatSessionId: session.chatSessionId,
-        ...(session.parentMessageId !== undefined && session.parentMessageId.length > 0
-          ? { parentMessageId: session.parentMessageId }
-          : {}),
-        ...(session.responseMessageId !== undefined && session.responseMessageId.length > 0
-          ? { responseMessageId: session.responseMessageId }
-          : {}),
+        ...(isDeepSeekMessageId(session.parentMessageId) ? { parentMessageId: session.parentMessageId } : {}),
+        ...(isDeepSeekMessageId(session.responseMessageId) ? { responseMessageId: session.responseMessageId } : {}),
         ...(session.modelType !== undefined && session.modelType.length > 0 ? { modelType: session.modelType } : {}),
         status: session.status,
         ...(session.reason !== undefined ? { reason: session.reason } : {}),

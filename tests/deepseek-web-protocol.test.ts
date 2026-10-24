@@ -10,6 +10,7 @@ import {
 import { defaultConfig } from "../src/config";
 import {
   DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES,
+  DEEPSEEK_WEB_DEFAULT_MODEL_TYPES,
   DEEPSEEK_WEB_PROVIDER_ID,
   DEEPSEEK_WEB_RECORDED_BODY_KEYS,
   DEEPSEEK_WEB_SESSION_ID_PATHS,
@@ -85,19 +86,33 @@ describe("deepseek-web — the completion body carries the keys the recon settle
     expect(body).not.toHaveProperty("source");
   });
 
-  test("a continuation sends the recorded cursor and the two toggles", () => {
+  test("a continuation sends the measured cursor (its own scalar) and no model_type", () => {
+    // The signed-in capture's second interaction: `parent_message_id` is the previous answer's
+    // `response_message_id` **as a JSON number**, and the app does not re-declare `model_type`
+    // (the session owns the model). Both are reproduced here, without coercing either value.
     const body = deepSeekCompletionRequest({
       chatSessionId: "session-fixture",
-      parentMessageId: "message-fixture",
-      modelType: "expert",
+      parentMessageId: 1713945000123,
+      modelType: null,
       prompt: "again",
       thinkingEnabled: true,
       searchEnabled: true,
     });
-    expect(body["parent_message_id"]).toBe("message-fixture");
-    expect(body["model_type"]).toBe("expert");
+    expect(body["parent_message_id"]).toBe(1713945000123);
+    expect(typeof body["parent_message_id"]).toBe("number");
+    expect(body["model_type"]).toBeNull();
     expect(body["thinking_enabled"]).toBe(true);
     expect(body["search_enabled"]).toBe(true);
+    expect(Object.keys(body).sort()).toEqual([...DEEPSEEK_WEB_RECORDED_BODY_KEYS].sort());
+    // A string id is kept as a string — the scalar the provider sent is what goes back.
+    expect(deepSeekCompletionRequest({
+      chatSessionId: "session-fixture",
+      parentMessageId: "message-fixture",
+      modelType: null,
+      prompt: "again",
+      thinkingEnabled: false,
+      searchEnabled: false,
+    })["parent_message_id"]).toBe("message-fixture");
   });
 
   test("a body without a session id or a model_type is a programming error, not a guess", () => {
@@ -106,6 +121,14 @@ describe("deepseek-web — the completion body carries the keys the recon settle
     })).toThrow(TypeError);
     expect(() => deepSeekCompletionRequest({
       chatSessionId: "s", modelType: "", prompt: "x", thinkingEnabled: false, searchEnabled: false,
+    })).toThrow(TypeError);
+    expect(() => deepSeekCompletionRequest({
+      chatSessionId: "s",
+      parentMessageId: "",
+      modelType: null,
+      prompt: "x",
+      thinkingEnabled: false,
+      searchEnabled: false,
     })).toThrow(TypeError);
   });
 
@@ -323,39 +346,52 @@ describe("deepseek-web — the proof of work is one seam whose default refuses",
   });
 });
 
-describe("deepseek-web — no rows are published without a configured model_type", () => {
-  test("an unconfigured deployment publishes nothing and says why", () => {
+describe("deepseek-web — the measured default row is served, and configuration overrides or extends it", () => {
+  test("an unconfigured deployment publishes exactly the measured default row", () => {
     const config = defaultConfig();
-    expect(deepSeekCatalogueVisible(config)).toBe(false);
+    expect(deepSeekCatalogueVisible(config)).toBe(true);
     const provider = resolveDeepSeekProviderConfig(config);
-    expect(provider.modelTypes).toEqual([]);
-    expect(deepSeekCatalogueRows(provider)).toEqual([]);
-    expect(deepSeekModelDescriptors(provider)).toEqual([]);
-    const note = deepSeekCatalogueNote(config);
-    expect(note).toContain('webChat.providers["deepseek-web"].modelTypes');
-    expect(note).toContain("session-only");
-    // The prefill literal is never used as a seed, even when nothing is configured.
+    // One row, the measured enabled one: `default`. No second id is seeded, and the deep-link prefill
+    // literal (`default`/`expert`/`vision`) is never a catalogue.
+    expect(provider.modelTypes).toEqual(DEEPSEEK_WEB_DEFAULT_MODEL_TYPES);
+    expect(provider.modelTypes).toEqual([{ id: "default", label: "DeepSeek Chat", thinking: true, search: true }]);
+    const rows = deepSeekCatalogueRows(provider);
+    expect(rows.map(row => row.slug)).toEqual([`${DEEPSEEK_WEB_PROVIDER_ID}/default`]);
+    expect(rows[0]?.display_name).toBe("DeepSeek Chat");
+    expect(deepSeekModelDescriptors(provider)).toEqual([{ id: "default", label: "DeepSeek Chat", text: true }]);
+    // The two toggles are on because the site had them on in both captured completions.
+    expect(provider.modelTypes[0]?.thinking).toBe(true);
+    expect(provider.modelTypes[0]?.search).toBe(true);
+    // The disabled server-side rows are never offered just because the prefill literal names them.
     for (const modelType of DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES) {
-      expect(note).toContain(modelType);
-      expect(deepSeekCatalogueRows(provider).map(row => row.slug)).not.toContain(`${DEEPSEEK_WEB_PROVIDER_ID}/${modelType}`);
+      if (modelType === "default") continue;
+      expect(rows.map(row => row.slug)).not.toContain(`${DEEPSEEK_WEB_PROVIDER_ID}/${modelType}`);
     }
+    expect(deepSeekCatalogueNote(config)).toContain("served by default: default");
+    expect(deepSeekCatalogueNote(config)).toContain("no configuration is needed");
   });
 
-  test("an empty list is the same deliberate 'serve nothing', not an error", () => {
+  test("an explicit empty list is the deliberate 'serve nothing', not an error", () => {
     const config = withModelTypes([]);
     expect(deepSeekCatalogueVisible(config)).toBe(false);
     expect(deepSeekCatalogueRows(resolveDeepSeekProviderConfig(config))).toEqual([]);
+    // The honest state still says why, and names the configuration field.
+    const note = deepSeekCatalogueNote(config);
+    expect(note).toContain('webChat.providers["deepseek-web"].modelTypes');
+    expect(note).toContain("empty list");
   });
 
-  test("configured model types produce text-only rows with no invented levels or windows", () => {
+  test("configured model types override the seeded defaults and extend the list", () => {
     const config = withModelTypes([
-      "default",
+      { id: "default", label: "My DeepSeek", thinking: false },
       { id: "expert", label: "DeepSeek Expert", thinking: true },
     ]);
     expect(deepSeekCatalogueVisible(config)).toBe(true);
     const provider = resolveDeepSeekProviderConfig(config);
+    // `default` keeps the seeded label/toggles where the entry is silent (`search`), and the entry
+    // overrides what it states (`label`, `thinking`). A non-seeded id takes the conservative defaults.
     expect(provider.modelTypes).toEqual([
-      { id: "default", label: "default", thinking: false, search: false },
+      { id: "default", label: "My DeepSeek", thinking: false, search: true },
       { id: "expert", label: "DeepSeek Expert", thinking: true, search: false },
     ]);
     const rows = deepSeekCatalogueRows(provider);
@@ -369,10 +405,21 @@ describe("deepseek-web — no rows are published without a configured model_type
       expect(row["tool_mode"]).toBeNull();
     }
     expect(deepSeekModelDescriptors(provider)).toEqual([
-      { id: "default", label: "default", text: true },
+      { id: "default", label: "My DeepSeek", text: true },
       { id: "expert", label: "DeepSeek Expert", text: true },
     ]);
-    expect(deepSeekCatalogueNote(config)).toContain("default, expert");
+    expect(deepSeekCatalogueNote(config)).toContain("configured: default, expert");
+  });
+
+  test("a plain id keeps the seeded defaults, and an explicit boolean overrides them", () => {
+    expect(resolveDeepSeekProviderConfig(withModelTypes(["default"])).modelTypes).toEqual([
+      { id: "default", label: "DeepSeek Chat", thinking: true, search: true },
+    ]);
+    expect(resolveDeepSeekProviderConfig(withModelTypes([
+      { id: "default", thinking: false, search: false },
+    ])).modelTypes).toEqual([
+      { id: "default", label: "DeepSeek Chat", thinking: false, search: false },
+    ]);
   });
 
   test("a malformed block is a configuration error, never a silent fallback", () => {
@@ -388,6 +435,16 @@ describe("deepseek-web — no rows are published without a configured model_type
       ...defaultConfig(),
       webChat: { providers: { [DEEPSEEK_WEB_PROVIDER_ID]: { modelTypes: [{ id: "default", thinking: "yes" }] } } },
     } as never)).toThrow(/thinking/);
+    // An unknown field is a typed configuration error, never silently ignored: a typo must not look
+    // like a configured capability.
+    expect(() => resolveDeepSeekProviderConfig({
+      ...defaultConfig(),
+      webChat: { providers: { [DEEPSEEK_WEB_PROVIDER_ID]: { modelTypes: [{ id: "default", reasoning: true }] } } },
+    } as never)).toThrow(/modelTypes\[0\]\.reasoning: unknown field/);
+    expect(() => resolveDeepSeekProviderConfig({
+      ...defaultConfig(),
+      webChat: { providers: { [DEEPSEEK_WEB_PROVIDER_ID]: { modelTypes: [{ id: "default", enabled: false }] } } },
+    } as never)).toThrow(/unknown field/);
   });
 
   test("the provider reads its own credential directory, never another provider's", () => {
@@ -414,18 +471,26 @@ describe("deepseek-web — the driver states its own unproven facts", () => {
     expect(account).not.toHaveProperty("accountFingerprint");
   });
 
-  test("no reasoning level is resolvable, and no model is served when nothing is configured", async () => {
+  test("no reasoning level is resolvable, and the seeded row resolves without configuration", async () => {
     const driver = createDeepSeekDriver({
       provider: resolveDeepSeekProviderConfig(withModelTypes(["default"])),
       state: createMemoryDeepSeekConversationState(),
     });
     expect(await driver.resolveModel("deepseek-web/default")).toMatchObject({ id: "default" });
     expect(await driver.resolveModel("deepseek-web/default", "Thinking")).toBeUndefined();
+    // No configuration at all still resolves the measured default row: that is what makes the provider
+    // selectable. An explicitly empty list is the only state that serves no model.
     const unconfigured = createDeepSeekDriver({
       provider: resolveDeepSeekProviderConfig(defaultConfig()),
       state: createMemoryDeepSeekConversationState(),
     });
-    expect(await unconfigured.resolveModel("deepseek-web/default")).toBeUndefined();
+    expect(await unconfigured.resolveModel("deepseek-web/default")).toMatchObject({ id: "default" });
+    expect(await unconfigured.resolveModel("deepseek-web/expert")).toBeUndefined();
     expect(await unconfigured.health()).toMatchObject({ ok: false });
+    const nothing = createDeepSeekDriver({
+      provider: resolveDeepSeekProviderConfig(withModelTypes([])),
+      state: createMemoryDeepSeekConversationState(),
+    });
+    expect(await nothing.resolveModel("deepseek-web/default")).toBeUndefined();
   });
 });
