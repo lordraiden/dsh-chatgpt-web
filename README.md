@@ -490,17 +490,19 @@ protocol, assumptions and the per-domain sign-in rule: [`doc/qwen-chat.md`](./do
 **DeepSeek Web** (`deepseek-web/<model_type>`) is implemented as a fourth provider. Its turn path is
 measured against a real signed-in capture: the completion body, the named/unnamed SSE patch stream, the
 `THINK`/`RESPONSE` fragments, the `close` terminator, the page-owned SHA3 proof of work (a fresh proof
-per completion) and the page's bearer plus `x-client-*` / `x-device-*` headers. It publishes no rows of
-its own: its model list is a session-only remote setting (no public endpoint, no refresh command), so
-the catalogue appears only once the operator configures the **measured** `model_type` values
-(`default` = Instant; `expert` and `vision` are disabled in the captured account) in
-`webChat.providers["deepseek-web"].modelTypes`. A `deepseek-web/...` request on a deployment that
-configured nothing is a typed `400` that says exactly that. A capture is verified by the provider's own
-predicate (the measured settings call, decided by its **nested** `data.biz_code`), so a good import
-writes the verified marker and unblocks a turn; a capture without the required `localStorage` is refused
-before any browser starts. An interactive sign-in controller is still not implemented, so DeepSeek's
-operator path is a capture plus `auth import`. Details:
-[`doc/deepseek-web.md`](./doc/deepseek-web.md) §6–§7.
+per completion) and the page's bearer plus `x-client-*` / `x-device-*` headers. **No configuration is
+needed to select it:** the model list is a session-only remote setting (no public endpoint, no refresh
+command), so the provider seeds the **measured** row — `deepseek-web/default`, labelled "DeepSeek Chat",
+with the site's two toggles on — and `/v1/models` publishes it out of the box. The measured account had
+`expert` and `vision` disabled server-side, so those are never seeded. A
+`webChat.providers["deepseek-web"]` block is optional: it overrides the seeded row or extends the list
+for an account that enabled more, and an explicit empty list is the only state that publishes no
+DeepSeek route (that deployment answers `deepseek-web/...` with a typed `400` that says exactly that). A
+capture is verified by the provider's own predicate (the measured settings call, decided by its
+**nested** `data.biz_code`), so a good import writes the verified marker and unblocks a turn; a capture
+without the required `localStorage` is refused before any browser starts. An interactive sign-in
+controller is still not implemented, so DeepSeek's operator path is a capture plus `auth import`.
+Details: [`doc/deepseek-web.md`](./doc/deepseek-web.md) §6–§7.
 
 The catalogue is resolved from the authenticated account's capability state, so it is not a promise
 that every account has every route: unknown or unverifiable capability state fails closed, and an

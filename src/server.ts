@@ -1934,11 +1934,13 @@ export function startServer(
     ? createQwenChatProvider({ config })
     : undefined;
   // DeepSeek Web is the third provider. Composing it is inert (no browser until a turn needs it, no
-  // file written), and it publishes **no** catalogue rows unless the operator configured the
-  // model_type values a signed-in capture showed — DeepSeek's model list is a session-only remote
-  // setting (recon §2.5), so an absent configuration is a deliberate "serve nothing", never a guess.
-  // The composition owns the ambient catalogue claim (`deepseek-web/<model_type>`), so a caller that
-  // asks this provider for an unserved model gets its typed 400 instead of an unrelated backend.
+  // file written), and it publishes the **measured default row** (`deepseek-web/default`, the only
+  // enabled row of the signed-in capture) so the model is selectable with no configuration at all.
+  // DeepSeek's model list is a session-only remote setting (recon §2.5), so that row is a seed, not a
+  // discovery: a configuration block overrides or extends it, and only an explicit empty list serves
+  // nothing. The composition owns the ambient catalogue claim (`deepseek-web/<model_type>`), so a
+  // caller that asks this provider for an unserved model gets its typed 400 instead of an unrelated
+  // backend.
   const deepSeekWebProvider = dependencies.webChatProviders === undefined
     ? createDeepSeekWebProvider({ config })
     : undefined;

@@ -11,6 +11,12 @@
  * keyed by the core's affinity key, and they are continuity state only — never a transcript, never a
  * credential.
  *
+ * It also records one **install fact**: whether the conversation has already sent its first human
+ * message ({@link QwenChatConversationEntry.humanMessageSent}). The deterministic project header
+ * belongs to that first human turn, and deciding it from this recorded fact — instead of from "does a
+ * provider chat exist" — is what keeps a provider chat created by something other than the caller's
+ * human turn from consuming the install.
+ *
  * ## Why it is durable
  *
  * The chat lives server-side and survives this process; only the mapping from the caller's affinity
@@ -61,6 +67,17 @@ export interface QwenChatConversationEntry {
   /** The provider's own epoch counter; the core records the same number the driver handed it. */
   readonly generation: number;
   readonly chat?: QwenChatChatRecord;
+  /**
+   * Whether this conversation has already sent its **first human message**.
+   *
+   * This is the recorded fact the conversation's install decision reads. The deterministic project
+   * header belongs to the first turn of a conversation that carries a human message, and it is decided
+   * from what this deployment recorded — **never** from whether a provider chat exists, because a
+   * provider chat can be created by something that is not the caller's human turn (a non-installing
+   * seam, or a housekeeping call the caller failed to declare). It survives a generation change: an
+   * explicit replay rebuilds canonical history and must not re-inject the header afterwards.
+   */
+  readonly humanMessageSent: boolean;
 }
 
 /** The continuity state port. All operations are synchronous: the payload is a few hundred bytes. */
@@ -73,12 +90,25 @@ export interface QwenChatConversationState {
   beginGeneration(key: string, generation: number): void;
   /** Record (or refresh) the chat and cursor of an affinity. */
   recordChat(key: string, chat: Omit<QwenChatChatRecord, "updatedAt"> & { readonly updatedAt?: number }): void;
+  /**
+   * Record that this conversation has sent its first human message.
+   *
+   * Once set it is never cleared: the install is initialization metadata of the conversation's first
+   * physical message, so a later turn of the same conversation (or of a replay of it) must not send it
+   * again. Idempotent.
+   */
+  recordHumanMessage(key: string): void;
   /** Record that the provider no longer accepts the chat. The entry is kept, never silently dropped. */
   markLost(key: string, reason: string): void;
   /** Abandon the chat of an affinity without inventing a replacement (an explicit replay does this). */
   forgetChat(key: string): void;
   /** Every entry, for diagnostics. No secrets: affinity keys and opaque chat ids only. */
-  entries(): readonly { readonly key: string; readonly generation: number; readonly chat?: QwenChatChatRecord }[];
+  entries(): readonly {
+    readonly key: string;
+    readonly generation: number;
+    readonly humanMessageSent: boolean;
+    readonly chat?: QwenChatChatRecord;
+  }[];
   /** Release the file, when this state owns one. Idempotent. */
   close?(): void;
 }
@@ -86,7 +116,18 @@ export interface QwenChatConversationState {
 /** The on-disk shape. `version` is the contract: an unknown version is never guessed. */
 interface QwenChatStateFile {
   version: 1;
-  conversations: Record<string, { generation: number; chat?: QwenChatChatRecord }>;
+  /**
+   * `humanMessageSent` is always written now; a file written before it existed lacks it, and the
+   * reader adopts that case (see {@link parseStateFile}).
+   */
+  conversations: Record<string, StoredEntry>;
+}
+
+/** One entry as this module keeps it in memory. */
+interface StoredEntry {
+  generation: number;
+  chat?: QwenChatChatRecord;
+  humanMessageSent: boolean;
 }
 
 const STATE_FILE_VERSION = 1;
@@ -136,24 +177,31 @@ function parseStateFile(raw: unknown): QwenChatStateFile | undefined {
   if (record["version"] !== STATE_FILE_VERSION) return undefined;
   const conversations = record["conversations"];
   if (!conversations || typeof conversations !== "object" || Array.isArray(conversations)) return undefined;
-  const parsed: Record<string, { generation: number; chat?: QwenChatChatRecord }> = {};
+  const parsed: Record<string, StoredEntry> = {};
   for (const [key, value] of Object.entries(conversations)) {
     if (key.length === 0 || !value || typeof value !== "object" || Array.isArray(value)) continue;
     const entry = value as Record<string, unknown>;
     const generation = entry["generation"];
     if (!positiveInteger(generation)) continue;
     const chat = parseChat(entry["chat"]);
-    parsed[key] = { generation, ...(chat ? { chat } : {}) };
+    // A file written before this fact existed records a chat but no flag. Such a conversation has
+    // already had its first physical message (that is what a recorded chat means), so it is adopted as
+    // "human message sent": the fail-safe direction, because re-installing the header into a live
+    // conversation would duplicate it. An **explicit** `false` beside a chat is a chat created by a
+    // non-installing seam in this format, and it keeps the install available.
+    const recorded = entry["humanMessageSent"];
+    const humanMessageSent = recorded === true || (recorded === undefined && chat !== undefined);
+    parsed[key] = { generation, humanMessageSent, ...(chat ? { chat } : {}) };
   }
   return { version: STATE_FILE_VERSION, conversations: parsed };
 }
 
 /** A shared in-memory implementation, and the durable one's base. */
 class QwenChatConversationStore implements QwenChatConversationState {
-  protected readonly conversations: Map<string, { generation: number; chat?: QwenChatChatRecord }>;
+  protected readonly conversations: Map<string, StoredEntry>;
   protected readonly now: () => number;
 
-  constructor(initial: Record<string, { generation: number; chat?: QwenChatChatRecord }>, options: { now?: () => number }) {
+  constructor(initial: Record<string, StoredEntry>, options: { now?: () => number }) {
     this.conversations = new Map(Object.entries(initial).map(([key, value]) => [key, { ...value }]));
     this.now = options.now ?? Date.now;
   }
@@ -164,7 +212,11 @@ class QwenChatConversationStore implements QwenChatConversationState {
   read(key: string): QwenChatConversationEntry | undefined {
     const entry = this.conversations.get(key);
     if (!entry) return undefined;
-    return { generation: entry.generation, ...(entry.chat ? { chat: entry.chat } : {}) };
+    return {
+      generation: entry.generation,
+      humanMessageSent: entry.humanMessageSent,
+      ...(entry.chat ? { chat: entry.chat } : {}),
+    };
   }
 
   generation(key: string): number {
@@ -177,7 +229,7 @@ class QwenChatConversationStore implements QwenChatConversationState {
     }
     const entry = this.conversations.get(key);
     if (entry === undefined) {
-      this.conversations.set(key, { generation });
+      this.conversations.set(key, { generation, humanMessageSent: false });
       this.persist();
       return;
     }
@@ -186,8 +238,10 @@ class QwenChatConversationStore implements QwenChatConversationState {
     }
     if (generation === entry.generation) return;
     // A new epoch abandons the previous chat: the next turn of this affinity must create a new one
-    // instead of continuing the conversation the caller explicitly replaced.
-    this.conversations.set(key, { generation });
+    // instead of continuing the conversation the caller explicitly replaced. The recorded install
+    // fact survives, because a replay rebuilds canonical history rather than reintroducing the
+    // conversation.
+    this.conversations.set(key, { generation, humanMessageSent: entry.humanMessageSent });
     this.persist();
   }
 
@@ -199,6 +253,7 @@ class QwenChatConversationStore implements QwenChatConversationState {
     const generation = existing?.generation ?? 1;
     this.conversations.set(key, {
       generation,
+      humanMessageSent: existing?.humanMessageSent ?? false,
       chat: {
         chatId: chat.chatId,
         ...(chat.parentId !== undefined && chat.parentId.length > 0 ? { parentId: chat.parentId } : {}),
@@ -212,11 +267,23 @@ class QwenChatConversationStore implements QwenChatConversationState {
     this.persist();
   }
 
+  recordHumanMessage(key: string): void {
+    const existing = this.conversations.get(key);
+    if (existing?.humanMessageSent === true) return;
+    this.conversations.set(key, {
+      generation: existing?.generation ?? 1,
+      humanMessageSent: true,
+      ...(existing?.chat ? { chat: existing.chat } : {}),
+    });
+    this.persist();
+  }
+
   markLost(key: string, reason: string): void {
     const existing = this.conversations.get(key);
     if (!existing?.chat) return;
     this.conversations.set(key, {
       generation: existing.generation,
+      humanMessageSent: existing.humanMessageSent,
       chat: { ...existing.chat, status: "lost", reason, updatedAt: this.now() },
     });
     this.persist();
@@ -225,14 +292,23 @@ class QwenChatConversationStore implements QwenChatConversationState {
   forgetChat(key: string): void {
     const existing = this.conversations.get(key);
     if (!existing?.chat) return;
-    this.conversations.set(key, { generation: existing.generation });
+    this.conversations.set(key, {
+      generation: existing.generation,
+      humanMessageSent: existing.humanMessageSent,
+    });
     this.persist();
   }
 
-  entries(): readonly { readonly key: string; readonly generation: number; readonly chat?: QwenChatChatRecord }[] {
+  entries(): readonly {
+    readonly key: string;
+    readonly generation: number;
+    readonly humanMessageSent: boolean;
+    readonly chat?: QwenChatChatRecord;
+  }[] {
     return [...this.conversations.entries()].map(([key, entry]) => ({
       key,
       generation: entry.generation,
+      humanMessageSent: entry.humanMessageSent,
       ...(entry.chat ? { chat: entry.chat } : {}),
     }));
   }
@@ -256,7 +332,7 @@ export function createFileQwenChatConversationState(
   file: string,
   options: QwenChatConversationStateOptions = {},
 ): QwenChatConversationState {
-  let initial: Record<string, { generation: number; chat?: QwenChatChatRecord }> = {};
+  let initial: Record<string, StoredEntry> = {};
   if (existsSync(file)) {
     try {
       const parsed = parseStateFile(JSON.parse(readFileSync(file, "utf8")));

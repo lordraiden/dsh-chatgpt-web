@@ -62,7 +62,9 @@ import {
   DEEPSEEK_WEB_PATCH_OPERATIONS,
   DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE,
   DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE,
+  isDeepSeekMessageId,
   isDeepSeekPatchOperation,
+  type DeepSeekMessageId,
   type DeepSeekPatchOperation,
 } from "./provider";
 
@@ -100,8 +102,9 @@ export type DeepSeekSseFrame =
   /** The stream announced the turn's own message ids and the model that answered. */
   | {
     readonly kind: "ready";
-    readonly responseMessageId?: string;
-    readonly requestMessageId?: string;
+    /** The answer's own id, kept with the scalar the provider sent it as (measured: a number). */
+    readonly responseMessageId?: DeepSeekMessageId;
+    readonly requestMessageId?: DeepSeekMessageId;
     readonly modelType?: string;
   }
   /** The provider closed the turn and said what the app's retry button should do. */
@@ -155,6 +158,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringField(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/** A message id as the wire carries it: a non-empty string or a finite number, never coerced. */
+function messageIdField(value: unknown): DeepSeekMessageId | undefined {
+  return isDeepSeekMessageId(value) ? value : undefined;
 }
 
 function numberField(value: unknown): number | undefined {
@@ -751,8 +759,10 @@ export function parseDeepSeekSseEvent(raw: DeepSeekSseRawEvent): DeepSeekSseFram
       return { kind: "delta", patch: normaliseDeepSeekPatch(payload) };
     case "ready": {
       const record = isRecord(payload) ? payload : {};
-      const responseMessageId = stringField(record["response_message_id"]);
-      const requestMessageId = stringField(record["request_message_id"]);
+      // The captured ids are JSON numbers; the scalar is kept as sent, because the continuation has to
+      // send the very same value back as `parent_message_id`.
+      const responseMessageId = messageIdField(record["response_message_id"]);
+      const requestMessageId = messageIdField(record["request_message_id"]);
       const modelType = stringField(record["model_type"]);
       return {
         kind: "ready",
@@ -813,9 +823,9 @@ export function parseDeepSeekSseEvent(raw: DeepSeekSseRawEvent): DeepSeekSseFram
 /** The accumulated answer of one streamed turn, plus the signal that ended it. */
 export interface DeepSeekCompletionResult {
   /** The `ready` response message id: the assistant message the **next** turn hangs off. */
-  readonly responseMessageId?: string;
+  readonly responseMessageId?: DeepSeekMessageId;
   /** The `ready` request message id, kept for diagnosis. */
-  readonly requestMessageId?: string;
+  readonly requestMessageId?: DeepSeekMessageId;
   /** The model the provider says answered (`ready.model_type`). */
   readonly modelType?: string;
   /** The answer text: `RESPONSE` fragment content, in document order. */
@@ -901,8 +911,8 @@ export function createDeepSeekCompletionAccumulator(
   /** What has already been streamed out, per fragment index. */
   const emitted = new Map<number, string>();
   const controlFrames: Record<string, number> = {};
-  let responseMessageId: string | undefined;
-  let requestMessageId: string | undefined;
+  let responseMessageId: DeepSeekMessageId | undefined;
+  let requestMessageId: DeepSeekMessageId | undefined;
   let modelType: string | undefined;
   let termination: DeepSeekTermination | undefined;
   let clickBehavior: string | undefined;
