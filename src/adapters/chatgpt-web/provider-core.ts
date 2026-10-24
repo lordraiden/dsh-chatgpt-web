@@ -5,6 +5,11 @@ import {
   type WebChatContinuationOutcome,
   type WebChatRetryRefusal,
 } from "../../web-chat/core";
+import {
+  createConversationAdmissionGate,
+  DEFAULT_TRANSPORT_ADMISSION_WAIT_MS,
+  type ConversationAdmissionGate,
+} from "../../web-chat/transport/conversation-admission";
 import { ChatGptWebAdapterError, chatGptRetainedSurfaceBusyError } from "./adapter-error";
 import type { CapabilitySnapshot } from "./capability-projector";
 import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concurrency";
@@ -73,27 +78,6 @@ export interface ProviderRetryDecision {
 const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BUDGET_TTL_MS = 30 * 60_000;
 const DEFAULT_SHUTDOWN_SETTLEMENT_GRACE_MS = 5_000;
-
-/**
- * How long an admission may wait for the conversation another turn is using (issue #305 follow-up).
- *
- * The refusal this bounds is correct — one active turn per logical conversation — but the conflict is
- * usually *transient*: a DSH harness's session-title call and the user's first message can share one
- * conversation, and the title turn is a short housekeeping round. Refusing the user's first message in
- * ~0 ms turned that overlap into a lost turn (`Another turn is already using this ChatGPT Web
- * conversation`), and the retry then paid for continuity the refused turn never wrote. Admission
- * therefore waits for the holder to retire, bounded here, and fails closed with exactly the same
- * honest refusal when the bound expires.
- *
- * The default is taken from the measured competing turn, not invented: the live re-measurement on the
- * #305 deployment saw the overlapping provider turn complete in 13.3–13.4 s, and the launcher's own
- * turn-end acknowledgement alone is allowed 15 s (`LAUNCHER_TURN_END_TIMEOUT_MS`). 30 s is 2× that
- * measurement and 2× the single acknowledgement step, while staying below the 60 s
- * `DEFAULT_SETTLEMENT_WAIT_GRACE_MS` that bounds the heavier wait on a predecessor's *physical
- * settlement* (issue #301). So a housekeeping overlap is absorbed rather than published to the caller,
- * and a genuine concurrency violation is still refused promptly instead of queueing forever.
- */
-export const DEFAULT_CONVERSATION_BUSY_WAIT_MS = 30_000;
 
 /**
  * The caller's cancellation, in the shape the rest of the turn path reports it.
@@ -838,12 +822,12 @@ export class ChatGptWebProviderCore {
    * replay advances the generation and a first turn records an unconfirmed conversation, so the next
    * attempt fails with "the last attempt on this conversation was never confirmed" even though the
    * refused turn never ran. The reservation is therefore taken *before* the continuity decision and
-   * held until the turn retires: it is the conversation's admission authority, and `begin` refuses a
-   * second execution while another one holds it.
+   * held until the turn retires: it is the conversation's admission authority, `begin` refuses a
+   * second execution while another one holds it, and the bounded wait itself is the shared
+   * conversation-admission owner (`src/web-chat/transport/conversation-admission.ts`) that the text
+   * providers' transport lease composes too — one mechanism, one measured bound.
    */
-  private readonly conversationAdmissions = new Map<string, string>();
-  /** Admission waits in flight, one set of wakers per native DSH thread. */
-  private readonly conversationWaiters = new Map<string, Set<() => void>>();
+  private readonly conversationAdmission: ConversationAdmissionGate;
   private closed = false;
 
   private rememberRetired(executionKey: string): void {
@@ -942,19 +926,27 @@ export class ChatGptWebProviderCore {
     private readonly leases = new BrowserAccountLeaseRegistry(),
     private readonly shutdownSettlementGraceMs = DEFAULT_SHUTDOWN_SETTLEMENT_GRACE_MS,
     /**
-     * Bound of one conversation admission wait (see `DEFAULT_CONVERSATION_BUSY_WAIT_MS`).
+     * Bound of one conversation admission wait (see `DEFAULT_TRANSPORT_ADMISSION_WAIT_MS`).
      *
-     * Injectable so a deterministic test can shrink the bound instead of waiting for the production
-     * one; the value is validated like every other bound in this provider.
+     * The default is the **shared** transport's measured bound — the harness's own session-title
+     * deadline — never a second provider-local number. Injectable so a deterministic test can shrink
+     * the bound instead of waiting for the production one; the value is validated like every other
+     * bound in this provider.
      */
-    private readonly conversationBusyWaitMs = DEFAULT_CONVERSATION_BUSY_WAIT_MS,
+    conversationAdmissionWaitMs = DEFAULT_TRANSPORT_ADMISSION_WAIT_MS,
   ) {
     if (!Number.isFinite(shutdownSettlementGraceMs) || shutdownSettlementGraceMs < 0) {
       throw new Error("ProviderCore shutdown settlement grace must be a non-negative finite number");
     }
-    if (!Number.isFinite(conversationBusyWaitMs) || conversationBusyWaitMs <= 0) {
-      throw new Error("ProviderCore conversation-busy wait must be a positive finite number of milliseconds");
+    if (!Number.isFinite(conversationAdmissionWaitMs) || conversationAdmissionWaitMs <= 0) {
+      throw new Error("ProviderCore conversation admission wait must be a positive finite number of milliseconds");
     }
+    this.conversationAdmission = createConversationAdmissionGate({
+      admissionWaitMs: conversationAdmissionWaitMs,
+      busyError: chatGptRetainedSurfaceBusyError,
+      abortError: conversationWaitAbortError,
+      closedError: () => new Error("ChatGPT Web ProviderCore is shut down"),
+    });
   }
 
   get(executionKey: string): ProviderTurnLifecycle | undefined {
@@ -970,7 +962,7 @@ export class ChatGptWebProviderCore {
   /**
    * Take the one admission slot for a native DSH thread, waiting for its holder to be released.
    *
-   * The wait is *bounded* by `conversationBusyWaitMs`, *cancellable* through the caller's own abort
+   * The wait is *bounded* by the shared admission wait, *cancellable* through the caller's own abort
    * signal, and event-driven: a waiter holds nothing while it waits and is woken when the holder
    * retires, never by polling. When the bound expires the refusal is exactly the one this provider
    * already publishes for a concurrent turn (issue #305), so a genuine contention is still refused
@@ -988,42 +980,34 @@ export class ChatGptWebProviderCore {
     signal?: AbortSignal,
   ): Promise<void> {
     if (!nativeThreadId) return;
-    const deadline = Date.now() + this.conversationBusyWaitMs;
-    for (;;) {
-      if (signal?.aborted) throw conversationWaitAbortError(signal);
-      if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
-      const holder = this.conversationAdmissions.get(nativeThreadId);
-      if ((holder === undefined || holder === executionKey)
-        && !this.activeTurnForThread(nativeThreadId, executionKey)) {
-        this.conversationAdmissions.set(nativeThreadId, executionKey);
-        return;
-      }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw chatGptRetainedSurfaceBusyError();
-      if (!await this.waitForConversationRelease(nativeThreadId, remaining, signal)) {
-        throw chatGptRetainedSurfaceBusyError();
-      }
-    }
+    if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
+    await this.conversationAdmission.admit({
+      holder: executionKey,
+      conversationKey: nativeThreadId,
+      ...(signal ? { signal } : {}),
+      // The begun-turn guard is a caller-owned blocking condition on top of the slot map: a turn
+      // that is still physically unsettled must keep the conversation closed even if a caller ever
+      // skipped admission. Retirement wakes the waiters through `notifyReleased`.
+      blocked: () => this.activeTurnForThread(nativeThreadId, executionKey) !== undefined,
+    });
   }
 
   /**
    * Give back an admission slot this execution holds but never turned into a provider turn.
    *
    * Idempotent, and deliberately silent when the slot belongs to another execution: only its owner
-   * may release it.
+   * may release it. The wake is sent even when this execution did not own the slot, so a waiter
+   * blocked by the begun-turn condition also re-checks after a retirement.
    */
   releaseConversationAdmission(executionKey: string, nativeThreadId?: string): void {
     if (!nativeThreadId) return;
-    if (this.conversationAdmissions.get(nativeThreadId) !== executionKey) return;
-    this.conversationAdmissions.delete(nativeThreadId);
-    this.wakeConversationWaiters(nativeThreadId);
+    this.conversationAdmission.release(executionKey, nativeThreadId);
+    this.conversationAdmission.notifyReleased(nativeThreadId);
   }
 
   /** Diagnostic: how many admissions are currently waiting for a conversation to become free. */
   conversationWaiterCount(): number {
-    let count = 0;
-    for (const waiters of this.conversationWaiters.values()) count += waiters.size;
-    return count;
+    return this.conversationAdmission.waiterCount();
   }
 
   /** The active turn holding a thread, excluding this execution's own. */
@@ -1037,63 +1021,6 @@ export class ChatGptWebProviderCore {
       if (!snapshot.physicalSettled && snapshot.provenance.nativeThreadId === nativeThreadId) return turn;
     }
     return undefined;
-  }
-
-  /** Wake every admission waiting on a thread; called from the release points, never by a poller. */
-  private wakeConversationWaiters(nativeThreadId: string): void {
-    const waiters = this.conversationWaiters.get(nativeThreadId);
-    if (!waiters) return;
-    this.conversationWaiters.delete(nativeThreadId);
-    for (const wake of waiters) wake();
-  }
-
-  /**
-   * Wait for one admission release on a thread, bounded and cancellable.
-   *
-   * Shaped after the provider's existing bounded waits (issue #301): the release owner stays the only
-   * authority on the outcome, this bound only decides which arrives first, and the timer and the abort
-   * listener are removed in one cleanup, so a wait that ends leaves no handle behind. `false` means
-   * the bound expired and the caller must fail closed.
-   */
-  private waitForConversationRelease(
-    nativeThreadId: string,
-    timeoutMs: number,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    return new Promise<boolean>((resolve, reject) => {
-      if (signal?.aborted) {
-        reject(conversationWaitAbortError(signal));
-        return;
-      }
-      let done = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const waiters = this.conversationWaiters.get(nativeThreadId) ?? new Set<() => void>();
-      this.conversationWaiters.set(nativeThreadId, waiters);
-      const cleanup = (): void => {
-        if (timer !== undefined) clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-        waiters.delete(wake);
-        if (waiters.size === 0 && this.conversationWaiters.get(nativeThreadId) === waiters) {
-          this.conversationWaiters.delete(nativeThreadId);
-        }
-      };
-      const finish = (released: boolean): void => {
-        if (done) return;
-        done = true;
-        cleanup();
-        resolve(released);
-      };
-      const wake = (): void => finish(true);
-      const onAbort = (): void => {
-        if (done) return;
-        done = true;
-        cleanup();
-        reject(conversationWaitAbortError(signal));
-      };
-      waiters.add(wake);
-      timer = setTimeout(() => finish(false), Math.max(1, timeoutMs));
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
   }
 
   begin(input: ChatGptWebProviderCoreTurnInput): ProviderTurnLifecycle {
@@ -1149,7 +1076,7 @@ export class ChatGptWebProviderCore {
       // The admission slot is the conversation's authority (issue #305 follow-up). A turn takes it
       // before its continuity decision; `begin` still refuses fail-closed when another execution
       // holds it, so a caller that skipped admission can never steal a conversation in use.
-      const admittedTo = this.conversationAdmissions.get(input.nativeThreadId);
+      const admittedTo = this.conversationAdmission.admissionHolder(input.nativeThreadId);
       if (admittedTo !== undefined && admittedTo !== input.executionKey) {
         throw chatGptRetainedSurfaceBusyError();
       }
@@ -1220,7 +1147,7 @@ export class ChatGptWebProviderCore {
     // The slot is recorded only once the turn really exists: everything above can throw (a lease
     // conflict, a capability conflict) and a failed `begin` must not leave a conversation reserved.
     if (input.nativeThreadId) {
-      this.conversationAdmissions.set(input.nativeThreadId, input.executionKey);
+      this.conversationAdmission.claim(input.executionKey, input.nativeThreadId);
     }
     return turn;
   }
@@ -1292,15 +1219,12 @@ export class ChatGptWebProviderCore {
     }));
     this.leases.clear();
     this.turns.clear();
-    this.conversationAdmissions.clear();
+    // Closing the admission owner clears every slot and wakes every waiter, so a waiter re-checks the
+    // closed core and fails instead of holding a timer for the rest of its bound.
+    this.conversationAdmission.close();
     this.capabilitySnapshotOwners.clear();
     this.retiredExecutions.clear();
     this.retiredCapabilitySnapshots.clear();
     this.retryBudgets.clear();
-    // Every waiter is woken so it re-checks the closed core and fails instead of holding a timer for
-    // the rest of its bound.
-    for (const nativeThreadId of [...this.conversationWaiters.keys()]) {
-      this.wakeConversationWaiters(nativeThreadId);
-    }
   }
 }

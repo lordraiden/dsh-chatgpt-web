@@ -32,9 +32,9 @@ import {
  *
  * The rule the fix must satisfy: **a housekeeping call must never fail a user's turn, and a user's
  * turn must never fail the housekeeping call.** The mechanism is a bounded, event-driven admission
- * wait at the shared transport owner (the same shape the ChatGPT owner already ships in
- * `ChatGPTWebProviderCore.acquireConversationAdmission`), so the second arrival waits instead of
- * being refused. Exclusivity is preserved: two turns of one conversation never run concurrently.
+ * wait at the one conversation-admission owner (`src/web-chat/transport/conversation-admission.ts`)
+ * that both this registry and `ChatGptWebProviderCore` compose, so the second arrival waits instead
+ * of being refused. Exclusivity is preserved: two turns of one conversation never run concurrently.
  */
 const MODEL_ID = "qwen3-coder-plus";
 const MODEL_ROUTE = `${QWEN_CODE_PROVIDER_ID}/${MODEL_ID}`;
