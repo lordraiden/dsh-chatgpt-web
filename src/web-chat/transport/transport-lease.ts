@@ -22,6 +22,13 @@
  */
 import { webChatError } from "../core/errors";
 import type { WebChatPhysicalSettlement } from "../core/exchange-state";
+import {
+  createConversationAdmissionGate,
+  DEFAULT_TRANSPORT_ADMISSION_WAIT_MS,
+  type ConversationAdmissionGate,
+} from "./conversation-admission";
+
+export { DEFAULT_TRANSPORT_ADMISSION_WAIT_MS };
 
 /** One physical transport resource. Its `id` is opaque to the core. */
 export interface WebChatTransportResource {
@@ -74,21 +81,6 @@ export interface WebChatTransportLeaseAcquireOptions {
   /** Create the resource when this conversation has none. Omit to refuse an unrecorded resource. */
   readonly create?: () => Promise<WebChatTransportResource>;
 }
-
-/**
- * Default bound of one **conversation admission wait**, in milliseconds.
- *
- * A caller that requires a conversation's transport while another exchange is using it waits this
- * long before the turn fails closed with the same refusal it already publishes. The number is chosen
- * from the measured competitor rather than from taste: this product's own harness runs the
- * session-title housekeeping call with a 60-second deadline
- * (`@deepseek-ai/dsh-experimental-session-titles-bundle`: `timeoutMs: 60000`), so a courtesy window
- * of the same size never pre-empts that call's own deadline — a housekeeping call blocked by a long
- * user turn is aborted by the caller's own cancellation, never by this bound — while a genuine
- * concurrency violation still fails closed within a minute instead of queueing behind a 15-minute
- * turn ceiling.
- */
-export const DEFAULT_TRANSPORT_ADMISSION_WAIT_MS = 60_000;
 
 /** Options for {@link WebChatTransportLeaseRegistry.admitConversation}. */
 export interface WebChatTransportAdmissionOptions {
@@ -204,73 +196,19 @@ export function createWebChatTransportLeaseRegistry(
    */
   const pendingAcquires = new Set<string>();
   /**
-   * The admission slots, per conversation, and the waiters for one.
-   *
-   * The slot is the **serialising** half of the same rule the lease enforces for the resource: it is
-   * held from before a turn's continuity decision until the turn ends, so two turns of one
-   * conversation are ordered rather than racing. Waiters are woken from the release points, never by
-   * a poller, and hold nothing while they wait.
+   * The admission slots are the **serialising** half of the same rule the lease enforces for the
+   * resource: a slot is held from before a turn's continuity decision until the turn ends, so two
+   * turns of one conversation are ordered rather than racing. The gate below is the one shared owner
+   * of that mechanism (the ChatGPT provider composes it too); a registry constructed without a bound
+   * keeps the historical immediate refusal.
    */
-  const admissions = new Map<string, string>();
-  const admissionWaiters = new Map<string, Set<() => void>>();
+  const admission: ConversationAdmissionGate = createConversationAdmissionGate({
+    admissionWaitMs,
+    busyError: conversationBusyError,
+    abortError: admissionAbortError,
+    closedError: registryClosedError,
+  });
   let closed = false;
-
-  /** Wake every admission waiting on a conversation; called from the release points. */
-  const wakeAdmissionWaiters = (conversationKey: string): void => {
-    const waiting = admissionWaiters.get(conversationKey);
-    if (!waiting) return;
-    admissionWaiters.delete(conversationKey);
-    for (const wake of waiting) wake();
-  };
-
-  /**
-   * Wait for one admission release on a conversation, bounded and cancellable.
-   *
-   * Shaped after the provider's existing bounded waits (issue #301): the release owner stays the only
-   * authority on the outcome, this bound only decides which arrives first, and the timer and the
-   * abort listener are removed in one cleanup, so a wait that ends leaves no handle behind. `false`
-   * means the bound expired and the caller must fail closed.
-   */
-  const waitForAdmissionRelease = (
-    conversationKey: string,
-    timeoutMs: number,
-    signal?: AbortSignal,
-  ): Promise<boolean> => {
-    return new Promise<boolean>((resolve, reject) => {
-      if (signal?.aborted) {
-        reject(admissionAbortError(signal));
-        return;
-      }
-      let done = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const waiting = admissionWaiters.get(conversationKey) ?? new Set<() => void>();
-      admissionWaiters.set(conversationKey, waiting);
-      const cleanup = (): void => {
-        if (timer !== undefined) clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-        waiting.delete(wake);
-        if (waiting.size === 0 && admissionWaiters.get(conversationKey) === waiting) {
-          admissionWaiters.delete(conversationKey);
-        }
-      };
-      const finish = (released: boolean): void => {
-        if (done) return;
-        done = true;
-        cleanup();
-        resolve(released);
-      };
-      const wake = (): void => finish(true);
-      const onAbort = (): void => {
-        if (done) return;
-        done = true;
-        cleanup();
-        reject(admissionAbortError(signal));
-      };
-      waiting.add(wake);
-      timer = setTimeout(() => finish(false), Math.max(1, timeoutMs));
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
-  };
 
   return {
     async acquire(options) {
@@ -395,46 +333,22 @@ export function createWebChatTransportLeaseRegistry(
       }
       entries.delete(conversationKey);
     },
-    async admitConversation({ holder, conversationKey, signal }) {
-      if (!holder) throw new TypeError("A conversation admission requires a holder identity");
-      if (!conversationKey) throw new TypeError("A conversation admission requires a conversation key");
-      const deadline = Date.now() + admissionWaitMs;
-      for (;;) {
-        if (signal?.aborted) throw admissionAbortError(signal);
-        if (closed) throw registryClosedError();
-        const current = admissions.get(conversationKey);
-        if (current === undefined || current === holder) {
-          admissions.set(conversationKey, holder);
-          return;
-        }
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) throw conversationBusyError();
-        // A released slot wakes the waiter; a bound that expires first fails closed with the refusal
-        // this layer already publishes, so a genuine concurrency violation is never queued forever.
-        if (!await waitForAdmissionRelease(conversationKey, remaining, signal)) {
-          throw conversationBusyError();
-        }
-      }
+    admitConversation({ holder, conversationKey, signal }) {
+      return admission.admit({ holder, conversationKey, ...(signal ? { signal } : {}) });
     },
     releaseConversation(holder, conversationKey) {
-      if (!holder || !conversationKey) return;
-      if (admissions.get(conversationKey) !== holder) return;
-      admissions.delete(conversationKey);
-      wakeAdmissionWaiters(conversationKey);
+      admission.release(holder, conversationKey);
     },
     isConversationAdmitted(conversationKey) {
-      return admissions.has(conversationKey);
+      return admission.isAdmitted(conversationKey);
     },
     admissionWaiterCount() {
-      let count = 0;
-      for (const waiting of admissionWaiters.values()) count += waiting.size;
-      return count;
+      return admission.waiterCount();
     },
     close() {
       if (closed) return;
       closed = true;
-      admissions.clear();
-      for (const conversationKey of [...admissionWaiters.keys()]) wakeAdmissionWaiters(conversationKey);
+      admission.close();
     },
   };
 }

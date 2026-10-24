@@ -15,16 +15,18 @@
  * Two owners are exercised here, both through the real turn path (identity resolution, the continuity
  * decision, the provider core, the durable store and settlement) with only the browser I/O replaced:
  *
- * 1. admission (`ChatGptWebProviderCore`): one slot per native DSH thread, waited for with a bounded,
- *    cancellable, event-driven wait. A transient overlap is absorbed; a genuine one still fails closed
- *    with #305's own refusal once the bound expires.
+ * 1. admission (`ChatGptWebProviderCore` over the shared conversation-admission owner): one slot per
+ *    native DSH thread, waited for with a bounded, cancellable, event-driven wait. A transient overlap
+ *    is absorbed; a genuine one still fails closed with #305's own refusal once the shared 60 s bound
+ *    (the harness session-title deadline) expires.
  * 2. the continuity decision (`webChatContinuity.resolveRecovery`): it must run *after* admission, so
  *    a refused turn leaves continuity exactly as it was and the retry can proceed.
  *
- * Deterministic and browser-free: the bound is injected (a constructor seam), the blocker is released
- * by the test, and the durable store is a real file whose bytes are compared across the refusal.
+ * Deterministic and browser-free: the bound is injected (a constructor seam) or moved with fake timers,
+ * the blocker is released by the test, and the durable store is a real file whose bytes are compared
+ * across the refusal.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -43,6 +45,7 @@ import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution"
 import type { ChatGptWebSurfaceTransport, WebSurfaceTurn } from "../src/adapters/chatgpt-web/web-surface-transport";
 import { defaultConfig, saveConfig } from "../src/config";
 import type { AdapterEvent, CodexParsedRequest } from "../src/types";
+import { DEFAULT_TRANSPORT_ADMISSION_WAIT_MS } from "../src/web-chat/transport";
 import {
   captureChatGptWebHome,
   restoreChatGptWebHome,
@@ -356,5 +359,142 @@ describe("a refusal that never executed leaves continuity untouched", () => {
     expect(errorEvents(retryEvents)).toHaveLength(0);
     expect(finalText(retryEvents)).toBe("answer-2");
     expect(surface.runs).toHaveLength(2);
+  });
+});
+
+/**
+ * The reported case — the ChatGPT counterpart of #336, operator report on `chatgpt-web/think`: the
+ * harness's session-title call is *undeclared* on the wire, so it takes the same conversation as the
+ * user's real turn and holds it for as long as the title generation takes. The measured example in this
+ * project took **1 m 5 s**, and the old provider bound was 30 s — so the title outlived the bound and
+ * the user's turn was refused, exactly as the operator saw:
+ *
+ *   Another turn is already using this ChatGPT Web conversation; concurrent turns of one chat are not
+ *   allowed.
+ *
+ * The rule: a housekeeping call must never make a user's turn fail. The admission wait is the shared
+ * transport's measured housekeeping deadline, so the title's own 60 s cancellation — never this bound —
+ * decides when it stops. This test drives the production default (no bound injected) and moves the clock
+ * deterministically, so it fails on the 30 s tree at the 30 s mark and passes once the wait is the shared
+ * 60 s one.
+ */
+describe("the reported case: a slow undeclared session-title call cannot fail the user's turn", () => {
+  /** Flush pending microtasks without relying on a clock, since the clock here is fake. */
+  async function flushMicrotasks(rounds = 25): Promise<void> {
+    for (let index = 0; index < rounds; index += 1) await Promise.resolve();
+  }
+
+  test("the ChatGPT admission uses the shared transport's measured housekeeping deadline", () => {
+    // The shared transport chose this from the harness's own session-title deadline (`timeoutMs: 60000`).
+    // ChatGPT composes the same owner and the same number; there is no second bound to drift.
+    expect(DEFAULT_TRANSPORT_ADMISSION_WAIT_MS).toBe(60_000);
+  });
+
+  test("a title call holding the conversation past the old 30 s bound is waited out, then the user's turn answers", async () => {
+    jest.useFakeTimers();
+    const leases = new BrowserAccountLeaseRegistry();
+    // No injected bound: this is the shipped default, and the assertion is about that default.
+    const core = new ChatGptWebProviderCore("chatgpt-web", leases);
+    const surface = new GatedSurface();
+    const adapter = adapterFor(core, surface);
+    let title: Promise<AdapterEvent[]> | undefined;
+    let user: Promise<AdapterEvent[]> | undefined;
+
+    try {
+      // The harness's undeclared housekeeping call: indistinguishable from a real turn, so it takes the
+      // conversation (same session/thread identity) and is held at its confirmed submission.
+      title = runTurn(adapter, turnRequest(
+        "title-turn",
+        "Generate the session title from this JSON array of human messages: []",
+      ));
+      title.catch(() => undefined);
+      await surface.submitted;
+      expect(surface.runs).toHaveLength(1);
+
+      // The operator's real message arrives while the title still owns the conversation.
+      user = runTurn(adapter, turnRequest("turn-1", "hola"));
+      user.catch(() => undefined);
+      await flushMicrotasks();
+      expect(core.conversationWaiterCount()).toBe(1);
+      // Waiting is a wait, not a second browser turn: exclusivity is unchanged.
+      expect(surface.runs).toHaveLength(1);
+
+      // Past the OLD 30 s bound: the user's turn is still waiting. On the old tree it had already been
+      // refused here, which is the reported failure.
+      jest.advanceTimersByTime(30_001);
+      await flushMicrotasks();
+      expect(core.conversationWaiterCount()).toBe(1);
+      expect(leases.activeCount()).toBe(1);
+
+      // The measured 1 m 5 s title lives past 45 s too; the shared bound (60 s) still has not expired.
+      jest.advanceTimersByTime(15_000);
+      await flushMicrotasks();
+      expect(core.conversationWaiterCount()).toBe(1);
+
+      // Release the title: the user's turn is admitted and answers, never refused, never concurrent.
+      jest.useRealTimers();
+      surface.open();
+      const [titleEvents, userEvents] = await Promise.all([answered(title), answered(user)]);
+      expect(errorEvents(titleEvents)).toHaveLength(0);
+      expect(errorEvents(userEvents)).toHaveLength(0);
+      expect(finalText(userEvents)).toBe("answer-2");
+      expect(surface.runs).toHaveLength(2);
+      expect(core.conversationWaiterCount()).toBe(0);
+      expect(leases.activeCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+      surface.open();
+      await Promise.allSettled([title, user].filter((work): work is Promise<AdapterEvent[]> => work !== undefined));
+    }
+  });
+
+  test("a genuine conflict that outlives the shared 60 s bound still refuses with #305's category and sentence", async () => {
+    jest.useFakeTimers();
+    const leases = new BrowserAccountLeaseRegistry();
+    const core = new ChatGptWebProviderCore("chatgpt-web", leases);
+    const surface = new GatedSurface();
+    const adapter = adapterFor(core, surface);
+    let title: Promise<AdapterEvent[]> | undefined;
+    let user: Promise<AdapterEvent[]> | undefined;
+
+    try {
+      // Two real turns, neither housekeeping: genuine contention, not a transient overlap.
+      title = runTurn(adapter, turnRequest("turn-1", "primera"));
+      title.catch(() => undefined);
+      await surface.submitted;
+
+      user = runTurn(adapter, turnRequest("turn-2", "segunda"));
+      user.catch(() => undefined);
+      await flushMicrotasks();
+      expect(core.conversationWaiterCount()).toBe(1);
+
+      // Still waiting one millisecond before the shared housekeeping deadline...
+      jest.advanceTimersByTime(DEFAULT_TRANSPORT_ADMISSION_WAIT_MS - 1);
+      await flushMicrotasks();
+      expect(core.conversationWaiterCount()).toBe(1);
+
+      // ...and refused exactly at it, with the same typed local refusal (issue #305): never a 5xx
+      // "provider failed", never a different sentence.
+      jest.advanceTimersByTime(2);
+      await flushMicrotasks();
+      const refused = await outcome(user);
+      expect(refused.ok).toBe(false);
+      assertBusyRefusal(refused.ok ? undefined : refused.error);
+      expect(core.conversationWaiterCount()).toBe(0);
+      // The refused turn never reached the browser, and the holder is untouched.
+      expect(surface.runs).toHaveLength(1);
+      expect(leases.activeCount()).toBe(1);
+
+      jest.useRealTimers();
+      surface.open();
+      const titleEvents = await answered(title);
+      expect(errorEvents(titleEvents)).toHaveLength(0);
+      expect(finalText(titleEvents)).toBe("answer-1");
+      expect(leases.activeCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+      surface.open();
+      await Promise.allSettled([title, user].filter((work): work is Promise<AdapterEvent[]> => work !== undefined));
+    }
   });
 });

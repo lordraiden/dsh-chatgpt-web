@@ -148,8 +148,9 @@ class GatedSurface {
  *
  * Admission now waits for a busy conversation before refusing (the #305 follow-up), so the assertion
  * that the second request is refused *while the first is still held* needs a deterministic bound
- * rather than the production 30 s. Every assertion below is unchanged: same refusal, same category,
- * same message, same point — only *when* it is decided moved to the end of the bound.
+ * rather than the production 60 s shared housekeeping deadline. Every assertion below is unchanged:
+ * same refusal, same category, same message, same point — only *when* it is decided moved to the end
+ * of the bound.
  */
 const ADMISSION_BOUND_MS = 250;
 
