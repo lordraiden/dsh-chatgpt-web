@@ -8,35 +8,29 @@
  * 1. the HTML shell and its API sit behind an **AWS WAF** challenge (`202` + `x-amzn-waf-action:
  *    challenge`), and the app treats `405` + `captcha` as a first-class state;
  * 2. `POST /api/v0/chat/completion` additionally needs a **proof of work** — one challenge per
- *    completion target, solved by the bundle's own WASM module.
+ *    completion target, solved by the page's own SHA3 WASM worker.
  *
- * The cookie/WAF half is what the provider-neutral page-context relay already solves: the request is
- * issued by the provider's own page, same-origin, with the page's cookies and `Sec-Fetch-*`. This
- * module adds no user-agent override, no stealth flag and no synthesized WAF cookie. If the page is
- * challenged, the turn fails with a typed access-verification category instead of being retried
- * behind the operator's back.
+ * The cookie/WAF half is what the provider-neutral page-context relay solves: the request is issued by
+ * the provider's own page, same-origin, with the page's cookies and `Sec-Fetch-*`. This module adds no
+ * user-agent override, no stealth flag and no synthesized WAF cookie. If the page is challenged, the
+ * turn fails with a typed access-verification category instead of being retried behind the operator's
+ * back.
  *
- * ## The two things this build cannot produce, and where each one lives
+ * ## The three things that come from the page at call time
  *
- * The proof of work is isolated behind **one seam**, {@link DeepSeekProofOfWorkSolver}, reached only
- * through {@link DeepSeekTurnRequestFacility.requestProofOfWork}. Its default implementation
- * {@link unprovenDeepSeekProofOfWork} throws a typed `TRANSPORT_UNAVAILABLE` failure and nothing else:
- * no retry, no fabricated clearance, no silent skip of the step. Two facts are unproven (recon §2.8):
+ * The signed-in capture settled all three; none is a constant in this module:
  *
- * - the **header name** the solved proof travels in (the bundle computes it but the name is not a
- *   plain literal in `main.js`);
- * - the **solution contract** — which hash function, which encoding, what the WASM module's entry
- *   point is.
+ * - the **proof of work** (`pow.ts`) is produced by the page's own worker, attached to the completion
+ *   POST *and nowhere else* — one fresh proof per completion;
+ * - the **`Authorization`** value is read from the page's own `localStorage["userToken"]` handle
+ *   (`page-identity.ts`), never from configuration and never from a captured header;
+ * - the **`x-client-*` / `x-device-*` / `x-hif-leim`** family is built from the page's identity
+ *   (`page-identity.ts`), so a guessed client version or a fabricated device id can never be sent.
  *
- * Because the header name is unproven, it travels *with* the value: a solver returns
- * `{header, value}`, so one capture replaces both halves in one place instead of leaving a guessed
- * header constant behind.
- *
- * The second unproven thing is the **provenance of the `Authorization` token** (recon §2.7 records the
- * header and the token manager, not where the token is stored). {@link
- * DeepSeekPageFacilityOptions.authorization} is that seam; its default sends no header at all rather
- * than reading or inventing a credential. The provider's own `40002`/`40003` refusal is then reported
- * honestly as `AUTH_REQUIRED`.
+ * If the page has no token, no `Authorization` header is sent and the provider's own `40002`/`40003`
+ * is reported as `AUTH_REQUIRED`. If the page cannot run its solver, the turn fails before anything is
+ * sent with `TRANSPORT_UNAVAILABLE` / `DEEPSEEK_POW_UNAVAILABLE`. Neither path fabricates anything and
+ * neither retries.
  */
 import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
@@ -48,61 +42,26 @@ import {
   DEEPSEEK_WEB_PROVIDER_ID,
   deepSeekApiHeaders,
   deepSeekUrl,
-  type DeepSeekProofChallenge,
 } from "./provider";
+import {
+  createDeepSeekPageProofAnswerer,
+  createDeepSeekProofOfWorkSolver,
+  unprovenDeepSeekProofOfWork,
+  type DeepSeekProofOfWork,
+  type DeepSeekProofOfWorkRequest,
+  type DeepSeekProofOfWorkSolver,
+} from "./pow";
+import {
+  deepSeekAuthorizationHeader,
+  deepSeekClientHeaders,
+  readDeepSeekPageIdentity,
+} from "./page-identity";
+
+export { unprovenDeepSeekProofOfWork };
+export type { DeepSeekProofOfWork, DeepSeekProofOfWorkRequest, DeepSeekProofOfWorkSolver };
 
 /** How long one JSON call (a session create, a challenge) may take. */
 export const DEEPSEEK_WEB_JSON_TIMEOUT_MS = 30_000;
-
-/** One solved proof of work: the header it travels in, and its value. */
-export interface DeepSeekProofOfWork {
-  /**
-   * The request header name the provider expects.
-   *
-   * **Unproven** (recon §2.8). A solver owns it because the header name and the solver contract are
-   * settled by the same observation (one signed-in HAR of a completion).
-   */
-  readonly header: string;
-  /** The header value the solver produced from the challenge. */
-  readonly value: string;
-}
-
-/** What a solver is given. */
-export interface DeepSeekProofOfWorkRequest {
-  /** The route the proof is for — the recorded `target_path` is the completion path. */
-  readonly targetPath: string;
-  /** The provider's challenge, with its raw object so a field this build did not name is available. */
-  readonly challenge: DeepSeekProofChallenge;
-}
-
-/**
- * The one seam the proof-of-work step is isolated behind.
- *
- * A production implementation must use **the page's own solver** (the bundle's `r1Pow` WASM flow,
- * recon §2.6) — never a reimplementation, because the challenge contract is the vendor's. This build
- * does not call it: no global handle for the module was measured, so invoking it would be an
- * invention. See `doc/deepseek-web.md` §6 for the observation that settles it.
- */
-export type DeepSeekProofOfWorkSolver = (request: DeepSeekProofOfWorkRequest) => Promise<DeepSeekProofOfWork>;
-
-/**
- * The default solver: a typed refusal, never a fabricated clearance.
- *
- * The failure is `TRANSPORT_UNAVAILABLE` because this is an admission step this build cannot perform
- * — not an authentication refusal (no credential was rejected) and not the provider's error (nothing
- * was sent). The turn is pre-submission and therefore retry-safe; the message names the seam.
- */
-export function unprovenDeepSeekProofOfWork(): DeepSeekProofOfWorkSolver {
-  return async () => {
-    throw webChatError(
-      "TRANSPORT_UNAVAILABLE",
-      "DeepSeek requires a per-completion proof of work, and this build cannot produce one: the header "
-      + "name and the solver contract are unproven (doc/deepseek-web.md §6), so no request was sent. "
-      + "The page's own solver is the only acceptable implementation.",
-      { providerId: DEEPSEEK_WEB_PROVIDER_ID, providerCode: "DEEPSEEK_POW_UNAVAILABLE" },
-    );
-  };
-}
 
 /** The HTTP result of a JSON POST issued from inside the page. */
 export interface DeepSeekJsonResult {
@@ -171,15 +130,14 @@ export interface DeepSeekTurnRequestFacility {
 
 /** Options for {@link createDeepSeekPageRequestFacility}. */
 export interface DeepSeekPageFacilityOptions {
-  /** The proof solver. Defaults to {@link unprovenDeepSeekProofOfWork}. */
+  /** The proof solver. Defaults to the page's own worker ({@link createDeepSeekPageProofAnswerer}). */
   readonly requestProofOfWork?: DeepSeekProofOfWorkSolver;
   /**
-   * Read the `Authorization` value the page's own client would send.
+   * Override the `Authorization` value the page's own client would send.
    *
-   * Defaults to "none": no storage key holding this provider's token was measured (recon §2.7 records
-   * the header and the token manager, not where the token lives), and reading a credential by guessing
-   * at keys is worse than sending no header. The provider then refuses with `40002`/`40003`, which is
-   * reported as `AUTH_REQUIRED` with an actionable message.
+   * Defaults to reading the page's own token from its `localStorage["userToken"]` handle at call time.
+   * An override that answers `undefined` sends no header; the provider's `40002`/`40003` is then
+   * reported as `AUTH_REQUIRED`.
    */
   readonly authorization?: () => Promise<string | undefined>;
 }
@@ -201,13 +159,35 @@ export function createDeepSeekPageRequestFacility(
   page: Page,
   options: DeepSeekPageFacilityOptions = {},
 ): DeepSeekTurnRequestFacility {
-  const requestProofOfWork = options.requestProofOfWork ?? unprovenDeepSeekProofOfWork();
+  const requestProofOfWork = options.requestProofOfWork
+    ?? createDeepSeekProofOfWorkSolver(createDeepSeekPageProofAnswerer(page));
   const authorization = options.authorization;
 
-  const authHeaders = async (): Promise<Record<string, string>> => {
-    if (authorization === undefined) return {};
+  /**
+   * The page's identity for one request: its client/device headers plus its own bearer, read now.
+   *
+   * Read per request (not once per page) because the page's token is the page's to rotate. The
+   * `authorization` override replaces only the bearer; the client/device headers still come from the
+   * page, because they are the browser's own identity.
+   */
+  const pageHeaders = async (): Promise<Record<string, string>> => {
+    let identity;
     try {
-      return authorizationHeaders(await authorization());
+      identity = await readDeepSeekPageIdentity(page);
+    } catch (error) {
+      throw webChatError(
+        "TRANSPORT_UNAVAILABLE",
+        "The DeepSeek page identity could not be read, so this turn was not sent. The page must be "
+        + "the signed-in chat.deepseek.com app.",
+        { providerId: DEEPSEEK_WEB_PROVIDER_ID, providerCode: "DEEPSEEK_PAGE_IDENTITY_UNREADABLE", cause: error },
+      );
+    }
+    const client = deepSeekClientHeaders(identity);
+    if (authorization === undefined) {
+      return { ...client, ...deepSeekAuthorizationHeader(identity) };
+    }
+    try {
+      return { ...client, ...authorizationHeaders(await authorization()) };
     } catch (error) {
       throw webChatError(
         "AUTH_REQUIRED",
@@ -220,7 +200,7 @@ export function createDeepSeekPageRequestFacility(
 
   return {
     async postJson(path: string, body: unknown): Promise<DeepSeekJsonResult> {
-      const headers = deepSeekApiHeaders(await authHeaders());
+      const headers = deepSeekApiHeaders(await pageHeaders());
       const answer = await requestInPageContext(page, {
         url: deepSeekUrl(path),
         method: "POST",
@@ -245,10 +225,8 @@ export function createDeepSeekPageRequestFacility(
       streamOptions: DeepSeekStreamPostOptions = {},
     ): Promise<DeepSeekStreamResult> {
       const headers = deepSeekApiHeaders({
-        accept: "text/event-stream",
-        "x-accel-buffering": "no",
+        ...await pageHeaders(),
         ...(streamOptions.proof === undefined ? {} : { [streamOptions.proof.header]: streamOptions.proof.value }),
-        ...await authHeaders(),
       });
       const suffix = randomUUID().replace(/-/g, "");
       const chunkBinding = `__dshDeepSeekChunk_${suffix}`;

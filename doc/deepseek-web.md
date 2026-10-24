@@ -7,29 +7,43 @@
 > ([`provider-onboarding.md`](./provider-onboarding.md)). Where this document and the code disagree, the
 > code and its tests win.
 
-The measured brief this provider implements is [`provider-recon.md`](./provider-recon.md) §2. Nothing in
-that document is re-measured here.
+The pre-capture brief is [`provider-recon.md`](./provider-recon.md) §2. Everything this document now
+states as measured was measured twice: once from the vendor's shipped bundle, and once from a **real
+signed-in HAR of `chat.deepseek.com`** supplied by the operator on **2026-10-24** (two completions, one
+`chat_session/create`, one `chat/create_pow_challenge`, the model settings call, the app's SHA3 WASM
+worker asset and its two bundle chunks). The capture itself is evidence, not a repository artifact: it
+is not committed, and no cookie, token, device id, prompt or header **value** from it appears in this
+document, the code or the tests.
 
 ## 1. What this slice is, and what it is not
 
 Implemented, and covered by tests that need no network:
 
-- the **stream vocabulary**: a named-SSE reader plus the JSON-patch fragment assembler
-  (`SET | BATCH | APPEND` against `response.fragments[i].content`), with `finish`, `close` and stream
-  end as the three terminators;
+- the **stream vocabulary**: a named-SSE reader plus the app's own delta parser — sticky `SET`/`APPEND`
+  defaults, `-1` = the last array element, and **relative** `BATCH` children — assembling
+  `response.fragments[i].content`, with `finish`, `close` and stream end as the three terminators. The
+  recorded answer is the `RESPONSE` fragment; `THINK` is reasoning, excluded and counted;
 - the **transport**: the recorded completion body over the provider-neutral page-context relay
-  (`src/adapters/page-context-request.ts`), with the proof-of-work step isolated behind **one seam** and
-  the `Authorization` provenance behind **a second**;
+  (`src/adapters/page-context-request.ts`);
+- the **proof of work**: a fresh proof per completion, produced by **the page's own SHA3 WASM worker**
+  (`pow.ts`), with the worker asset discovered from the page's live bundle at call time — no
+  reimplementation, no hard-coded proof, no fabricated header;
+- the **page identity**: `Authorization` (the page's own `localStorage["userToken"]`), the
+  `x-client-*` / `x-device-*` family and `x-hif-leim`, all read from the page **at call time**
+  (`page-identity.ts`); a page without a token sends no bearer and the provider's `40002`/`40003`
+  becomes `AUTH_REQUIRED`;
 - the **provider skeleton**: configurable catalogue rows with no invented ids, continuity keyed to
   `chat_session_id` + `parent_message_id`, ephemeral turns that create no session, and the two-layer
   envelope refusal mapping.
 
-**Not implemented, on purpose:** a live turn cannot succeed end to end. The proof of work and the page
-token are unproven (§6), and the adapter says so with typed errors rather than pretending. There is also
-no interactive sign-in controller and no authenticated import predicate (§7).
+**Not implemented, on purpose:** the interactive sign-in controller and the authenticated **import
+predicate** (§7). A fresh `auth import --provider deepseek-web` still stores the capture *unverified*,
+and the session's `ready()` gate refuses before launching the page. That is the one rung between a good
+capture and a live turn; §6 and §7 name it.
 
 - **Provider id / public route:** `deepseek-web`. A row is `deepseek-web/<model_type>`.
-- **Files:** `src/adapters/deepseek-web/**`; tests `tests/deepseek-web-{sse,protocol,route}.test.ts`.
+- **Files:** `src/adapters/deepseek-web/**`; tests
+  `tests/deepseek-web-{sse,protocol,pow,route}.test.ts`.
 
 ## 2. The id is the existing one, not a new spelling
 
@@ -43,11 +57,14 @@ path and `auth import --provider deepseek-web` all address the same literal. The
 
 ```text
 POST /api/v0/chat/create_pow_challenge  { target_path: "/api/v0/chat/completion" }
-      -> {code:0, data:{biz_data:{challenge:{challenge, difficulty, …}}}}
+      -> {code:0, data:{biz_code:0, biz_data:{challenge:{algorithm, challenge, salt, signature,
+                                    difficulty, expire_at, expire_after, target_path}}}}
 POST /api/v0/chat_session/create        {}                       (only when the conversation has none)
+      -> {code:0, data:{biz_code:0, biz_data:{chat_session:{id, …}, ttl_seconds}}}
 POST /api/v0/chat/completion            { chat_session_id, parent_message_id, model_type, prompt,
-                                          ref_file_ids: [], thinking_enabled, search_enabled }
-      -> text/event-stream, named events
+                                          ref_file_ids: [], thinking_enabled, search_enabled,
+                                          action: null, preempt: false }
+      -> text/event-stream, named + unnamed SSE
 ```
 
 **The proof comes first.** The challenge is fetched and solved *before* a session is created, so a build
@@ -55,12 +72,11 @@ that cannot produce a proof fails the turn with nothing created and nothing sent
 in the operator's account by a build limitation. The recorded `target_path` is the completion route, not
 a session, so the order is not a protocol claim.
 
-**The body is built from the keys the recon settles.** Recon §2.3 records ten keys; this adapter sends the
-seven whose values are measured (`chat_session_id`, `parent_message_id`, `model_type`, `prompt`,
-`ref_file_ids`, `thinking_enabled`, `search_enabled`) and **omits** `source`, `action` and `preempt`.
-The recon calls `source` free-form and `action`/`preempt` nullable extras, but records no value for any
-of them, so filling them would be a guess. `DEEPSEEK_WEB_RECORDED_BODY_KEYS` and
-`DEEPSEEK_WEB_UNSENT_BODY_KEYS` name both halves in one place.
+**The body is the measured one.** Both captured completions carry exactly nine keys — the seven above
+plus `action: null` and `preempt: false`. The pre-capture brief had listed `source` as a completion key
+and no value for `action`/`preempt`; the capture shows `source` is **not** sent at all, so the adapter no
+longer omits the two booleans and no longer models `source`
+(`DEEPSEEK_WEB_RECORDED_BODY_KEYS`, `DEEPSEEK_WEB_UNSENT_BODY_KEYS = []`).
 
 `thinking_enabled` and `search_enabled` are the recorded plain booleans (recon §2.5). They are
 **deployment configuration per model**, not caller-selectable modes: no named mode labels were measured,
@@ -71,38 +87,56 @@ caller did not ask for.
 
 ## 4. The stream parser (the part that is independent of the model list)
 
-Named SSE, not `data:`-only frames. `DeepSeekSseReader` assembles `event:`/`data:`/`id:` blocks
+Named SSE **plus unnamed delta frames**. `DeepSeekSseReader` assembles `event:`/`data:`/`id:` blocks
 (comments and heartbeats ignored, multi-line `data` joined, CRLF and chunk boundaries irrelevant, a
-trailing event without its blank line flushed once), and `parseDeepSeekSseEvent` classifies them with the
-bundle's own `onServerEvent` switch (recon §2.4). An unnamed data frame is the recorded delta case.
+trailing event without its blank line flushed once). `parseDeepSeekSseEvent` classifies them, and an
+unnamed `data:` frame is the recorded delta case — the capture's turn is carried mostly that way:
+`ready`, then `update_session`, then dozens of unnamed patches, then `title` and `close`.
 
-The `delta` payload is a JSON patch `{p, o, v}`:
+The delta payload is `{p?, o?, v}`. **`p` and `o` are optional**, exactly as the app's own parser (`SI`
+in the bundle) treats them: the previous operation and path are the defaults, starting at `SET` and `""`.
+The measured forms are:
 
-| Operation | Rule implemented |
+| Frame form | Meaning |
 | --- | --- |
-| `SET` | write the value at the slash path |
-| `APPEND` | concatenate text onto text; append a value to an array |
-| `BATCH` | apply an array of patches, in order, recursively (bounded depth) |
+| `{"v":{…}}` | first frame: `SET` the whole response document; later: `APPEND` to the previous path |
+| `{"p":"…", "v":…}` | the operation is inherited, the path changes |
+| `{"p":"…","o":"SET","v":…}` | fully specified |
+| `{"p":"response","o":"BATCH","v":[…]}` | children are **relative** to the batch path (the app prepends it) |
 
-`DeepSeekFragmentAssembler` applies them to the provider's response document. Fragments are keyed by
-their **index in the document**, never by arrival order, so a patch that fills `fragments/1` before
-`fragments/0` cannot shift the answer. The answer is the content of fragments whose `type` is `RESPONSE`;
-content on any other (or undeclared) fragment is reported by `unattributedText()` and the transport
-**fails the turn** rather than returning an empty successful answer.
+`DeepSeekDeltaParser` implements that inheritance and the relative `BATCH`. `DeepSeekFragmentAssembler`
+then mirrors the app's writer (`Sn.write`) over the response document:
 
-**Termination is exactly one of** `finish`, `close` and the stream ending. There is no `[DONE]` sentinel
-anywhere in the bundle (0 occurrences, recon §2.4). `ready`, `title`, `toast`, `hint`, `update_session`,
-`update_parent_message` and `update_file` are control frames: counted, never content, never terminal.
+| Rule | Detail |
+| --- | --- |
+| Root | paths start with `response`; `""` (a whole-document `SET`) replaces the document |
+| `-1` | resolves as `length + index`, while traversing **and** at the assignment (`response/fragments/-1/content` is the last fragment) |
+| `SET` | writes any JSON value; an array index equal to the length appends |
+| `APPEND` string | concatenates onto an **existing** string (the app's writer refuses a missing target) |
+| `APPEND` array | pushes onto an existing array, or splices at an array index |
+| Ordered fragments | fragments are keyed by their **document index**, never arrival order |
 
-**A malformed patch throws `DeepSeekProtocolError`** with a stable code (missing path, unknown operation,
-missing value, non-array `BATCH`, `APPEND` of a number to text, a path that traverses a scalar, nesting
-too deep). It is never skipped and never coerced: skipping corrupts the answer silently, and a
-plausible-looking wrong answer is worse than a failed turn.
+**The answer and the reasoning.** A plain answer has exactly two fragment types: `THINK` and `RESPONSE`
+(measured on both completions). The answer is the `RESPONSE` content. `THINK` is the model's reasoning:
+it is **excluded and counted** (`reasoningChars`), never returned to the caller — the same rule the other
+providers apply to a reasoning phase. A turn whose only text is `THINK` (or an unmodelled fragment type)
+fails as `DEEPSEEK_UNATTRIBUTED_ANSWER` instead of returning empty successful text.
+
+**Termination** is `finish`, `close`, or the stream ending. There is no `[DONE]` anywhere. The measured
+normal answer ends with the patch `response/status: "FINISHED"`, then `update_session`, then `title`, then
+`close` with `click_behavior: "none"` — **`finish` did not appear in either captured turn**, so `close` is
+the terminator a live text turn actually uses (row 7). `ready`, `title`, `toast`, `hint`,
+`update_session`, `update_parent_message` and `update_file` are control frames: counted, never content,
+never terminal.
+
+**A malformed patch throws `DeepSeekProtocolError`** with a stable code (unknown operation, missing value,
+non-array `BATCH`, a path that does not start at `response`, `APPEND` onto a non-string, a path that
+traverses a scalar, nesting too deep). It is never skipped and never coerced: skipping corrupts the
+answer silently, and a plausible-looking wrong answer is worse than a failed turn.
 
 **An in-band error** is read from the provider's own envelope: any frame that declares a non-zero `code`
 or a non-zero `data.biz_code` becomes an error frame, and a frame that carries no code at all is still
-reported as a provider error. Recon §2.4 records no dedicated stream error event, so the measured
-envelope is the only error shape applied (see §6).
+reported as a provider error. Neither captured stream carried one (row 10).
 
 ## 5. Continuity, ephemeral turns, and the route
 
@@ -130,46 +164,102 @@ forwarded to an unrelated backend. Serving an exact model still requires it to b
 chat-completions surface refuses an unadvertised route at the catalogue layer, which is the service's
 routing authority.
 
-## 6. The unproven inventory
+## 6. The inventory: what the signed-in capture settled, and what is still open
 
-Every row is a fact this adapter **does not know**. Each names what the code does instead, and the single
-observation that settles it. Until then the behaviour is a typed refusal, never a guess.
+Every row is now either **measured** (with the evidence and the code that owns it) or **open** with the
+one observation that settles it. No row is dropped.
+
+### 6.1 Measured on the capture (2026-10-24)
+
+| # | Fact | Evidence | Owner |
+| --- | --- | --- | --- |
+| 1 | **`x-ds-pow-response` is the proof header.** Its value is `base64(JSON)` with exactly `{algorithm, challenge, salt, answer, signature, target_path}` (a 368-char value decoding to 274 chars of JSON on both completions). | Both completion requests carry it; `algorithm` is `DeepSeekHashV1`; the second completion's proof matches the captured `create_pow_challenge` answer. | `DEEPSEEK_WEB_POW_HEADER`, `pow.ts` |
+| 2 | **The solver contract is the page's own worker.** Algorithm `DeepSeekHashV1`; the page starts a classic worker from its static asset (`static/37627.<hash>.js`, discovered through `new Worker(new URL(publicPath + "static/" + id + "." + hash + ".js", base))`), posts `{type:"pow-challenge", challenge:{…, expireAt}}`, and receives `{type:"pow-answer", answer:{algorithm, challenge, salt, answer, signature}}`. The worker's `answer` is `wasm_solve(challenge, `${salt}_${expireAt}_`, difficulty)`. | The captured worker bundle carries that message switch; the captured `sha3_wasm_bg.*.wasm` reproduces the recorded `answer` for the recorded challenge, salt, `expire_at` and difficulty (checked locally by instantiating the captured WASM, without printing any value). A **fresh proof per completion** is proven by the capture's two distinct proofs for two completions. | `pow.ts` — drives the page's worker; nothing is re-hashed |
+| 3 | **The real `model_type` values** are `default`, `expert`, `vision`. `default` = "Instant" (`enabled: true`, `switchable: true`, `is_default: true`); `expert` = "Expert" and `vision` = "Vision" are both `enabled: false`, `switchable: false`. | `GET /api/v0/client/settings?did=…&scope=model` → `code:0`, `data.biz_code:0`, `data.biz_data.settings.model_configs = {id, value:[…]}`. Note the shape: a `{id, value}` wrapper, **not** the `biz_data.entries` array the pre-capture guess named. | Configuration (`webChat.providers["deepseek-web"].modelTypes`); §6.3 example |
+| 4 | **The `did` is a UUID** and is **not** the `x-device-id` of the completion (compare the two captured values). The app persists its own `__ds_remote_feature_did` for it. | The settings query is `?did=<uuid>&scope=model`; the completion's `x-device-id` is a different UUID. | Nothing on the turn path sends it; the settings call is not part of a turn |
+| 5 | **A plain answer's fragment types are `THINK` and `RESPONSE`.** The complete response document is the first `delta` frame, with the `THINK` fragment already open; the `RESPONSE` fragment is appended later. | Both captured streams: `fragments` = `[{type:"THINK",…}]` then `APPEND response/fragments [{type:"RESPONSE",…}]`; answer = `RESPONSE` content, reasoning = `THINK`. | `DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE`, `DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE`, `sse.ts` |
+| 6 | **`source` is not sent; `action: null` and `preempt: false` are.** The completion body has exactly nine keys. | Both captured bodies (a first turn and a continuation). | `deepSeekCompletionRequest`, `DEEPSEEK_WEB_RECORDED_BODY_KEYS` |
+| 7 | **A normal text answer ends on `close`**, not `finish`. Order: `ready` → `update_session` → patches (including `response/status: "FINISHED"`) → `update_session` → `title` → `close {click_behavior:"none", auto_resume:false}`. `finish` appears in neither capture. | Both captured streams. | `sse.ts` terminators; `text-transport.ts` treats `close`/`finish`/stream end |
+| 8 | **`chat_session/create` takes `{}` and answers the measured envelope**; the id is at `data.biz_data.chat_session.id`. The full success shape carries `model_type`, `title`, `seq_id`, `ttl_seconds`, `is_empty`, `current_message_id`, … | The captured create request and answer. | `DEEPSEEK_WEB_SESSION_ID_PATHS`, `readDeepSeekCreatedSessionId` |
+| 9 | **`Authorization` is `Bearer <64-char opaque token>`** (not a JWT), and the page keeps it in `localStorage["userToken"]` as `{"value": …, "__version": "0"}`. Its client reads it through the same storage handle for every API call. | The captured completion/settings/create requests carry the header; the live app bundle's storage handle `userToken` and token manager read that key. | `page-identity.ts` — read at call time, per request |
+| 11 | **`BATCH` children are relative** to the batch path. The captured frame is `p:"response", o:"BATCH", v:[{p:"accumulated_token_usage"},{p:"quasi_status"}]`. | The captured stream, and the bundle's `SI.parse` prepends `s + "/"`. | `DeepSeekDeltaParser` |
+| 13a | **The exact `x-client-*` / `x-device-*` names** are `x-client-bundle-id`, `x-client-platform`, `x-client-version`, `x-client-locale`, `x-client-timezone-offset`, `x-device-id`, `x-device-model`, and `x-hif-leim`. Their measured shapes: bundle id `com.deepseek.chat` (region-mapped), platform `web`, version `2.7.0`, locale `en_US`, offset in seconds (`7200`), device id a UUID, device model empty, leim a cached fingerprint token (its `hif_leim_cached` handle is a JSON string). | Every captured API request carries the set; the live bundle builds it from `staticEnv` + `navigator.language` + the browser offset + `localStorage`. | `page-identity.ts` — values read from the page, except the two documented build constants (`web`, `2.7.0`) |
+
+### 6.2 Still open, with the one observation that settles each
 
 | # | Unknown | What this build does | The one observation that settles it |
 | --- | --- | --- | --- |
-| 1 | The **proof-of-work header name** | The solver returns `{header, value}`, so the name travels with the solution; the default solver throws `TRANSPORT_UNAVAILABLE` / `DEEPSEEK_POW_UNAVAILABLE` | One signed-in HAR of a completion: the extra request header whose value changes per turn |
-| 2 | The **solver contract** (hash, encoding, the bundle's WASM entry point) | Not implemented. The page's own solver (`r1Pow`, recon §2.6) is the only acceptable implementation; no global handle was measured, so invoking it would be an invention | A captured challenge **and** its accepted solution for the same turn, plus the bundle function that computes it |
-| 3 | The **real `model_type` values** | Configuration only (`webChat.providers["deepseek-web"].modelTypes`). No rows are published without it | One signed-in `GET /api/v0/client/settings?did=…&scope=model`, read `biz_data.entries[].model_type` |
-| 4 | The **`did` provenance/format** | Never sent: the completion body does not need it, and nothing else on this path requires it | The same HAR: the `did` on the settings request versus `__ds_remote_feature_did` in the page |
-| 5 | The exact **fragment `type` set** for a plain answer | Only `type === "RESPONSE"` is treated as the answer; anything else is reported and fails the turn as `DEEPSEEK_UNATTRIBUTED_ANSWER` | The first `delta` frames of a signed-in turn: their `p` paths and `response/fragments/<n>/type` values |
-| 6 | Whether **`source` / `action` / `preempt`** are required | Omitted (see §3); the completion carries only measured-value keys | The body of one plain first turn in the HAR |
-| 7 | **`finish` vs `close`** reliability for a text answer | Both are terminators; `close.click_behavior` is recorded and surfaced, and a `close:"retry"` with no text fails as `DEEPSEEK_CLOSE_RETRY` instead of retrying | The HAR: which event precedes the stream close on a normal answer |
-| 8 | The **`chat_session/create` body and success shape** | `{}` is sent (the minimal request), and the id is read from one documented candidate list; an unreadable answer fails as `DEEPSEEK_SESSION_CREATE_UNREADABLE` naming the paths tried | The create call in the same HAR — its request body and its full JSON answer |
-| 9 | The **`Authorization` token provenance** | No header is sent by default (`DeepSeekPageFacilityOptions.authorization` is the seam); the provider's `40002`/`40003` is then reported as `AUTH_REQUIRED` | The HAR's `Authorization` header **and** where the page keeps that value (a captured header alone cannot be replayed) |
-| 10 | Which event/name carries an **in-band stream error** | The two-layer envelope is applied to every frame; a frame with no code is still a provider error | A rejected completion mid-stream (expired token, quota) and the event it arrives as |
-| 11 | Whether **`BATCH` child paths** are absolute or relative to the batch path | Absolute; children are validated as full patches. Recorded as the only reading of the bundle's `d.set(t,l,i)` the recon supports | One `BATCH` frame from a signed-in turn |
-| 12 | Whether an **ephemeral turn** is accepted with a process-generated session id | Sent, never created; a refusal is that turn's typed failure | A completion request carrying a `chat_session_id` the provider never issued |
-| 13 | Whether **`x-client-*` / `x-device-id`** are required | Not sent: recon §2.7 records those names but not their values, and a guessed client version is worse than a missing one | The HAR's request headers for a completion |
+| 10 | Which event/name carries an **in-band stream error** | The two-layer envelope is applied to every frame; a frame with no code is still a provider error. No captured stream carried one. | A rejected completion mid-stream (expired token, quota, `POW_HEADER_ERROR`/`INVALID_POW_RESPONSE`) and the frame it arrives as |
+| 12 | Whether an **ephemeral turn** is accepted with a process-generated session id | Sent, never created; a refusal is that turn's typed failure, never a fallback to creating a session | A completion request carrying a `chat_session_id` the provider never issued |
+| 13b | Which client/device headers are **required** (as opposed to merely sent) | All measured ones are sent from the page; none is fabricated. Requirement cannot be proven from one capture. | A signed-in completion with exactly one of them omitted, and the provider's answer |
+
+### 6.3 The catalogue example these values produce
+
+The measured values become the documented configuration — nothing is published without configuration:
+
+```jsonc
+{
+  "webChat": {
+    "providers": {
+      "deepseek-web": {
+        "accountIdentityFingerprint": "<the operator's recorded account label>",
+        "modelTypes": [
+          // The only enabled + switchable row in the captured account.
+          { "id": "default", "label": "Instant", "thinking": false, "search": false },
+          // Captured as enabled:false / switchable:false; configure only if the account offers them.
+          { "id": "expert", "label": "Expert" },
+          { "id": "vision", "label": "Vision" }
+        ]
+      }
+    }
+  }
+}
+```
+
+`deepseek-web/default` is the route a normal deployment serves. The two toggles default to `false`,
+which is the only value the capture does not claim a reasoning pass or a web search for; a row may
+configure them when the operator wants them. No rows exist without this block, and `/v1/models` shows
+exactly what is configured.
 
 ## 7. Sign-in, import and the current operator ladder
 
-This slice deliberately does **not** add:
+This slice deliberately still does **not** add:
 
 - an interactive sign-in controller, so `GET /v1/control/auth/` does not list DeepSeek yet;
-- an authenticated predicate, so `auth import --provider deepseek-web` still stores a capture
-  **unverified** (no `.verified.json` marker) — the import's own message now says *why* (no predicate has
-  accepted it) instead of claiming there is no adapter.
+- an authenticated **predicate**, so `auth import --provider deepseek-web` still stores a capture
+  **unverified** (no `.verified.json` marker). The import's message says exactly that.
+
+The capture now has a measured shape, so what it must contain is no longer a guess:
+
+```text
+cookies                        the WAF/session cookies of chat.deepseek.com
+origins[chat.deepseek.com].localStorage
+  userToken                    {"value": "<opaque bearer>", "__version": "0"}
+  deepseek-device-id:chat      the browser's UUID device identity
+  hif_leim_cached              the page's cached HIF leim token (optional; omitted when absent)
+```
+
+A capture with cookies only is **not** enough: every API call carries the page's bearer, and the page
+reads it from `userToken`. A capture with `userToken` only is not enough either: the WAF/session cookies
+are the page's own. The storage state is what `auth import` already stores, so no new format is
+introduced.
 
 The ladder today, in the order each rung blocks the next:
 
 1. **Capture** — `auth import --provider deepseek-web --from <file>` stores the session in the standard
-   provider layout. It is *not* proof (§6 rows 9 and 3 are needed before a predicate can exist).
-2. **Verified session** — not reachable yet. `ready()` requires the deployment's verified marker, so it
-   refuses before launching a browser; the refusal names the capture command and says the session is not
-   verified.
-3. **A turn** — blocked by the proof of work (§6 rows 1–2) even with a verified session.
-4. **A catalogue** — needs row 3; the model list is a **session-only remote setting**, so no public
-   endpoint and no `models refresh` command exist for this provider.
+   provider layout. It is *not* proof: no predicate has accepted it.
+2. **Verified session** — **the one remaining rung.** `ready()` requires the deployment's verified
+   marker, so it refuses before launching a browser. Nothing in this slice writes that marker, because
+   writing it without a predicate would be a claim the deployment cannot prove. The measurement a
+   predicate can be built on is now known and cheap: the page's own token makes
+   `GET /api/v0/client/settings?did=<uuid>&scope=model` answer `code:0` + `data.biz_code:0` for a signed-in
+   session and `data.biz_msg:"SETTINGS_NOT_FOUND"` for an anonymous one (both measured).
+3. **A turn** — ready to run once rung 2 exists: the proof, the bearer, the client/device headers and the
+   measured stream are implemented and pinned by tests. This slice cannot prove a live run without an
+   authenticated session.
+4. **A catalogue** — configuration, not discovery: the model list is a session-only remote setting, so
+   there is no public endpoint and no `models refresh` command for this provider. §6.3 is the example
+   with the measured values.
 
 `doctor` reports `webchat-deepseek-web` once a `model_type` is configured, and its health detail states
 the exact missing rung. A deployment that only stored a capture gets no doctor check, because an
@@ -186,41 +276,38 @@ unverified capture is not an account.
   cannot deliver.
 - **Tools / MCP / provider-native loops** — refused-or-discarded by the shared rule
   (`rejectUnsupportedWebChatFeatures`), never forwarded.
-- **The shared conformance suite** — it drives a *successful* turn through the real path, which would
-  require fabricating the two unproven steps. The protocol tests cover the same vocabulary with an
-  injected solver instead, and no test claims a live turn works.
+- **The shared conformance suite** — it drives a *successful* turn through the real path, whose session
+  gate needs a verified capture. The protocol/PoW/route tests cover the vocabulary with injected seams,
+  and no test claims a live authenticated run.
 - **Automatic retry after a rejected proof or a `close:"retry"`** — both are typed failures. A confirmed
-  submission is never resent, and a build limitation never becomes a retry storm.
+  submission is never resent, and a rejected proof is never replayed.
+- **A synthesized `x-device-id`** — when the page has none, the page generates one with its own
+  `crypto.randomUUID()` and stores it under its own key; this build never invents an identity on the
+  Node side.
 
 ## 9. Tests
 
 | File | What it pins |
 | --- | --- |
-| `tests/deepseek-web-sse.test.ts` | named-SSE framing (comments, multi-line data, CRLF split, trailing event), every recorded event, the patch assembler (`SET`/`APPEND`/`BATCH`, ordered fragments, repeated deltas), every terminator, `update_session` mid-stream, an in-band envelope error at either layer, unattributed content, and each malformed patch refused with its typed code |
-| `tests/deepseek-web-protocol.test.ts` | the completion body's exact key set and the three unmeasured keys omitted, `parent_message_id: null` on a first turn, both envelope layers, the auth / PoW / WAF / lost-session / upstream refusal mapping, the provisional session-id paths, the challenge location, the default solver's typed refusal, catalogue visibility (no rows, no seed, no invented levels/windows), and the driver's own unproven facts |
+| `tests/deepseek-web-sse.test.ts` | the measured frame sequence (snapshot, inherited `{v}`, `-1`, relative `BATCH`, `close` termination); named-SSE framing (comments, multi-line data, CRLF split, trailing event); the sticky/default delta parser; `SET`/`APPEND`/`BATCH` semantics; `THINK` excluded and counted, unmodelled types reported; every terminator; `update_session` mid-stream; an in-band envelope error at either layer; each malformed patch refused with its typed code |
+| `tests/deepseek-web-protocol.test.ts` | the measured nine-key completion body (`action:null`, `preempt:false`, no `source`), `parent_message_id:null` on a first turn, the measured session-id path, both envelope layers, the auth / PoW / WAF / lost-session / upstream refusal mapping, the challenge location, the no-solver seam, catalogue visibility and the §6.3 example |
+| `tests/deepseek-web-pow.test.ts` | the header/value shape (base64 JSON, recorded keys/order), a fresh proof per call, the page answerer's worker call (`expireAt` mapping), solver success/refusal/unavailable/timeout/mismatched-challenge/unknown-algorithm, the page token storage shape, the bundle-id region mapping, the client/device header family, read-at-call-time rotation, facility wiring (auth + client headers on JSON calls, proof only on the completion), and the measured storage keys/header names |
 | `tests/deepseek-web-route.test.ts` | same key → same `chat_session_id` and `parent_message_id`; lost session → typed loss → explicit replay; ephemeral with zero creations; PoW-unavailable failing before anything is created; auth refusal mapped from `code:40003`; reasoning selection refused; capability declaration discarded and declared; the configured and unconfigured listener paths (rows, stream, honest `not_configured`); a `ready.model_type` that differs from the requested one surfaced, never hidden |
 
-## 10. What one HAR of a signed-in turn changes
+## 10. What the capture changed
 
-The deliverable question is: **how many things must change before turns can work, and which are data?**
+The pre-capture plan expected six changes. The capture confirmed the order and the ownership, and settled
+which of them were data, which were code, and which did not exist at all:
 
-Six changes, in this order. **One is substantial code (the solver), one is small code (the token
-reader), and four are data** — a header name, a session-create shape, the model types, and at most one
-constant or branch for the fragment/body/error details.
+| # | Change | Outcome |
+| --- | --- | --- |
+| 1 | The proof-of-work solver | **Code, delivered.** `pow.ts` drives the page's own worker (asset discovered from the live bundle), composes the measured header blob, and types every failure. Never a reimplementation, never a recorded proof. |
+| 2 | The header name | **Data, settled.** `x-ds-pow-response`, exported by `pow.ts`; it had arrived with the solver, not as a constant the solver had to guess. |
+| 3 | The `Authorization` provenance | **Code + data, delivered.** The page's `localStorage["userToken"]`, read per request; the storage keys are exported constants. |
+| 4 | `chat_session/create` request and response | **Data, settled.** `{}` → `data.biz_data.chat_session.id`; the provisional path list collapsed to the measured one. |
+| 5 | The `model_type` values | **Data, settled.** `default`/`expert`/`vision`; §6.3 is the configuration. |
+| 6 | Fragment types / body extras / error event | **Partly confirmed, partly corrected.** `THINK` + `RESPONSE` confirmed; `action`/`preempt` are sent (the brief's "omit them" was wrong) and `source` is not; the stream's unnamed `{v}`/`{p,v}` forms, `-1` and relative `BATCH` were **not** in the brief and are now implemented. The in-band error frame remains open (row 10). |
 
-| # | Change | Kind | Where |
-| --- | --- | --- | --- |
-| 1 | The proof-of-work **solver** — invoke the page's own `r1Pow` WASM flow, returning `{header, value}` | **Code** | One function behind `DeepSeekProofOfWorkSolver`; the HAR settles the header *name* and the challenge/solution pair, but the solver itself is code |
-| 2 | The **header name** (if it is not supplied by the solver) | **Data** | `DeepSeekProofOfWork.header`, already data in this build's seam |
-| 3 | The **`Authorization` provenance** — read the token where the page keeps it | **Code** + one **data** constant (the storage key) | `DeepSeekPageFacilityOptions.authorization` |
-| 4 | The **`chat_session/create`** request body and response shape | **Data** | `deepSeekSessionCreateRequest()` (`{}` today) and `DEEPSEEK_WEB_SESSION_ID_PATHS` |
-| 5 | The **`model_type` values** | **Data** (configuration) | `webChat.providers["deepseek-web"].modelTypes` — no code change at all |
-| 6 | The fragment `type` / body extras / in-band error event, **if** the capture differs from the recon | **Data** (a constant or one branch) | `DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE`, `deepSeekCompletionRequest`, `frameEnvelopeError` |
-
-Two things a HAR cannot give you, because they are per-turn secrets rather than recorded values: a
-**replayable proof** (it expires, and one challenge is valid for one completion) and a **replayable
-token**. That is why row 1 is code — it must *produce* proofs, not carry a recorded one — and why the
-allowlist around the page's own solver is the only honest route for it.
-
-The moment rows 1–3 exist, the parser, the assembler, the body, the continuity and the ephemeral rule
-need no change: they are already pinned by the tests in §9.
+Two things a capture can never give: a **replayable proof** (valid for one completion) and a
+**replayable token**. That is why the solver is code and why the token is read from the page at call
+time rather than copied anywhere.

@@ -513,6 +513,14 @@ No token value, cookie value or device id is reproduced here.
 
 ### 2.8 What is unknown, and the one cheapest observation
 
+> **Post-capture status (2026-10-24).** A real signed-in HAR of `chat.deepseek.com` has since settled
+> most of this table: the proof header (`x-ds-pow-response`), the page-owned solver contract, the real
+> `model_type` values (`default`/`expert`/`vision`), the body extras (`action:null`, `preempt:false`,
+> no `source`), the session-create shape, the `THINK`/`RESPONSE` fragments, `close` as the terminator,
+> relative `BATCH`, and the page's bearer/client identity. The current measured inventory — and the
+> three observations that remain — is [`deepseek-web.md`](./deepseek-web.md) §6. The table below is
+> kept as the pre-capture record of what was unknown and why.
+
 | Unknown | Cheapest settling observation |
 | --- | --- |
 | The actual `model_type` values and the full `model_configs` shape | One signed-in `GET /api/v0/client/settings?did=…&scope=model`; the JSON is `biz_data.entries` |

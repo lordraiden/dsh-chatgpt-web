@@ -199,15 +199,15 @@ export const AUTH_IMPORT_PROVIDER_IDS = [
  * Deliberately states both halves: the session was stored, and it cannot be used. A caller must not
  * mistake `verified: false` for a transient failure of an otherwise working login.
  *
- * The adapter now exists (`src/adapters/deepseek-web/**`), but its authenticated predicate does not:
- * the page token's provenance was never measured, so no probe can prove this capture works. The
- * sentence therefore says "no authenticated predicate has accepted it" — not "there is no adapter" —
- * and the unproven inventory is `doc/deepseek-web.md` §6.
+ * The adapter now exists (`src/adapters/deepseek-web/**`) and the page token's provenance is measured
+ * (`localStorage["userToken"]`), but no authenticated predicate has been accepted as this provider's
+ * verification step, so no probe claims the capture works. The sentence therefore says "no
+ * authenticated predicate has accepted it" — not "there is no adapter" — and the remaining rung is
+ * `doc/deepseek-web.md` §7.
  */
 export const DEEPSEEK_WEB_UNVERIFIED_MESSAGE =
   "Captured and stored, but not verified: no authenticated predicate has accepted this DeepSeek Web "
-  + "session yet (the provider's page token provenance is unmeasured, doc/deepseek-web.md §6), so it "
-  + "cannot be used for turns.";
+  + "session yet (doc/deepseek-web.md §7), so it cannot be used for turns.";
 
 function defaultReadFile(path: string): string {
   return readFileSync(path, "utf8");

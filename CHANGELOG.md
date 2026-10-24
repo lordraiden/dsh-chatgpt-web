@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- A slow session-title call can no longer fail a ChatGPT Web turn (#336 follow-up, operator report on
+  `chatgpt-web/think`). The harness's housekeeping call arrives **undeclared** (`@earendil-works/pi-ai`
+  drops `purpose`), so it takes the same conversation as the user's real turn. The ChatGPT native route
+  already waited for that holder, but only for its own provider-specific 30 s bound; a measured title
+  call took 1 m 5 s, outlived the bound, and the operator's message was refused with
+  `Another turn is already using this ChatGPT Web conversation; concurrent turns of one chat are not
+  allowed.` (`PI_AI_ERROR`) while the title itself had no answer. The bounded, cancellable,
+  event-driven admission now has **one owner** (`src/web-chat/transport/conversation-admission.ts`)
+  shared by the ChatGPT provider core and the text providers' transport lease, with one bound,
+  `DEFAULT_TRANSPORT_ADMISSION_WAIT_MS` (60 s — the housekeeping call's own measured deadline). The
+  ChatGPT per-conversation exclusivity, the account fan-out bound (#201/`MAX_CHATGPT_BROWSER_TABS`) and
+  the `retained_surface_busy` category (#305) are unchanged. A refusal at admission still happens
+  **before** any submission, so it leaves nothing to reconcile or adopt: the operator's turn was never
+  sent, and the title call's empty answer is the harness's own housekeeping deadline/cancellation, not a
+  lost reply to the operator's message.
+
 - Serialise a housekeeping call and a real turn of the same conversation instead of refusing one of
   them (issue #336, operator report on the Qwen Code selector). The harness issues its session-title
   call at the same moment as the user's first message, and `@earendil-works/pi-ai` never maps

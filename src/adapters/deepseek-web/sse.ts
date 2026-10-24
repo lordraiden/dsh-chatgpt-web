@@ -60,6 +60,7 @@
  */
 import {
   DEEPSEEK_WEB_PATCH_OPERATIONS,
+  DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE,
   DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE,
   isDeepSeekPatchOperation,
   type DeepSeekPatchOperation,
@@ -90,16 +91,6 @@ export interface DeepSeekSseRawEvent {
   readonly id?: string;
   /** Every `data:` line, joined with `\n` exactly as SSE specifies. */
   readonly data: string;
-}
-
-/** One JSON patch, after validation. The bundle's `{p, o, v}`. */
-export interface DeepSeekDeltaPatch {
-  /** The slash path, e.g. `response/fragments/0/content`. */
-  readonly p: string;
-  /** One of `SET`, `BATCH`, `APPEND`. */
-  readonly o: DeepSeekPatchOperation;
-  /** The value the operation carries. */
-  readonly v: unknown;
 }
 
 /** The frame vocabulary of one turn. */
@@ -180,52 +171,156 @@ function booleanField(value: unknown): boolean | undefined {
 }
 
 /**
- * Validate one patch value.
+ * One raw delta frame, after the bundle's schema has accepted it.
  *
- * This is the bundle's schema, enforced instead of assumed: `p` is a non-empty path, `o` is exactly
- * one of the three recorded operations, and `v` is present (JSON `null` is a value; a missing key is
- * not). Everything beyond that is structural and is checked where it is applied.
+ * **Both `p` and `o` are optional on the wire.** The page's own delta parser (`SI` in the bundle)
+ * keeps the previous operation and path as defaults (`op = e.o ?? op`, `path = e.p ?? path`, starting
+ * at `SET` and `""`), so the recorded stream legitimately sends:
+ *
+ * ```text
+ * {"v":{"response":{…}}}                          first frame: SET the whole document
+ * {"v":" need"}                                    APPEND to the path of the previous frame
+ * {"p":"response/fragments/-1/content","v":"H"}     APPEND with a new path, inherited operation
+ * {"p":"response/fragments/-1/content","o":"APPEND","v":"ola"}
+ * ```
+ *
+ * `v` is always present (JSON `null` is a value; a missing key is a protocol error).
+ */
+export interface DeepSeekDeltaPatch {
+  /** The slash path, when the frame carries one. `""` addresses the whole document. */
+  readonly p?: string;
+  /** One of `SET`, `BATCH`, `APPEND`, when the frame carries one. */
+  readonly o?: DeepSeekPatchOperation;
+  /** The value the operation carries. Always present. */
+  readonly v: unknown;
+}
+
+/** One delta after the sticky/default rules have resolved its path and operation. */
+export interface DeepSeekResolvedDeltaPatch {
+  /** The resolved path; `""` is the response document itself. */
+  readonly path: string;
+  readonly operation: DeepSeekPatchOperation;
+  readonly value: unknown;
+}
+
+/**
+ * Validate one delta frame against the bundle's schema, keeping `p`/`o` optional.
+ *
+ * The bundle validates `{p?, o?, v}` (`So`/`Sv`: `lqM(...)` for `p` and `o`, required `v`), so a frame
+ * without a path or operation is valid and is resolved against the previous frame by
+ * {@link DeepSeekDeltaParser}. Everything structural beyond that is checked where it is applied.
  */
 export function normaliseDeepSeekPatch(value: unknown): DeepSeekDeltaPatch {
   if (!isRecord(value)) {
-    throw protocol("DEEPSEEK_PATCH_NOT_OBJECT", "A DeepSeek delta must be a JSON object `{p, o, v}`");
+    throw protocol("DEEPSEEK_PATCH_NOT_OBJECT", "A DeepSeek delta must be a JSON object `{p?, o?, v}`");
+  }
+  const has = (key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
+  if (!has("v")) {
+    throw protocol("DEEPSEEK_PATCH_VALUE_MISSING", "A DeepSeek delta carries no value");
   }
   const p = value["p"];
-  if (typeof p !== "string" || p.length === 0) {
-    throw protocol("DEEPSEEK_PATCH_PATH_INVALID", "A DeepSeek delta needs a non-empty string path `p`");
-  }
-  if (p.startsWith("/") || p.endsWith("/") || p.includes("//")) {
-    throw protocol(
-      "DEEPSEEK_PATCH_PATH_INVALID",
-      `A DeepSeek delta path must be a slash-separated path with no empty segments, not ${JSON.stringify(p)}`,
-    );
+  if (p !== undefined) {
+    if (typeof p !== "string") {
+      throw protocol("DEEPSEEK_PATCH_PATH_INVALID", "A DeepSeek delta path `p` must be a string");
+    }
+    if (p.length > 0 && (p.startsWith("/") || p.endsWith("/") || p.includes("//"))) {
+      throw protocol(
+        "DEEPSEEK_PATCH_PATH_INVALID",
+        `A DeepSeek delta path must be a slash-separated path with no empty segments, not ${JSON.stringify(p)}`,
+      );
+    }
   }
   const o = value["o"];
-  if (!isDeepSeekPatchOperation(o)) {
+  if (o !== undefined && !isDeepSeekPatchOperation(o)) {
     throw protocol(
       "DEEPSEEK_PATCH_OPERATION_INVALID",
       `A DeepSeek delta operation must be one of ${DEEPSEEK_WEB_PATCH_OPERATIONS.join(", ")}, not ${JSON.stringify(o)}`,
     );
   }
-  if (!Object.prototype.hasOwnProperty.call(value, "v")) {
-    throw protocol("DEEPSEEK_PATCH_VALUE_MISSING", `The DeepSeek ${o} delta at ${JSON.stringify(p)} carries no value`);
-  }
-  return { p, o, v: value["v"] };
+  return {
+    ...(p === undefined ? {} : { p }),
+    ...(o === undefined ? {} : { o }),
+    v: value["v"],
+  };
 }
 
 /**
- * One path segment: an array index when it is all digits, a key otherwise.
+ * The app's own delta parser: sticky `SET`/`""` defaults and **relative** `BATCH` children.
  *
- * DeepSeek's paths address the provider's own response document, whose only array is `fragments`.
- * Treating a digits-only segment as an index is what makes `response/fragments/0/content` address the
- * same place the app addresses, and it is visible here instead of hiding in a getter.
+ * This mirrors the bundle's `SI` exactly, because the recorded stream depends on it:
+ *
+ * - `op` and `path` are remembered across frames of one turn;
+ * - `BATCH` children are resolved by a **fresh** parser and then re-rooted under the batch's path
+ *   (`(s ? s + "/" : "") + child.path`), which is what makes `p:"response", o:"BATCH", v:[{p:"status",…}]`
+ *   address `response/status` rather than a top-level `status`;
+ * - an operation/path pair the app could not express is refused, never guessed.
+ *
+ * The parser is stateful **per turn**, which is why the assembler owns one.
+ */
+export class DeepSeekDeltaParser {
+  #operation: DeepSeekPatchOperation = "SET";
+  #path = "";
+
+  /** Resolve one raw frame into the patch(es) it applies. */
+  parse(value: unknown, depth = 0): readonly DeepSeekResolvedDeltaPatch[] {
+    const patch = normaliseDeepSeekPatch(value);
+    const operation = patch.o ?? this.#operation;
+    const path = patch.p ?? this.#path;
+    this.#operation = operation;
+    this.#path = path;
+    if (operation !== "BATCH") return [{ path, operation, value: patch.v }];
+    if (!Array.isArray(patch.v)) {
+      throw protocol(
+        "DEEPSEEK_PATCH_BATCH_INVALID",
+        `A DeepSeek BATCH delta at ${JSON.stringify(path)} must carry an array of patches`,
+      );
+    }
+    if (depth >= MAX_PATCH_DEPTH) {
+      throw protocol(
+        "DEEPSEEK_PATCH_BATCH_DEPTH",
+        `A DeepSeek BATCH delta at ${JSON.stringify(path)} nests deeper than ${MAX_PATCH_DEPTH}`,
+      );
+    }
+    const children: DeepSeekResolvedDeltaPatch[] = [];
+    const nested = new DeepSeekDeltaParser();
+    for (const child of patch.v) {
+      for (const resolved of nested.parse(child, depth + 1)) {
+        children.push({
+          path: path.length === 0 ? resolved.path : resolved.path.length === 0 ? path : `${path}/${resolved.path}`,
+          operation: resolved.operation,
+          value: resolved.value,
+        });
+      }
+    }
+    return children;
+  }
+}
+
+/**
+ * One path segment: an array index when it is an integer (including `-1`), a key otherwise.
+ *
+ * The recorded stream addresses the last fragment as `response/fragments/-1/content`; the app's own
+ * writer resolves a negative index as `length + index`, so `-1` is the last element — not an array
+ * property named `"-1"`.
  */
 type PathSegment = string | number;
 
+/** The deepest a BATCH may nest before it is refused. */
 const MAX_PATCH_DEPTH = 8;
 
-function parsePatchPath(p: string): readonly PathSegment[] {
-  return p.split("/").map(segment => (/^\d+$/.test(segment) ? Number(segment) : segment));
+/** The prefix every recorded path carries; it names the app's response document root. */
+const RESPONSE_ROOT = "response";
+
+function pathSegments(path: string): readonly PathSegment[] {
+  if (path.length === 0) return [];
+  const segments = path.split("/");
+  if (segments[0] !== RESPONSE_ROOT) {
+    throw protocol(
+      "DEEPSEEK_PATCH_ROOT_INVALID",
+      `A DeepSeek delta path must start with ${JSON.stringify(RESPONSE_ROOT)}, not ${JSON.stringify(segments[0])}`,
+    );
+  }
+  return segments.slice(1).map(segment => (/^-?\d+$/.test(segment) ? Number(segment) : segment));
 }
 
 /** One fragment of the provider's streamed response document. */
@@ -237,55 +332,61 @@ export interface DeepSeekFragment {
 }
 
 /**
- * The fragment assembler: the app's `d.set`/`d.append` over a provider response document.
+ * The fragment assembler: the app's `set`/`append` writer over a provider response document.
  *
- * The document is deliberately untyped beyond what the protocol needs: any path can be patched, so a
- * field this build never read (`response.message_id`, a status, a future key) is stored instead of
- * being rejected. What *is* strict is the shape of the operation and of the answer-bearing content:
+ * It applies the **resolved** patches from {@link DeepSeekDeltaParser} and mirrors the vendor's
+ * `Sn.write` semantics where the recorded stream depends on them:
  *
- * - `SET` writes any JSON value at the path;
- * - `APPEND` concatenates a string onto a string (or an existing string is created by it), and
- *   appends a value to an array;
- * - `BATCH` applies an array of patches, in order, recursively;
- * - anything else is a {@link DeepSeekProtocolError}.
+ * - a path starting with `response` is rooted at the response document; `""` replaces the whole
+ *   document (the recorded first frame does exactly that);
+ * - `-1` (any negative integer) resolves as `length + index`, both while traversing and at the final
+ *   assignment (the recorded `response/fragments/-1/content` depends on it);
+ * - `SET` writes any JSON value at the path (an index equal to the array length appends);
+ * - `APPEND` of a string requires an existing string and concatenates; `APPEND` of an array pushes
+ *   onto an existing array (or splices at an array index);
+ * - anything the writer could not express faithfully is a {@link DeepSeekProtocolError}.
  *
  * Content is keyed by its **index in the document**, never by arrival order, so a patch that fills
  * `fragments/1` before `fragments/0` cannot shift the answer.
  */
 export class DeepSeekFragmentAssembler {
-  #document: Record<string, unknown> = {};
+  #document: unknown = {};
+  readonly #parser = new DeepSeekDeltaParser();
 
-  /** Apply one patch. Throws {@link DeepSeekProtocolError} when it cannot be applied faithfully. */
-  apply(patch: unknown, depth = 0): void {
-    const normalised = normaliseDeepSeekPatch(patch);
-    switch (normalised.o) {
-      case "SET":
-        this.#setAt(parsePatchPath(normalised.p), normalised.v);
-        return;
-      case "APPEND":
-        this.#appendAt(parsePatchPath(normalised.p), normalised.v);
-        return;
-      case "BATCH": {
-        if (!Array.isArray(normalised.v)) {
-          throw protocol(
-            "DEEPSEEK_PATCH_BATCH_INVALID",
-            `A DeepSeek BATCH delta at ${JSON.stringify(normalised.p)} must carry an array of patches`,
-          );
-        }
-        if (depth >= MAX_PATCH_DEPTH) {
-          throw protocol(
-            "DEEPSEEK_PATCH_BATCH_DEPTH",
-            `A DeepSeek BATCH delta at ${JSON.stringify(normalised.p)} nests deeper than ${MAX_PATCH_DEPTH}`,
-          );
-        }
-        for (const child of normalised.v) this.apply(child, depth + 1);
-        return;
+  /** Apply one raw delta frame. Throws {@link DeepSeekProtocolError} when it cannot be applied. */
+  apply(patch: unknown): void {
+    for (const resolved of this.#parser.parse(patch)) this.#applyResolved(resolved);
+  }
+
+  #applyResolved(patch: DeepSeekResolvedDeltaPatch): void {
+    const segments = pathSegments(patch.path);
+    if (segments.length === 0) {
+      if (patch.operation !== "SET") {
+        throw protocol(
+          "DEEPSEEK_PATCH_ROOT_INVALID",
+          `A DeepSeek ${patch.operation} delta cannot address the whole response document`,
+        );
       }
+      this.#document = patch.value;
+      return;
     }
+    if (patch.operation === "SET") {
+      this.#setAt(segments, patch.value);
+      return;
+    }
+    if (patch.operation === "APPEND") {
+      this.#appendAt(segments, patch.value);
+      return;
+    }
+    throw protocol(
+      "DEEPSEEK_PATCH_OPERATION_INVALID",
+      `A resolved DeepSeek patch cannot be ${patch.operation}; BATCH is expanded by the parser`,
+    );
   }
 
   /** Every fragment the document holds, in document order (holes and non-objects skipped). */
   fragments(): readonly DeepSeekFragment[] {
+    if (!isRecord(this.#document)) return [];
     const response = this.#document["response"];
     if (!isRecord(response)) return [];
     const fragments = response["fragments"];
@@ -304,10 +405,10 @@ export class DeepSeekFragmentAssembler {
   /**
    * The assistant's answer: the content of `RESPONSE` fragments, in document order.
    *
-   * `RESPONSE` is the only type the recon attributes to the answer (recon §2.4). A fragment whose
-   * type is different — or has not been declared at all — is **not** silently folded in here;
-   * {@link unattributedText} reports it so the transport can refuse a turn whose only content it
-   * cannot honestly attribute, instead of returning an empty successful answer.
+   * `RESPONSE` is the only type that carries the answer. `THINK` is the model's reasoning and is
+   * excluded (it is counted by {@link reasoningText}); any other type is *unknown* content and is
+   * reported by {@link unattributedText} so the transport can refuse a turn whose only content it
+   * cannot honestly attribute.
    */
   text(): string {
     return this.fragments()
@@ -316,10 +417,24 @@ export class DeepSeekFragmentAssembler {
       .join("");
   }
 
-  /** Content that arrived on fragments this build cannot attribute to the answer. */
+  /**
+   * The reasoning the model streamed in `THINK` fragments.
+   *
+   * Excluded from the answer, never returned to the caller: the same rule the other providers apply to
+   * a reasoning phase. It is exposed so the transport can report how much was excluded.
+   */
+  reasoningText(): string {
+    return this.fragments()
+      .filter(fragment => fragment.type === DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE)
+      .map(fragment => fragment.content)
+      .join("");
+  }
+
+  /** Content that arrived on fragment types this build does not model at all. */
   unattributedText(): string {
     return this.fragments()
-      .filter(fragment => fragment.type !== DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE)
+      .filter(fragment => fragment.type !== DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE
+        && fragment.type !== DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE)
       .map(fragment => fragment.content)
       .join("");
   }
@@ -329,32 +444,62 @@ export class DeepSeekFragmentAssembler {
     return [...new Set(this.fragments().flatMap(fragment => (fragment.type === undefined ? [] : [fragment.type])))];
   }
 
-  #getAt(segments: readonly PathSegment[]): unknown {
-    let current: unknown = this.#document;
-    for (const segment of segments) {
-      if (typeof segment === "number") {
-        if (!Array.isArray(current)) return undefined;
-        current = current[segment];
-      } else {
-        if (!isRecord(current)) return undefined;
-        current = current[segment];
+  /**
+   * The `response` member every stripped path is rooted at.
+   *
+   * The recorded first frame is `{v:{response:…}}` (a whole-document SET), so paths like
+   * `response/fragments/-1/content` are rooted at `document.response`, exactly as the app's writer
+   * strips the `response` prefix and then walks the message object. A SET may create that member; an
+   * APPEND may not (there is nothing to append to).
+   */
+  #responseRoot(create: boolean): unknown {
+    if (!isRecord(this.#document)) {
+      throw protocol(
+        "DEEPSEEK_PATCH_PATH_TRAVERSAL",
+        "A DeepSeek response path addresses a document that is not an object",
+      );
+    }
+    const current = this.#document["response"];
+    if (current === undefined || current === null) {
+      if (!create) {
+        throw protocol(
+          "DEEPSEEK_PATCH_APPEND_INVALID",
+          "A DeepSeek APPEND addresses the response document before it exists",
+        );
       }
+      const created: Record<string, unknown> = {};
+      this.#document["response"] = created;
+      return created;
     }
     return current;
   }
 
+  #at(container: unknown, segment: PathSegment): unknown {
+    if (typeof segment === "number") {
+      if (!Array.isArray(container)) return undefined;
+      return segment < 0 ? container.at(segment) : container[segment];
+    }
+    return isRecord(container) ? container[segment] : undefined;
+  }
+
   #setAt(segments: readonly PathSegment[], value: unknown): void {
     const last = segments[segments.length - 1]!;
-    let container: unknown = this.#document;
+    let container: unknown = this.#responseRoot(true);
     for (let index = 0; index < segments.length - 1; index += 1) {
       const segment = segments[index]!;
       const next = segments[index + 1]!;
-      const existing = typeof segment === "number"
-        ? (Array.isArray(container) ? container[segment] : undefined)
-        : (isRecord(container) ? container[segment] : undefined);
+      const existing = this.#at(container, segment);
       if (existing === undefined || existing === null) {
-        const created: unknown = typeof next === "number" ? [] : {};
-        this.#assign(container, segment, created, segments.slice(0, index + 1));
+        // Only a positive object key/array tail can be created; a negative index addresses an element
+        // that must already exist (the app's writer cannot create an element at `-1`).
+        if (typeof segment === "number" && segment < 0) {
+          throw protocol(
+            "DEEPSEEK_PATCH_PATH_TRAVERSAL",
+            `A DeepSeek delta addresses ${JSON.stringify(segments.slice(0, index + 1).join("/"))}, which does not exist`,
+          );
+        }
+        const created: unknown = typeof next === "number" && next >= 0 ? [] : {};
+        this.#assign(container, segment, created);
         container = created;
         continue;
       }
@@ -367,65 +512,88 @@ export class DeepSeekFragmentAssembler {
       }
       container = existing;
     }
-    this.#assign(container, last, value, segments);
+    this.#assign(container, last, value);
   }
 
-  #assign(container: unknown, segment: PathSegment, value: unknown, segments: readonly PathSegment[]): void {
+  #assign(container: unknown, segment: PathSegment, value: unknown): void {
     if (typeof segment === "number") {
       if (!Array.isArray(container)) {
         throw protocol(
           "DEEPSEEK_PATCH_PATH_TRAVERSAL",
-          `A DeepSeek delta addresses index ${segment} of ${JSON.stringify(segments.join("/"))}, which is not an array`,
+          `A DeepSeek delta addresses index ${segment} of a value that is not an array`,
         );
       }
-      container[segment] = value;
+      const index = segment < 0 ? container.length + segment : segment;
+      if (index < 0 || index > container.length) {
+        throw protocol(
+          "DEEPSEEK_PATCH_PATH_TRAVERSAL",
+          `A DeepSeek delta addresses index ${segment} of an array of length ${container.length}`,
+        );
+      }
+      container[index] = value;
       return;
     }
     if (!isRecord(container)) {
       throw protocol(
         "DEEPSEEK_PATCH_PATH_TRAVERSAL",
-        `A DeepSeek delta addresses ${JSON.stringify(segments.join("/"))}, which is not an object`,
+        `A DeepSeek delta addresses ${JSON.stringify(segment)}, which is not an object`,
       );
     }
     container[segment] = value;
   }
 
   #appendAt(segments: readonly PathSegment[], value: unknown): void {
-    const current = this.#getAt(segments);
-    if (typeof value === "string") {
-      if (current === undefined || current === null) {
-        this.#setAt(segments, value);
-        return;
-      }
-      if (typeof current !== "string") {
+    const last = segments[segments.length - 1]!;
+    let container: unknown = this.#responseRoot(false);
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index]!;
+      const existing = this.#at(container, segment);
+      if (existing === undefined || existing === null) {
         throw protocol(
           "DEEPSEEK_PATCH_APPEND_INVALID",
-          `A DeepSeek APPEND at ${JSON.stringify(segments.join("/"))} targets a ${typeof current} value with text`,
+          `A DeepSeek APPEND addresses ${JSON.stringify(segments.slice(0, index + 1).join("/"))}, which does not exist`,
         );
       }
-      this.#setAt(segments, `${current}${value}`);
-      return;
+      if (typeof existing !== "object") {
+        throw protocol(
+          "DEEPSEEK_PATCH_PATH_TRAVERSAL",
+          `A DeepSeek APPEND addresses ${JSON.stringify(segments.slice(0, index + 1).join("/"))}, which is a `
+          + `${typeof existing} value`,
+        );
+      }
+      container = existing;
     }
-    if (Array.isArray(current)) {
-      current.push(value);
-      return;
-    }
-    if (current === undefined || current === null) {
-      if (Array.isArray(value)) {
-        this.#setAt(segments, [...value]);
+
+    if (Array.isArray(value)) {
+      // The app's writer splices an array onto an array *index*, and pushes onto an array *key*.
+      if (typeof last === "number" && Array.isArray(container)) {
+        container.splice(last, 0, ...value);
         return;
       }
+      const target = typeof last === "number" ? this.#at(container, last) : (container as Record<string, unknown>)[last];
+      if (!Array.isArray(target)) {
+        throw protocol(
+          "DEEPSEEK_PATCH_APPEND_INVALID",
+          `A DeepSeek APPEND at ${JSON.stringify(segments.join("/"))} targets no array`,
+        );
+      }
+      target.push(...value);
+      return;
+    }
+    if (typeof value !== "string") {
       throw protocol(
         "DEEPSEEK_PATCH_APPEND_INVALID",
-        `A DeepSeek APPEND at ${JSON.stringify(segments.join("/"))} has no value to append to and carries `
-        + `${Array.isArray(value) ? "an array" : typeof value}`,
+        `A DeepSeek APPEND at ${JSON.stringify(segments.join("/"))} carries ${typeof value}, not text`,
       );
     }
-    throw protocol(
-      "DEEPSEEK_PATCH_APPEND_INVALID",
-      `A DeepSeek APPEND at ${JSON.stringify(segments.join("/"))} targets a ${typeof current} value, which is `
-      + "neither text nor an array",
-    );
+    const target = typeof last === "number" ? this.#at(container, last) : (container as Record<string, unknown>)[last];
+    if (typeof target !== "string") {
+      throw protocol(
+        "DEEPSEEK_PATCH_APPEND_INVALID",
+        `A DeepSeek APPEND at ${JSON.stringify(segments.join("/"))} targets ${typeof target}, not text`,
+      );
+    }
+    this.#assign(container, last, `${target}${value}`);
   }
 }
 
@@ -652,6 +820,12 @@ export interface DeepSeekCompletionResult {
   readonly modelType?: string;
   /** The answer text: `RESPONSE` fragment content, in document order. */
   readonly text: string;
+  /** The model's reasoning (`THINK` fragments). Excluded from the answer, never returned. */
+  readonly reasoningText: string;
+  /** Characters that were excluded from the answer (reasoning + unmodelled fragments). */
+  readonly excludedChars: number;
+  /** Of {@link excludedChars}, the characters that arrived as reasoning. */
+  readonly reasoningChars: number;
   /** Content the stream carried on fragments this build cannot attribute to the answer. */
   readonly unattributedText: string;
   /** The fragment types the stream declared, for diagnostics. */
@@ -747,6 +921,9 @@ export function createDeepSeekCompletionAccumulator(
     ...(requestMessageId === undefined ? {} : { requestMessageId }),
     ...(modelType === undefined ? {} : { modelType }),
     text: assembler.text(),
+    reasoningText: assembler.reasoningText(),
+    excludedChars: assembler.reasoningText().length + assembler.unattributedText().length,
+    reasoningChars: assembler.reasoningText().length,
     unattributedText: assembler.unattributedText(),
     fragmentTypes: assembler.fragmentTypes(),
     termination: termination ?? "stream_end",

@@ -2,20 +2,34 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEEPSEEK_TERMINATIONS,
+  DeepSeekDeltaParser,
   DeepSeekFragmentAssembler,
   DeepSeekProtocolError,
   DeepSeekSseReader,
   createDeepSeekCompletionAccumulator,
+  normaliseDeepSeekPatch,
   parseDeepSeekSseEvent,
   type DeepSeekSseFrame,
   type DeepSeekSseRawEvent,
 } from "../src/adapters/deepseek-web";
 
 /**
- * The `chat.deepseek.com` completion vocabulary — recorded shape, synthetic content.
+ * The `chat.deepseek.com` completion vocabulary — **recorded shape, synthetic content**.
  *
- * Event names, payload keys and the patch operations come from `doc/provider-recon.md` §2.4; every
- * value here is synthetic, and no captured prompt, id or credential appears in this file.
+ * Every frame shape below is measured from the signed-in capture the operator supplied on 2026-10-24
+ * (two completions, 115 frames):
+ *
+ * - named SSE (`ready`, `update_session`, `title`, `close`), with the bulk of the turn carried by
+ *   **unnamed** `data:` frames — the app's `if (!e.event && e.data)` delta case;
+ * - the first delta is the whole `{response: …}` document (no `p`, no `o`);
+ * - later deltas are `{p, o, v}`, `{p, v}` (operation inherited) and `{v}` (both inherited);
+ * - paths address the last fragment as `-1` (`response/fragments/-1/content`);
+ * - `BATCH` children are **relative** to the batch path (`p:"response"`, children `p:"status"`);
+ * - the answer is the `RESPONSE` fragment, the reasoning is the `THINK` fragment, and a normal turn
+ *   ends with `close` (`click_behavior: "none"`) after `response/status: FINISHED`.
+ *
+ * Every text, id and title here is synthetic; no captured prompt, answer, id, header or credential
+ * appears in this file.
  */
 
 /** One named SSE event block. */
@@ -23,24 +37,84 @@ function named(event: string, payload: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
-/** One `delta` patch block. */
-function delta(p: string, o: string, v: unknown): string {
-  return named("delta", { p, o, v });
+/** One unnamed `data:` block — the recorded delta case. */
+function frame(payload: unknown): string {
+  return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
-/** The fragment that carries the answer. */
-const RESPONSE_TYPE = delta("response/fragments/0/type", "SET", "RESPONSE");
-const CONTENT = delta("response/fragments/0/content", "APPEND", "Hello");
+/** One fully-specified patch block (the form the app also uses). */
+function delta(p: string, o: string, v: unknown): string {
+  return frame({ p, o, v });
+}
 
-/** The recorded `ready` event. */
 const READY = named("ready", {
   response_message_id: "message-fixture",
   request_message_id: "request-fixture",
   model_type: "default",
 });
 
-/** A control frame that must never become content. */
-const UPDATE_SESSION = named("update_session", { updated_at: 1_700_000_000 });
+/** The measured first delta: the complete response document, with a `THINK` fragment already open. */
+const SNAPSHOT = frame({
+  v: {
+    response: {
+      message_id: 2,
+      parent_id: 1,
+      model: "",
+      role: "ASSISTANT",
+      thinking_enabled: true,
+      ban_edit: false,
+      ban_regenerate: false,
+      status: "WIP",
+      incomplete_message: null,
+      accumulated_token_usage: 0,
+      feedback: null,
+      inserted_at: 1_700_000_000,
+      search_enabled: true,
+      fragments: [{ id: 2, type: "THINK", content: "We", elapsed_secs: null, references: [], stage_id: 1 }],
+      conversation_mode: "DEFAULT",
+      has_pending_fragment: false,
+      auto_continue: false,
+      search_triggered: false,
+      extra_search_providers: [],
+    },
+  },
+});
+
+/**
+ * The measured frame sequence of one normal turn, with synthetic text.
+ *
+ * Order, event names, patch forms and paths are the capture's; only the strings differ.
+ */
+const MEASURED_TURN = [
+  READY,
+  named("update_session", { updated_at: 1_700_000_001 }),
+  SNAPSHOT,
+  delta("response/fragments/-1/content", "APPEND", " reason"),
+  frame({ v: " quietly" }),
+  delta("response/fragments/-1/elapsed_secs", "SET", 0.5),
+  delta("response/fragments", "APPEND", [
+    { id: 3, type: "RESPONSE", content: "H", references: [], stage_id: 1 },
+  ]),
+  // The operation is inherited (`APPEND`) and the path is the last fragment's content.
+  frame({ p: "response/fragments/-1/content", v: "i" }),
+  frame({ v: " there" }),
+  // The recorded BATCH is re-rooted under `response`, so its children are relative.
+  delta("response", "BATCH", [
+    { p: "accumulated_token_usage", v: 7 },
+    { p: "quasi_status", v: "FINISHED" },
+  ]),
+  delta("response/status", "SET", "FINISHED"),
+  named("title", { content: "synthetic title" }),
+  named("close", { click_behavior: "none", auto_resume: false }),
+].join("");
+
+/** Classify the single event one block contains. */
+function parseDeepSseFrameOf(block: string): DeepSeekSseFrame {
+  const reader = new DeepSeekSseReader();
+  const events = [...reader.push(block), ...reader.end()];
+  expect(events).toHaveLength(1);
+  return parseDeepSeekSseEvent(events[0]!);
+}
 
 describe("deepseek-web — named SSE frames are classified structurally", () => {
   test("the recorded event names parse", () => {
@@ -57,7 +131,8 @@ describe("deepseek-web — named SSE frames are classified structurally", () => 
     expect(parseDeepSeekSseEvent({ event: "close", data: JSON.stringify({ click_behavior: "retry" }) }))
       .toEqual({ kind: "close", clickBehavior: "retry" });
     expect(parseDeepSeekSseEvent({ event: "finish", data: "{}" })).toEqual({ kind: "finish" });
-    expect(parseDeepSseFrameOf(UPDATE_SESSION)).toMatchObject({ kind: "update_session", updatedAt: 1_700_000_000 });
+    expect(parseDeepSseFrameOf(named("update_session", { updated_at: 1_700_000_000 })))
+      .toMatchObject({ kind: "update_session", updatedAt: 1_700_000_000 });
     expect(parseDeepSseFrameOf(named("toast", { type: "error", content: "synthetic", finish_reason: "stop" })))
       .toEqual({ kind: "toast", type: "error", content: "synthetic", finishReason: "stop" });
     expect(parseDeepSseFrameOf(named("hint", { content: "synthetic", type: "tip", clear_response: true })))
@@ -68,13 +143,18 @@ describe("deepseek-web — named SSE frames are classified structurally", () => 
     expect(parseDeepSseFrameOf(named("update_file", {}))).toMatchObject({ kind: "update_file" });
   });
 
-  test("the recorded patch shape parses; an unnamed data frame is the delta case", () => {
-    expect(parseDeepSseFrameOf(CONTENT)).toEqual({
+  test("an unnamed data frame is the delta case, and p/o are optional on it", () => {
+    // All three measured forms classify as a delta; inheritance is applied by the parser.
+    expect(parseDeepSseFrameOf(delta("response/fragments/0/content", "APPEND", "Hello"))).toEqual({
       kind: "delta",
       patch: { p: "response/fragments/0/content", o: "APPEND", v: "Hello" },
     });
-    expect(parseDeepSseFrameOf(`data: ${JSON.stringify({ p: "response/fragments/0/content", o: "SET", v: "x" })}\n\n`))
-      .toMatchObject({ kind: "delta" });
+    expect(parseDeepSseFrameOf(frame({ p: "response/fragments/-1/content", v: "H" }))).toEqual({
+      kind: "delta",
+      patch: { p: "response/fragments/-1/content", v: "H" },
+    });
+    expect(parseDeepSseFrameOf(frame({ v: " there" }))).toEqual({ kind: "delta", patch: { v: " there" } });
+    expect(normaliseDeepSeekPatch({ v: { response: {} } })).toEqual({ v: { response: {} } });
   });
 
   test("an unmodelled event is reported, not guessed and not fatal", () => {
@@ -85,18 +165,6 @@ describe("deepseek-web — named SSE frames are classified structurally", () => 
     });
   });
 });
-
-/** Classify the single event one block contains. */
-function parseDeepSseFrameOf(block: string): DeepSeekSseFrame {
-  const reader = new DeepSeekSseReader();
-  const events = [...reader.push(block), ...reader.end()];
-  expect(events).toHaveLength(1);
-  return parseDeepSseEvent(events[0]!);
-}
-
-function parseDeepSseEvent(event: DeepSeekSseRawEvent): DeepSeekSseFrame {
-  return parseDeepSeekSseEvent(event);
-}
 
 describe("deepseek-web — the reader is incremental and framing-only", () => {
   test("comments are ignored, data lines are joined, and an event without data is not a frame", () => {
@@ -114,16 +182,13 @@ describe("deepseek-web — the reader is incremental and framing-only", () => {
   });
 
   test("chunk boundaries are irrelevant: a character-at-a-time feed yields the same frames", () => {
-    const body = [READY, RESPONSE_TYPE, CONTENT, UPDATE_SESSION,
-      delta("response/fragments/0/content", "APPEND", " from the recorded shape."),
-      named("finish", {})].join("");
     const whole = new DeepSeekSseReader();
-    const expected = [...whole.push(body), ...whole.end()];
-    expect(expected.length).toBe(6);
+    const expected = [...whole.push(MEASURED_TURN), ...whole.end()];
+    expect(expected.length).toBe(13);
 
     const chunked = new DeepSeekSseReader();
     const actual: DeepSeekSseRawEvent[] = [];
-    for (const character of body) actual.push(...chunked.push(character));
+    for (const character of MEASURED_TURN) actual.push(...chunked.push(character));
     actual.push(...chunked.end());
     expect(actual).toEqual(expected);
   });
@@ -139,63 +204,98 @@ describe("deepseek-web — the reader is incremental and framing-only", () => {
 
   test("a trailing event without its blank line is flushed exactly once", () => {
     const reader = new DeepSeekSseReader();
-    expect(reader.push('event: finish\ndata: {}')).toEqual([]);
-    expect(reader.end()).toEqual([{ event: "finish", data: "{}" }]);
+    expect(reader.push('data: {"p":"response/status","o":"SET","v":"FINISHED"}')).toEqual([]);
+    expect(reader.end()).toHaveLength(1);
     expect(reader.end()).toEqual([]);
   });
 });
 
-describe("deepseek-web — the fragment assembler applies SET / APPEND / BATCH", () => {
-  test("content is ordered by fragment index, and only RESPONSE fragments are the answer", () => {
-    const assembler = new DeepSeekFragmentAssembler();
-    assembler.apply({ p: "response/fragments/0/type", o: "SET", v: "RESPONSE" });
-    assembler.apply({ p: "response/fragments/0/content", o: "APPEND", v: "Hello" });
-    assembler.apply({ p: "response/fragments/1/type", o: "SET", v: "THINKING" });
-    assembler.apply({ p: "response/fragments/1/content", o: "APPEND", v: "a private thought" });
-    assembler.apply({ p: "response/fragments/0/content", o: "APPEND", v: " world" });
-    expect(assembler.text()).toBe("Hello world");
-    // The non-answer fragment is reported, never folded into the answer.
-    expect(assembler.unattributedText()).toBe("a private thought");
-    expect(assembler.fragments().map(fragment => fragment.index)).toEqual([0, 1]);
-    expect(assembler.fragmentTypes()).toEqual(["RESPONSE", "THINKING"]);
+describe("deepseek-web — the delta parser applies the app's sticky defaults and relative BATCH", () => {
+  test("the first frame defaults to SET at the document root", () => {
+    expect(new DeepSeekDeltaParser().parse({ v: { response: { status: "WIP" } } }))
+      .toEqual([{ path: "", operation: "SET", value: { response: { status: "WIP" } } }]);
   });
 
-  test("a fragment filled before its predecessor cannot shift the answer", () => {
-    const assembler = new DeepSeekFragmentAssembler();
-    assembler.apply({ p: "response/fragments/1/type", o: "SET", v: "RESPONSE" });
-    assembler.apply({ p: "response/fragments/1/content", o: "APPEND", v: "second" });
-    assembler.apply({ p: "response/fragments/0/type", o: "SET", v: "RESPONSE" });
-    assembler.apply({ p: "response/fragments/0/content", o: "APPEND", v: "first " });
-    expect(assembler.text()).toBe("first second");
+  test("an operation and a path are inherited until replaced", () => {
+    const parser = new DeepSeekDeltaParser();
+    expect(parser.parse({ p: "response/fragments/-1/content", o: "APPEND", v: "We" }))
+      .toEqual([{ path: "response/fragments/-1/content", operation: "APPEND", value: "We" }]);
+    // `{v}` keeps both.
+    expect(parser.parse({ v: " think" }))
+      .toEqual([{ path: "response/fragments/-1/content", operation: "APPEND", value: " think" }]);
+    // `{p, v}` keeps the operation, changes the path.
+    expect(parser.parse({ p: "response/fragments/-1/elapsed_secs", v: 1 }))
+      .toEqual([{ path: "response/fragments/-1/elapsed_secs", operation: "APPEND", value: 1 }]);
+    // An explicit operation wins.
+    expect(parser.parse({ p: "response/status", o: "SET", v: "FINISHED" }))
+      .toEqual([{ path: "response/status", operation: "SET", value: "FINISHED" }]);
+    // The new operation/path become the defaults for the next frame.
+    expect(parser.parse({ v: "x" }))
+      .toEqual([{ path: "response/status", operation: "SET", value: "x" }]);
   });
 
-  test("BATCH applies its patches in order and nests", () => {
-    const assembler = new DeepSeekFragmentAssembler();
-    assembler.apply({
-      p: "response/fragments/0/content",
+  test("BATCH children are relative to the batch path, and nest the same way", () => {
+    const parser = new DeepSeekDeltaParser();
+    expect(parser.parse({
+      p: "response",
       o: "BATCH",
       v: [
-        { p: "response/fragments/0/type", o: "SET", v: "RESPONSE" },
-        { p: "response/fragments/0/content", o: "APPEND", v: "a" },
-        {
-          p: "response/fragments/0/content",
-          o: "BATCH",
-          v: [{ p: "response/fragments/0/content", o: "APPEND", v: "b" }],
-        },
+        { p: "accumulated_token_usage", v: 7 },
+        { p: "status", o: "SET", v: "FINISHED" },
+        { p: "quasi_status", o: "BATCH", v: [{ p: "x", v: 1 }] },
       ],
-    });
-    expect(assembler.text()).toBe("ab");
+    })).toEqual([
+      { path: "response/accumulated_token_usage", operation: "SET", value: 7 },
+      { path: "response/status", operation: "SET", value: "FINISHED" },
+      { path: "response/quasi_status/x", operation: "SET", value: 1 },
+    ]);
   });
 
-  test("a whole fragment object can be SET in one patch", () => {
+  test("a batch child without a path addresses the batch node itself", () => {
+    expect(new DeepSeekDeltaParser().parse({ p: "response/status", o: "BATCH", v: [{ v: "FINISHED" }] }))
+      .toEqual([{ path: "response/status", operation: "SET", value: "FINISHED" }]);
+  });
+});
+
+describe("deepseek-web — the fragment assembler applies the measured patch forms", () => {
+  test("a whole response document can be SET, and `-1` addresses its last fragment", () => {
     const assembler = new DeepSeekFragmentAssembler();
-    assembler.apply({ p: "response/fragments/0", o: "SET", v: { type: "RESPONSE", content: "whole" } });
-    expect(assembler.text()).toBe("whole");
+    assembler.apply({ v: { response: { fragments: [
+      { id: 1, type: "THINK", content: "We" },
+      { id: 2, type: "RESPONSE", content: "a" },
+    ] } } });
+    assembler.apply({ p: "response/fragments/-1/content", o: "APPEND", v: "nswer" });
+    expect(assembler.text()).toBe("answer");
+    expect(assembler.reasoningText()).toBe("We");
+    // `-1` never becomes an object key named "-1".
+    expect(assembler.fragments().map(fragment => fragment.index)).toEqual([0, 1]);
+  });
+
+  test("APPEND of an array appends fragments; APPEND of text requires an existing string", () => {
+    const assembler = new DeepSeekFragmentAssembler();
+    assembler.apply({ v: { response: { fragments: [{ type: "RESPONSE", content: "a" }] } } });
+    assembler.apply({ p: "response/fragments", o: "APPEND", v: [{ type: "RESPONSE", content: "b" }] });
+    assembler.apply({ p: "response/fragments/0/content", o: "APPEND", v: "!" });
+    expect(assembler.text()).toBe("a!b");
+    // The app's own writer refuses text APPEND to a missing/non-string target; so does this.
+    expect(() => assembler.apply({ p: "response/fragments/1/content", o: "SET", v: 7 }))
+      .not.toThrow();
+    expect(() => assembler.apply({ p: "response/fragments/2/content", o: "APPEND", v: "x" }))
+      .toThrow(DeepSeekProtocolError);
+  });
+
+  test("arrival order is not document order: a later fragment cannot shift an earlier one", () => {
+    const assembler = new DeepSeekFragmentAssembler();
+    assembler.apply({ v: { response: { fragments: [{ type: "RESPONSE", content: "first " }] } } });
+    // A second fragment arrives before the first one finishes streaming.
+    assembler.apply({ p: "response/fragments", o: "APPEND", v: [{ type: "RESPONSE", content: "second" }] });
+    assembler.apply({ p: "response/fragments/0/content", o: "APPEND", v: "one" });
+    expect(assembler.text()).toBe("first onesecond");
   });
 
   test("a repeated APPEND is applied as recorded, and a SET converges", () => {
     const assembler = new DeepSeekFragmentAssembler();
-    assembler.apply({ p: "response/fragments/0/type", o: "SET", v: "RESPONSE" });
+    assembler.apply({ p: "response/fragments/0", o: "SET", v: { type: "RESPONSE", content: "" } });
     for (const piece of ["a", "b", "c", "d"]) {
       assembler.apply({ p: "response/fragments/0/content", o: "APPEND", v: piece });
     }
@@ -203,16 +303,43 @@ describe("deepseek-web — the fragment assembler applies SET / APPEND / BATCH",
     assembler.apply({ p: "response/fragments/0/content", o: "SET", v: "abcd" });
     expect(assembler.text()).toBe("abcd");
   });
+
+  test("a negative index works while traversing, not only at the final assignment", () => {
+    const assembler = new DeepSeekFragmentAssembler();
+    assembler.apply({ v: { response: { fragments: [
+      { type: "THINK", content: "We" },
+      { type: "RESPONSE", content: "Hi" },
+    ] } } });
+    assembler.apply({ p: "response/fragments/-1/elapsed_secs", o: "SET", v: 0.25 });
+    expect(assembler.text()).toBe("Hi");
+    // A fragment element cannot be created through `-1`: the element must exist.
+    expect(() => assembler.apply({ p: "response/fragments/-9/content", o: "SET", v: "x" }))
+      .toThrow(DeepSeekProtocolError);
+  });
+
+  test("only RESPONSE content is the answer; THINK is reasoning; anything else is unattributed", () => {
+    const assembler = new DeepSeekFragmentAssembler();
+    assembler.apply({ v: { response: { fragments: [
+      { type: "THINK", content: "a thought" },
+      { type: "RESPONSE", content: "the answer" },
+      { type: "SEARCH", content: "a citation card" },
+    ] } } });
+    expect(assembler.text()).toBe("the answer");
+    expect(assembler.reasoningText()).toBe("a thought");
+    expect(assembler.unattributedText()).toBe("a citation card");
+    expect(assembler.fragmentTypes()).toEqual(["THINK", "RESPONSE", "SEARCH"]);
+  });
 });
 
 describe("deepseek-web — a malformed patch is refused with a typed error", () => {
   const cases: readonly { readonly name: string; readonly patch: unknown; readonly code: string }[] = [
     { name: "not an object", patch: "nope", code: "DEEPSEEK_PATCH_NOT_OBJECT" },
-    { name: "no path", patch: { o: "SET", v: "x" }, code: "DEEPSEEK_PATCH_PATH_INVALID" },
-    { name: "empty path", patch: { p: "", o: "SET", v: "x" }, code: "DEEPSEEK_PATCH_PATH_INVALID" },
     { name: "empty segment", patch: { p: "response//content", o: "SET", v: "x" }, code: "DEEPSEEK_PATCH_PATH_INVALID" },
+    { name: "non-string path", patch: { p: 7, o: "SET", v: "x" }, code: "DEEPSEEK_PATCH_PATH_INVALID" },
     { name: "unknown operation", patch: { p: "response/x", o: "MERGE", v: "x" }, code: "DEEPSEEK_PATCH_OPERATION_INVALID" },
     { name: "missing value", patch: { p: "response/x", o: "SET" }, code: "DEEPSEEK_PATCH_VALUE_MISSING" },
+    { name: "a root other than the response document", patch: { p: "other/x", o: "SET", v: 1 }, code: "DEEPSEEK_PATCH_ROOT_INVALID" },
+    { name: "a non-SET operation at the document root", patch: { p: "", o: "APPEND", v: "x" }, code: "DEEPSEEK_PATCH_ROOT_INVALID" },
   ];
 
   for (const entry of cases) {
@@ -248,7 +375,7 @@ describe("deepseek-web — a malformed patch is refused with a typed error", () 
 
   test("APPEND of a number to text, and APPEND to a number, are refused", () => {
     const assembler = new DeepSeekFragmentAssembler();
-    assembler.apply({ p: "response/fragments/0/content", o: "SET", v: "text" });
+    assembler.apply({ p: "response/fragments/0", o: "SET", v: { type: "RESPONSE", content: "text" } });
     expect(() => assembler.apply({ p: "response/fragments/0/content", o: "APPEND", v: 5 }))
       .toThrow(DeepSeekProtocolError);
     assembler.apply({ p: "response/status", o: "SET", v: 7 });
@@ -258,8 +385,7 @@ describe("deepseek-web — a malformed patch is refused with a typed error", () 
 
   test("a path that traverses a scalar is refused instead of overwriting it", () => {
     const assembler = new DeepSeekFragmentAssembler();
-    assembler.apply({ p: "response/fragments/0/type", o: "SET", v: "RESPONSE" });
-    assembler.apply({ p: "response/fragments/0/content", o: "SET", v: "text" });
+    assembler.apply({ p: "response/fragments/0", o: "SET", v: { type: "RESPONSE", content: "text" } });
     let thrown: unknown;
     try {
       assembler.apply({ p: "response/fragments/0/content/deeper", o: "SET", v: 1 });
@@ -281,10 +407,8 @@ describe("deepseek-web — the accumulator: content, control frames and terminat
   function run(body: string) {
     const reader = new DeepSeekSseReader();
     const accumulator = createDeepSeekCompletionAccumulator();
-    const chunks: string[] = [];
     for (const event of reader.push(body)) {
       if (accumulator.push(parseDeepSeekSseEvent(event))) break;
-      chunks.push(event.data);
     }
     if (!accumulator.done) {
       for (const event of reader.end()) {
@@ -294,22 +418,40 @@ describe("deepseek-web — the accumulator: content, control frames and terminat
     return accumulator.finish();
   }
 
-  test("the answer is the RESPONSE fragments' content, in order", () => {
-    const result = run([READY, RESPONSE_TYPE, CONTENT,
-      delta("response/fragments/0/content", "APPEND", " from"),
-      delta("response/fragments/0/content", "APPEND", " the recorded shape."),
-      named("finish", {})].join(""));
-    expect(result.text).toBe("Hello from the recorded shape.");
-    expect(result.termination).toBe("finish");
+  test("the measured turn assembles the answer, excludes THINK and ends on close", () => {
+    const result = run(MEASURED_TURN);
+    expect(result.text).toBe("Hi there");
+    expect(result.reasoningText).toBe("We reason quietly");
+    expect(result.reasoningChars).toBe("We reason quietly".length);
+    expect(result.excludedChars).toBe("We reason quietly".length);
+    expect(result.fragmentTypes).toEqual(["THINK", "RESPONSE"]);
+    expect(result.termination).toBe("close");
+    expect(result.clickBehavior).toBe("none");
     expect(result.responseMessageId).toBe("message-fixture");
+    expect(result.requestMessageId).toBe("request-fixture");
     expect(result.modelType).toBe("default");
+    expect(result.sessionUpdated).toBe(true);
+    expect(result.controlFrames).toMatchObject({ update_session: 1, title: 1 });
+    expect(result.frames).toBe(13);
+  });
+
+  test("the recorded BATCH is applied at the path it is rooted on", () => {
+    const parser = new DeepSeekDeltaParser();
+    const resolved = parser.parse({
+      p: "response", o: "BATCH", v: [{ p: "status", v: "FINISHED" }, { p: "accumulated_token_usage", v: 7 }],
+    });
+    // The batch re-rooted `status` under `response`; the old absolute reading produced a root `status`.
+    expect(resolved.map(patch => patch.path)).toEqual([
+      "response/status",
+      "response/accumulated_token_usage",
+    ]);
   });
 
   test("update_session mid-stream changes nothing about the content and does not terminate", () => {
     const result = run([
-      RESPONSE_TYPE,
+      delta("response/fragments/0", "SET", { type: "RESPONSE", content: "" }),
       delta("response/fragments/0/content", "APPEND", "before "),
-      UPDATE_SESSION,
+      named("update_session", { updated_at: 1_700_000_000 }),
       delta("response/fragments/0/content", "APPEND", "after"),
       named("finish", {}),
     ].join(""));
@@ -319,8 +461,11 @@ describe("deepseek-web — the accumulator: content, control frames and terminat
     expect(result.termination).toBe("finish");
   });
 
-  test("each of the three terminators is distinguishable", () => {
-    const body = [RESPONSE_TYPE, CONTENT];
+  test("each terminator is distinguishable, and the measured turn uses close", () => {
+    const body = [
+      delta("response/fragments/0", "SET", { type: "RESPONSE", content: "" }),
+      delta("response/fragments/0/content", "APPEND", "Hello"),
+    ];
     const finish = run([...body, named("finish", {})].join(""));
     expect(finish.termination).toBe("finish");
     const close = run([...body, named("close", { click_behavior: "none" })].join(""));
@@ -344,8 +489,7 @@ describe("deepseek-web — the accumulator: content, control frames and terminat
 
   test("toast, hint and title are control frames, not content", () => {
     const result = run([
-      RESPONSE_TYPE,
-      delta("response/fragments/0/content", "APPEND", "answer"),
+      delta("response/fragments/0", "SET", { type: "RESPONSE", content: "answer" }),
       named("toast", { type: "info", content: "synthetic" }),
       named("hint", { type: "tip", content: "synthetic" }),
       named("title", { title: "synthetic" }),
@@ -358,7 +502,7 @@ describe("deepseek-web — the accumulator: content, control frames and terminat
   test("a delta that arrives after a terminal signal is ignored", () => {
     const accumulator = createDeepSeekCompletionAccumulator();
     accumulator.push(parseDeepSeekSseEvent({ event: "delta", data: JSON.stringify({
-      p: "response/fragments/0/type", o: "SET", v: "RESPONSE",
+      p: "response/fragments/0", o: "SET", v: { type: "RESPONSE", content: "" },
     }) }));
     accumulator.push(parseDeepSeekSseEvent({ event: "finish", data: "{}" }));
     const late = parseDeepSeekSseEvent({ event: "delta", data: JSON.stringify({
@@ -368,38 +512,49 @@ describe("deepseek-web — the accumulator: content, control frames and terminat
     expect(accumulator.finish().text).toBe("");
   });
 
-  test("content this build cannot attribute is reported instead of being folded in", () => {
+  test("THINK is counted as reasoning, never returned; a THINK-only turn has no answer", () => {
     const result = run([
-      delta("response/fragments/0/type", "SET", "THINKING"),
-      delta("response/fragments/0/content", "APPEND", "only a thought"),
+      delta("response/fragments/0", "SET", { type: "THINK", content: "only a thought" }),
+      named("close", { click_behavior: "none" }),
+    ].join(""));
+    expect(result.text).toBe("");
+    expect(result.reasoningText).toBe("only a thought");
+    expect(result.reasoningChars).toBe("only a thought".length);
+    expect(result.unattributedText).toBe("");
+    expect(result.fragmentTypes).toEqual(["THINK"]);
+  });
+
+  test("an unmodelled fragment type is reported as unattributed, not as the answer", () => {
+    const result = run([
+      delta("response/fragments/0", "SET", { type: "SEARCH", content: "only a card" }),
       named("finish", {}),
     ].join(""));
     expect(result.text).toBe("");
-    expect(result.unattributedText).toBe("only a thought");
-    expect(result.fragmentTypes).toEqual(["THINKING"]);
+    expect(result.unattributedText).toBe("only a card");
+    expect(result.fragmentTypes).toEqual(["SEARCH"]);
   });
 
   test("streamed text is the incremental suffix, and a rewrite is counted", () => {
     const assembled: string[] = [];
     const accumulator = createDeepSeekCompletionAccumulator({ onText: text => assembled.push(text) });
     accumulator.push(parseDeepSeekSseEvent({ event: "delta", data: JSON.stringify({
-      p: "response/fragments/0/type", o: "SET", v: "RESPONSE",
+      p: "response/fragments/0", o: "SET", v: { type: "RESPONSE", content: "" },
     }) }));
     accumulator.push(parseDeepSeekSseEvent({ event: "delta", data: JSON.stringify({
       p: "response/fragments/0/content", o: "APPEND", v: "Hel",
     }) }));
-    accumulator.push(parseDeepSseEvent({ event: "delta", data: JSON.stringify({
+    accumulator.push(parseDeepSeekSseEvent({ event: "delta", data: JSON.stringify({
       p: "response/fragments/0/content", o: "APPEND", v: "lo",
     }) }));
     expect(assembled).toEqual(["Hel", "lo"]);
     // A SET that *extends* what was already streamed is indistinguishable from an APPEND of the
     // suffix, so only the suffix is sent.
-    accumulator.push(parseDeepSseEvent({ event: "delta", data: JSON.stringify({
+    accumulator.push(parseDeepSeekSseEvent({ event: "delta", data: JSON.stringify({
       p: "response/fragments/0/content", o: "SET", v: "Hello there",
     }) }));
     expect(assembled).toEqual(["Hel", "lo", " there"]);
     // A SET that replaces it cannot be unsaid: it is counted, not retracted.
-    accumulator.push(parseDeepSseEvent({ event: "delta", data: JSON.stringify({
+    accumulator.push(parseDeepSeekSseEvent({ event: "delta", data: JSON.stringify({
       p: "response/fragments/0/content", o: "SET", v: "Goodbye",
     }) }));
     const result = accumulator.finish();

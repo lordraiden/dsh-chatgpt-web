@@ -111,6 +111,10 @@ export interface DeepSeekTurnAnswer {
   /** The model the provider says answered (`ready.model_type`), when it said. */
   readonly modelType?: string;
   readonly text: string;
+  /** The model's reasoning (`THINK` fragments), excluded from {@link text} and kept only as a count. */
+  readonly reasoningChars: number;
+  /** Every character the stream carried that is not the answer (reasoning plus unmodelled types). */
+  readonly excludedChars: number;
   readonly termination: DeepSeekCompletionResult["termination"];
   /** The `close.click_behavior`, when a `close` frame ended the turn. */
   readonly clickBehavior?: string;
@@ -151,6 +155,9 @@ export interface DeepSeekTurnDiagnostic {
   readonly fragmentIndex?: number;
   readonly frames?: number;
   readonly chars?: number;
+  /** Answer characters, on `completed`; reasoning is counted separately and never returned. */
+  readonly reasoningChars?: number;
+  readonly excludedChars?: number;
   readonly elapsedMs?: number;
   readonly ephemeral?: boolean;
   /** The typed failure category, on `failed`. */
@@ -494,15 +501,18 @@ class DeepSeekWebTextTransport implements WebChatTextTransport {
       if (completion.termination === "error") {
         throw this.#inBandFailure(completion, result.status);
       }
-      // The answer is the `RESPONSE` fragments' content. Content that arrived on fragments this build
-      // cannot attribute is reported honestly instead of being folded in or silently dropped.
-      if (completion.text.length === 0 && completion.unattributedText.length > 0) {
+      // The answer is the `RESPONSE` fragments' content; `THINK` is reasoning and is counted, never
+      // returned. A stream whose only text is reasoning (or a fragment type this build does not model)
+      // is a failed turn, never an empty successful answer.
+      if (completion.text.length === 0 && completion.excludedChars > 0) {
+        const reasoning = completion.reasoningChars;
         throw webChatError(
           "UPSTREAM_ERROR",
-          "DeepSeek answered only with fragment types this build cannot attribute to the assistant "
-          + `(types: ${completion.fragmentTypes.join(", ") || "none declared"}). The fragment type that `
-          + "carries a plain answer is unproven (doc/deepseek-web.md §6), so this turn is reported as a "
-          + "failure rather than returning empty text.",
+          "DeepSeek answered without a `RESPONSE` fragment: "
+          + `${reasoning} reasoning character(s) and `
+          + `${completion.unattributedText.length} character(s) on unmodelled fragment types `
+          + `(types: ${completion.fragmentTypes.join(", ") || "none declared"}). Reasoning is never `
+          + "returned as the answer, so this turn is reported as a failure rather than empty text.",
           { providerId: DEEPSEEK_WEB_PROVIDER_ID, providerCode: "DEEPSEEK_UNATTRIBUTED_ANSWER" },
         );
       }
@@ -527,6 +537,8 @@ class DeepSeekWebTextTransport implements WebChatTextTransport {
         ...(completion.responseMessageId === undefined ? {} : { responseMessageId: completion.responseMessageId }),
         ...(completion.modelType === undefined ? {} : { modelType: completion.modelType }),
         text: completion.text,
+        reasoningChars: completion.reasoningChars,
+        excludedChars: completion.excludedChars,
         termination,
         ...(completion.clickBehavior === undefined ? {} : { clickBehavior: completion.clickBehavior }),
         fragmentTypes: completion.fragmentTypes,
@@ -558,6 +570,8 @@ class DeepSeekWebTextTransport implements WebChatTextTransport {
         termination,
         frames: completion.frames,
         chars: completion.text.length,
+        reasoningChars: completion.reasoningChars,
+        excludedChars: completion.excludedChars,
         elapsedMs: answer.elapsedMs,
         ephemeral,
       });

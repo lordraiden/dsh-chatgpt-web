@@ -3,11 +3,13 @@
  *
  * ## Where every fact below comes from
  *
- * [`doc/provider-recon.md`](../../../doc/provider-recon.md) §2 is the measured brief. Nothing in this
- * module is invented: a path, a key and an event name are either **measured** over the wire or read
- * from the vendor's own shipped bundle (`main.a34f79a498.js`, commit `6c40ca01`), and the two facts
- * that are *not* settled are named as such (`DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES` is **not** a
- * catalogue; the body's `source`/`action`/`preempt` extras are deliberately not sent).
+ * [`doc/provider-recon.md`](../../../doc/provider-recon.md) §2 is the pre-capture brief, and
+ * [`doc/deepseek-web.md`](../../../doc/deepseek-web.md) §6 is the settled inventory. Nothing in this
+ * module is invented: a path, a key and an event name are either **measured** over the wire, read from
+ * the vendor's own shipped bundle, or measured on the signed-in capture the operator supplied. The one
+ * list that stays a documented non-catalogue is `DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES`; the body's
+ * `action`/`preempt` are now sent with their measured values and `source` is not sent because the
+ * captured completion body does not carry it.
  *
  * ## The id is not new
  *
@@ -73,8 +75,9 @@ export const DEEPSEEK_WEB_USERS_CURRENT_PATH = "/api/v0/users/current";
  * The bundle commit the recorded protocol was read from (`<meta name="commit-id">`, recon §2.1).
  *
  * DeepSeek pins a commit id rather than a semver. It is exported because a capture compared against
- * the wrong bundle is a real source of confusion; this adapter does **not** send it as `x-client-*`
- * (those headers were recorded by name only, and their required values were never measured).
+ * the wrong bundle is a real source of confusion. It is **not** the `x-client-bundle-id` value: the
+ * page sends the app bundle identifier (`com.deepseek.chat`) there, which `page-identity.ts` derives
+ * from the page's own region.
  */
 export const DEEPSEEK_WEB_BUNDLE_COMMIT_ID = "6c40ca01";
 
@@ -89,10 +92,12 @@ export const DEEPSEEK_WEB_BUNDLE_COMMIT_ID = "6c40ca01";
 export const DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES = ["default", "expert", "vision"] as const;
 
 /**
- * The recorded completion body keys (recon §2.3), in the bundle's own order.
+ * The completion body keys **measured** on the signed-in turn (one capture, two completions).
  *
- * Kept as one constant so the delta between "what the app sends" and "what this build sends" is
- * visible in one place instead of being rediscovered by a reviewer.
+ * The captured bodies carry exactly these nine keys, in this order — both a first turn
+ * (`parent_message_id: null`) and a continuation. `action` is `null` and `preempt` is `false` on both,
+ * and `source` — which the pre-capture recon listed as free-form — is **not** part of the completion
+ * body at all. The capture is the evidence; `doc/deepseek-web.md` §3 records it.
  */
 export const DEEPSEEK_WEB_RECORDED_BODY_KEYS = [
   "chat_session_id",
@@ -102,21 +107,18 @@ export const DEEPSEEK_WEB_RECORDED_BODY_KEYS = [
   "ref_file_ids",
   "thinking_enabled",
   "search_enabled",
-  "source",
   "action",
   "preempt",
 ] as const;
 
 /**
- * The recorded body keys this build does **not** send, and why.
+ * The recorded body keys this build does **not** send.
  *
- * Recon §2.3 records `source` as free-form and `action`/`preempt` as nullable extras, but records no
- * value for any of them. A turn is therefore built from the keys whose value the recon actually
- * settles, and these three are omitted rather than filled with a guess. Whether the server requires
- * them is one of the open questions in `doc/deepseek-web.md` §6, and the single observation that
- * settles it is the body of one signed-in first turn.
+ * Empty: every recorded key now has a measured value. In particular `source` is not reported here any
+ * more, because the capture shows the completion body does not carry it — the pre-capture brief
+ * listed a key the app does not send.
  */
-export const DEEPSEEK_WEB_UNSENT_BODY_KEYS = ["source", "action", "preempt"] as const;
+export const DEEPSEEK_WEB_UNSENT_BODY_KEYS = [] as const;
 
 /** The named SSE events the bundle's own `onServerEvent` switch handles (recon §2.4). */
 export const DEEPSEEK_WEB_SSE_EVENTS = [
@@ -141,24 +143,28 @@ export const DEEPSEEK_WEB_PATCH_OPERATIONS = ["SET", "BATCH", "APPEND"] as const
 /** One permitted patch operation. */
 export type DeepSeekPatchOperation = (typeof DEEPSEEK_WEB_PATCH_OPERATIONS)[number];
 
-/** The only fragment `type` whose content this adapter treats as the assistant's answer (recon §2.4). */
+/** The only fragment `type` whose content this adapter treats as the assistant's answer (measured). */
 export const DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE = "RESPONSE";
 
 /**
- * The candidate locations a `chat_session/create` answer may carry its id.
+ * The fragment `type` that carries the model's reasoning (measured: the paired `THINK` frame).
  *
- * **Unproven**: the recon measured the endpoint and its anonymous answer, not its success shape. This
- * ordered list is the documented provisional reading, checked by
- * {@link readDeepSeekCreatedSessionId}, which refuses with a typed error (naming the paths it tried)
- * instead of guessing an id. One signed-in capture of the create call replaces this list.
+ * Its content is **excluded** from the answer and counted, never returned — the same rule the other
+ * providers apply to a reasoning phase.
+ */
+export const DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE = "THINK";
+
+/**
+ * The measured location of the id in a `chat_session/create` answer.
+ *
+ * The signed-in create answer is `{code:0, msg:"", data:{biz_code:0, biz_msg:"", biz_data:{chat_session:
+ * {id, title, title_type, model_type, pinned, updated_at, seq_id, agent, version, is_empty,
+ * current_message_id, inserted_at}, ttl_seconds}}}`; the id is `data.biz_data.chat_session.id`. The list
+ * stays a list (one measured path) because {@link readDeepSeekCreatedSessionId} names every path it
+ * tried in its refusal, so a future shape change is a readable failure instead of an empty id.
  */
 export const DEEPSEEK_WEB_SESSION_ID_PATHS = [
-  ["data", "chat_session", "id"],
   ["data", "biz_data", "chat_session", "id"],
-  ["data", "chat_session_id"],
-  ["data", "biz_data", "chat_session_id"],
-  ["data", "id"],
-  ["data", "biz_data", "id"],
 ] as const;
 
 /** How long one sign-in/session navigation may take. */
@@ -358,9 +364,10 @@ export function deepSeekRefusal(input: DeepSeekRefusalInput): WebChatError {
   if (powMarker) {
     return webChatError(
       "UPSTREAM_ERROR",
-      `DeepSeek rejected the proof of work this build produced for ${input.what}. The header name and `
-      + "the solver contract are unproven (doc/deepseek-web.md §6), so this is a typed refusal and not "
-      + "a retry: the header the capture shows replaces the value in one place.",
+      `DeepSeek rejected the proof of work this turn's page produced for ${input.what} `
+      + "(`POW_HEADER_ERROR` / `INVALID_POW_RESPONSE`). A proof is valid for one completion and is never "
+      + "replayed, so this is a typed refusal: fetch a fresh challenge (a new attempt), never resend the "
+      + "same proof.",
       { providerId: DEEPSEEK_WEB_PROVIDER_ID, providerCode: "DEEPSEEK_POW_REJECTED" },
     );
   }
@@ -423,14 +430,16 @@ export function deepSeekUrl(path: string, query?: Readonly<Record<string, string
 /**
  * The non-secret headers every DeepSeek API request carries.
  *
- * `Authorization` and the proof-of-work header are **not** part of this set: both depend on state this
- * build cannot read (see `network-turn.ts`), and neither is ever baked into a constant. The recorded
- * `x-client-*` family is deliberately absent — recon §2.7 records the names but not the values, and a
- * guessed client version is worse than a missing one (the capture settles it).
+ * The capture shows the app sends the wildcard `accept` media range and `content-type:
+ * application/json` on the JSON calls
+ * *and* on the completion stream, so those two are the recorded base. `Authorization`, the proof of
+ * work and the `x-client-*` / `x-device-*` family are **not** part of this set: the first two are
+ * credentials/proofs and the rest are the page's own identity, all supplied by
+ * `network-turn.ts`/`page-identity.ts` at call time. This function stays pure and secret-free.
  */
 export function deepSeekApiHeaders(extra: Readonly<Record<string, string>> = {}): Record<string, string> {
   return {
-    accept: "application/json",
+    accept: "*/*",
     "content-type": "application/json",
     ...extra,
   };
@@ -449,8 +458,8 @@ export function deepSeekApiHeaders(extra: Readonly<Record<string, string>> = {})
  * (`cH.o(parentMessageId) ? null : parentMessageId`). `ref_file_ids` is the recorded empty list for a
  * text turn: this bridge is text-only, so it never carries a file id.
  *
- * The three extras are omitted on purpose — see {@link DEEPSEEK_WEB_UNSENT_BODY_KEYS}. A capture that
- * shows the app sending them changes exactly one function: this one.
+ * `action: null` and `preempt: false` are the measured values on both captured completions; they are
+ * sent because the capture shows them (the pre-capture brief had no value for them).
  */
 export function deepSeekCompletionRequest(input: {
   readonly chatSessionId: string;
@@ -479,16 +488,17 @@ export function deepSeekCompletionRequest(input: {
     ref_file_ids: [],
     thinking_enabled: input.thinkingEnabled,
     search_enabled: input.searchEnabled,
+    action: null,
+    preempt: false,
   };
 }
 
 /**
  * The `chat_session/create` body.
  *
- * Recon §2.2 records the endpoint (and its anonymous `40003`), but no call site *with a body*: the
- * bundle's creator was not captured. An empty object is the minimal request and the only body that
- * claims nothing; whether the server requires a field is unproven (doc/deepseek-web.md §6), and the
- * typed failure below is what happens if the answer does not carry an id this build can read.
+ * The signed-in capture measured this exact body: `{}`. The success shape is measured too
+ * (`data.biz_data.chat_session.id`), so {@link readDeepSeekCreatedSessionId} now reads the recorded
+ * path rather than a provisional one; its typed failure stays for an answer that stops carrying it.
  */
 export function deepSeekSessionCreateRequest(): Record<string, unknown> {
   return {};
