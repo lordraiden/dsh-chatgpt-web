@@ -3,6 +3,7 @@ import type { Page } from "playwright-core";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { storeProviderSession } from "../src/browser-login";
 import { defaultConfig } from "../src/config";
 import { AUTH_IMPORT_MAX_BODY_BYTES, startServer, type RunningServer } from "../src/server";
 import {
@@ -19,6 +20,15 @@ import {
   restoreChatGptWebHome,
   useTemporaryChatGptWebHome,
 } from "./support/chatgpt-web-home";
+import {
+  DEEPSEEK_DEVICE_ID,
+  DEEPSEEK_SETTINGS_ANONYMOUS,
+  DEEPSEEK_SETTINGS_AUTHENTICATED,
+  deepSeekCapture,
+  deepSeekPageOpener,
+  simulatedDeepSeekPage,
+  type DeepSeekAnswerFixture,
+} from "./support/deepseek-page";
 
 /**
  * The generic session-import endpoint, `POST /v1/control/auth/import`.
@@ -47,6 +57,8 @@ const SECRET_DEEPSEEK_LOCAL = "SECRET-DEEPSEEK-LOCAL-STORAGE-VALUE";
 const SECRET_FOREIGN = "SECRET-FOREIGN-COOKIE-VALUE";
 /** The page's own token, read from the live page. Asserted absent from every response body. */
 const SECRET_QWEN_PAGE_TOKEN = "SECRET-QWEN-PAGE-TOKEN-VALUE";
+/** The page's own bearer, read from the live page — asserted absent from every response. */
+const SECRET_DEEPSEEK_PAGE_TOKEN = "SECRET-DEEPSEEK-PAGE-TOKEN-VALUE";
 /** A leftover token in a stale capture's state; it must never be what the probe sends. */
 const SECRET_QWEN_STALE_TOKEN = "SECRET-QWEN-STALE-TOKEN-VALUE";
 const SECRETS = [
@@ -58,6 +70,7 @@ const SECRETS = [
   SECRET_FOREIGN,
   SECRET_QWEN_PAGE_TOKEN,
   SECRET_QWEN_STALE_TOKEN,
+  SECRET_DEEPSEEK_PAGE_TOKEN,
 ];
 
 const AUTHENTICATED_TASK_LIST = {
@@ -92,10 +105,15 @@ const QWEN_STATE = {
   ],
 };
 
-const DEEPSEEK_STATE = {
-  cookies: [cookie(".deepseek.com", SECRET_DEEPSEEK)],
-  origins: [],
-};
+/**
+ * A DeepSeek capture in the shape the doc lists: the WAF/session cookie plus this origin's local
+ * storage (`userToken` and the device identity). Cookies alone are no longer a DeepSeek capture.
+ */
+const DEEPSEEK_STATE = deepSeekCapture({
+  token: SECRET_DEEPSEEK_PAGE_TOKEN,
+  cookie: SECRET_DEEPSEEK,
+  deviceId: DEEPSEEK_DEVICE_ID,
+});
 
 const savedHome = captureChatGptWebHome();
 const homes: string[] = [];
@@ -199,6 +217,20 @@ function simulatedQwenPage(
 /** Wait for the app itself, not a timer, but keep the suite fast. */
 const FAST_HYDRATION = { timeoutMs: 500, pollIntervalMs: 5 } as const;
 
+/**
+ * DeepSeek with its predicate wired to a simulated page; its real capture validator and store remain.
+ *
+ * The settings answer is the fixture the test chooses, so every verdict class is reachable without a
+ * browser — and a browser is never launched by this suite.
+ */
+function deepseekImport(
+  answer: DeepSeekAnswerFixture = DEEPSEEK_SETTINGS_AUTHENTICATED,
+): AuthImportProvider {
+  return deepSeekWebAuthImportProvider({
+    openPage: deepSeekPageOpener(simulatedDeepSeekPage({ token: SECRET_DEEPSEEK_PAGE_TOKEN, answer }).page),
+  });
+}
+
 /** Wrap one descriptor so a test can prove the single writer was (or was not) reached. */
 function tracked(provider: AuthImportProvider): { provider: AuthImportProvider; stores: () => number } {
   let stores = 0;
@@ -245,7 +277,7 @@ function expectNoSecret(text: string): void {
 describe("session import — a verified provider lands in its own layout once", () => {
   test("chatgpt-web: the capture is stored and the answer carries the verified shape", async () => {
     const chatgpt = tracked(chatGptImport());
-    const server = serve([chatgpt.provider, qwenImport(), deepSeekWebAuthImportProvider()]);
+    const server = serve([chatgpt.provider, qwenImport(), deepseekImport()]);
 
     const result = await postImport(server, {
       provider: CHATGPT_WEB_AUTH_PROVIDER_ID,
@@ -269,7 +301,7 @@ describe("session import — a verified provider lands in its own layout once", 
 
   test("qwen-code: the capture is stored sanitized, in the provider's own layout, once", async () => {
     const qwen = tracked(qwenImport());
-    const server = serve([chatGptImport(), qwen.provider, deepSeekWebAuthImportProvider()]);
+    const server = serve([chatGptImport(), qwen.provider, deepseekImport()]);
 
     const result = await postImport(server, {
       provider: QWEN_CODE_PROVIDER_ID,
@@ -302,8 +334,8 @@ describe("session import — a verified provider lands in its own layout once", 
     expectNoSecret(result.text);
   });
 
-  test("deepseek-web: the capture is stored, but verified is false and the answer says it is unusable", async () => {
-    const deepseek = tracked(deepSeekWebAuthImportProvider());
+  test("deepseek-web: the settings predicate verifies the capture and writes the marker once", async () => {
+    const deepseek = tracked(deepseekImport());
     const server = serve([chatGptImport(), qwenImport(), deepseek.provider]);
 
     const result = await postImport(server, {
@@ -314,69 +346,132 @@ describe("session import — a verified provider lands in its own layout once", 
     const body = result.json();
 
     expect(result.status).toBe(200);
-    expect(body).toMatchObject({
+    expect(body).toEqual({
       ok: true,
       provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
-      verified: false,
-      verifiedAt: null,
+      verified: true,
+      verifiedAt: new Date(NOW).toISOString(),
       storedAt,
     });
-    expect(typeof body.message).toBe("string");
-    expect(String(body.message)).toMatch(/not verified/i);
-    // The reason is now the missing predicate, not a missing adapter: the adapter exists, and a
-    // capture still is not proof (doc/deepseek-web.md §7).
-    expect(String(body.message)).toMatch(/no authenticated predicate/i);
-    expect(String(body.message)).toMatch(/cannot be used/i);
-
     expect(deepseek.stores()).toBe(1);
     expect(existsSync(storedAt)).toBe(true);
-    // No verified marker: every reader that gates on it must keep treating this as unverified.
-    expect(existsSync(`${storedAt}.verified.json`)).toBe(false);
-    // The capture itself carries the cookie value; the response never does.
+
+    // The marker every reader gates on, written by the one session writer.
+    const marker = JSON.parse(readFileSync(`${storedAt}.verified.json`, "utf8")) as {
+      version: number; authenticated: boolean; verifiedAt: string;
+    };
+    expect(marker.version).toBe(1);
+    expect(marker.authenticated).toBe(true);
+    expect(typeof marker.verifiedAt).toBe("string");
+
+    // The importer's sanitizer is the provider's own: only its cookie domain and origin land.
+    const stored = JSON.parse(readFileSync(storedAt, "utf8")) as {
+      cookies: { domain: string }[];
+      origins: { origin: string }[];
+    };
+    expect(stored.cookies.map(entry => entry.domain)).toEqual([".deepseek.com"]);
+    expect(stored.origins.map(entry => entry.origin)).toEqual(["https://chat.deepseek.com"]);
+    // The session file is the only place the cookie and the bearer may live.
     expect(readFileSync(storedAt, "utf8")).toContain(SECRET_DEEPSEEK);
     expectNoSecret(result.text);
   });
 
-  test("deepseek-web: an unverified capture cannot inherit a stale verified marker", async () => {
-    const server = serve([deepSeekWebAuthImportProvider()]);
+  test("deepseek-web: a capture the predicate refuses writes nothing and leaves the stored session alone", async () => {
     const directory = join(home, "providers", DEEPSEEK_WEB_IMPORT_PROVIDER_ID);
     const storedAt = join(directory, "storage-state.json");
     const marker = `${storedAt}.verified.json`;
     mkdirSync(directory, { recursive: true });
+    const previous = `${JSON.stringify({ cookies: [], origins: [] })}\n`;
+    writeFileSync(storedAt, previous);
     writeFileSync(
       marker,
       `${JSON.stringify({ version: 1, authenticated: true, verifiedAt: new Date(NOW).toISOString() })}\n`,
     );
 
+    const deepseek = tracked(deepseekImport(DEEPSEEK_SETTINGS_ANONYMOUS));
+    const server = serve([deepseek.provider]);
     const result = await postImport(server, {
       provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
       storageState: DEEPSEEK_STATE,
     });
 
-    expect(result.status).toBe(200);
-    expect(result.json()).toMatchObject({ verified: false, verifiedAt: null });
-    expect(existsSync(marker)).toBe(false);
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_predicate_failed" });
+    // SETTINGS_NOT_FOUND is the provider's own reason, and the sentence says nothing was written.
+    expect(String(result.json().message)).toContain("SETTINGS_NOT_FOUND");
+    expect(String(result.json().message)).toContain("nothing was written");
+    expect(deepseek.stores()).toBe(0);
+    // The refused capture cannot overwrite (or un-verify) the session that is already stored.
+    expect(readFileSync(storedAt, "utf8")).toBe(previous);
+    expect(existsSync(marker)).toBe(true);
+    expectNoSecret(result.text);
   });
 
-  test("deepseek-web: an origins-only capture is accepted because no adapter has declared where the token lives", async () => {
-    const server = serve([deepSeekWebAuthImportProvider()]);
-    const state = {
-      cookies: [],
-      origins: [{
-        origin: "https://chat.deepseek.com",
-        localStorage: [{ name: "token", value: SECRET_DEEPSEEK_LOCAL }],
-      }],
-    };
+  test("deepseek-web: a capture with cookies but no page storage is refused before any browser", async () => {
+    const deepseek = tracked(deepseekImport());
+    const server = serve([deepseek.provider]);
+    const state = { cookies: deepSeekCapture({ cookie: SECRET_DEEPSEEK }).cookies, origins: [] };
 
     const result = await postImport(server, {
       provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
       storageState: state,
     });
 
+    expect(result.status).toBe(400);
+    expect(result.json()).toMatchObject({ ok: false, code: "import_empty" });
+    // The refusal names the missing material, in the doc's own vocabulary.
+    expect(String(result.json().message)).toContain("local storage");
+    expect(String(result.json().message)).toContain("userToken");
+    expect(deepseek.stores()).toBe(0);
+    expect(existsSync(join(home, "providers", DEEPSEEK_WEB_IMPORT_PROVIDER_ID))).toBe(false);
+    expectNoSecret(result.text);
+  });
+});
+
+describe("session import — a provider that declares no predicate is stored and says so", () => {
+  /**
+   * A synthetic provider with `verification: "unverified"`.
+   *
+   * No registered provider is in this state any more (DeepSeek Web has a predicate now), but the mode
+   * stays part of the pipeline's contract: "captured, not proved" must remain expressible, and the
+   * answer must never look like a verified session.
+   */
+  const UNVERIFIED_ID = "synthetic-unverified";
+  const unverified = (): AuthImportProvider => ({
+    id: UNVERIFIED_ID,
+    label: "Synthetic Provider",
+    verification: "unverified",
+    accept: state => state,
+    unverifiedMessage: "Captured and stored, but not verified: Synthetic Provider has no authenticated "
+      + "predicate, so it cannot be used for turns.",
+    store: authentication => storeProviderSession(
+      authentication.storageState as Parameters<typeof storeProviderSession>[0],
+      {},
+      { providerId: UNVERIFIED_ID, verified: false },
+    ),
+  });
+
+  test("verified is false, verifiedAt is null, the answer explains it and no marker is written", async () => {
+    const server = serve([unverified()]);
+    const result = await postImport(server, {
+      provider: UNVERIFIED_ID,
+      storageState: { cookies: [cookie(".example.com", SECRET_FOREIGN)], origins: [] },
+    });
+    const storedAt = join(home, "providers", UNVERIFIED_ID, "storage-state.json");
+
     expect(result.status).toBe(200);
-    expect(result.json()).toMatchObject({ verified: false, verifiedAt: null });
-    const storedAt = join(home, "providers", DEEPSEEK_WEB_IMPORT_PROVIDER_ID, "storage-state.json");
-    expect(JSON.parse(readFileSync(storedAt, "utf8"))).toEqual(state);
+    expect(result.json()).toMatchObject({
+      ok: true,
+      provider: UNVERIFIED_ID,
+      verified: false,
+      verifiedAt: null,
+      storedAt,
+    });
+    expect(String(result.json().message)).toContain("no authenticated predicate");
+    expect(String(result.json().message)).toContain("cannot be used");
+    expect(existsSync(storedAt)).toBe(true);
+    // The marker is the deployment's promise that a session works; a capture gets none.
+    expect(existsSync(`${storedAt}.verified.json`)).toBe(false);
     expectNoSecret(result.text);
   });
 });
@@ -622,7 +717,7 @@ describe("session import — caller capture problems are 4xx with the pipeline's
   });
 
   test("an unregistered provider is a 404 naming one that exists, and no store runs", async () => {
-    const server = serve([chatGptImport(), deepSeekWebAuthImportProvider()]);
+    const server = serve([chatGptImport(), deepseekImport()]);
     const result = await postImport(server, {
       provider: "not-a-provider",
       storageState: CHATGPT_STATE,
@@ -634,7 +729,7 @@ describe("session import — caller capture problems are 4xx with the pipeline's
   });
 
   test("a body missing provider or storageState is import_invalid_request", async () => {
-    const server = serve([deepSeekWebAuthImportProvider()]);
+    const server = serve([deepseekImport()]);
 
     for (const body of [{}, { provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID }, { storageState: DEEPSEEK_STATE }]) {
       const result = await postImport(server, body);
@@ -648,7 +743,7 @@ describe("session import — authority is the control token, exactly like the re
   const validBody = { provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID, storageState: DEEPSEEK_STATE };
 
   test("anonymous, the API key and a wrong control token are refused; the control token opens it", async () => {
-    const server = serve([deepSeekWebAuthImportProvider()]);
+    const server = serve([deepseekImport()]);
 
     const anonymous = await postImport(server, validBody, { "content-type": "application/json" });
     expect(anonymous.status).toBe(401);
@@ -667,7 +762,7 @@ describe("session import — authority is the control token, exactly like the re
   });
 
   test("the endpoint does not exist under the API authority", async () => {
-    const server = serve([deepSeekWebAuthImportProvider()]);
+    const server = serve([deepseekImport()]);
 
     // With the control token this is the public API surface, which refuses the non-API authority.
     const withControl = await fetch(url(server, "/v1/auth/import"), {
@@ -689,7 +784,7 @@ describe("session import — authority is the control token, exactly like the re
 
 describe("session import — the body ceiling is the capture's, not the API's", () => {
   test("a wildly oversized body is 413 request_too_large and writes nothing", async () => {
-    const deepseek = tracked(deepSeekWebAuthImportProvider());
+    const deepseek = tracked(deepseekImport());
     const server = serve([deepseek.provider]);
     const oversized = {
       provider: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
@@ -713,7 +808,7 @@ describe("session import — the body ceiling is the capture's, not the API's", 
 describe("session import — stored files are private and the response is never the capture", () => {
   test("a stored session is mode 0600 and every response body is cookie-free", async () => {
     if (process.platform === "win32") return;
-    const server = serve([chatGptImport(), qwenImport(), deepSeekWebAuthImportProvider()]);
+    const server = serve([chatGptImport(), qwenImport(), deepseekImport()]);
 
     const responses = [
       await postImport(server, { provider: CHATGPT_WEB_AUTH_PROVIDER_ID, storageState: CHATGPT_STATE }),

@@ -174,9 +174,9 @@ export interface DeepSeekWebProviderOptions {
   readonly state?: DeepSeekConversationState;
   /** Session page seam (tests); the real Chromium-backed session when omitted. */
   readonly session?: DeepSeekRequestSession;
-  /** The proof-of-work solver. Defaults to the typed refusal (`unprovenDeepSeekProofOfWork`). */
+  /** The proof-of-work solver. Defaults to the page's own worker. */
   readonly proofOfWork?: DeepSeekProofOfWorkSolver;
-  /** The `Authorization` reader (unproven provenance; defaults to "none"). */
+  /** The `Authorization` reader. Defaults to the page's own `localStorage["userToken"]` at call time. */
   readonly authorization?: () => Promise<string | undefined>;
   /** Clock seam. */
   readonly now?: () => number;

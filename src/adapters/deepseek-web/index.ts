@@ -12,8 +12,10 @@
  * It parses the recorded stream, speaks the recorded turn body over the page-context relay, and keeps
  * continuity keyed to `chat_session_id` + `parent_message_id`. The proof of work is produced by the
  * page's own worker, and the `Authorization` value plus the `x-client-*` / `x-device-*` family are read
- * from the page at call time. `doc/deepseek-web.md` §6 records what a signed-in capture settled and the
- * few observations that still need a live authenticated run.
+ * from the page at call time. The authenticated **import predicate** (`session-probe.ts`) is the
+ * measured settings call, and `session-import.ts` is the one probe `auth import` runs.
+ * `doc/deepseek-web.md` §6 records what a signed-in capture settled and the few observations that still
+ * need a live authenticated run.
  */
 export {
   DEEPSEEK_WEB_BUNDLE_COMMIT_ID,
@@ -34,10 +36,13 @@ export {
   DEEPSEEK_WEB_ROOT_URL,
   DEEPSEEK_WEB_SESSION_CREATE_PATH,
   DEEPSEEK_WEB_SESSION_ID_PATHS,
+  DEEPSEEK_WEB_SETTINGS_PATH,
+  DEEPSEEK_WEB_SETTINGS_SCOPE,
   DEEPSEEK_WEB_SSE_EVENTS,
   DEEPSEEK_WEB_UNSENT_BODY_KEYS,
   DEEPSEEK_WEB_USERS_CURRENT_PATH,
   DEEPSEEK_WEB_VIEWPORT,
+  deepSeekAccessVerificationAnswer,
   deepSeekApiHeaders,
   deepSeekCompletionRequest,
   deepSeekEnvelope,
@@ -49,6 +54,7 @@ export {
   isDeepSeekPatchOperation,
   readDeepSeekCreatedSessionId,
   readDeepSeekProofChallenge,
+  type DeepSeekAccessVerificationInput,
   type DeepSeekEnvelope,
   type DeepSeekPatchOperation,
   type DeepSeekProofChallenge,
@@ -126,11 +132,52 @@ export {
 export {
   DEEPSEEK_WEB_SIGN_IN_INSTRUCTION,
   createDeepSeekBrowserSession,
+  deepSeekWebLaunchArgs,
+  openDeepSeekPage,
   type DeepSeekBrowserSessionOptions,
+  type DeepSeekOpenedPage,
   type DeepSeekRequestSession,
   type DeepSeekSessionPage,
   type DeepSeekSessionPageOpener,
 } from "./session";
+
+export {
+  createDeepSeekPageProbeSender,
+  deepSeekProbeRefusal,
+  deepSeekSettingsAuthenticated,
+  deepSeekSettingsProbeRequest,
+  deepSeekSettingsVerdict,
+  probeDeepSeekSessionFromPage,
+  probeDeepSeekSettings,
+  type DeepSeekProbeAnswer,
+  type DeepSeekProbeObservation,
+  type DeepSeekProbeRequest,
+  type DeepSeekProbeSender,
+  type DeepSeekProbeVerdict,
+  type DeepSeekProbeVerdictClass,
+} from "./session-probe";
+
+export {
+  DEEPSEEK_WEB_CAPTURE_STORAGE_SUMMARY,
+  DEEPSEEK_WEB_COOKIE_DOMAINS,
+  DEEPSEEK_WEB_OPTIONAL_STORAGE_KEY,
+  DEEPSEEK_WEB_REQUIRED_STORAGE_KEYS,
+  DEEPSEEK_WEB_STORAGE_ORIGINS,
+  deepSeekCredentialsDir,
+  sanitizeDeepSeekStorageState,
+  storeDeepSeekSession,
+  validateDeepSeekSessionStorageState,
+  type DeepSeekSessionStorageState,
+} from "./session-store";
+
+export {
+  deepSeekVerifiedDetail,
+  verifyDeepSeekImportedSession,
+  type DeepSeekImportedSessionOptions,
+  type DeepSeekImportedSessionPage,
+  type DeepSeekImportedSessionPageOpener,
+  type DeepSeekImportedSessionVerification,
+} from "./session-import";
 
 export {
   createFileDeepSeekConversationState,

@@ -215,9 +215,11 @@ export function resolveDeepSeekProviderConfig(config: AppConfig): DeepSeekProvid
  * Whether a **verified** session exists for this provider right now.
  *
  * The convention is the deployment's own: the storage state file plus the marker written beside it,
- * and the marker must say `version: 1`, `authenticated: true` and carry a `verifiedAt` string. A
- * capture stored by `auth import --provider deepseek-web` today is written **unverified** (no marker),
- * so it is correctly *not* a verified session. Nothing here reads a cookie or a token.
+ * and the marker must say `version: 1`, `authenticated: true` and carry a `verifiedAt` string. The
+ * marker is written by the single session writer only after the authenticated predicate accepted the
+ * capture (`session-import.ts`), so its presence is the deployment's own proof that the session worked
+ * when it was imported. A bare capture file is correctly *not* a verified session. Nothing here reads a
+ * cookie or a token.
  */
 export function deepSeekSessionVerified(storageStatePath: string): boolean {
   if (!existsSync(storageStatePath)) return false;
@@ -333,9 +335,11 @@ export function deepSeekCatalogueNote(config: AppConfig): string {
     return `${provider.modelTypes.length} DeepSeek model_type value(s) configured: `
       + provider.modelTypes.map(modelType => modelType.id).join(", ");
   }
-  const capture = deepSeekCapturePresent(provider.storageStatePath)
-    ? "a capture is stored for this provider, but it is not a verified session and it names no model"
-    : "no capture is stored for this provider";
+  const capture = !deepSeekCapturePresent(provider.storageStatePath)
+    ? "no capture is stored for this provider"
+    : deepSeekSessionVerified(provider.storageStatePath)
+      ? "a verified session is stored for this provider, and it names no model because none is configured"
+      : "a capture is stored for this provider, but it is not a verified session";
   return 'no DeepSeek model_type is configured in webChat.providers["deepseek-web"].modelTypes, so no '
     + `DeepSeek route is published; ${capture}. DeepSeek's model list is a session-only remote setting `
     + "(recon §2.5), so it cannot be discovered without a signed-in capture, and the bundle's deep-link "

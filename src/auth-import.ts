@@ -24,9 +24,10 @@
  * the control surface returns to its caller.
  *
  * **Verified and unverified are distinct.** A provider with an adapter proves the capture with its
- * own authenticated predicate. A provider with no adapter yet (DeepSeek) is stored as a *capture*
- * with `verified: false` and no `.verified.json` marker — it is never dressed up as a working
- * session.
+ * own authenticated predicate (ChatGPT Web, Qwen Code, Qwen Chat and DeepSeek Web all do). A provider
+ * that had no adapter yet would be stored as a *capture* with `verified: false` and no
+ * `.verified.json` marker — never dressed up as a working session. No registered provider is in that
+ * state today; the mode stays supported because "captured, not proved" must remain expressible.
  *
  * Nothing here prints or echoes a cookie value: names, counts and provider codes only, and any
  * provider failure is reduced by `nonSecretDiagnosticText` before it becomes a message.
@@ -65,6 +66,15 @@ import {
   type QwenChatImportedSessionPageOpener,
   type QwenChatImportedSessionProbe,
 } from "./adapters/qwen-chat/session-import";
+import {
+  storeDeepSeekSession,
+  validateDeepSeekSessionStorageState,
+} from "./adapters/deepseek-web/session-store";
+import {
+  deepSeekVerifiedDetail,
+  verifyDeepSeekImportedSession,
+  type DeepSeekImportedSessionPageOpener,
+} from "./adapters/deepseek-web/session-import";
 import { nonSecretDiagnosticText } from "./lib/safe-diagnostics";
 import {
   AUTH_IMPORT_REFUSAL_CODES,
@@ -110,9 +120,9 @@ export interface AuthImportAuthentication {
  * How a provider makes a capture trustworthy.
  *
  * - `authenticated` — `authenticate` must resolve before anything is written.
- * - `unverified` — the provider has no adapter/predicate yet. The capture is stored, but the result
- *   says so and no verified marker is written. This is not a shortcut around verification: it is
- *   the honest representation of "captured, not usable".
+ * - `unverified` — the provider declares no authenticated predicate. The capture is stored, but the
+ *   result says so and no verified marker is written. This is not a shortcut around verification: it
+ *   is the honest representation of "captured, not usable".
  */
 export type AuthImportVerification = "authenticated" | "unverified";
 
@@ -181,7 +191,7 @@ export interface AuthImportResult {
   readonly reading?: string;
 }
 
-/** DeepSeek Web's provider id: a capture-only participant until its adapter exists. */
+/** DeepSeek Web's provider id, already the deployment's capture id for this provider. */
 export const DEEPSEEK_WEB_IMPORT_PROVIDER_ID = "deepseek-web";
 export const DEEPSEEK_WEB_IMPORT_PROVIDER_LABEL = "DeepSeek Web";
 
@@ -194,20 +204,59 @@ export const AUTH_IMPORT_PROVIDER_IDS = [
 ] as const;
 
 /**
- * The honest success line for a DeepSeek capture.
+ * DeepSeek Web: validate the provider's own capture, then the measured settings predicate.
  *
- * Deliberately states both halves: the session was stored, and it cannot be used. A caller must not
- * mistake `verified: false` for a transient failure of an otherwise working login.
+ * The capture must carry the WAF/session cookies **and** the page's `localStorage` (`userToken` and
+ * `deepseek-device-id:chat`, with `hif_leim_cached` optional) — `session-store.ts` refuses anything
+ * less **before** a browser starts, naming the entry that is missing. The predicate itself is the
+ * measured `GET /api/v0/client/settings?did=…&scope=model`, whose nested `data.biz_code` decides
+ * (`session-probe.ts`); a 200 that carries a refusal is never read as success.
  *
- * The adapter now exists (`src/adapters/deepseek-web/**`) and the page token's provenance is measured
- * (`localStorage["userToken"]`), but no authenticated predicate has been accepted as this provider's
- * verification step, so no probe claims the capture works. The sentence therefore says "no
- * authenticated predicate has accepted it" — not "there is no adapter" — and the remaining rung is
- * `doc/deepseek-web.md` §7.
+ * Like Qwen Chat, the page is asked for its own state after it proved the session, so a credential the
+ * app rotated while loading is what gets stored instead of the snapshot the proof consumed.
  */
-export const DEEPSEEK_WEB_UNVERIFIED_MESSAGE =
-  "Captured and stored, but not verified: no authenticated predicate has accepted this DeepSeek Web "
-  + "session yet (doc/deepseek-web.md §7), so it cannot be used for turns.";
+export interface DeepSeekWebAuthImportOptions {
+  readonly chromeExecutablePath?: string;
+  readonly openPage?: DeepSeekImportedSessionPageOpener;
+}
+
+/**
+ * DeepSeek Web's participation in the one pipeline: `accept` (cookies + storage, no browser) →
+ * `authenticate` (the settings predicate from the page's own context) → `store` (the single writer,
+ * verified marker included).
+ */
+export function deepSeekWebAuthImportProvider(options: DeepSeekWebAuthImportOptions = {}): AuthImportProvider {
+  return {
+    id: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
+    label: DEEPSEEK_WEB_IMPORT_PROVIDER_LABEL,
+    verification: "authenticated",
+    accept: (state, now) => validateDeepSeekSessionStorageState(state, now),
+    authenticate: async state => {
+      const verification = await verifyDeepSeekImportedSession(state, {
+        ...(options.chromeExecutablePath === undefined ? {} : { chromeExecutablePath: options.chromeExecutablePath }),
+        ...(options.openPage === undefined ? {} : { openPage: options.openPage }),
+      });
+      // The page restored its own session with this capture; persisting the page's state means the
+      // stored session is the one that was just proved, not the snapshot the proof consumed. A page
+      // state that cannot be read back is ignored: it must never discard a session the page just
+      // proved.
+      let storageState = state;
+      if (verification.storageState !== undefined) {
+        try {
+          storageState = validateImportedStorageState(verification.storageState, "the session page state");
+        } catch {
+          storageState = state;
+        }
+      }
+      return {
+        storageState,
+        detail: deepSeekVerifiedDetail(verification.status),
+        verified: true,
+      };
+    },
+    store: authentication => storeDeepSeekSession(authentication.storageState),
+  };
+}
 
 function defaultReadFile(path: string): string {
   return readFileSync(path, "utf8");
@@ -518,52 +567,6 @@ export function qwenChatAuthImportProvider(options: QwenChatAuthImportOptions = 
   };
 }
 
-/**
- * DeepSeek Web: a capture-only participant (a predicate is still missing).
- *
- * There is deliberately no browser, no request and no `verified` claim here. The descriptor puts the
- * browser's capture in the deployment's standard provider layout, where the adapter's session check
- * reads it — but a capture is not proof, and no authenticated predicate has been measured for this
- * provider yet (`doc/deepseek-web.md` §6), so the answer says exactly that. Only the provider-neutral
- * structural rule is applied — a capture with neither cookies nor `localStorage` is not a capture.
- * With no predicate there is no domain list, expiry rule or "deepseek keeps its token in cookies"
- * assumption to invent.
- */
-export function deepSeekWebAuthImportProvider(): AuthImportProvider {
-  return {
-    id: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
-    label: DEEPSEEK_WEB_IMPORT_PROVIDER_LABEL,
-    verification: "unverified",
-    accept: state => {
-      // No adapter has declared where DeepSeek keeps its session yet, so accept either half of a
-      // Playwright storage state. Refusing an origins-only capture would silently encode a guess.
-      const hasCookies = state.cookies.length > 0;
-      const hasLocalStorage = state.origins.some(origin => {
-        const entry = origin as { localStorage?: unknown } | null;
-        return Array.isArray(entry?.localStorage) && entry.localStorage.length > 0;
-      });
-      if (!hasCookies && !hasLocalStorage) {
-        throw new AuthImportRefusal(
-          AUTH_IMPORT_REFUSAL_CODES.empty,
-          "the capture contains no cookies or local storage at all; open DeepSeek Web in the browser "
-          + "you signed in with, then export the session again",
-        );
-      }
-      return state;
-    },
-    unverifiedMessage: DEEPSEEK_WEB_UNVERIFIED_MESSAGE,
-    store: authentication => storeProviderSession(
-      authentication.storageState as Parameters<typeof storeProviderSession>[0],
-      {},
-      {
-        providerId: DEEPSEEK_WEB_IMPORT_PROVIDER_ID,
-        // No predicate proved this capture: the writer omits the marker every reader treats as proof.
-        verified: false,
-      },
-    ),
-  };
-}
-
 /** Resolve `--provider` to its import provider; unknown ids are refused with the supported list. */
 export function authImportProvider(providerId: string, config?: AppConfig): AuthImportProvider {
   switch (providerId) {
@@ -574,7 +577,7 @@ export function authImportProvider(providerId: string, config?: AppConfig): Auth
     case QWEN_CHAT_PROVIDER_ID:
       return qwenChatAuthImportProvider({ chromeExecutablePath: (config ?? loadConfig()).chromeExecutablePath });
     case DEEPSEEK_WEB_IMPORT_PROVIDER_ID:
-      return deepSeekWebAuthImportProvider();
+      return deepSeekWebAuthImportProvider({ chromeExecutablePath: (config ?? loadConfig()).chromeExecutablePath });
     default:
       throw new AuthImportRefusal(
         AUTH_IMPORT_REFUSAL_CODES.providerUnknown,

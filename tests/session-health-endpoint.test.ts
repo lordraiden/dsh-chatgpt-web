@@ -30,10 +30,10 @@ import {
  * `GET /v1/control/auth/health` — does each stored session still verify, before a turn is sent?
  *
  * The suite runs the real listener with deterministic import descriptors (a fake predicate per
- * provider, the real Qwen Chat capture validator, the real capture-only DeepSeek descriptor), so
- * every state is reachable without a browser: present+verified, present+expired, absent and
- * unverifiable, plus the cache/single-flight/bound behaviour that keeps opening the page from
- * hammering a provider. No response body may echo a cookie, token, storage value or path.
+ * provider over the real capture validators and the real writer), so every state is reachable
+ * without a browser: present+verified, present+expired and absent, plus the cache/single-flight/bound
+ * behaviour that keeps opening the page from hammering a provider. No response body may echo a
+ * cookie, token, storage value or path.
  */
 
 const CONTROL_TOKEN = "session-health-control-token-0123456789";
@@ -126,6 +126,35 @@ function qwenChatCapture(options: { readonly expires?: number; readonly refresh?
   };
 }
 
+/**
+ * A DeepSeek capture the provider's own validator accepts: the WAF/session cookie plus the page's
+ * local storage (`userToken` and the device identity). Cookies alone are no longer a capture.
+ */
+function deepSeekCapture(expires = FUTURE) {
+  return {
+    cookies: [{
+      name: "waf_session",
+      value: SECRET_DEEPSEEK,
+      domain: ".deepseek.com",
+      path: "/",
+      expires,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax" as const,
+    }],
+    origins: [{
+      origin: "https://chat.deepseek.com",
+      localStorage: [
+        {
+          name: "userToken",
+          value: JSON.stringify({ value: "SECRET-DEEPSEEK-PAGE-TOKEN-VALUE", __version: "0" }),
+        },
+        { name: "deepseek-device-id:chat", value: "11111111-1111-4111-8111-111111111111" },
+      ],
+    }],
+  };
+}
+
 /** The provider's own refusal, as a real page reports it. */
 const EXPIRED_SENTENCE = "Qwen Chat is not signed in: the live page's token has expired. "
   + "Sign in at /v1/control/auth/ (choose \"Qwen Chat\").";
@@ -178,7 +207,16 @@ function descriptors(qwenChat: AuthImportProvider): AuthImportProvider[] {
       },
     },
     qwenChat,
-    authImportProvider(DEEPSEEK_WEB_IMPORT_PROVIDER_ID, defaultConfig()),
+    {
+      // The real DeepSeek capture validator and the real writer; only the browser-bound settings
+      // predicate is replaced, so the row below is decided without launching Chromium.
+      ...authImportProvider(DEEPSEEK_WEB_IMPORT_PROVIDER_ID, defaultConfig()),
+      authenticate: async state => ({
+        storageState: state,
+        detail: "Authenticated: /api/v0/client/settings answered data.biz_code:0 (HTTP 200)",
+        verified: true,
+      }),
+    },
   ];
 }
 
@@ -243,7 +281,7 @@ function expectNoSecret(text: string): void {
 }
 
 describe("session health — every state, from the pipeline's own predicate", () => {
-  test("present+verified, present+expired, absent and unverifiable are all reported, with no secret", async () => {
+  test("present+verified, present+expired and absent are all reported, with no secret", async () => {
     writeCapture(QWEN_CHAT_PROVIDER_ID, qwenChatCapture());
     writeCapture(CHATGPT_WEB_AUTH_PROVIDER_ID, {
       cookies: [{
@@ -252,13 +290,7 @@ describe("session health — every state, from the pipeline's own predicate", ()
       }],
       origins: [],
     });
-    writeCapture(DEEPSEEK_WEB_IMPORT_PROVIDER_ID, {
-      cookies: [{
-        name: "x", value: SECRET_DEEPSEEK, domain: ".deepseek.com", path: "/",
-        expires: FUTURE, httpOnly: true, secure: true, sameSite: "Lax",
-      }],
-      origins: [],
-    }, "");
+    writeCapture(DEEPSEEK_WEB_IMPORT_PROVIDER_ID, deepSeekCapture());
 
     const qwenChat = countingAuthenticate(state => ({ storageState: state }));
     const server = serve({ providers: descriptors({
@@ -292,10 +324,14 @@ describe("session health — every state, from the pipeline's own predicate", ()
     expect(chatgptRow["state"]).toBe("verified");
     expect(chatgptRow["capturePresent"]).toBe(true);
 
+    // DeepSeek Web has an authenticated predicate now, so its row is neither absent nor
+    // `unverifiable`: the pipeline's own steps decide it, exactly like the other providers.
     const deepseekRow = rowOf(response, DEEPSEEK_WEB_IMPORT_PROVIDER_ID);
-    expect(deepseekRow["state"]).toBe("unverifiable");
+    expect(deepseekRow["state"]).toBe("verified");
     expect(deepseekRow["capturePresent"]).toBe(true);
-    expect(String(deepseekRow["reason"])).toMatch(/no authenticated predicate/i);
+    expect(deepseekRow["code"]).toBeNull();
+    expect(deepseekRow["reason"]).toBeNull();
+    expect(deepseekRow["verifiedAt"]).toBe(new Date(NOW).toISOString());
 
     expectNoSecret(response.text);
   });
@@ -521,6 +557,52 @@ describe("session health — one writer, one cache, one authority", () => {
     // The two authorities stay separate: the control token does not open the public API.
     const api = await fetch(url(server, "/v1/models"), { headers: controlHeaders });
     expect(api.status).toBe(401);
+  });
+});
+
+describe("session health — a provider that declares no predicate is unverifiable, never expired", () => {
+  /**
+   * A synthetic provider with `verification: "unverified"`.
+   *
+   * No registered provider is in this state any more (DeepSeek Web has an authenticated predicate
+   * now), but the surface's contract still has to hold: a provider without a predicate is reported
+   * `unverifiable`, never probed, and never dressed up as `expired`.
+   */
+  const UNVERIFIED_ID = "synthetic-unverified";
+  const message = "Synthetic Provider captures are stored, but it declares no authenticated predicate, "
+    + "so no check can verify one.";
+
+  test("a stored capture is unverifiable, its reason is the provider's own message, and nothing is probed", async () => {
+    writeCapture(UNVERIFIED_ID, {
+      cookies: [{
+        name: "session", value: SECRET_DEEPSEEK, domain: ".synthetic.invalid", path: "/",
+        expires: FUTURE, httpOnly: true, secure: true, sameSite: "Lax",
+      }],
+      origins: [],
+    });
+    const synthetic: AuthImportProvider = {
+      id: UNVERIFIED_ID,
+      label: "Synthetic Provider",
+      verification: "unverified",
+      accept: state => state,
+      unverifiedMessage: message,
+      store: () => {
+        throw new Error("an unverifiable provider must never be stored by a health check");
+      },
+    };
+
+    const server = serve({ providers: [synthetic], now: () => NOW });
+    const response = await getHealth(server);
+    expect(response.status).toBe(200);
+
+    const row = rowOf(response, UNVERIFIED_ID);
+    expect(row["state"]).toBe("unverifiable");
+    expect(row["capturePresent"]).toBe(true);
+    expect(row["reason"]).toBe(message);
+    expect(row["code"]).toBeNull();
+    // A stored marker is reported as the last proof, not as this check's verdict.
+    expect(row["verifiedAt"]).toBe(MARKER_VERIFIED_AT);
+    expectNoSecret(response.text);
   });
 });
 

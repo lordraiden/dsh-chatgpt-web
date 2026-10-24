@@ -66,10 +66,26 @@ export const DEEPSEEK_WEB_SESSION_CREATE_PATH = "/api/v0/chat_session/create";
  * `GET /api/v0/users/current` is the recorded "who am I" endpoint, and the anonymous answer is
  * `40002 Missing Token` (recon §2.2).
  *
- * Recorded here because it is the endpoint a future authenticated predicate must use; this slice
- * does **not** implement that predicate (see `doc/deepseek-web.md` §6), so nothing calls it yet.
+ * Recorded, not used: the authenticated predicate this provider now has is the **settings** call
+ * ({@link DEEPSEEK_WEB_SETTINGS_PATH}, `session-probe.ts`), which the signed-in capture measured at
+ * both envelope layers. Keeping this literal names the alternative without inventing a call.
  */
 export const DEEPSEEK_WEB_USERS_CURRENT_PATH = "/api/v0/users/current";
+
+/**
+ * `GET /api/v0/client/settings?did=<uuid>&scope=model` — the model settings call (recon §2.5) and
+ * this provider's **authenticated predicate** (`session-probe.ts`).
+ *
+ * The capture settled all three readings (`doc/deepseek-web.md` §6.1 rows 3 and 14): a signed-in
+ * session answers `{"code":0,"data":{"biz_code":0,…}}`, an anonymous one
+ * `{"code":0,"data":{"biz_code":1,"biz_msg":"SETTINGS_NOT_FOUND"}}`, and the token family
+ * (`40002`/`40003`) appears when the bearer is missing or expired. The HTTP status is 200 in every
+ * case, so only the nested `data.biz_code` decides.
+ */
+export const DEEPSEEK_WEB_SETTINGS_PATH = "/api/v0/client/settings";
+
+/** The `scope` the measured settings call asks for (`model`), exported for the predicate. */
+export const DEEPSEEK_WEB_SETTINGS_SCOPE = "model";
 
 /**
  * The bundle commit the recorded protocol was read from (`<meta name="commit-id">`, recon §2.1).
@@ -279,6 +295,36 @@ const SESSION_LOST_MARKERS = /SESSION_NOT_FOUND|session[^a-z]{0,4}not[^a-z]{0,4}
 /** What a refused DeepSeek call was attempting, for the message the operator reads. */
 export type DeepSeekRefusedOperation = "create-a-session" | "stream-a-completion" | "read-a-challenge";
 
+/** One answer, as the access-verification test needs to see it. */
+export interface DeepSeekAccessVerificationInput {
+  /** The HTTP status that carried the answer. */
+  readonly status: number;
+  /** The parsed body, when the answer was JSON. */
+  readonly body?: unknown;
+  /** The (bounded) raw body text, so an HTML challenge page is still recognisable. */
+  readonly bodyText?: string;
+}
+
+/**
+ * Whether an answer is the provider's **access-verification challenge** instead of the API.
+ *
+ * The branch is narrow on purpose: a marker, or the recorded challenge status carrying HTML. An
+ * arbitrary HTML error page (a proxy, a 502) is *not* a challenge, and telling the operator to clear a
+ * challenge that does not exist is worse than saying the call failed.
+ *
+ * Exported because two callers need the same reading: the turn path's typed refusal
+ * ({@link deepSeekRefusal}) and the authenticated predicate (`session-probe.ts`). One classifier, not
+ * a second copy of the markers.
+ */
+export function deepSeekAccessVerificationAnswer(input: DeepSeekAccessVerificationInput): boolean {
+  const rawText = input.bodyText ?? "";
+  const envelope = deepSeekEnvelope({ status: input.status, body: input.body });
+  return WAF_MARKERS.test(rawText)
+    || (envelope.code === undefined
+      && (input.status === 202 || input.status === 405 || input.status === 403)
+      && /<html|<!doctype/i.test(rawText));
+}
+
 /** Options for {@link deepSeekRefusal}. */
 export interface DeepSeekRefusalInput {
   readonly status: number;
@@ -323,12 +369,12 @@ export function deepSeekRefusal(input: DeepSeekRefusalInput): WebChatError {
 
   // The WAF branch is narrow on purpose: a marker, or the recorded challenge status carrying HTML. An
   // arbitrary HTML error page (a proxy, a 502) must stay an upstream failure instead of telling the
-  // operator to clear a challenge that does not exist.
-  const wafChallenge = WAF_MARKERS.test(rawText)
-    || (envelope.code === undefined
-      && (input.status === 202 || input.status === 405 || input.status === 403)
-      && /<html|<!doctype/i.test(rawText));
-  if (wafChallenge) {
+  // operator to clear a challenge that does not exist. The classifier is shared with the predicate.
+  if (deepSeekAccessVerificationAnswer({
+    status: input.status,
+    ...(parsed === undefined ? {} : { body: parsed }),
+    ...(input.bodyText === undefined ? {} : { bodyText: input.bodyText }),
+  })) {
     return webChatError(
       "AUTH_REQUIRED",
       "DeepSeek answered with an access-verification challenge instead of the API. Open "

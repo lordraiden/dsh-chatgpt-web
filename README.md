@@ -42,8 +42,8 @@ API as its surface.
 
 The shared semantics of the exchange live in a provider-neutral WebChat core. ChatGPT Web, Qwen Code
 and Qwen Chat are served routes; DeepSeek Web is implemented — its turn transport, page-owned proof of
-work and page identity are measured against a signed-in capture — and publishes no rows until the
-operator configures its measured `model_type` values
+work, page identity and authenticated import predicate are measured against a signed-in capture — and
+publishes no rows until the operator configures its measured `model_type` values
 ([`doc/deepseek-web.md`](./doc/deepseek-web.md)). See [`doc/architecture.md`](./doc/architecture.md) for
 the ownership model.
 
@@ -344,10 +344,14 @@ A verified session answers exactly:
 {"ok":true,"provider":"qwen-code","verified":true,"verifiedAt":"2026-10-19T21:00:00.000Z","storedAt":"/data/providers/qwen-code/storage-state.json"}
 ```
 
-`deepseek-web` has **no authenticated predicate yet** — the page token's provenance is now measured, but
-no probe has been accepted as the provider's verification step — so its capture is stored but not yet
-usable. It answers `verified: false`, `verifiedAt: null` and a `message` saying so; no `.verified.json`
-marker is written, so nothing can mistake it for a working session. Every capture refusal is a 4xx with the existing
+`deepseek-web` is verified by its own measured predicate: the capture must carry the
+`chat.deepseek.com` cookies **and** the page's `localStorage` (`userToken` and `deepseek-device-id:chat`;
+`hif_leim_cached` is optional), and the import then asks
+`GET /api/v0/client/settings?did=…&scope=model` from the capture's own page. Only an answer whose
+**nested** `data.biz_code` is `0` authenticates — a success-shaped top level is not enough — so a `200`
+that carries `SETTINGS_NOT_FOUND`, a token refusal, a WAF challenge or an unreadable body is a refusal
+that writes nothing ([`doc/deepseek-web.md`](./doc/deepseek-web.md) §7). A capture missing the required
+storage is refused before any browser starts. Every capture refusal is a 4xx with the existing
 control error shape and a stable code:
 
 | code | status | meaning |
@@ -407,7 +411,7 @@ curl -sS http://127.0.0.1:17841/v1/control/auth/health \
 | `verified` | a capture is stored and the provider's **own** authenticated predicate accepts it now |
 | `expired` | a capture is stored and the predicate refused it (or its own validator rejected it); `code`/`reason` say why, and `verifiedAt` is the last time it did verify |
 | `absent` | no capture is stored for this provider |
-| `unverifiable` | the provider has no authenticated predicate (DeepSeek Web today), so no capture can be proved — never reported as `expired` |
+| `unverifiable` | the provider declares no authenticated predicate, so no capture can be proved — never reported as `expired`. Every provider this deployment serves declares one, so no row is in this state today |
 | `unknown` | the check could not be completed inside its bound; the session was **not** judged |
 
 Every provider the deployment serves is listed, so a row never disappears. The check runs the import
@@ -491,9 +495,11 @@ its own: its model list is a session-only remote setting (no public endpoint, no
 the catalogue appears only once the operator configures the **measured** `model_type` values
 (`default` = Instant; `expert` and `vision` are disabled in the captured account) in
 `webChat.providers["deepseek-web"].modelTypes`. A `deepseek-web/...` request on a deployment that
-configured nothing is a typed `400` that says exactly that. One rung still gates a live turn: no
-authenticated **import predicate** has been measured, so an imported capture stays unverified and the
-session's `ready()` refuses before a browser starts. Details and the exact remaining inventory:
+configured nothing is a typed `400` that says exactly that. A capture is verified by the provider's own
+predicate (the measured settings call, decided by its **nested** `data.biz_code`), so a good import
+writes the verified marker and unblocks a turn; a capture without the required `localStorage` is refused
+before any browser starts. An interactive sign-in controller is still not implemented, so DeepSeek's
+operator path is a capture plus `auth import`. Details:
 [`doc/deepseek-web.md`](./doc/deepseek-web.md) §6–§7.
 
 The catalogue is resolved from the authenticated account's capability state, so it is not a promise

@@ -349,10 +349,12 @@ Do not reconstruct authoritative DSH state from browser-visible conversation tex
 it or a `webChat.providers["qwen-code"]` block. **DeepSeek Web** (`deepseek-web/<model_type>`) is
 implemented and publishes no rows until the operator configures the measured `model_type` values in
 `webChat.providers["deepseek-web"].modelTypes`. Its turn path is measured (page-owned proof of work,
-page bearer and client/device headers, the recorded SSE patch stream), but a live turn still needs a
-**verified** session: a stored DeepSeek capture is unverified by design because no authenticated import
-predicate has been accepted yet, so `ready()` answers with a typed `401` naming the missing step.
-Details: [`doc/deepseek-web.md`](./doc/deepseek-web.md) §6–§7.
+page bearer and client/device headers, the recorded SSE patch stream), and a live turn needs a
+**verified** session: `auth import --provider deepseek-web` runs the measured settings predicate and
+writes the verified marker, so a `ready()` refusal on a stored capture means the predicate refused it
+(SETTINGS_NOT_FOUND, a token code, a WAF challenge or an unreadable answer — the import's message says
+which) or that no capture was imported yet. Details:
+[`doc/deepseek-web.md`](./doc/deepseek-web.md) §6–§7.
 
 Do not add ad-hoc DeepSeek routes to ChatGPT-specific code. A new provider requires the shared WebChat
 contracts to be implemented first, and it must pass the conformance suite.

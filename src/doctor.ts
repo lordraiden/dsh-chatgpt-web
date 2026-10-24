@@ -120,7 +120,8 @@ export function webChatDoctorDrivers(config: AppConfig): readonly WebChatProvide
   }
   // DeepSeek Web is inspected only when it publishes a route (a configured model_type). A deployment
   // that merely stored a capture gets no check here, because `doctor` must not suggest that an
-  // unverified capture is an account: the catalogue note and the service log say that instead.
+  // unverified capture is an account: the catalogue note and the service log say that instead (a
+  // verified session is one the import's own predicate accepted — doc/deepseek-web.md §7).
   if (deepSeekCatalogueVisible(config)) {
     drivers.push(createDeepSeekDriver({
       provider: resolveDeepSeekProviderConfig(config),
