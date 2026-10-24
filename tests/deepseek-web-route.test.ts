@@ -40,20 +40,24 @@ import type { WebChatTextTransportContext } from "../src/web-chat/transport";
  * The DeepSeek Web route.
  *
  * The unit half drives the real composition (continuity decision, exchange, durable record, session
- * state) with a controlled network and an **injected proof-of-work solver** — the one seam whose
- * production default is a typed refusal. The integration half runs the real listener and proves what a
- * caller observes: the configured slug streams in the OpenAI wire shape, an unconfigured provider
- * answers with its honest typed error, and `/v1/models` lists the rows only when configured.
+ * state) with a controlled network and an **injected proof-of-work solver** — production drives the
+ * page's own worker (`tests/deepseek-web-pow.test.ts`), and the fixture here keeps the route test
+ * offline. The integration half runs the real listener and proves what a caller observes: the
+ * configured slug streams in the OpenAI wire shape, an unconfigured provider answers with its honest
+ * typed error, and `/v1/models` lists the rows only when configured.
  *
- * No test claims a live DeepSeek turn works: the proof of work and the token provenance are unproven
- * (`doc/deepseek-web.md` §6), and the solver injected here is a fixture, not an implementation.
+ * No test claims a live authenticated DeepSeek turn works: that needs a verified session
+ * (`doc/deepseek-web.md` §7), which this repository cannot fabricate.
  */
 const CONTROL_TOKEN = "deepseek-web-route-control-token";
 const MODEL_TYPE = "default";
 const MODEL_ROUTE = `${DEEPSEEK_WEB_PROVIDER_ID}/${MODEL_TYPE}`;
 const ACCOUNT = "deepseek-web-route-account";
-/** The fixture header name. Synthetic: the real one is unproven and belongs to the solver seam. */
-const POW_HEADER = "x-ds-pow-fixture";
+/**
+ * The measured proof header (one signed-in completion). The value is still a fixture — the solver
+ * seam is injected here — but the *name* is the capture's, so the route pins the real wiring point.
+ */
+const POW_HEADER = "x-ds-pow-response";
 
 let home: string;
 let savedHome: SavedChatGptWebHome;
@@ -74,6 +78,11 @@ afterEach(async () => {
 /** One named SSE event block. */
 function event(name: string, payload: unknown): string {
   return `event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+/** One unnamed `data:` block — the recorded delta case. */
+function frame(payload: unknown): string {
+  return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
 /** One scripted turn. */
@@ -128,10 +137,19 @@ class ControlledNetwork {
       }
       if (path === DEEPSEEK_WEB_SESSION_CREATE_PATH) {
         this.sessionCreates += 1;
+        // The measured create shape: the id lives at `data.biz_data.chat_session.id`.
         return {
           status: 200,
           contentType: "application/json",
-          body: { code: 0, msg: "", data: { chat_session: { id: `session-${this.sessionCreates}` } } },
+          body: {
+            code: 0,
+            msg: "",
+            data: {
+              biz_code: 0,
+              biz_msg: "",
+              biz_data: { chat_session: { id: `session-${this.sessionCreates}`, model_type: MODEL_TYPE } },
+            },
+          },
           bodyText: "",
           truncated: false,
         };
@@ -162,14 +180,36 @@ class ControlledNetwork {
         request_message_id: `request-${this.completionCalls}`,
         model_type: reportedModel,
       }));
-      // Two APPENDs, so the answer really is assembled from patches.
-      onChunk(event("delta", { p: "response/fragments/0/type", o: "SET", v: "RESPONSE" }));
+      onChunk(event("update_session", { updated_at: 1_700_000_000 }));
+      // The measured shape: the whole response document first (a THINK fragment already open), then
+      // an unnamed `{v}` patch, then the RESPONSE fragment appended to `fragments`, then its content
+      // addressed as `-1` — and the turn ends on `close`, not `finish`.
+      onChunk(frame({
+        v: {
+          response: {
+            message_id: 2,
+            parent_id: 1,
+            model: "",
+            role: "ASSISTANT",
+            thinking_enabled: false,
+            status: "WIP",
+            fragments: [{ id: 1, type: "THINK", content: "private reasoning", elapsed_secs: null }],
+          },
+        },
+      }));
+      // The operation/path are inherited only after a frame sets them (the capture's order).
+      onChunk(frame({ p: "response/fragments/-1/content", o: "APPEND", v: " private" }));
+      onChunk(frame({ v: " reasoning" }));
+      onChunk(frame({
+        p: "response/fragments",
+        o: "APPEND",
+        v: [{ id: 2, type: "RESPONSE", content: "", references: [], stage_id: 1 }],
+      }));
       const answer = script.answer ?? "controlled answer";
       const half = Math.max(1, Math.floor(answer.length / 2));
-      onChunk(event("delta", { p: "response/fragments/0/content", o: "APPEND", v: answer.slice(0, half) }));
-      onChunk(event("delta", { p: "response/fragments/0/content", o: "APPEND", v: answer.slice(half) }));
-      onChunk(event("update_session", { updated_at: 1_700_000_000 }));
-      onChunk(event("finish", { finish_reason: "stop" }));
+      onChunk(frame({ p: "response/fragments/-1/content", o: "APPEND", v: answer.slice(0, half) }));
+      onChunk(frame({ p: "response/fragments/-1/content", o: "APPEND", v: answer.slice(half) }));
+      onChunk(event("close", { click_behavior: "none", auto_resume: false }));
       return { status: 200, contentType: "text/event-stream" };
     },
 
@@ -611,7 +651,7 @@ describe("deepseek-web — the transport surfaces a re-routed model", () => {
     for await (const adapterEvent of transport.stream(context)) events.push(adapterEvent);
     expect(events.at(-1)?.type).toBe("completed");
     expect(answers[0]?.modelType).toBe("expert");
-    expect(answers[0]?.termination).toBe("finish");
+    expect(answers[0]?.termination).toBe("close");
     expect(diagnostics.some(diagnostic => diagnostic.stage === "model-rerouted")).toBe(true);
   });
 });

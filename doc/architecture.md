@@ -1228,11 +1228,22 @@ This prevents:
 **The refusal is a decision at the end of a bounded wait, and admission precedes the continuity
 decision.** A conflict on one conversation is usually *transient* — a harness housekeeping round (a
 session title) sharing the session's conversation with the user's own first message — so admission
-waits for the holder to be released before it refuses, bounded like every other wait in this provider
-(`DEFAULT_CONVERSATION_BUSY_WAIT_MS`, `ChatGptWebProviderCore`). The wait is event-driven and
-cancellable, the holder remains the only authority on when the conversation frees, and a bound that
-expires publishes exactly the same conversation-busy refusal as before: admission strictness is
-unchanged, only *when* it is decided moved to the end of the bound.
+waits for the holder to be released before it refuses. The wait is event-driven and cancellable, the
+holder remains the only authority on when the conversation frees, and a bound that expires publishes
+exactly the same conversation-busy refusal as before: admission strictness is unchanged, only *when*
+it is decided moved to the end of the bound.
+
+The mechanism has **one owner**: `src/web-chat/transport/conversation-admission.ts` owns the bounded,
+cancellable, event-driven slot and its waiters. The shared transport lease composes it for the text
+providers (Qwen Code, Qwen Chat, DeepSeek Web), and `ChatGptWebProviderCore` composes the same owner for
+its native route — it keeps only its provider-specific holder identity (the native DSH thread), its
+begun-turn backstop and its own refusal category. There is one bound,
+`DEFAULT_TRANSPORT_ADMISSION_WAIT_MS` (60 s), chosen at the harness housekeeping call's own measured
+deadline (`timeoutMs: 60000` in `@deepseek-ai/dsh-experimental-session-titles-bundle`); no provider
+keeps a second, shorter number. A measured example of a slow title call in this project took 1 m 5 s;
+a user turn is therefore delayed by that call, not failed by it. A user turn longer than the bound can
+still fail a housekeeping call rather than delay it — the bound is the housekeeping call's deadline, so
+that call is aborted by the caller's cancellation instead.
 
 Admission also comes **before** the continuity decision, because that decision has side effects — a
 replay advances the conversation generation and a first turn records an unconfirmed conversation. A
@@ -1241,20 +1252,14 @@ next attempt is refused with "the last attempt on this conversation was never co
 that never happened. A refused turn therefore leaves continuity exactly as it was, and the retry
 proceeds on the state the admitted turns established.
 
-**The shared transport layer owns the same rule for the text providers** (issue #336). The ChatGPT
-owner above is provider-specific; the Qwen Code, Qwen Chat and DeepSeek Web providers run one text
-exchange per turn through `src/web-chat/transport/**`, which is where their conversation exclusivity
-lives. A caller that cannot declare a purpose — `@earendil-works/pi-ai` never maps the harness's
-`GenerateOptions.purpose` onto an OpenAI-compatible wire, so this product's own harness sends its
-session-title call indistinguishably from a real turn — throws the harness's housekeeping round and the
-user's first message at the same conversation. Those providers therefore compose their lease registry
-with `DEFAULT_TRANSPORT_ADMISSION_WAIT_MS` and take `admitConversation` on the conversation key
-**before** reading continuity, releasing it when the turn ends. The mechanism is provider-neutral and lives
-outside `src/web-chat/core/**`: the registry's admission wait is the serialising half of its lease, the
-lease keeps the immediate refusal that owns the physical resource, and a registry constructed without a
-bound keeps the historical behaviour for every direct caller. A user turn longer than the bound can
-still fail a housekeeping call rather than delay it; the bound is chosen at the housekeeping call's own
-measured deadline so that call is aborted by the caller's cancellation instead.
+For the text providers a caller that cannot declare a purpose — `@earendil-works/pi-ai` never maps the
+harness's `GenerateOptions.purpose` onto an OpenAI-compatible wire, so this product's own harness sends
+its session-title call indistinguishably from a real turn — throws the harness's housekeeping round and
+the user's first message at the same conversation. Those providers take `admitConversation` on the
+conversation key **before** reading continuity and release it when the turn ends; the registry's
+admission wait is the serialising half of its lease, the lease keeps the immediate refusal that owns the
+physical resource, and a registry constructed without a bound keeps the historical behaviour for every
+direct caller. The mechanism is provider-neutral and lives outside `src/web-chat/core/**`.
 
 ### 15.2 Account sharing
 

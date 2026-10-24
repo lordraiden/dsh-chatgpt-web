@@ -67,6 +67,8 @@ describe("deepseek-web — the completion body carries the keys the recon settle
       thinkingEnabled: false,
       searchEnabled: false,
     });
+    // The measured body: nine keys, `action: null` and `preempt: false`. The capture shows the app
+    // does **not** send `source`, so it is no longer part of the recorded key set.
     expect(body).toEqual({
       chat_session_id: "session-fixture",
       parent_message_id: null,
@@ -75,17 +77,12 @@ describe("deepseek-web — the completion body carries the keys the recon settle
       ref_file_ids: [],
       thinking_enabled: false,
       search_enabled: false,
+      action: null,
+      preempt: false,
     });
-    // The recorded body has ten keys; the three this build cannot fill with a measured value are
-    // omitted rather than guessed, and the omission is named in code.
-    expect(Object.keys(body).sort()).toEqual(
-      DEEPSEEK_WEB_RECORDED_BODY_KEYS
-        .filter(key => !(DEEPSEEK_WEB_UNSENT_BODY_KEYS as readonly string[]).includes(key))
-        .sort(),
-    );
-    for (const key of DEEPSEEK_WEB_UNSENT_BODY_KEYS) {
-      expect(body).not.toHaveProperty(key);
-    }
+    expect(Object.keys(body).sort()).toEqual([...DEEPSEEK_WEB_RECORDED_BODY_KEYS].sort());
+    expect(DEEPSEEK_WEB_UNSENT_BODY_KEYS).toEqual([]);
+    expect(body).not.toHaveProperty("source");
   });
 
   test("a continuation sends the recorded cursor and the two toggles", () => {
@@ -117,9 +114,12 @@ describe("deepseek-web — the completion body carries the keys the recon settle
     expect([...DEEPSEEK_WEB_DEEP_LINK_MODEL_TYPES]).toEqual(["default", "expert", "vision"]);
   });
 
-  test("the header set carries no invented client version", () => {
-    expect(deepSeekApiHeaders()).toEqual({ accept: "application/json", "content-type": "application/json" });
+  test("the base header set is the measured one, with no client/device/credential invented", () => {
+    // The capture shows the app sends the wildcard accept media range on JSON calls *and* on the SSE
+    // completion; the client/device family and the credential are supplied per request by the page.
+    expect(deepSeekApiHeaders()).toEqual({ accept: "*/*", "content-type": "application/json" });
     expect(JSON.stringify(deepSeekApiHeaders())).not.toContain("x-client");
+    expect(JSON.stringify(deepSeekApiHeaders())).not.toContain("x-device");
     expect(JSON.stringify(deepSeekApiHeaders())).not.toContain("Authorization");
   });
 });
@@ -218,24 +218,28 @@ describe("deepseek-web — the envelope helper reads both layers", () => {
   });
 });
 
-describe("deepseek-web — the session id is read from a provisional, documented shape", () => {
+describe("deepseek-web — the session id is read from its measured shape", () => {
   test("the recorded candidate paths resolve", () => {
+    // The measured success shape: `{code:0, msg:"", data:{biz_code:0, biz_msg:"", biz_data:{chat_session:{id}}}}`.
     expect(readDeepSeekCreatedSessionId({
       status: 200,
-      body: { code: 0, msg: "", data: { chat_session: { id: "session-a" } } },
+      body: {
+        code: 0,
+        msg: "",
+        data: { biz_code: 0, biz_msg: "", biz_data: { chat_session: { id: "session-a", model_type: "default" } } },
+      },
     })).toBe("session-a");
-    expect(readDeepSeekCreatedSessionId({
+    // The provisional alternatives from before the capture are gone: a different location is refused.
+    expect(() => readDeepSeekCreatedSessionId({
       status: 200,
-      body: { code: 0, msg: "", data: { biz_data: { chat_session: { id: "session-b" } } } },
-    })).toBe("session-b");
-    expect(readDeepSeekCreatedSessionId({ status: 200, body: { code: 0, data: { id: "session-c" } } }))
-      .toBe("session-c");
+      body: { code: 0, msg: "", data: { chat_session: { id: "session-b" } } },
+    })).toThrow();
   });
 
   test("an answer with no readable id is refused, naming the paths it tried", () => {
     let thrown: unknown;
     try {
-      readDeepSeekCreatedSessionId({ status: 200, body: { code: 0, msg: "", data: { chat_session: {} } } });
+      readDeepSeekCreatedSessionId({ status: 200, body: { code: 0, msg: "", data: { biz_data: { chat_session: {} } } } });
     } catch (error) {
       thrown = error;
     }
@@ -315,7 +319,7 @@ describe("deepseek-web — the proof of work is one seam whose default refuses",
     expect(error.category).toBe("TRANSPORT_UNAVAILABLE");
     expect(error.providerCode).toBe("DEEPSEEK_POW_UNAVAILABLE");
     expect(error.message).toContain("proof of work");
-    expect(error.message).toContain("doc/deepseek-web.md");
+    expect(error.message).toContain("chat.deepseek.com");
   });
 });
 

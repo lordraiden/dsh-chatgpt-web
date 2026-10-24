@@ -10,10 +10,10 @@
  * ## What this adapter can and cannot do today
  *
  * It parses the recorded stream, speaks the recorded turn body over the page-context relay, and keeps
- * continuity keyed to `chat_session_id` + `parent_message_id`. It **cannot complete a live turn**:
- * the proof of work is an unproven seam whose default is a typed refusal, and the `Authorization`
- * token's provenance was not measured. `doc/deepseek-web.md` §6 is the exact inventory, with the one
- * observation that settles each point.
+ * continuity keyed to `chat_session_id` + `parent_message_id`. The proof of work is produced by the
+ * page's own worker, and the `Authorization` value plus the `x-client-*` / `x-device-*` family are read
+ * from the page at call time. `doc/deepseek-web.md` §6 records what a signed-in capture settled and the
+ * few observations that still need a live authenticated run.
  */
 export {
   DEEPSEEK_WEB_BUNDLE_COMMIT_ID,
@@ -26,6 +26,7 @@ export {
   DEEPSEEK_WEB_PATCH_OPERATIONS,
   DEEPSEEK_WEB_POW_CHALLENGE_PATH,
   DEEPSEEK_WEB_PROVIDER_ID,
+  DEEPSEEK_WEB_REASONING_FRAGMENT_TYPE,
   DEEPSEEK_WEB_PROVIDER_LABEL,
   DEEPSEEK_WEB_RECORDED_BODY_KEYS,
   DEEPSEEK_WEB_RESPONSE_FRAGMENT_TYPE,
@@ -58,6 +59,7 @@ export {
 
 export {
   DEEPSEEK_TERMINATIONS,
+  DeepSeekDeltaParser,
   DeepSeekFragmentAssembler,
   DeepSeekProtocolError,
   DeepSeekSseReader,
@@ -69,10 +71,45 @@ export {
   type DeepSeekCompletionResult,
   type DeepSeekDeltaPatch,
   type DeepSeekFragment,
+  type DeepSeekResolvedDeltaPatch,
   type DeepSeekSseFrame,
   type DeepSeekSseRawEvent,
   type DeepSeekTermination,
 } from "./sse";
+
+export {
+  DEEPSEEK_WEB_POW_ALGORITHM,
+  DEEPSEEK_WEB_POW_HEADER,
+  DEEPSEEK_WEB_POW_TIMEOUT_MS,
+  createDeepSeekPageProofAnswerer,
+  createDeepSeekProofOfWorkSolver,
+  deepSeekProofHeaderValue,
+  type DeepSeekPageProofAnswererOptions,
+  type DeepSeekPowAnswer,
+  type DeepSeekProofAnswerer,
+  type DeepSeekProofOfWork,
+  type DeepSeekProofOfWorkRequest,
+  type DeepSeekProofOfWorkSolver,
+  type DeepSeekProofOfWorkSolverOptions,
+} from "./pow";
+
+export {
+  DEEPSEEK_WEB_CLIENT_BUNDLE_ID,
+  DEEPSEEK_WEB_CLIENT_BUNDLE_ID_GB,
+  DEEPSEEK_WEB_CLIENT_PLATFORM,
+  DEEPSEEK_WEB_CLIENT_VERSION,
+  DEEPSEEK_WEB_DEVICE_ID_STORAGE_KEY,
+  DEEPSEEK_WEB_DEVICE_MODEL,
+  DEEPSEEK_WEB_LEIM_STORAGE_KEY,
+  DEEPSEEK_WEB_TOKEN_STORAGE_KEY,
+  deepSeekAccessTokenFromStorage,
+  deepSeekAuthorizationHeader,
+  deepSeekBundleIdForRegion,
+  deepSeekClientHeaders,
+  deepSeekLeimFromStorage,
+  readDeepSeekPageIdentity,
+  type DeepSeekPageIdentity,
+} from "./page-identity";
 
 export {
   DEEPSEEK_WEB_JSON_TIMEOUT_MS,
@@ -80,9 +117,6 @@ export {
   unprovenDeepSeekProofOfWork,
   type DeepSeekJsonResult,
   type DeepSeekPageFacilityOptions,
-  type DeepSeekProofOfWork,
-  type DeepSeekProofOfWorkRequest,
-  type DeepSeekProofOfWorkSolver,
   type DeepSeekStreamOpened,
   type DeepSeekStreamPostOptions,
   type DeepSeekStreamResult,

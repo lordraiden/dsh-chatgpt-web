@@ -41,8 +41,9 @@ API as its surface.
   durable conversation store.
 
 The shared semantics of the exchange live in a provider-neutral WebChat core. ChatGPT Web, Qwen Code
-and Qwen Chat are served routes; DeepSeek Web is implemented but not usable for live turns yet and
-publishes no rows until the operator configures its measured `model_type` values
+and Qwen Chat are served routes; DeepSeek Web is implemented — its turn transport, page-owned proof of
+work and page identity are measured against a signed-in capture — and publishes no rows until the
+operator configures its measured `model_type` values
 ([`doc/deepseek-web.md`](./doc/deepseek-web.md)). See [`doc/architecture.md`](./doc/architecture.md) for
 the ownership model.
 
@@ -343,9 +344,10 @@ A verified session answers exactly:
 {"ok":true,"provider":"qwen-code","verified":true,"verifiedAt":"2026-10-19T21:00:00.000Z","storedAt":"/data/providers/qwen-code/storage-state.json"}
 ```
 
-`deepseek-web` has **no authenticated predicate yet** — the page token's provenance is unmeasured — so
-its capture is stored but not usable. It answers `verified: false`, `verifiedAt: null` and a `message`
-saying so; no `.verified.json` marker is written, so nothing can mistake it for a working session. Every capture refusal is a 4xx with the existing
+`deepseek-web` has **no authenticated predicate yet** — the page token's provenance is now measured, but
+no probe has been accepted as the provider's verification step — so its capture is stored but not yet
+usable. It answers `verified: false`, `verifiedAt: null` and a `message` saying so; no `.verified.json`
+marker is written, so nothing can mistake it for a working session. Every capture refusal is a 4xx with the existing
 control error shape and a stable code:
 
 | code | status | meaning |
@@ -481,15 +483,18 @@ selection offers none. The model list is configuration with a measured seed and 
 the cache with `dsh-chatgpt-web models refresh --provider qwen-chat` and restart to serve it. Full
 protocol, assumptions and the per-domain sign-in rule: [`doc/qwen-chat.md`](./doc/qwen-chat.md).
 
-**DeepSeek Web** (`deepseek-web/<model_type>`) is implemented as a fourth provider but is **not
-usable for live turns yet**, and it publishes no rows of its own: its model list is a session-only
-remote setting (no public endpoint, no refresh command), so the catalogue appears only once the
-operator configures the measured `model_type` values in
+**DeepSeek Web** (`deepseek-web/<model_type>`) is implemented as a fourth provider. Its turn path is
+measured against a real signed-in capture: the completion body, the named/unnamed SSE patch stream, the
+`THINK`/`RESPONSE` fragments, the `close` terminator, the page-owned SHA3 proof of work (a fresh proof
+per completion) and the page's bearer plus `x-client-*` / `x-device-*` headers. It publishes no rows of
+its own: its model list is a session-only remote setting (no public endpoint, no refresh command), so
+the catalogue appears only once the operator configures the **measured** `model_type` values
+(`default` = Instant; `expert` and `vision` are disabled in the captured account) in
 `webChat.providers["deepseek-web"].modelTypes`. A `deepseek-web/...` request on a deployment that
-configured nothing is a typed `400` that says exactly that. Two steps are still unproven — the
-per-completion **proof of work** and the page token's provenance — so a turn fails with a typed
-`503`/`401` instead of being retried or faked. The exact unproven inventory, with the one observation
-that settles each item, is [`doc/deepseek-web.md`](./doc/deepseek-web.md) §6.
+configured nothing is a typed `400` that says exactly that. One rung still gates a live turn: no
+authenticated **import predicate** has been measured, so an imported capture stays unverified and the
+session's `ready()` refuses before a browser starts. Details and the exact remaining inventory:
+[`doc/deepseek-web.md`](./doc/deepseek-web.md) §6–§7.
 
 The catalogue is resolved from the authenticated account's capability state, so it is not a promise
 that every account has every route: unknown or unverifiable capability state fails closed, and an
