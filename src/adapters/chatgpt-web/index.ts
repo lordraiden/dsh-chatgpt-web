@@ -19,7 +19,7 @@ import {
   type LauncherManualTurnOwner,
   type LauncherManualTurnStart,
 } from "../../launcher-browser-host";
-import { type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
+import { type AdapterEvent, type ChatGptWebChatVisibility, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import { safeErrorDescriptor, toolCallDiagnosticSummary } from "../../lib/safe-diagnostics";
 import type { IncomingMeta, ProviderAdapter } from "../base";
 import type { ProviderRecovery } from "./provider-core";
@@ -28,6 +28,7 @@ import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAda
 import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface, type WebSurfaceRetainedAnswer } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { createChatGptContinuity, type ChatGptContinuity } from "./chatgpt-continuity";
+import { chatGptWebChatVisibility } from "./chat-visibility";
 import { authorizeCapability, capabilitySnapshotForEnvironment, projectChatGptCapabilities, type CapabilitySnapshot } from "./capability-projector";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { compileChatGptWebPrompt, compileChatGptWebContinuation, compileChatGptWebInstall, compileRetainedChatGptWebContinuation, compileRetainedChatGptWebInstall, type CompiledChatGptWebPrompt } from "./prompt";
@@ -329,7 +330,17 @@ export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): str
   // than naming a new deployment; hashing it would silently re-key every existing conversation (and
   // address different ChatGPT threads through the legacy digest) on upgrade. It is excluded
   // explicitly, here, and a test pins that the namespace of a recorded deployment is unchanged.
-  const { accountIdentityRecorded: _identityProvenance, ...deployment } = provider.chatgptWeb ?? {};
+  //
+  // `chatVisibility` (issue #355) is excluded for the same reason: it selects which ChatGPT surface a
+  // turn lands on, not which account or deployment the conversation belongs to. A temporary deployment
+  // claims no conversation key at all, so the fact can never key one, and a deployment that switches
+  // back to persistent must resume the conversations it already had instead of abandoning them as an
+  // implicit fork.
+  const {
+    accountIdentityRecorded: _identityProvenance,
+    chatVisibility: _visibility,
+    ...deployment
+  } = provider.chatgptWeb ?? {};
   return createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,
     chatgptWeb: deployment,
@@ -364,12 +375,30 @@ export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexPa
  * never records an installed-prefix fingerprint, and never becomes the surface the session's own next
  * turn continues. The browser still serves the turn — that is the transport — but no *provider
  * conversation* is claimed for it.
+ *
+ * The same "retain nothing" answer is given for a **temporary** visibility deployment (issue #355), for
+ * a different reason that must not be conflated with the ephemeral classification: a Temporary Chat is
+ * a provider-side *surface* with no durable provider conversation at all, so nothing can be claimed,
+ * fingerprinted or published for it. That is not bridge-side retention policy — it is the provider
+ * saying the conversation does not exist — and every turn of it is rebuilt explicitly from the caller's
+ * canonical history instead (the non-retained transport, `compileChatGptWebPrompt`), which is the
+ * documented replay recovery mode rather than a silent fork.
+ *
+ * @param parsed - the parsed provider request.
+ * @param mode - the resolved provider model mode.
+ * @param manualRequest - whether this is an explicit Zero Risk launcher turn.
+ * @param visibility - the resolved `chatVisibility` provider fact (absent means `"persistent"`).
+ * @returns whether this turn's provider conversation is retained and addressed by a conversation key.
  */
 export function shouldRetainChatGptWebConversation(
   parsed: CodexParsedRequest,
   mode: { localTools: boolean },
   manualRequest = false,
+  visibility: ChatGptWebChatVisibility = "persistent",
 ): boolean {
+  // A Temporary Chat outranks every retention reason below: the surface is not a provider conversation,
+  // so there is nothing to retain, fingerprint or resume (issue #355).
+  if (visibility === "temporary") return false;
   if (manualRequest || parsed._compactionRequest) return false;
   // The caller's own classification outranks every retention reason below: housekeeping is answered,
   // never remembered (issue #307).
@@ -795,14 +824,26 @@ export function createChatGptWebAdapter(
       : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const identity = extractChatGptTurnIdentity(parsed);
     if (capabilitySnapshot.turnId !== identity.turnId) throw new Error("ChatGPT Web capability snapshot is bound to a different native turn");
+    // The resolved visibility fact decides the surface and, with it, whether this turn may own a
+    // provider conversation at all (issue #355): a temporary turn claims no conversation key, records
+    // no installed-prefix fingerprint and publishes no handle, and its prompt is the explicit replay
+    // of the caller's canonical history that the non-retained transport compiles.
+    const chatVisibility = chatGptWebChatVisibility(provider);
     const retainConversationForTurn = shouldRetainChatGptWebConversation(
       parsed,
       mode,
       manualRequest,
+      chatVisibility,
     );
+    // A temporary turn always replays the caller's complete canonical history (issue #355). The Luna
+    // rolling checkpoint is a *compaction* of that history — the next turn would receive the previous
+    // checkpoint plus its own input instead of the conversation — so it is deliberately not captured
+    // for this mode: "temporary" means each turn is an explicit, complete replay, not a continuation of
+    // provider-local state.
     const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
       && !parsed._compactionRequest
       && !retainConversationForTurn
+      && chatVisibility !== "temporary"
       && Boolean(identity.threadId && identity.turnId);
     const checkpointInput = captureLunaCheckpoint
       ? lunaCheckpointStore.apply(parsed)

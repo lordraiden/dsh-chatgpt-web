@@ -21,6 +21,7 @@ import type { CodexProviderConfig } from "../../types";
 import {
   webChatAccountBindingId,
   webChatAffinityKey,
+  webChatError,
   type WebChatAccountBinding,
   type WebChatAccountInspection,
   type WebChatConversation,
@@ -37,6 +38,7 @@ import {
   type WebChatProviderHealth,
 } from "../../web-chat/core";
 import { chatGptWebAccountFingerprint, chatGptWebExecutionNamespace } from "./index";
+import { chatGptWebChatIsTemporary } from "./chat-visibility";
 import { CHATGPT_WEB_DRIVER_ID } from "../../web-chat/host/provider-host";
 import { chatGptTurnSessions, type ChatGptTurnSessions } from "./turn-execution";
 import type { RetainedConversationReconciliation } from "./retained-coherence";
@@ -114,6 +116,23 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
   const sessions = options.sessions ?? chatGptTurnSessions;
   const authority = createChatGptWebRouteAuthorityFromProvider(provider);
   const namespace = options.namespace ?? chatGptWebExecutionNamespace(provider);
+  /**
+   * A Temporary Chat deployment has no durable provider conversation (issue #355).
+   *
+   * The driver is the owner of the opaque conversation handle, so it is also where "this mode publishes
+   * none" is enforced: a caller that asks for a conversation anyway is refused with the core's
+   * `UNSUPPORTED_OPTION` category instead of receiving a handle for a conversation that cannot be
+   * resumed. The native turn path never reaches these methods in temporary mode (the continuity
+   * decision is an explicit replay, not a core conversation), so this is a fail-closed guard rather
+   * than a second decision.
+   */
+  const temporary = chatGptWebChatIsTemporary(provider);
+  const refuseTemporaryConversation = (operation: string): never => {
+    throw webChatError(
+      "UNSUPPORTED_OPTION",
+      `ChatGPT Web temporary chat visibility publishes no provider conversation; ${operation} is unavailable`,
+    );
+  };
 
   const descriptorOf = (model: string): WebChatModelDescriptor | undefined => {
     const route = availableChatGptWebRoutes(authority).find(candidate => candidate.slug === model);
@@ -214,6 +233,14 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
      * conversation has to be established from canonical history (the provider's `install` path).
      */
     async assessConversation(input: WebChatConversationAssessmentInput): Promise<WebChatConversationAssessment> {
+      // Temporary mode has no resumable provider conversation, so it never reports one: a caller that
+      // asks anyway is refused instead of being told a temporary surface can continue (issue #355).
+      if (temporary) {
+        return {
+          status: "unsupported",
+          reason: "ChatGPT Web temporary chat visibility has no resumable provider conversation",
+        };
+      }
       if (!servedRouteOf(input.model)) {
         return { status: "unsupported", reason: `the ChatGPT Web route ${input.model} is not served by this deployment` };
       }
@@ -268,6 +295,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
     },
 
     async createConversation(input: WebChatConversationCreateInput): Promise<WebChatConversation> {
+      if (temporary) refuseTemporaryConversation("creating a conversation");
       const key = conversationKeyOf(input);
       if (!key) throw new Error("A ChatGPT conversation requires a host session identity");
       const generation = sessions.conversationGeneration(key);
@@ -276,6 +304,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
     },
 
     async resumeConversation(input: WebChatConversationResumeInput): Promise<WebChatConversation> {
+      if (temporary) refuseTemporaryConversation("resuming a conversation");
       const generation = input.conversation.generation;
       sessions.setConversationGeneration(input.conversation.key, generation);
       return conversationOf({
@@ -293,6 +322,7 @@ export function createChatGptWebDriver(options: ChatGptWebDriverOptions): WebCha
      * provider's replacement path does today.
      */
     async replayConversation(input: WebChatConversationReplayInput): Promise<WebChatConversation> {
+      if (temporary) refuseTemporaryConversation("replaying a conversation");
       const key = input.conversation?.key ?? conversationKeyOf(input);
       if (!key) throw new Error("A ChatGPT replay requires a host session identity");
       const generation = (input.conversation?.generation ?? 0) + 1;

@@ -13,7 +13,7 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
   resolveChatGptWebContextLimits,
 } from "./chatgpt-web-models.ts";
-import type { CodexProviderConfig } from "./types.ts";
+import type { ChatGptWebChatVisibility, CodexProviderConfig } from "./types.ts";
 import { accountIdentityFromStorageState } from "./chatgpt-web-authority.ts";
 import { VERSION } from "./version.ts";
 
@@ -206,6 +206,30 @@ function capabilityStateFromBooleans(record: Record<string, unknown>): {
 }
 
 /**
+ * Validate one authored ChatGPT conversation-visibility value (issue #355).
+ *
+ * The flat `chatgptWeb.chatVisibility` block field, a provider-scoped
+ * `webChat.providers["chatgpt-web"].chatVisibility` overlay and the control API all describe the same
+ * fact, so they share this one rule: the value is one of the two enumerated modes, and anything else is
+ * refused with the location it was read from. `undefined` is not a value here — an absent fact means
+ * `"persistent"`, and the projection decides that, not the validator.
+ *
+ * @param value - the authored value.
+ * @param path - where the value was read from, named in the refusal.
+ * @returns the validated mode.
+ * @throws {Error} when the value is not one of the enumerated modes.
+ */
+export function validateChatGptWebChatVisibility(
+  value: unknown,
+  path = "config",
+): ChatGptWebChatVisibility {
+  if (value !== "persistent" && value !== "temporary") {
+    throw new Error(`Invalid chatVisibility in ${path}`);
+  }
+  return value;
+}
+
+/**
  * Validate the ChatGPT Web provider facts a configuration block carries (issue #193).
  *
  * The same facts are described twice: by the historical flat ChatGPT block (the AppConfig fields
@@ -214,11 +238,13 @@ function capabilityStateFromBooleans(record: Record<string, unknown>): {
  * validates the effective merge; the runtime resolver uses the same merge owner. This function is the
  * single copy of their rules, so the two descriptions cannot drift:
  *
- * - the scalar shape of every fact, including the two enumerations and the transport pair
- *   (a launcher browser host requires an absolute descriptor);
+ * - the scalar shape of every fact, including the three enumerations (browser interaction mode,
+ *   browser host and conversation visibility) and the transport pair (a launcher browser host requires
+ *   an absolute descriptor);
  * - the capability invariants: the tri-state shape, an `unknown` state contradicting a boolean claim,
  *   Pro requiring Sol;
  * - the capability ↔ browser-mode invariants (Zero Risk does not support Bigger Context);
+ * - the visibility ↔ browser-host invariant (Temporary Chat is a managed-Chrome surface only);
  * - the tuning block, through `validateChatGptWebTuning`.
  *
  * Fields the caller omits are not validated: a flat configuration is one source of the facts and a
@@ -255,6 +281,9 @@ export function validateChatGptWebProviderFacts(
     && record.browserHost !== "launcher") {
     throw new Error(`Invalid browserHost in ${path}`);
   }
+  if (record.chatVisibility !== undefined) {
+    validateChatGptWebChatVisibility(record.chatVisibility, path);
+  }
   if (options.crossField !== false && record.browserHost === "launcher"
     && (typeof record.browserHostDescriptorPath !== "string" || !record.browserHostDescriptorPath.trim())) {
     throw new Error(`Launcher browser host requires browserHostDescriptorPath in ${path}`);
@@ -263,6 +292,14 @@ export function validateChatGptWebProviderFacts(
     && typeof record.browserHostDescriptorPath === "string"
     && !isAbsolute(expandUserPath(record.browserHostDescriptorPath))) {
     throw new Error(`Launcher browserHostDescriptorPath must be absolute in ${path}`);
+  }
+  // Temporary Chat is a surface of the service-managed Chrome browser (issue #355). The launcher host
+  // attaches to the Electron surface the Zero Risk product owns, and a turn there is driven by that
+  // product's own page lifecycle, so the visibility fact cannot be honoured for it. Refusing the
+  // combination is the honest answer: silently running a configured-temporary deployment on the
+  // persistent surface would put every turn back into the account history the operator opted out of.
+  if (options.crossField !== false && record.chatVisibility === "temporary" && record.browserHost === "launcher") {
+    throw new Error(`Temporary chat visibility requires the managed-chrome browser host in ${path}`);
   }
   if (record.stallTimeoutSec !== undefined
     && (typeof record.stallTimeoutSec !== "number"
@@ -427,6 +464,21 @@ export interface AppConfig {
   experimentalBiggerContext: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
+  /**
+   * Which ChatGPT surface turns land on (issue #355).
+   *
+   * Absent means `"persistent"` — today's behaviour, byte-for-byte: the history-visible conversation
+   * surface, the durable provider conversation, the installed-prefix fingerprint and the published
+   * conversation handle all stay exactly as they are. `"temporary"` selects ChatGPT's Temporary Chat:
+   * the conversation is deliberately not resumable, so the provider claims no conversation key,
+   * records no installed-prefix fingerprint, publishes no conversation handle and rebuilds each turn
+   * explicitly from the caller's canonical history.
+   *
+   * It is a provider fact, so it is validated, projected and overlaid exactly like every other one
+   * (`validateChatGptWebProviderFacts`, `providerConfig`, `mergeChatGptWebProviderFacts`), and a
+   * provider-scoped `webChat.providers["chatgpt-web"]` block wins over this flat field field-by-field.
+   */
+  chatVisibility?: ChatGptWebChatVisibility;
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   /** Optional browser transport tuning; defaults apply per field when absent. */
@@ -994,6 +1046,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
   // of those rules (issue #193), which the provider-scoped block uses too, so the two cannot drift.
   validateChatGptWebProviderFacts({
     browserInteractionMode,
+    browserHost: parsed.browserHost,
+    browserHostDescriptorPath: parsed.browserHostDescriptorPath,
+    chatVisibility: parsed.chatVisibility,
     solAvailable: parsed.solAvailable,
     proAvailable: parsed.proAvailable,
     capabilityState: parsed.capabilityState,
@@ -1157,6 +1212,11 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     noReasoningModels: [],
     chatgptWeb: {
       appName: manual ? config.manualAppName : config.automaticAppName,
+      // Projected only when it is authored (issue #355): an absent fact means `"persistent"`, and the
+      // provider block of a deployment that never states one must stay byte-identical to what it was
+      // before the fact existed (the execution namespace, the worker identity and the persisted
+      // configuration all hash or serialize this block).
+      ...(config.chatVisibility !== undefined ? { chatVisibility: config.chatVisibility } : {}),
       browserInteractionMode: config.browserInteractionMode,
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,
