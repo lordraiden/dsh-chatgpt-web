@@ -22,6 +22,13 @@ import {
   resolveDeepSeekProviderConfig,
 } from "./adapters/deepseek-web/provider-config";
 import { effectiveChatGptWebProviderConfig } from "./chatgpt-web-provider-config";
+import {
+  candidateChatGptWebRoutes,
+  classifyChatGptWebRoute,
+  createChatGptWebRouteAuthorityFromProvider,
+  type ChatGptWebRouteAuthority,
+  type ChatGptWebRouteAvailability,
+} from "./chatgpt-web-authority";
 import { safeErrorDescriptor } from "./lib/safe-diagnostics";
 import {
   inspectWebChatProvider,
@@ -166,6 +173,112 @@ export async function webChatProviderChecks(
     });
   }
   return checks;
+}
+
+/** The doctor check id that reports which catalogue rows the configured account can serve. */
+export const MODEL_AVAILABILITY_CHECK_ID = "model-availability";
+
+/** One catalogue row and whether the configured account can serve it. */
+export interface ModelAvailabilityRow {
+  readonly model: string;
+  readonly availability: ChatGptWebRouteAvailability;
+}
+
+interface ResolvedModelAvailability {
+  readonly authority: ChatGptWebRouteAuthority;
+  readonly rows: readonly ModelAvailabilityRow[];
+}
+
+/**
+ * Resolve the catalogue rows and their availability from the two existing owners.
+ *
+ * The rows come from the catalogue's route table ({@link candidateChatGptWebRoutes}) and the decision
+ * from the route authority, so this report cannot disagree with `/v1/models` or with the refusal a
+ * real turn receives. Pure configuration: no browser, no network, no credential.
+ */
+function resolveModelAvailability(config: AppConfig): ResolvedModelAvailability {
+  const authority = createChatGptWebRouteAuthorityFromProvider(effectiveChatGptWebProviderConfig(config));
+  return {
+    authority,
+    rows: candidateChatGptWebRoutes(authority).map(route => ({
+      model: route.slug,
+      availability: classifyChatGptWebRoute(route, authority),
+    })),
+  };
+}
+
+/**
+ * The catalogue rows this account can serve, in catalogue order.
+ *
+ * @throws {Error} when the configured capability facts are incoherent; {@link modelAvailabilityCheck}
+ *   is the doctor-facing wrapper that reports that instead of throwing.
+ */
+export function modelAvailabilityRows(config: AppConfig): readonly ModelAvailabilityRow[] {
+  return resolveModelAvailability(config).rows;
+}
+
+/**
+ * Report which catalogue rows the configured account can actually serve.
+ *
+ * Pointing a client at a row the account cannot answer fails on the first call with a typed 400, so
+ * the doctor lists every row of the active catalogue and classifies it:
+ *
+ * - `available` — the account tier serves it;
+ * - `unavailable` — the account tier cannot serve it (a Luna-only account is not served the Sol rows,
+ *   and a Sol account without Pro is not served the Pro-gated rows);
+ * - `unknown` — the configured capability state does not say.
+ *
+ * An unknown state is a `warning`, never an `error`: the check reports what it knows rather than
+ * failing a run for a capability the operator may still be settling. It is `skipped` only when there
+ * is no catalogue row to read, and it never prints a credential, a host path or a network fact.
+ */
+export function modelAvailabilityCheck(config: AppConfig): DoctorCheck {
+  let resolved: ResolvedModelAvailability;
+  try {
+    resolved = resolveModelAvailability(config);
+  } catch {
+    return {
+      id: MODEL_AVAILABILITY_CHECK_ID,
+      status: "warning",
+      message: "ChatGPT Web catalogue availability could not be resolved from the configured capability state",
+      detail: "the configuration check owns the cause; no catalogue row was classified",
+    };
+  }
+  const { authority, rows } = resolved;
+  if (rows.length === 0) {
+    return {
+      id: MODEL_AVAILABILITY_CHECK_ID,
+      status: "skipped",
+      message: "model-availability check skipped: the catalogue defines no row for this interaction mode",
+    };
+  }
+  const modelsFor = (availability: ChatGptWebRouteAvailability): string[] =>
+    rows.filter(row => row.availability === availability).map(row => row.model);
+  const available = modelsFor("available");
+  const unavailable = modelsFor("unavailable");
+  const unknown = modelsFor("unknown");
+  const detail = [
+    authority.browserInteractionMode === "manual"
+      ? "interaction mode manual (Zero Risk)"
+      : `capability state sol=${authority.capabilities.solAvailable}, pro=${authority.capabilities.proAvailable}`,
+    ...(available.length === 0 ? [] : [`available: ${available.join(", ")}`]),
+    ...(unavailable.length === 0 ? [] : [`unavailable for this account: ${unavailable.join(", ")}`]),
+    ...(unknown.length === 0 ? [] : [`unknown: ${unknown.join(", ")}`]),
+  ].join(" · ");
+  if (unknown.length > 0) {
+    return {
+      id: MODEL_AVAILABILITY_CHECK_ID,
+      status: "warning",
+      message: `ChatGPT Web catalogue: availability is unknown for ${unknown.length} of ${rows.length} rows`,
+      detail: `${detail} · a client that selects an unknown row is refused on its first call`,
+    };
+  }
+  return {
+    id: MODEL_AVAILABILITY_CHECK_ID,
+    status: "ok",
+    message: `ChatGPT Web catalogue: ${available.length} of ${rows.length} rows are served by this account`,
+    detail,
+  };
 }
 
 async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
@@ -624,6 +737,10 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
       detail: safeErrorDescriptor(error),
     });
   }
+
+  // Which catalogue rows this account can actually serve: a pure configuration/catalogue report, so
+  // it never touches the network or a browser, and an unknown capability state is a warning.
+  checks.push(modelAvailabilityCheck(config));
 
   const codex = inspectCodexIntegration();
   if (!codex.installed) {

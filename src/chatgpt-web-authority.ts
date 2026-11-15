@@ -125,7 +125,18 @@ function failUnknown(capability: string): never {
   throw new Error(`ChatGPT Web ${capability} capability is unknown or unverifiable; refusing model selection`);
 }
 
-export function availableChatGptWebRoutes(
+/** How one catalogue route behaves for the account the authority describes. */
+export type ChatGptWebRouteAvailability = "available" | "unavailable" | "unknown";
+
+/**
+ * Every route the catalogue can consider in this interaction mode, before capability gating.
+ *
+ * The rows come from the route table in `chatgpt-web-models.ts` — the catalogue's own owner — never
+ * from a second hand-written list. {@link availableChatGptWebRoutes} is exactly this list filtered to
+ * the `available` rows; the doctor reports the whole list so an operator can see the rows the account
+ * cannot answer as well as the ones it can.
+ */
+export function candidateChatGptWebRoutes(
   authority: ChatGptWebRouteAuthority,
 ): readonly ChatGptWebModelRoute[] {
   if (authority.browserInteractionMode === "manual") {
@@ -133,14 +144,57 @@ export function availableChatGptWebRoutes(
       ? [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE, CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE]
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
+  return [...CHATGPT_WEB_LUNA_MODEL_ROUTES, ...CHATGPT_WEB_MODEL_ROUTES];
+}
 
-  if (authority.capabilities.solAvailable === "unknown") return [];
-  if (authority.capabilities.solAvailable === "unsupported") {
-    return CHATGPT_WEB_LUNA_MODEL_ROUTES;
+/**
+ * Classify one catalogue route against the account authority.
+ *
+ * This is the **report** decision: it reads the same {@link ChatGptWebRouteAuthority} capability
+ * facts {@link requireChatGptWebRoute} enforces, and it distinguishes the two refusals that path
+ * collapses into a throw — a row this account tier cannot serve (`unavailable`) from a row the
+ * capability state does not decide (`unknown`). It is deliberately not a second source of truth: no
+ * capability is re-derived here, and `requireChatGptWebRoute` remains the refusal path a real turn
+ * takes.
+ *
+ * @param route - one route from {@link candidateChatGptWebRoutes}.
+ * @param authority - the configured account authority.
+ * @returns `available`, `unavailable` or `unknown` for that row.
+ */
+export function classifyChatGptWebRoute(
+  route: ChatGptWebModelRoute,
+  authority: ChatGptWebRouteAuthority,
+): ChatGptWebRouteAvailability {
+  if (route.interactionMode === "manual") {
+    if (authority.browserInteractionMode !== "manual") return "unavailable";
+    if (route === CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE && !authority.zeroRiskProEnabled) {
+      return "unavailable";
+    }
+    return "available";
   }
 
-  if (authority.capabilities.proAvailable === "supported") return CHATGPT_WEB_MODEL_ROUTES;
-  return CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
+  // Only the explicit Zero Risk mode excludes an automatic row; any other value is the automatic
+  // catalogue, exactly as `availableChatGptWebRoutes` has always treated it.
+  if (authority.browserInteractionMode === "manual") return "unavailable";
+  // An undecided Sol state decides nothing: the same fail-closed rule the refusal path applies.
+  if (authority.capabilities.solAvailable === "unknown") return "unknown";
+
+  if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+    // Luna and Think are the Luna-only account's rows; a Sol account is served the Sol rows instead.
+    return authority.capabilities.solAvailable === "unsupported" ? "available" : "unavailable";
+  }
+
+  if (authority.capabilities.solAvailable !== "supported") return "unavailable";
+  if (!route.requiresPro) return "available";
+  if (authority.capabilities.proAvailable === "unknown") return "unknown";
+  return authority.capabilities.proAvailable === "supported" ? "available" : "unavailable";
+}
+
+export function availableChatGptWebRoutes(
+  authority: ChatGptWebRouteAuthority,
+): readonly ChatGptWebModelRoute[] {
+  return candidateChatGptWebRoutes(authority)
+    .filter(route => classifyChatGptWebRoute(route, authority) === "available");
 }
 
 export function requireChatGptWebRoute(
