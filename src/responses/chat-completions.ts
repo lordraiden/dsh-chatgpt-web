@@ -578,7 +578,58 @@ export function chatFinishReason(payload: Record<string, unknown>): "stop" | "le
 }
 
 /** Shape one internal Responses payload as an OpenAI `chat.completion`. */
-export function toChatCompletion(payload: Record<string, unknown>, model: string): Record<string, unknown> {
+/**
+ * The characters JSON defines after a backslash.
+ *
+ * A backslash before anything else is not a JSON escape at all: `\_`, `\*` and `\#` are Markdown
+ * escaping leaking into the document, and `JSON.parse` rejects the whole reply because of it.
+ */
+const VALID_JSON_ESCAPE_CHARACTERS = new Set(['"', "\\", "/", "b", "f", "n", "r", "t", "u"]);
+
+/**
+ * Drop the backslash of every escape JSON does not define.
+ *
+ * A consumer-web model renders JSON keys as if they were Markdown, so a key `max_tokens` comes back as
+ * `"max\_tokens"`. JSON has no `\_` escape, so the reply is invalid and a structured caller loses the
+ * turn (a real memory backend failed every reflect call this way). Removing that backslash is
+ * deterministic and lossless — the character JSON would have to represent is the one after it — and it
+ * is a **transport** normalization, not schema enforcement: nothing here validates, reorders or invents
+ * a field, and a reply that was already valid JSON is returned byte-for-byte. Every valid escape
+ * (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`) is preserved exactly.
+ *
+ * @param text - the model's reply.
+ * @returns the same text with invalid escapes unescaped.
+ */
+export function normalizeInvalidJsonEscapes(text: string): string {
+  if (!text.includes("\\")) return text;
+  let out = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    if (character !== "\\") {
+      out += character;
+      continue;
+    }
+    const next = text[index + 1];
+    if (next === undefined) {
+      out += character;
+      continue;
+    }
+    if (VALID_JSON_ESCAPE_CHARACTERS.has(next)) {
+      out += character + next;
+      index += 1;
+      continue;
+    }
+    out += next;
+    index += 1;
+  }
+  return out;
+}
+
+export function toChatCompletion(
+  payload: Record<string, unknown>,
+  model: string,
+  options: { normalizeStructuredJson?: boolean } = {},
+): Record<string, unknown> {
   const failure = responseFailure(payload);
   const created = typeof payload.created_at === "number" ? payload.created_at : Math.floor(Date.now() / 1000);
   const id = typeof payload.id === "string" && payload.id ? `chatcmpl-${payload.id}` : `chatcmpl-${created}`;
@@ -590,7 +641,14 @@ export function toChatCompletion(payload: Record<string, unknown>, model: string
     model,
     choices: [{
       index: 0,
-      message: { role: "assistant", content: failure ? "" : responseText(payload) },
+      message: {
+        role: "assistant",
+        content: failure
+          ? ""
+          : options.normalizeStructuredJson === true
+            ? normalizeInvalidJsonEscapes(responseText(payload))
+            : responseText(payload),
+      },
       finish_reason: failure ? "stop" : chatFinishReason(payload),
     }],
     // Absent usage means absent, not a zero block a billing client would read as a measurement.

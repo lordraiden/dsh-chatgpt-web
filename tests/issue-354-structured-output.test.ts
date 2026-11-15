@@ -4,6 +4,7 @@ import { startServer, type RunningServer } from "../src/server";
 import {
   ChatCompletionsRequestError,
   chatFinishReason,
+  normalizeInvalidJsonEscapes,
   toChatCompletion,
   toChatCompletionStream,
   translateChatCompletionsRequest,
@@ -444,5 +445,36 @@ describe("issue #354 — the schema is provider-visible text, not a hidden field
     expect(compiled.text).toContain("one JSON value matching the supplied schema");
     // The schema is output-format data, not a second conversation turn.
     expect(compiled.text).toContain("give me a verdict");
+  });
+});
+
+describe("issue #354 — invalid JSON escapes from a Markdown-minded model", () => {
+  test("only escapes JSON does not define are unescaped", () => {
+    // The real failure: a key rendered as if it were Markdown.
+    expect(normalizeInvalidJsonEscapes('{"max\\_tokens":4096}')).toBe('{"max_tokens":4096}');
+    // Every escape JSON does define survives byte-for-byte.
+    const valid = '{"a":"quote \\" backslash \\\\ slash \\/ b \\b f \\f n \\n r \\r t \\t u \\u00e9"}';
+    expect(normalizeInvalidJsonEscapes(valid)).toBe(valid);
+    // Nothing to do, and a trailing backslash is left alone rather than guessed at.
+    expect(normalizeInvalidJsonEscapes("plain text")).toBe("plain text");
+    expect(normalizeInvalidJsonEscapes("trailing\\")).toBe("trailing\\");
+  });
+
+  test("a structured reply is normalized into valid JSON, a plain reply stays verbatim", async () => {
+    const reply = '{"query":"x","max\\_tokens":4096}';
+    const stub = stubAdapter(reply);
+    const server = serve(stub.factory);
+
+    const structured = await post(server, { ...BASE, response_format: JSON_SCHEMA_FORMAT });
+    const completion = await structured.json() as { choices: Array<{ message: { content: string } }> };
+    const content = completion.choices[0]!.message.content;
+    // The caller receives JSON it can parse; the bridge did not validate or reorder anything.
+    expect(() => JSON.parse(content)).not.toThrow();
+    expect(JSON.parse(content)).toEqual({ query: "x", max_tokens: 4096 });
+
+    // A caller that did not ask for a shape gets the model's text untouched.
+    const plain = await post(server, BASE);
+    const plainCompletion = await plain.json() as { choices: Array<{ message: { content: string } }> };
+    expect(plainCompletion.choices[0]!.message.content).toBe(reply);
   });
 });
