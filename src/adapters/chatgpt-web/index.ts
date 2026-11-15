@@ -25,7 +25,7 @@ import type { IncomingMeta, ProviderAdapter } from "../base";
 import type { ProviderRecovery } from "./provider-core";
 import { parseDataUrl } from "../image";
 import { CHATGPT_CONTEXT_EXHAUSTED_CODE, ChatGptSurfaceStaleError, ChatGptWebAdapterError } from "./adapter-error";
-import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface, type WebSurfaceRetainedAnswer } from "./web-surface-transport";
+import { chatGptWebSurfaceTransportForProvider, type WebSurfacePhysicalSurface, type WebSurfaceRetainedAnswer, type WebSurfaceTurn } from "./web-surface-transport";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { createChatGptContinuity, type ChatGptContinuity } from "./chatgpt-continuity";
 import { chatGptWebChatVisibility } from "./chat-visibility";
@@ -39,6 +39,7 @@ import { classifyChatGptWebRetry } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import type { ChatGptTurnQueueTicket } from "./turn-queue";
+import type { ChatGptTurnAccountingRequest, ChatGptTurnBrowserTurn, ChatGptTurnPromptKind } from "./turn-accounting";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
@@ -811,6 +812,13 @@ export function createChatGptWebAdapter(
      * disconnect stops the browser turn and releases the conversation (issue #329).
      */
     requestAbortSignal?: AbortSignal,
+    /**
+     * This request's browser-turn accounting (issue #359), opened by `runTurn`.
+     *
+     * Optional so a direct caller (a test, a composition that does not account) is unchanged. The
+     * runtime only records facts into it; it never reads it and never changes a turn's outcome.
+     */
+    requestAccounting?: ChatGptTurnAccountingRequest,
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -1025,6 +1033,46 @@ export function createChatGptWebAdapter(
       return answer;
     });
     const browserAbort = new AbortController();
+    /**
+     * The browser turn currently preparing its prompt, so the compiled prompt can be attributed to
+     * the turn that produced it (issue #359). One `startRuntime` call runs one browser turn at a time.
+     */
+    let activeBrowserTurn: ChatGptTurnBrowserTurn | undefined;
+    /**
+     * Count one physical browser turn and time it, without changing its outcome.
+     *
+     * The accounting records only what the provider actually did: a turn that never starts leaves no
+     * browser-turn field (absent, never zero), and a turn that fails still reports its duration.
+     */
+    const trackBrowserRun = (run: Promise<string>): Promise<string> => {
+      const browserTurn = requestAccounting?.beginBrowserTurn();
+      activeBrowserTurn = browserTurn;
+      if (!browserTurn) return run;
+      const clearActive = (): void => {
+        if (activeBrowserTurn === browserTurn) activeBrowserTurn = undefined;
+      };
+      return run.then(
+        answer => {
+          browserTurn.settle("completed");
+          clearActive();
+          return answer;
+        },
+        error => {
+          browserTurn.settle("failed");
+          clearActive();
+          throw error;
+        },
+      );
+    };
+    const runBrowserTurn = (turn: WebSurfaceTurn): Promise<string> => trackBrowserRun(transport.run(turn));
+    /**
+     * Record the prompt one browser turn compiled: its kind (a fresh conversation or a delta on the
+     * operation's conversation), the messages it carried and its compiled size. A continuation
+     * reports only its delta, which is what makes the replay saving observable.
+     */
+    const recordCompiledPrompt = (kind: ChatGptTurnPromptKind, input: CodexParsedRequest, text: string): void => {
+      activeBrowserTurn?.recordPrompt(kind, input.context.messages.length, text.length);
+    };
     let browserOwnerSettled = false;
     const trackBrowserOwner = (browser: Promise<string>): Promise<string> => browser.finally(() => {
       browserOwnerSettled = true;
@@ -1226,7 +1274,7 @@ export function createChatGptWebAdapter(
           throw normalized;
         }
       };
-      const browserTurn = cancellableBrowserTurn(trackBrowserOwner(runManual()), browserAbort, requestAbortSignal);
+      const browserTurn = cancellableBrowserTurn(trackBrowserOwner(trackBrowserRun(runManual())), browserAbort, requestAbortSignal);
       void browserTurn.browser.catch(error => {
         if (tokenSettled) return;
         tokenSettled = true;
@@ -1261,18 +1309,18 @@ export function createChatGptWebAdapter(
       };
     }
     if (!mode.localTools) {
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(transport.run({
+      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(runBrowserTurn({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
-        prepare: async () => ({
+        prepare: async () => {
           // Normal Chat Mode installs the deterministic project header plus only
           // the current user message on its first physical turn. Other retained
           // routes (Luna with identity, Advisor) install the composer prefix;
           // non-retained read-only turns keep the full envelope compile (each
           // turn is a fresh conversation for them).
-          ...(minimalChatInstall
+          const compiled = minimalChatInstall
             ? compileChatGptWebInstall(checkpointInput.parsed)
             : retainConversation
               ? compileRetainedChatGptWebInstall(checkpointInput.parsed, compileOptionsFor(checkpointInput.parsed))
@@ -1281,19 +1329,24 @@ export function createChatGptWebAdapter(
                 turnCapabilities,
                 undefined,
                 compileOptionsFor(checkpointInput.parsed),
-              )),
-          release: () => {},
-        }),
+              );
+          recordCompiledPrompt("install", checkpointInput.parsed, compiled.text);
+          return { ...compiled, release: () => {} };
+        },
         // A retained conversation (managed-chrome, issue #171) continues on the existing surface,
         // so it compiles the composer delta (issue #172) when the prefix is installed in the
         // current physical generation, and installs it as plain composer text otherwise. An
         // Advisor review turn (issue #178) always needs a resume prompt too: its request carries
         // no assistant message (so `resumeInput` is undefined), and a reused Advisor surface
         // continues through the composer delta compiled from the full single-message input.
-        ...(resumeInput !== undefined || advisorTurn ? { prepareResume: async () => ({
-          ...compileResume(resumeInput ?? parsed),
-          release: () => {},
-        }) } : {}),
+        ...(resumeInput !== undefined || advisorTurn ? {
+          prepareResume: async () => {
+            const input = resumeInput ?? parsed;
+            const compiled = compileResume(input);
+            recordCompiledPrompt("continuation", input, compiled.text);
+            return { ...compiled, release: () => {} };
+          },
+        } : {}),
         ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
@@ -1347,6 +1400,7 @@ export function createChatGptWebAdapter(
           : retainConversation
             ? compileRetainedChatGptWebInstall(input, compileOptionsFor(input))
             : compileChatGptWebPrompt(input, turnCapabilities, turnToken, compileOptionsFor(input));
+        recordCompiledPrompt(isResume ? "continuation" : "install", input, compiled.text);
         return { ...compiled, release: () => {} };
       } catch (error) {
         await broker.revoke(turnToken);
@@ -1354,7 +1408,7 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(transport.run({
+    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(runBrowserTurn({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
@@ -1452,6 +1506,24 @@ export function createChatGptWebAdapter(
       if (shuttingDown) {
         throw new Error("ChatGPT Web provider is shutting down");
       }
+      // Issue #359: open this request's browser-turn accounting before anything can refuse it. The
+      // operation is the caller's resolved conversation identity (native metadata, `user` /
+      // `session_id`, or `prompt_cache_key`); the accounting fingerprints it and never publishes it.
+      // A request refused before the browser is reached is still reported — with no browser-turn
+      // field, because none happened.
+      const accountingIdentity = extractChatGptTurnIdentity(parsed);
+      const requestAccounting = providerCore.beginTurnAccounting({
+        operation: accountingIdentity.threadId ?? accountingIdentity.dshSessionId ?? "unaddressed",
+      });
+      // The adapter's own terminal event is the request outcome. Observe it without changing the event
+      // the caller receives; the request accounting is closed in the turn's `finally` below.
+      let terminalOutcome: "completed" | "failed" | undefined;
+      const emitToCaller = emit;
+      emit = event => {
+        if (event.type === "done") terminalOutcome = "completed";
+        else if (event.type === "error" || event.type === "incomplete") terminalOutcome = "failed";
+        emitToCaller(event);
+      };
       incoming = {
         ...incoming,
         abortSignal: incoming.abortSignal
@@ -1589,6 +1661,7 @@ export function createChatGptWebAdapter(
                       undefined,
                       undefined,
                       incoming.abortSignal,
+                      requestAccounting,
                     );
                     try {
                       const rawSummary = await withAbort(fallbackRuntime.browser, operationSignal);
@@ -1815,13 +1888,23 @@ export function createChatGptWebAdapter(
         let webChatContinuity: ChatGptContinuity;
         try {
           if (previousProviderTurn === undefined) {
-            turnSlot = await providerCore.waitForTurnSlot({
-              accountIdentity: leaseInput.accountIdentity,
-              // Fairness/metrics only: the provider fingerprints this before the queue ever sees it.
-              callerKey: nativeIdentity.dshSessionId ?? nativeIdentity.threadId ?? "anonymous",
-              ...(nativeIdentity.purpose !== undefined ? { purpose: nativeIdentity.purpose } : {}),
-              ...(incoming.abortSignal ? { signal: incoming.abortSignal } : {}),
-            });
+            // Issue #359: the wait for an account slot is part of the request's cost, so it is
+            // measured from the request's own clock. The queue's ticket reports the exact grant wait;
+            // a refusal has no ticket, so the elapsed time is the honest measurement there.
+            const waitStartedAt = Date.now();
+            try {
+              turnSlot = await providerCore.waitForTurnSlot({
+                accountIdentity: leaseInput.accountIdentity,
+                // Fairness/metrics only: the provider fingerprints this before the queue ever sees it.
+                callerKey: nativeIdentity.dshSessionId ?? nativeIdentity.threadId ?? "anonymous",
+                ...(nativeIdentity.purpose !== undefined ? { purpose: nativeIdentity.purpose } : {}),
+                ...(incoming.abortSignal ? { signal: incoming.abortSignal } : {}),
+              });
+            } catch (error) {
+              requestAccounting.recordWait(Date.now() - waitStartedAt);
+              throw error;
+            }
+            requestAccounting.recordWait(turnSlot.waitedMs);
           }
           // The core owns the continuity decision (issue #192): the provider states its intent and the
           // core applies the shared rules, mapping the outcome back to the provider's vocabulary. The
@@ -1917,6 +2000,7 @@ export function createChatGptWebAdapter(
               options,
               phases,
               incoming.abortSignal,
+              requestAccounting,
             ),
             onSessionCreated: created => {
               replaySession = created;
@@ -1955,7 +2039,7 @@ export function createChatGptWebAdapter(
             session = await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
               executionKey,
               ownerKey,
-              () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn, undefined, phases, incoming.abortSignal),
+              () => startRuntime(parsed, environment, capabilitySnapshot, traceId, turnCapabilities, providerTurn, undefined, phases, incoming.abortSignal, requestAccounting),
               traceId,
               incoming.abortSignal,
               nativeTurnId,
@@ -2466,6 +2550,10 @@ export function createChatGptWebAdapter(
           await runChatGptWebTurn();
         } finally {
           clearInterval(heartbeat);
+          // Issue #359: the request's accounting is closed exactly once, after the turn's own
+          // terminal event was observed. A request that never started a browser turn reports
+          // `refused` (or `cancelled`) and no browser-turn field.
+          requestAccounting.finish(terminalOutcome ?? "failed");
         }
       })();
       activeRuns.add(runPromise);

@@ -27,6 +27,13 @@ import {
   type ChatGptTurnQueueSnapshot,
   type ChatGptTurnQueueTicket,
 } from "./turn-queue";
+import {
+  createChatGptTurnAccounting,
+  type ChatGptTurnAccounting,
+  type ChatGptTurnAccountingRequest,
+  type ChatGptTurnAccountingRequestInput,
+  type ChatGptTurnAccountingSnapshot,
+} from "./turn-accounting";
 
 export const CHATGPT_WEB_PROVIDER_CORE_SERVICE = "chatgpt-web" as const;
 
@@ -900,6 +907,15 @@ export class ChatGptWebProviderCore {
    * capacity owner; the queue reads its live count and is woken by its releases.
    */
   private readonly turnQueue: ChatGptTurnQueue;
+  /**
+   * Per-request/per-operation browser-turn accounting (issue #359).
+   *
+   * The measurement the control surface publishes beside `turnQueue`: how many browser turns one
+   * request/operation actually started, how long it waited for an account slot, and how much context
+   * it replayed. It observes; it never decides reuse, merges calls or caches an answer, and its
+   * snapshot carries counters and fingerprints only (see `turn-accounting.ts`).
+   */
+  private readonly turnAccounting: ChatGptTurnAccounting = createChatGptTurnAccounting();
   /** The queue ticket each begun turn holds, so retirement (and `forget`) can release it. */
   private readonly turnSlots = new Map<string, ChatGptTurnQueueTicket>();
   private closed = false;
@@ -1158,6 +1174,23 @@ export class ChatGptWebProviderCore {
     return { ...this.turnQueue.snapshot(), activeLeases: this.leases.activeCount() };
   }
 
+  /**
+   * Begin accounting one request (issue #359).
+   *
+   * The adapter opens a request before it waits for an account slot, so a request that is refused
+   * before the browser is reached is still reported — with no browser-turn field, because none
+   * happened. The operation is the caller's resolved conversation identity; it is fingerprinted by
+   * the accounting owner and never published raw.
+   */
+  beginTurnAccounting(input: ChatGptTurnAccountingRequestInput): ChatGptTurnAccountingRequest {
+    return this.turnAccounting.begin(input);
+  }
+
+  /** The browser-turn accounting the control surface publishes (counters and fingerprints only). */
+  turnAccountingSnapshot(): ChatGptTurnAccountingSnapshot {
+    return this.turnAccounting.snapshot();
+  }
+
   /** The active turn holding a thread, excluding this execution's own. */
   private activeTurnForThread(
     nativeThreadId: string,
@@ -1393,6 +1426,7 @@ export class ChatGptWebProviderCore {
     // the core is shutting down instead of waiting out its budget against a process that is going away.
     this.turnQueue.close();
     this.turnSlots.clear();
+    this.turnAccounting.clear();
     this.capabilitySnapshotOwners.clear();
     this.retiredExecutions.clear();
     this.retiredCapabilitySnapshots.clear();

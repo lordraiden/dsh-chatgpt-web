@@ -276,6 +276,39 @@ Rules:
 5. **Live reload.** Profiles live in `config.json` (`endpointProfiles`) and a create/edit/delete takes
    effect on the next request without a restart; `PUT /v1/control/config` accepts the whole set too.
 
+### Hindsight: one model per operation, one conversation per operation
+
+Hindsight can point each of its operations at a different catalogue model, and can keep one operation's
+turns on one provider conversation:
+
+```dotenv
+# cheap model for the high-volume extraction/consolidation work
+HINDSIGHT_API_RETAIN_LLM_MODEL=chatgpt-web/light
+HINDSIGHT_API_CONSOLIDATION_LLM_MODEL=chatgpt-web/light
+# stronger model for the multi-turn reflect loop
+HINDSIGHT_API_REFLECT_LLM_MODEL=chatgpt-web/high
+# one provider conversation for the reflect loop's turns (operation-scoped reuse)
+HINDSIGHT_API_REFLECT_LLM_CACHE_AFFINITY=openai_prompt_cache_key
+```
+
+The cache-affinity value is Hindsight's per-operation trace id, sent as `prompt_cache_key`; this service
+already reads that field as a declared conversation identity, so on a **persistent** profile every call
+of one `reflect` run continues the same provider conversation (ChatGPT's prefix caching applies, and
+the surface is not re-hydrated per step) while a different run gets a different conversation. Do
+**not** enable it for `retain`/consolidation: one retain run extracts several chunks, and each
+extraction must be an independent conversation — sharing one would let a later extraction see an
+earlier extraction's prompt. Reuse is scoped to the operation; nothing is shared across operations.
+
+A **temporary** profile is different by design: a Temporary Chat claims no provider conversation, so
+every turn is an explicit replay of the caller's canonical history. Leave cache affinity at `none`
+there (the default for a custom base URL): declaring an operation identity would make the projection
+send only the newest user message, and the temporary surface would then lose the history it must
+replay. `GET /v1/control/status` publishes `turnAccounting` — per-request and per-operation browser
+turns, continuations, replay size and the wait for an account slot (a request that never reached the
+provider has no browser-turn field) — so both shapes are measurable. `chatgpt-web/light`/`high`
+require a Sol account; on a Luna-only account use `chatgpt-web/luna` and `chatgpt-web/think`. `usage`
+remains an **estimate** — see [The `usage` block is an estimate](#the-usage-block-is-an-estimate).
+
 ### Every CLI subcommand through the image
 
 The entrypoint execs `node lib/cli.js "$@"`, so any subcommand is reachable with `docker run`:
