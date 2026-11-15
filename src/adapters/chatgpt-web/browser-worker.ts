@@ -880,6 +880,34 @@ export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterErro
   }
 }
 
+/**
+ * The affordance ChatGPT renders when a generation was cut off by the output budget.
+ *
+ * Localised labels are included because the surface follows the account language. This is the evidence
+ * a future `stopReason: "max_tokens"` mapping needs; today the bridge still reports `"stop"` because it
+ * cannot prove the reason, and this probe only records what the page shows (issue #360 follow-up).
+ */
+export const CHATGPT_TRUNCATION_AFFORDANCE =
+  /continue generating|seguir generando|continuer la g[ée]n[ée]ration|weiter generieren|继续生成|繼續生成|続きを生成|계속 생성/i;
+
+/**
+ * One sanitized, single-line surface diagnostic.
+ *
+ * The checkpoint capture writes a full page state and is expensive; this is the cheap counterpart for
+ * facts worth recording on every turn (a truncation affordance, a quota dialog). It never throws, and
+ * callers pass only labels and counts — never prompt text, never a credential.
+ *
+ * @param event - the diagnostic name, stable enough to grep.
+ * @param detail - small, sanitized facts about the surface.
+ */
+export function logChatGptSurfaceDiagnostic(event: string, detail: Record<string, unknown>): void {
+  try {
+    console.info(`[chatgpt-web] ${event} ${JSON.stringify(detail)}`);
+  } catch {
+    // A diagnostic must never fail a turn.
+  }
+}
+
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests|太多要求|太多请求|リクエストが多すぎます/i })
   .filter({ hasText: /making requests too quickly|過於頻繁|过于频繁|リクエストの頻度が高すぎます/i })
@@ -888,6 +916,15 @@ const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dia
 export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   const dialog = chatGptRateLimitDialog(page);
   if (!await dialog.isVisible().catch(() => false)) return;
+
+  // Capture the dialog's own words before dismissing it: the reset time it names is what a caller
+  // needs for Retry-After, and the wording is what a parser has to match (issue #360 follow-up).
+  const dialogText = await dialog.innerText().catch(() => "");
+  const actionLabels = await dialog.getByRole("button").allInnerTexts().catch(() => []);
+  logChatGptSurfaceDiagnostic("rate-limit-dialog", {
+    text: dialogText.replace(/\s+/g, " ").trim().slice(0, 300),
+    actions: actionLabels.map(label => label.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 6),
+  });
 
   const acknowledge = dialog.getByRole("button", { name: /^(Got it|知道了|了解)$/ }).last();
   if (await acknowledge.isVisible().catch(() => false)) {
@@ -5773,6 +5810,20 @@ export class ChatGptBrowserWorker {
       if (this.context && this.config.browserHost === "managed-chrome") {
         const state = await this.context.storageState();
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
+      }
+      // Record whether the generation was cut off by the output budget: ChatGPT leaves a "continue
+      // generating" affordance behind when it was. The bridge still reports "stop" (it cannot prove
+      // the reason yet); this line is the evidence that decides the mapping (issue #360 follow-up).
+      try {
+        const truncation = page.getByRole("button", { name: CHATGPT_TRUNCATION_AFFORDANCE });
+        const candidates = await truncation.count();
+        logChatGptSurfaceDiagnostic("truncation-affordance", {
+          trace: turn.traceId,
+          present: candidates > 0,
+          candidates,
+        });
+      } catch {
+        // A missing affordance is not a failure.
       }
       await diagnostics.capture(page, "turn-completed");
       console.info(

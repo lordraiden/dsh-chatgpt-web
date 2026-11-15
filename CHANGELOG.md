@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.1
+
+- Two surface diagnostics, recorded as one sanitized line per event and with no behaviour change:
+  - `truncation-affordance` at turn completion — whether ChatGPT left a "continue generating"
+    affordance behind (localised labels included). The bridge still reports `finish_reason: "stop"`
+    because it cannot prove the reason yet; this line is the evidence that decides a future
+    `stopReason: "max_tokens"` mapping.
+  - `rate-limit-dialog` before a rate-limit refusal — the dialog's own text (truncated, whitespace
+    collapsed) and its action labels, which is what a future `Retry-After` parser has to match.
+  Both carry labels and counts only: no prompt text, no credential, and a diagnostic can never fail a
+  turn.
+
 ## 1.2.0
 
 - `doctor` gains a `model-availability` check: it reports which catalogue rows the configured account
