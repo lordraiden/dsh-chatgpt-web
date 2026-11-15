@@ -10,6 +10,7 @@
  * (and its consumers) keep working unchanged.
  */
 import { createChatGptWebDriver, type ChatGptRetainedCoherenceProbe } from "./chatgpt-driver";
+import { chatGptWebChatIsTemporary } from "./chat-visibility";
 import { chatGptRetainedSurfaceLostError } from "./adapter-error";
 import { chatGptAffinitySessionId, chatGptConversationKey } from "./conversation-key";
 import { extractChatGptTurnIdentity } from "./environment";
@@ -152,6 +153,14 @@ export function createChatGptContinuity(deps: ChatGptContinuityDeps): ChatGptCon
 
   return {
     async resolveRecovery(facts) {
+      // A Temporary Chat deployment has no provider conversation to decide about (issue #355), so the
+      // durable continuity machinery is deliberately not consulted: it would have to create a record
+      // and publish an opaque handle for a conversation that does not exist. The turn is an explicit
+      // **replay** instead — the non-retained transport compiles the caller's complete canonical
+      // history into the fresh temporary surface — which is the documented recovery mode, never a
+      // silent continuation of an unrelated chat and never a silent fork. Nothing is claimed, recorded
+      // or confirmed for it: `decision` stays undefined, so `confirmTurn` writes nothing.
+      if (chatGptWebChatIsTemporary(deps.provider)) return "REPLAY";
       const identity = extractChatGptTurnIdentity(facts.parsed);
       const conversationKey = chatGptConversationKey(facts.parsed, deps.namespace, deps.affinity);
       if (!conversationKey || !identity.threadId) {

@@ -317,6 +317,20 @@ export interface ChatGptWebTuning {
   turnTimeoutMs?: number;
 }
 
+/**
+ * Which ChatGPT surface a turn lands on (issue #355).
+ *
+ * `persistent` — the history-visible conversation surface (`https://chatgpt.com/`), today's behaviour
+ * when the fact is absent. `temporary` — ChatGPT's Temporary Chat surface
+ * (`https://chatgpt.com/?temporary-chat=true`), which is not written to the account history, does not
+ * read or write ChatGPT memories and is not used for training.
+ *
+ * It is a *visibility* fact, deliberately distinct from `isEphemeralWebChatTurn` (which classifies a
+ * caller's housekeeping turn for bridge-side retention): this one selects the provider surface, and a
+ * temporary surface is never a resumable provider conversation.
+ */
+export type ChatGptWebChatVisibility = "persistent" | "temporary";
+
 /** The only provider configuration supported by this focused runtime. */
 export interface CodexProviderConfig {
   adapter: "chatgpt-web";
@@ -333,6 +347,14 @@ export interface CodexProviderConfig {
   chatgptWeb?: {
     /** ChatGPT custom connector attached to tool-capable temporary chats. */
     appName?: string;
+    /**
+     * Which ChatGPT surface turns land on (issue #355). Absent means `"persistent"` — the
+     * history-visible conversation surface this provider has always used. `"temporary"` selects
+     * ChatGPT's Temporary Chat, which is deliberately **not** a resumable provider conversation: no
+     * conversation key is claimed, no installed-prefix fingerprint is recorded and no conversation
+     * handle is published for it.
+     */
+    chatVisibility?: ChatGptWebChatVisibility;
     /** Whether ChatGPT DOM interaction is automatic or explicitly driven by the user. */
     browserInteractionMode?: "automatic" | "manual";
     /** Explicit browser owner. Launcher mode attaches to the embedded Electron ChatGPT surface. */

@@ -19,9 +19,10 @@ import {
 import { estimateTokens } from "../../lib/token-estimate";
 import { isHttpClientDisconnectedReason } from "../../lib/errors";
 import { safeErrorDescriptor } from "../../lib/safe-diagnostics";
-import type { CodexProviderConfig } from "../../types";
+import type { ChatGptWebChatVisibility, CodexProviderConfig } from "../../types";
 import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import { parseDataUrl } from "../image";
+import { chatGptWebChatVisibility } from "./chat-visibility";
 import {
   ChatGptMarkdownBuffer,
   ChatGptMarkdownConsistencyError,
@@ -64,9 +65,9 @@ import {
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
-  CHATGPT_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
+  chatGptSurfaceUrl,
   detectChatGptAccountCapabilities,
   detectChatGptAuthenticatedAccountIdentity,
   parseChatGptEffortSliderState,
@@ -1565,6 +1566,11 @@ export interface ResolvedBrowserConfig {
   chromeExecutablePath: string;
   /** The bridge's absolute turn ceiling; always resolved (issue #329). */
   turnTimeoutMs: number;
+  /**
+   * The ChatGPT surface this worker's turns land on, resolved from the provider fact (issue #355).
+   * `persistent` is the history-visible conversation surface and today's behaviour.
+   */
+  chatVisibility: ChatGptWebChatVisibility;
   headed: boolean;
   autoApproveToolCalls: boolean;
   /** User-tunable transport limits with every default applied. */
@@ -2238,6 +2244,9 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     storageStatePath: resolveProviderStorageStatePath(configured.storageStatePath),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     turnTimeoutMs,
+    // Resolved once, here, from the provider fact: the navigation target and the surface assertion
+    // both read this, so they cannot disagree about which ChatGPT surface a turn belongs on.
+    chatVisibility: chatGptWebChatVisibility(provider),
     tuning,
     headed: configured.headed === true,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
@@ -3028,17 +3037,27 @@ export class ChatGptBrowserWorker {
     );
   }
 
-  /** Put every browser operation on one fully hydrated persistent ChatGPT conversation surface. */
+  /**
+   * Put every browser operation on one fully hydrated ChatGPT conversation surface.
+   *
+   * The surface is the one the resolved `chatVisibility` fact owns (issue #355): the persistent
+   * conversation surface for `"persistent"` — byte-for-byte today's navigation — and ChatGPT's
+   * Temporary Chat for `"temporary"`. The assertion that the page stayed there uses the same mode, so a
+   * temporary turn that silently fell back to a persistent conversation fails closed instead of
+   * writing the turn into the account history.
+   */
   private async prepareChatSurface(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
   ): Promise<Locator> {
+    const visibility = this.config.chatVisibility;
+    const surfaceUrl = chatGptSurfaceUrl(visibility);
     // Launcher verification refreshes its owned page before attaching Playwright so a newly added
     // connector is present in the catalog. Navigating again here destroys that freshly hydrated
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
-    if (page.url() !== CHATGPT_CHAT_URL) {
-      await page.goto(CHATGPT_CHAT_URL, {
+    if (page.url() !== surfaceUrl) {
+      await page.goto(surfaceUrl, {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
@@ -3048,12 +3067,14 @@ export class ChatGptBrowserWorker {
     try {
       composer = await this.activeComposer(page);
     } catch {
-      throw new Error("ChatGPT web login is expired or the persistent ChatGPT conversation surface is unavailable");
+      throw new Error(visibility === "temporary"
+        ? "ChatGPT web login is expired or the Temporary Chat surface is unavailable"
+        : "ChatGPT web login is expired or the persistent ChatGPT conversation surface is unavailable");
     }
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
-    await assertChatGptPage(page);
+    await assertChatGptPage(page, visibility);
     await captureDiagnostic?.("session-verified");
     return composer;
   }

@@ -98,10 +98,13 @@ import {
   CHATGPT_WEB_TUNING_DEFAULTS,
   getConfigDir,
   isLoopbackHost,
+  providerConfig,
   resolveApiKey,
   resolveChatGptWebTuning,
   resolveProviderStorageStatePath,
   saveConfig,
+  validateChatGptWebChatVisibility,
+  validateChatGptWebProviderFacts,
   validateChatGptWebTuning,
 } from "./config";
 import { AsyncEventQueue } from "./event-queue";
@@ -2136,19 +2139,45 @@ export function startServer(
         tuning: config.tuning ?? {},
         effective: resolveChatGptWebTuning(config.tuning),
         defaults: { ...CHATGPT_WEB_TUNING_DEFAULTS },
+        // Issue #355: the configured visibility and the one a turn actually resolves, which a
+        // provider-scoped block may override field-by-field (issue #193 semantics).
+        chatVisibility: config.chatVisibility ?? "persistent",
+        effectiveChatVisibility:
+          effectiveChatGptWebProviderConfig(config).chatgptWeb?.chatVisibility ?? "persistent",
       }, { headers: controlCorsHeaders() });
     }
     if (req.method === "PUT" && url.pathname === "/v1/control/config") {
       try {
-        const body = await req.json() as { tuning?: unknown };
-        const tuning = validateChatGptWebTuning(body.tuning, "control API");
-        saveConfig({ ...config, tuning });
+        const body = await req.json() as { tuning?: unknown; chatVisibility?: unknown };
+        // `tuning` stays required unless the request only states the visibility, so an empty body keeps
+        // today's refusal and an existing caller is unaffected by the added field.
+        const tuning = body.tuning === undefined && body.chatVisibility !== undefined
+          ? config.tuning
+          : validateChatGptWebTuning(body.tuning, "control API");
+        const chatVisibility = body.chatVisibility === undefined
+          ? config.chatVisibility
+          : validateChatGptWebChatVisibility(body.chatVisibility, "control API");
+        const next: AppConfig = {
+          ...config,
+          tuning,
+          ...(chatVisibility !== undefined ? { chatVisibility } : {}),
+        };
+        // The candidate is checked by the same provider-facts owner the loader uses, so an incoherent
+        // combination (for example temporary visibility on the launcher host) is refused here instead of
+        // being saved and failing every turn.
+        validateChatGptWebProviderFacts(providerConfig(next).chatgptWeb, "control API");
+        saveConfig(next);
         // Mutate the in-memory config so the next turn's effective provider configuration sees the
-        // new tuning without a sidecar restart (workers are keyed by the serialized provider config).
-        // The resolver reads the configuration per call, and a provider-scoped block still wins over
-        // this flat field, exactly as it wins over the loaded one (issue #193).
+        // new tuning and visibility without a sidecar restart (workers are keyed by the serialized
+        // provider config). The resolver reads the configuration per call, and a provider-scoped block
+        // still wins over these flat fields, exactly as it wins over the loaded ones (issue #193).
         config.tuning = tuning;
-        return Response.json({ status: "ok", tuning }, { headers: controlCorsHeaders() });
+        if (chatVisibility !== undefined) config.chatVisibility = chatVisibility;
+        return Response.json({
+          status: "ok",
+          tuning,
+          chatVisibility: chatVisibility ?? "persistent",
+        }, { headers: controlCorsHeaders() });
       } catch (error) {
         return Response.json(
           { status: "error", error: error instanceof Error ? error.message : String(error) },

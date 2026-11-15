@@ -5,8 +5,18 @@ import {
   type ChatGptWebAccountIdentity,
 } from "./chatgpt-web-authority";
 import type { ChatGptWebCapabilityState } from "./chatgpt-web-authority";
+import type { ChatGptWebChatVisibility } from "./types";
 
 export const CHATGPT_CHAT_URL = "https://chatgpt.com/";
+/**
+ * ChatGPT's Temporary Chat surface (issue #355).
+ *
+ * A Temporary Chat is not written to the account history, does not read or write ChatGPT memories and
+ * is not used for training, which is what makes it the right surface for a caller whose turns must not
+ * become visible conversations. The `temporary-chat=true` query parameter is the surface's own switch;
+ * the provider navigates here only when the resolved `chatVisibility` fact is `"temporary"`.
+ */
+export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 /**
  * Ordered provider selectors. Discovery keeps this list separate from the
  * joined diagnostic selector so activeComposer can rank overlapping DOM nodes
@@ -175,21 +185,95 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
   }
 }
 
+/** Whether a pathname is a ChatGPT conversation surface (`/`, or one `/c/<id>` conversation). */
+function isChatGptSurfacePath(pathname: string): boolean {
+  if (pathname === "/" || pathname === "") return true;
+  return /^\/c\/[^/?#]+$/.test(pathname);
+}
+
+/**
+ * Whether a URL is the **persistent** ChatGPT conversation surface.
+ *
+ * Unchanged by issue #355: the persistent surface is the history-visible conversation, so a URL that
+ * carries `temporary-chat=true` is still not one. The temporary surface has its own predicate
+ * ({@link isChatGptTemporaryChatUrl}), and only the configured temporary mode accepts it.
+ */
 export function isChatGptConversationUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
     if (url.origin !== new URL(CHATGPT_CHAT_URL).origin) return false;
     if (url.searchParams.get("temporary-chat") === "true") return false;
-    if (url.pathname === "/" || url.pathname === "") return true;
-    return /^\/c\/[^/?#]+$/.test(url.pathname);
+    return isChatGptSurfacePath(url.pathname);
   } catch {
     return false;
   }
 }
 
-export async function assertChatGptPage(page: Page): Promise<void> {
-  if (!isChatGptConversationUrl(page.url())) {
-    throw new Error(`ChatGPT left the persistent conversation surface (${page.url()})`);
+/**
+ * Whether a URL is ChatGPT's **Temporary Chat** surface (issue #355).
+ *
+ * The surface is the same origin and the same conversation path shapes, but it is only the temporary
+ * surface while the `temporary-chat=true` switch is present: a URL that lost it is a persistent
+ * conversation, which temporary mode must never silently continue.
+ */
+export function isChatGptTemporaryChatUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.origin !== new URL(CHATGPT_CHAT_URL).origin) return false;
+    if (url.searchParams.get("temporary-chat") !== "true") return false;
+    return isChatGptSurfacePath(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a URL is the conversation surface the given visibility mode owns.
+ *
+ * This is the one place that maps the provider fact onto a surface predicate, so the navigation target
+ * and the assertion that the page stayed there cannot disagree.
+ *
+ * @param rawUrl - the page URL to classify.
+ * @param visibility - the resolved `chatVisibility` provider fact.
+ * @returns whether the URL is the surface that mode must be on.
+ */
+export function isChatGptSurfaceUrl(
+  rawUrl: string,
+  visibility: ChatGptWebChatVisibility = "persistent",
+): boolean {
+  return visibility === "temporary"
+    ? isChatGptTemporaryChatUrl(rawUrl)
+    : isChatGptConversationUrl(rawUrl);
+}
+
+/**
+ * The URL a turn of the given visibility mode navigates to.
+ *
+ * @param visibility - the resolved `chatVisibility` provider fact.
+ * @returns the persistent conversation surface, or ChatGPT's Temporary Chat surface.
+ */
+export function chatGptSurfaceUrl(visibility: ChatGptWebChatVisibility = "persistent"): string {
+  return visibility === "temporary" ? CHATGPT_TEMPORARY_CHAT_URL : CHATGPT_CHAT_URL;
+}
+
+/**
+ * Assert that the page is still on the conversation surface its visibility mode owns.
+ *
+ * The persistent message is unchanged from before issue #355; the temporary mode names its own
+ * surface, because "left the persistent conversation surface" would be the wrong diagnosis there.
+ *
+ * @param page - the page to check.
+ * @param visibility - the resolved `chatVisibility` provider fact.
+ * @throws {Error} when the page is not on the expected surface.
+ */
+export async function assertChatGptPage(
+  page: Page,
+  visibility: ChatGptWebChatVisibility = "persistent",
+): Promise<void> {
+  if (!isChatGptSurfaceUrl(page.url(), visibility)) {
+    throw new Error(visibility === "temporary"
+      ? `ChatGPT left the Temporary Chat surface (${page.url()})`
+      : `ChatGPT left the persistent conversation surface (${page.url()})`);
   }
 }
 
