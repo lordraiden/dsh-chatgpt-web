@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.2
+
+- Record the truncation affordance where it actually appears. A generation cut by the output budget
+  stops **without** the completion action and leaves a "continue generating" affordance instead, so the
+  turn never completes: it stalls until the bridge's own clock kills it (observed as
+  `12-response-stalled-30s` with 14 207 visible characters and `completionActionVisible=false`). The
+  probe now fires when the generation has stopped and no completion action is present — the truncation
+  signature — and logs `truncation-affordance-stall` with the visible character count. No behaviour
+  change yet: the turn still waits; this is the evidence the terminal mapping needs.
+
 ## 1.2.1
 
 - Two surface diagnostics, recorded as one sanitized line per event and with no behaviour change:
