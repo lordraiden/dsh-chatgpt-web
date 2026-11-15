@@ -18,6 +18,8 @@ interface RunMessage {
     browserHostDescriptorPath: string;
     browserDiagnosticsPath?: string;
     turnTimeoutMs: number;
+    /** Opt-in partial-answer-on-timeout switch; absent means the helper resolves it from its env. */
+    partialOnTurnTimeout?: boolean;
     autoApproveToolCalls: boolean;
   };
   turn: {
@@ -195,6 +197,9 @@ async function run(message: RunMessage): Promise<void> {
       browserHostDescriptorPath: message.config.browserHostDescriptorPath,
       browserDiagnosticsPath: message.config.browserDiagnosticsPath,
       turnTimeoutMs: message.config.turnTimeoutMs,
+      ...(message.config.partialOnTurnTimeout !== undefined
+        ? { partialOnTurnTimeout: message.config.partialOnTurnTimeout }
+        : {}),
       autoApproveToolCalls: message.config.autoApproveToolCalls,
     },
   };
@@ -307,6 +312,9 @@ async function run(message: RunMessage): Promise<void> {
     }),
     onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
     onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
+    // The worker concluded the turn with the partial answer because the opt-in turn clock expired
+    // (issue #360 follow-up); the answer itself travels in the normal `result` frame.
+    onTruncated: () => writeProtocol({ type: "event", id: message.id, event: "truncated" }),
     ...(message.turn.captureLunaCheckpoint ? {
       captureLunaCheckpoint: true,
       onLunaCheckpoint: captured => writeProtocol({

@@ -188,7 +188,7 @@ export function validateChatGptWebTuning(value: unknown, path = "config"): ChatG
 /** Boolean provider facts, and the string provider facts that name a location or identity. */
 const CHATGPT_WEB_PROVIDER_BOOLEAN_FACTS = [
   "solAvailable", "proAvailable", "zeroRiskProEnabled", "experimentalBiggerContext",
-  "headed", "localToolsEnabled", "autoApproveToolCalls",
+  "headed", "localToolsEnabled", "autoApproveToolCalls", "partialOnTurnTimeout",
 ] as const;
 const CHATGPT_WEB_PROVIDER_STRING_FACTS = [
   "appName", "storageStatePath", "chromeExecutablePath", "brokerSocketPath",

@@ -49,6 +49,12 @@ export interface WebSurfaceTurn {
   onCommentary?: (text: string, continuation?: boolean) => void;
   /** Append-only Markdown answer data. */
   onTextDelta: (delta: string) => void;
+  /**
+   * The turn is concluding with a partial answer because the bridge's turn clock expired and the
+   * caller opted into `chatgptWeb.partialOnTurnTimeout` (issue #360 follow-up). The answer still
+   * travels through the normal result; this callback only carries the truncation signal.
+   */
+  onTruncated?: () => void;
   /** Proven current-turn MCP activity; never response content or completion. */
   externalProgress?: ChatGptTurnProgressReader;
   /** Atomically fences browser completion against concurrent MCP claims in the turn broker. */
@@ -145,6 +151,7 @@ function toBrowserTurn(turn: WebSurfaceTurn): BrowserTurn {
     onReasoningSummary: turn.onReasoningSummary,
     onCommentary: turn.onCommentary,
     onTextDelta: turn.onTextDelta,
+    onTruncated: turn.onTruncated,
     externalProgress: turn.externalProgress,
     completionFence: turn.completionFence,
     compaction: turn.compaction,

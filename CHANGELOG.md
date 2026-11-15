@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.5
+
+- Optional: return the **partial answer** when the turn clock expires, instead of discarding it. A
+  generation that hits the provider's output budget on this account never completes — the bridge waits
+  for a completion action that does not arrive, and the turn dies on its own clock with `504
+  turn_timeout`, throwing away 14 000+ visible characters. With
+  `chatgptWeb.partialOnTurnTimeout: true` (or `DSH_CHATGPT_WEB_PARTIAL_ON_TIMEOUT=1`) the turn instead
+  concludes with the text it already has and `finish_reason: "length"`, and logs
+  `turn_timeout partial=true chars=<n>`. **Off by default**: without the switch the `504 turn_timeout`
+  behaviour is unchanged, and a malformed switch value fails closed naming the variable. The other
+  deadline checks (multipart and observation) still throw.
+
 ## 1.2.4
 
 - The truncation probe now runs every 30 seconds while a turn is waiting, instead of only when the

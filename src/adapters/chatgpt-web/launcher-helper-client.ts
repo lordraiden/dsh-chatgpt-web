@@ -25,7 +25,7 @@ interface PendingTurn {
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
-  | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text" | "surface_bound" | "surface_ready"; text?: string; continuation?: boolean; binding?: ChatGptBrowserPhysicalSurface }
+  | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text" | "surface_bound" | "surface_ready" | "truncated"; text?: string; continuation?: boolean; binding?: ChatGptBrowserPhysicalSurface }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
@@ -136,7 +136,7 @@ function parseHelperMessage(line: string): HelperMessage {
       }
       return { type: "event", id: message.id, event, reused: message.reused };
     }
-    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text", "surface_bound", "surface_ready"].includes(String(event))) {
+    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text", "surface_bound", "surface_ready", "truncated"].includes(String(event))) {
       throw new Error("Launcher browser helper emitted an unknown event");
     }
     if (text !== undefined && typeof text !== "string") {
@@ -148,7 +148,7 @@ function parseHelperMessage(line: string): HelperMessage {
     return {
       type: "event",
       id: message.id,
-      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text" | "surface_bound" | "surface_ready",
+      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text" | "surface_bound" | "surface_ready" | "truncated",
       ...(text !== undefined ? { text: text as string } : {}),
       ...(continuation !== undefined ? { continuation: continuation as boolean } : {}),
     };
@@ -292,6 +292,7 @@ export class LauncherBrowserHelperClient {
             browserHostDescriptorPath: this.config.browserHostDescriptorPath!,
             browserDiagnosticsPath: this.config.browserDiagnosticsPath,
             turnTimeoutMs: this.config.turnTimeoutMs,
+            partialOnTurnTimeout: this.config.partialOnTurnTimeout,
             autoApproveToolCalls: this.config.autoApproveToolCalls,
           },
           turn: {
@@ -531,6 +532,9 @@ export class LauncherBrowserHelperClient {
         ));
       }
       else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      // The helper concluded a turn with the partial answer because the opt-in turn clock expired
+      // (issue #360 follow-up). The answer itself arrives in the normal `result` frame.
+      else if (message.event === "truncated") pending.turn.onTruncated?.();
       else if (message.event === "prepared_selected") {
         const prepare = message.reused ? pending.turn.prepareResume : pending.turn.prepare;
         void Promise.resolve().then(() => prepare?.()).then(prepared => {

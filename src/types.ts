@@ -377,6 +377,13 @@ export interface CodexProviderConfig {
     lunaCheckpointStatePath?: string;
     /** Optional explicit safety ceiling. Browser turns have no absolute deadline by default. */
     turnTimeoutMs?: number;
+    /**
+     * Opt-in: when the turn ceiling expires and visible assistant text exists, conclude the turn with
+     * that text and a truncation signal (`finish_reason: "length"`) instead of failing it with
+     * `turn_timeout` (issue #360 follow-up). Defaults to false, so the 504 behaviour is unchanged.
+     * `DSH_CHATGPT_WEB_PARTIAL_ON_TIMEOUT` is the environment fallback; an explicit value wins.
+     */
+    partialOnTurnTimeout?: boolean;
     /** Optional browser transport tuning; per-field defaults apply when absent. */
     tuning?: ChatGptWebTuning;
     /**

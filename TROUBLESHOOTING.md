@@ -541,6 +541,11 @@ client ignores. No client timeout was raised or needs to be raised.
 3. Do not raise any client-side `streamIdleTimeout`/idle timer as a workaround — the keep-alive is the
    fix for that, and the two clocks are independent.
 
+If you would rather receive the visible partial answer than a `504`, opt in with
+`chatgptWeb.partialOnTurnTimeout` (or `DSH_CHATGPT_WEB_PARTIAL_ON_TIMEOUT=1`). It is **off by default**;
+when enabled, a timed-out turn that already shows assistant text concludes with that text and
+`finish_reason: "length"` instead of `turn_timeout`.
+
 ## 17. A structured request fails with `400` on `response_format`
 
 ### Symptom
