@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.1.1
+
+- Fix the endpoint-profiles page at `/v1/control/endpoints/`: an escaped quote written inside the
+  page's TypeScript template literal resolved into the served document, which broke its inline script
+  at parse time. No handler was registered, the native form submit is blocked by the page's
+  `form-action 'none'` CSP, and the result was an operator clicking "Use token" and seeing nothing
+  happen. The page's script now compiles, and a regression test compiles the exact string the server
+  serves for both operator pages (endpoint profiles and sign-in), so a template-literal escape can
+  never silently disable a page again.
+
 ## 1.1.0
 
 - `POST /v1/chat/completions` accepts the OpenAI structured-output shapes: `{"type":"json_object"}` and
