@@ -396,6 +396,20 @@ chat, never silently replaced: the next turn rebuilds the conversation from cano
 explicit replay (a new chat, a generation that advances by one). If replaying is not what you want, start
 a new conversation on the caller side.
 
+### A structured reply came back as Markdown prose instead of JSON
+
+ChatGPT can run its **own web search** while answering. When it does, the search flow overrides the
+`response_format` instruction and the reply arrives as prose with a citation, so a structured caller
+loses the turn. Observed live on a Luna-only account: a `json_schema` request returned
+`**Status:** 🟢 **Mature** … [github.com](…)` instead of the object.
+
+The bridge asks the model not to search ("Do not use web search or cite sources: answer from the
+conversation only"), but that is a **soft** instruction like the rest of `response_format`, and the
+model does not always follow it. There is no supported way to switch the provider's search off from the
+bridge today; a caller that needs a guaranteed shape must validate the reply and retry, and the
+`x-dsh-chatgpt-web-structured-output: soft` header on the response says the shape was requested, not
+enforced.
+
 ### A session title or compaction turn does not appear in the Qwen Code account
 
 That is correct. A turn that declares a housekeeping `purpose` (`session-title`, `compaction`, or any
