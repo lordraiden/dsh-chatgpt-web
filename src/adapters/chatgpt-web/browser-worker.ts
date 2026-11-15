@@ -2420,6 +2420,9 @@ export class ChatGptBrowserWorker {
     if (this.activeRuns.has(turn.traceId)) {
       return Promise.reject(new Error(`Duplicate ChatGPT web browser turn: ${turn.traceId}`));
     }
+    // Last-resort guard, not the caller-facing bound (issue #358). A browser run is only started for a
+    // turn that holds an account lease, so the bounded wait queue in front of the lease registry is
+    // what a caller actually meets; reaching this refusal means a caller bypassed the queue.
     if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
       return Promise.reject(chatGptBrowserTurnLimitError());
     }

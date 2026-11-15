@@ -93,7 +93,12 @@ import {
   cancelStructuredCompactionNativeTurn,
   cancelStructuredCompactionTrace,
 } from "./adapters/chatgpt-web/compaction-handoff";
-import { ChatGptWebAdapterError, chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
+import {
+  CHATGPT_TURN_QUEUE_FULL_CODE,
+  CHATGPT_TURN_QUEUE_TIMEOUT_CODE,
+  ChatGptWebAdapterError,
+  chatGptBrowserTabClosedError,
+} from "./adapters/chatgpt-web/adapter-error";
 import {
   CHATGPT_TURN_REVISION_CONFLICT_MESSAGE,
   extractChatGptTurnIdentity,
@@ -2417,6 +2422,11 @@ export function startServer(
         solAvailable: config.solAvailable,
         proAvailable: config.proAvailable,
         tuning: resolveChatGptWebTuning(config.tuning),
+        // Issue #358: the bounded wait queue in front of the account fan-out bound, per caller.
+        // Counters and wait times only — caller keys are fingerprints the provider computed before the
+        // queue saw them, so no prompt text, conversation key, credential or raw session identity can
+        // appear here.
+        turnQueue: sharedProviderCore.turnQueueSnapshot(),
       }, { headers: controlCorsHeaders() });
     }
     if (req.method === "GET" && url.pathname === "/v1/control/config") {
@@ -2895,10 +2905,19 @@ export function startServer(
             type: failure.type ?? "upstream_error",
             code: failure.code ?? null,
           };
-          return declareDropped(Response.json(
+          const failed = Response.json(
             { error },
             { status: httpStatusFromTerminalError(error) },
-          ));
+          );
+          // Issue #358: a turn-queue refusal is backpressure, not a provider failure. Publish the
+          // queue's own deferral hint beside the typed 429 so an OpenAI-compatible caller (Hindsight
+          // parallelises retain) sleeps instead of retrying into the same saturated account. The value
+          // comes from the listener's own ProviderCore, so it is the budget that actually refused.
+          if (failure.code === CHATGPT_TURN_QUEUE_TIMEOUT_CODE
+            || failure.code === CHATGPT_TURN_QUEUE_FULL_CODE) {
+            failed.headers.set("retry-after", String(sharedProviderCore.turnQueueRetryAfterSeconds()));
+          }
+          return declareDropped(failed);
         }
         return declareDropped(
           Response.json(toChatCompletion(payload, translation.model), { status: upstream.ok ? 200 : upstream.status }),

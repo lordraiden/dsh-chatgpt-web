@@ -231,6 +231,48 @@ export function chatGptRetainedSurfaceBusyError(): ChatGptWebAdapterError {
   );
 }
 
+export const CHATGPT_TURN_QUEUE_TIMEOUT_CODE = "turn_queue_timeout";
+export const CHATGPT_TURN_QUEUE_FULL_CODE = "turn_queue_full";
+
+/**
+ * The account fan-out bound stayed full for the whole wait budget, or the bounded queue itself was
+ * already full (issue #358).
+ *
+ * This is **backpressure, not a provider failure**: the turn never started, nothing was submitted and
+ * ChatGPT never saw the request, so retrying after the advertised delay is safe. It is a 429 because
+ * that is what an OpenAI-compatible caller already understands as "slow down and retry"; the stable
+ * code says *which* limit answered, and the HTTP surface publishes the queue's own `Retry-After`
+ * beside it so a fan-out client (Hindsight parallelises retain) defers instead of retrying into the
+ * same saturated account.
+ *
+ * `retryable: false` is deliberate: the service's own retry authority must not spend the budget again
+ * inside the same turn. The *caller* retries, after the delay, which is the retry boundary the
+ * architecture assigns to it.
+ */
+export function chatGptTurnQueueBackpressureError(input: {
+  readonly reason: "wait_budget_exhausted" | "queue_full";
+  readonly retryAfterSeconds: number;
+  readonly waitBudgetMs: number;
+  readonly depth: number;
+  readonly capacity: number;
+}): ChatGptWebAdapterError {
+  const message = input.reason === "queue_full"
+    ? `ChatGPT Web already has ${input.depth} turns waiting for one of its ${input.capacity} `
+      + `simultaneous browser turns, so this turn was not started. Retry after `
+      + `${input.retryAfterSeconds} seconds.`
+    : `No ChatGPT Web browser slot became free within ${input.waitBudgetMs} ms (${input.capacity} `
+      + `simultaneous browser turns in use, ${input.depth} waiting), so this turn was not started. `
+      + `Retry after ${input.retryAfterSeconds} seconds.`;
+  return new ChatGptWebAdapterError(message, {
+    status: 429,
+    errorType: "rate_limit_error",
+    code: input.reason === "queue_full"
+      ? CHATGPT_TURN_QUEUE_FULL_CODE
+      : CHATGPT_TURN_QUEUE_TIMEOUT_CODE,
+    retryable: false,
+  });
+}
+
 /**
  * The Temporary Chat surface rehydrated the conversation mid-turn ("Loading chats" / "Loading
  * profile"), so the already-sent prompt and its in-flight generation were lost to a page reload.

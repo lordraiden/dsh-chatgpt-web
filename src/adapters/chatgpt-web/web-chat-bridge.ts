@@ -146,6 +146,11 @@ const CHATGPT_WEB_CHAT_CATEGORY_BY_CODE: Readonly<Record<string, WebChatErrorCat
   chatgpt_session_expired: "AUTH_EXPIRED",
   chatgpt_subscription_unavailable: "ACCOUNT_UNAVAILABLE",
   rate_limit_exceeded: "UPSTREAM_RATE_LIMITED",
+  // The account fan-out bound stayed full for the whole wait budget (issue #358). Backpressure, not a
+  // provider failure: the turn never started, so the same category as a rate limit is the honest one —
+  // the caller waits and retries, which is exactly what the 429 + Retry-After tells it to do.
+  turn_queue_timeout: "UPSTREAM_RATE_LIMITED",
+  turn_queue_full: "UPSTREAM_RATE_LIMITED",
   // Request and context admission.
   context_length_exceeded: "INPUT_TOO_LARGE",
   context_budget_exceeded: "INPUT_TOO_LARGE",
