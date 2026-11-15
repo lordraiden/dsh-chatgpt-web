@@ -178,7 +178,10 @@ describe("issue #248 — the OpenAI request is translated, never re-executed", (
     const cases: Array<[string, Record<string, unknown>, RegExp]> = [
       ["n > 1", { n: 2 }, /`n` greater than 1/],
       ["logprobs", { logprobs: true }, /logprobs/],
-      ["response_format json", { response_format: { type: "json_object" } }, /plain text/],
+      // `response_format` itself is no longer refused: issue #354 accepts `json_object` and
+      // `json_schema` and carries them as text (tests/issue-354-structured-output.test.ts). What this
+      // surface still refuses is a shape it cannot serve.
+      ["response_format malformed", { response_format: { type: "json_schema" } }, /response_format\.json_schema/],
     ];
     for (const [label, extra, pattern] of cases) {
       expect(() => translateChatCompletionsRequest({ ...base, ...extra })).toThrow(pattern);

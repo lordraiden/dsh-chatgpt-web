@@ -519,10 +519,19 @@ content**:
   execution path and no return channel to your harness: a tool-sending agent (DSH, Cline, …) works, but
   gets plain chat and no tool calls. Nothing is silent — an affected response carries
   `x-dsh-chatgpt-web-ignored-features` and the service logs one line per request.
-- **Refused with a typed `400`, never silently dropped:** `n > 1`; `logprobs` / `top_logprobs`;
-  `response_format` other than plain text; and attached content — `files`, `images`, `audio`, `video`,
+- **Refused with a typed `400`, never silently dropped:** `n > 1`; `logprobs` / `top_logprobs`; a
+  malformed or unknown `response_format`; and attached content — `files`, `images`, `audio`, `video`,
   `attachments` and non-text content parts (`image_url`, `input_audio`, files). Attached content is data
   the caller meant the model to see, so it can never be dropped.
+
+`response_format` is a wire format, not content: `{"type":"json_object"}` and
+`{"type":"json_schema","json_schema":{"name","strict","schema"}}` are accepted and carried into the
+turn as text (a consumer web chat has no native schema enforcement), the reply is returned verbatim,
+and the response declares the soft mode with `x-dsh-chatgpt-web-structured-output: soft`.
+`{"type":"text"}` and a request without `response_format` are unchanged, and `max_completion_tokens`
+is accepted as an alias of `max_tokens`. `finish_reason` is `"length"` only when the provider proves
+the output budget was exhausted (`max_output_tokens`); no current web provider enforces one, so a
+truncated web answer otherwise still reports `"stop"`.
 
 The capability/content split belongs to the common layer's own vocabulary
 (`WEB_CHAT_CAPABILITY_FEATURES` / `WEB_CHAT_CONTENT_FEATURES`), so the API does not maintain a second

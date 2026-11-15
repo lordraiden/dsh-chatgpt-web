@@ -2463,8 +2463,15 @@ export function startServer(
           `[dsh-chatgpt-web] web_chat_dropped_capabilities ${JSON.stringify({ endpoint: "chat-completions", dropped })}`,
         );
       }
+      // Structured output is carried softly (issue #354): the schema reaches the model as text on the
+      // turn's instruction channel, and this bridge has no native enforcement. The header says so, so
+      // a caller can tell "asked for JSON" from "enforced JSON" instead of inferring it from a reply
+      // that merely happens to be valid. Absent when the caller asked for nothing (`{"type":"text"}` or
+      // no `response_format`), which keeps those responses byte-for-byte unchanged.
+      const structuredOutputSoft = translation.structuredOutput !== undefined;
       const declareDropped = (response: Response): Response => {
         if (dropped.length > 0) response.headers.set("x-dsh-chatgpt-web-ignored-features", dropped.join(","));
+        if (structuredOutputSoft) response.headers.set("x-dsh-chatgpt-web-structured-output", "soft");
         return response;
       };
       return httpTurns.track(async (signal, bindIdentity) => {
