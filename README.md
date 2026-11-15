@@ -362,6 +362,38 @@ Rules:
 5. **Live reload.** Profiles live in `config.json` (`endpointProfiles`) and a create/edit/delete takes
    effect on the next request without a restart; `PUT /v1/control/config` accepts the whole set too.
 
+### Operator settings page
+
+One page shows the service's live state and edits the two facts that are safe to change at runtime:
+
+```text
+http://127.0.0.1:17841/v1/control/settings/
+```
+
+Enter the **control token** (kept in that tab's session storage, never in a URL). The page has five
+sections:
+
+1. **Status** (read-only) — version, mode, the account capability the configuration reports
+   (`solAvailable`/`proAvailable` → Sol, Pro or Free), session health from
+   `GET /v1/control/auth/health`, the catalogue rows, and the `turnQueue`/`turnAccounting` counters.
+2. **Chat** — `chatVisibility` and the live tuning fields (`turnTimeoutMs` and the
+   `CHATGPT_WEB_TUNING_DEFAULTS` keys). Saving posts to the existing `PUT /v1/control/config`, so the
+   configuration owner's validation is the only validation: an invalid value is refused with its
+   reason, never clamped. An empty field keeps the service default shown as its placeholder.
+3. **Endpoints** — a link to [Endpoint profiles](#endpoint-profiles-one-service-several-endpoints);
+   the page does not reimplement it.
+4. **Memory backend routing** — per operation (`retain`, `consolidation`, `reflect`) choose a bridge
+   profile, an external base URL or `disabled`, and copy the generated
+   `HINDSIGHT_API_<OP>_LLM_*` environment block. The block carries placeholders only: the page never
+   sees the API key and never calls the memory backend.
+5. **Doctor** — runs the same probe as `dsh-chatgpt-web doctor`, with a visible warning that it
+   performs one real browser turn.
+
+The page is served anonymously **by design** (a browser navigation cannot carry an `Authorization`
+header, and the token must never be in a URL); every data-carrying endpoint it calls stays
+control-token only. It is one static document — no external asset, no absolute URL — so it works on an
+offline container.
+
 ### Structured output (`response_format`)
 
 `POST /v1/chat/completions` accepts the OpenAI structured-output shapes:
@@ -487,6 +519,10 @@ HINDSIGHT_API_REFLECT_LLM_MODEL=chatgpt-web/high
 `chatgpt-web/light`/`medium`/`high` need a **Sol** account; on a Luna-only account use
 `chatgpt-web/luna` and `chatgpt-web/think`. On startup Hindsight sends one verification call per
 configured model, and a model that is down only logs a warning — so check this side too.
+
+The per-operation block above can be generated from the service's own
+[settings page](#operator-settings-page): pick a bridge profile (or an external base URL, or
+`disabled`) per operation and copy the result. It contains placeholders, never a secret.
 
 ### Verify the wiring
 

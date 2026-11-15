@@ -60,6 +60,10 @@ import {
   WEB_CHAT_ENDPOINT_PROFILES_PAGE_PATHS,
 } from "./web-chat/host/endpoint-profiles-page";
 import {
+  WEB_CHAT_SETTINGS_PAGE_HTML,
+  WEB_CHAT_SETTINGS_PAGE_PATHS,
+} from "./web-chat/host/settings-page";
+import {
   ENDPOINT_PROFILE_CONCURRENCY_EXCEEDED_CODE,
   applyEndpointProfile,
   endpointProfileCredential,
@@ -161,6 +165,7 @@ import { expandPreviousResponseInput, flushResponseState, rememberResponseState 
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
+import { runDoctor, type DoctorReport } from "./doctor";
 import { VERSION } from "./version";
 
 type HttpTrackedEndpoint = "models" | "responses" | "chat-completions" | "compact" | "search" | "unspecified";
@@ -1694,6 +1699,20 @@ function endpointProfilesPageResponse(): Response {
   });
 }
 
+/** The static operator settings page (issue #360). No data, no secret and no absolute URL. */
+function settingsPageResponse(): Response {
+  return new Response(WEB_CHAT_SETTINGS_PAGE_HTML, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      // Same policy as the other operator pages: this origin's control endpoints only, no external
+      // asset, and no native form submission that could turn a token field into a URL query.
+      "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
+      ...controlCorsHeaders(),
+    },
+  });
+}
+
 /**
  * The management view of the configured endpoint profiles (issue #356).
  *
@@ -2091,6 +2110,15 @@ export function startServer(
      * without a browser. An explicit list replaces the default entirely.
      */
     readonly webChatProviders?: readonly ComposedWebChatProvider[];
+    /**
+     * The doctor probe behind `POST /v1/control/doctor` (issue #360).
+     *
+     * Production leaves this out and runs the CLI's own {@link runDoctor}, so the settings page
+     * triggers exactly the probe `doctor` runs — including its one real browser turn, which is why
+     * the page warns about it. A test injects a deterministic report so the route can be exercised
+     * without a browser and without consuming a turn.
+     */
+    readonly doctor?: () => Promise<DoctorReport>;
   } = {},
 ): RunningServer {
   if (config.purpose === "dev-harness") {
@@ -2329,15 +2357,18 @@ export function startServer(
         ...activity(),
       });
     }
-    // The sign-in page (issue #276) and the endpoint-profiles page (issue #356): static documents,
-    // deliberately readable without the control token — a browser cannot put a header on a
-    // navigation, and each page's whole token handling exists to keep the token out of the URL. They
-    // carry no data; every endpoint below is guarded.
+    // The sign-in page (issue #276), the endpoint-profiles page (issue #356) and the settings page
+    // (issue #360): static documents, deliberately readable without the control token — a browser
+    // cannot put a header on a navigation, and each page's whole token handling exists to keep the
+    // token out of the URL. They carry no data; every endpoint below is guarded.
     if (req.method === "GET" && WEB_CHAT_AUTH_PAGE_PATHS.includes(url.pathname)) {
       return authPageResponse();
     }
     if (req.method === "GET" && WEB_CHAT_ENDPOINT_PROFILES_PAGE_PATHS.includes(url.pathname)) {
       return endpointProfilesPageResponse();
+    }
+    if (req.method === "GET" && WEB_CHAT_SETTINGS_PAGE_PATHS.includes(url.pathname)) {
+      return settingsPageResponse();
     }
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/control/")) {
       return new Response(null, { status: 204, headers: controlCorsHeaders() });
@@ -2500,6 +2531,38 @@ export function startServer(
         return Response.json(
           { status: "error", error: error instanceof Error ? error.message : String(error) },
           { status: 400, headers: controlCorsHeaders() },
+        );
+      }
+    }
+    if (req.method === "GET" && url.pathname === "/v1/control/catalogue") {
+      // The rows this service serves, from the one catalogue owner `/v1/models` uses (issue #360).
+      // The native Codex catalogue is deliberately not merged: it is an additive upstream view, and
+      // the settings page reports what the service itself routes. The rows carry no credential.
+      try {
+        const catalog = buildPublicModelCatalog(config, readCodexModelContextOverride());
+        return Response.json(
+          { models: Array.isArray(catalog.models) ? catalog.models : [] },
+          { headers: controlCorsHeaders() },
+        );
+      } catch (error) {
+        return Response.json(
+          { status: "error", error: nonSecretDiagnosticText(error) },
+          { status: 500, headers: controlCorsHeaders() },
+        );
+      }
+    }
+    if (req.method === "POST" && url.pathname === "/v1/control/doctor") {
+      // The CLI's own doctor, unmodified (issue #360): the page triggers exactly the probe `doctor`
+      // runs, including its one real browser turn. `runDoctor` reads the persisted configuration and
+      // dials the service's own `/v1/chat/completions`, so the check proves the deployment end to
+      // end; it is a POST because it is not idempotent and it consumes account quota.
+      const report = dependencies.doctor ?? (() => runDoctor());
+      try {
+        return Response.json(await report(), { headers: controlCorsHeaders() });
+      } catch (error) {
+        return Response.json(
+          { status: "error", error: nonSecretDiagnosticText(error) },
+          { status: 500, headers: controlCorsHeaders() },
         );
       }
     }
