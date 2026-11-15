@@ -2427,6 +2427,12 @@ export function startServer(
         // queue saw them, so no prompt text, conversation key, credential or raw session identity can
         // appear here.
         turnQueue: sharedProviderCore.turnQueueSnapshot(),
+        // Issue #359: per-request and per-operation browser-turn accounting — how many browser turns a
+        // request/operation actually started, how long it waited for an account slot, and how much
+        // context it replayed. A request that never reached the provider has no browser-turn field
+        // (absent, never zero). Counters and operation fingerprints only: no prompt text, no raw
+        // session identity, no conversation key.
+        turnAccounting: sharedProviderCore.turnAccountingSnapshot(),
       }, { headers: controlCorsHeaders() });
     }
     if (req.method === "GET" && url.pathname === "/v1/control/config") {

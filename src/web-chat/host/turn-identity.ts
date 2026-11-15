@@ -79,6 +79,12 @@ export const NATIVE_TURN_PURPOSE_KEY = "purpose";
  * `@earendil-works/pi-ai`'s OpenAI-completions adapter places the harness session id here verbatim
  * (`clampOpenAIPromptCacheKey` only truncates past 64 characters; it never hashes), so the value is a
  * declared identity rather than an opaque cache token when the caller sent one.
+ *
+ * A memory client (Hindsight) can use the same channel for its **operation** identity: its
+ * `cache_affinity` setting sends one per-operation trace id on every call of a retain/reflect/
+ * consolidation run, which this service reads as one conversation — so a reflect loop continues one
+ * provider conversation while a different run gets a different one (issue #359). That reuse is scoped
+ * to the operation by construction; it is never shared across operations.
  */
 export const NATIVE_PROMPT_CACHE_KEY_FIELD = "prompt_cache_key";
 
