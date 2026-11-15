@@ -254,7 +254,7 @@ export const WEB_CHAT_ENDPOINT_PROFILES_PAGE_HTML = `<!doctype html>
   }
 
   async function deleteProfile(profile) {
-    if (!confirm("Delete endpoint profile \"" + profile.name + "\"? Its path will answer 404.")) return;
+    if (!confirm('Delete endpoint profile "' + profile.name + '"? Its path will answer 404."')) return;
     try {
       await api(profileUrl(profile.name), "DELETE");
       setStatus("Deleted " + profile.name + ".");

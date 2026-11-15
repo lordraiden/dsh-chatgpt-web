@@ -51,6 +51,7 @@ import {
 import {
   WEB_CHAT_ENDPOINT_PROFILES_PAGE_HTML,
 } from "../src/web-chat/host/endpoint-profiles-page";
+import { WEB_CHAT_AUTH_PAGE_HTML } from "../src/web-chat/host/auth-page";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
 import type { ProviderAdapter } from "../src/adapters/base";
 import {
@@ -823,4 +824,28 @@ describe("issue #356 — the management surface keeps the control-token authorit
     expect(body.credential.required).toBe(true);
     expect(JSON.stringify(body)).not.toContain(API_KEY);
   });
+});
+
+describe("issue #356 — the served pages' inline scripts parse", () => {
+  function inlineScript(html: string): string {
+    const start = html.indexOf("<script>");
+    const end = html.indexOf("</script>", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    return html.slice(start + "<script>".length, end);
+  }
+
+  for (const [name, html] of [
+    ["endpoint profiles", WEB_CHAT_ENDPOINT_PROFILES_PAGE_HTML],
+    ["sign-in", WEB_CHAT_AUTH_PAGE_HTML],
+  ] as const) {
+    test(`the ${name} page's script compiles`, () => {
+      const script = inlineScript(html);
+      // A template-literal escape that resolves into the page (for example a `\"` written inside
+      // the TS template) breaks the whole script at parse time, which silently disables every
+      // handler: the operator clicks the button and nothing happens. Compiling the exact string the
+      // server serves is the only check that catches it.
+      expect(() => new Function(script)).not.toThrow();
+    });
+  }
 });
