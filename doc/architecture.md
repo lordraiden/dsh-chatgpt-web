@@ -1339,6 +1339,42 @@ caller's harness (§8.3, §32.2).
 
 The service's local, config-driven route registry performs route selection for a distribution with no separate host. It is not a second public provider registry: it still runs the shared driver resolver, which only maps an already-selected catalogue route to the implementation that owns it (see §17 and §32).
 
+### 16.1 Endpoint profiles are host views, not a second surface authority
+
+The service can expose more than one public endpoint from one deployment (issue #356). An **endpoint
+profile** is a host-owned view over the configured catalogue:
+
+~~~text
+operator names a profile
+        |
+        v
+host binds /p/<name>/v1 + a chatVisibility fact + optional model allow-list + optional turn budget
+        |
+        v
+the request resolves a request-scoped AppConfig
+        |
+        v
+the SAME ingress, provider core and retry authority execute the turn
+~~~
+
+A profile is deliberately not a new authority:
+
+- it selects among the catalogue models the service already serves; it adds no provider, no route and
+  no model, and a profile request never reaches the native Codex passthrough;
+- it does not become a second retry authority or execution engine — the wire contract, the ingress and
+  the provider core are the ones `/v1/*` already uses;
+- the `chatVisibility` it states is the provider fact from issue #355, not a second visibility
+  concept; the profile's explicit statement is the effective fact for its endpoint, and the default
+  endpoint keeps the configured behaviour;
+- the API key stays global: profiles mint no credential, so there is one authority for `/v1/*` and
+  `/p/*`, and the management routes remain control-token only.
+
+A profile that cannot be honoured — an unknown catalogue model, a visibility mode the deployment
+cannot produce (a `temporary` profile on the launcher browser host, or a non-ChatGPT route), or a
+deleted profile's path — fails closed with a typed refusal. It never falls back to the default
+endpoint's behaviour, because a silent fallback would put a Hindsight turn back into the account
+history the profile exists to keep it out of.
+
 ---
 
 ## 17. Provider driver resolution
