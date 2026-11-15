@@ -37,7 +37,7 @@ import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-parser";
 import { classifyChatGptWebRetry } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptBrowserStopReason, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import type { ChatGptTurnQueueTicket } from "./turn-queue";
 import type { ChatGptTurnAccountingRequest, ChatGptTurnBrowserTurn, ChatGptTurnPromptKind } from "./turn-accounting";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
@@ -466,7 +466,9 @@ function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (
 
 function emitBrowserCompletion(outcome: ChatGptBrowserOutcome, usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
   if (outcome.type === "error") throw outcome.error;
-  emit({ type: "done", stopReason: "stop", endTurn: true, usage });
+  // A partial answer from the opt-in turn-timeout path is the one truncation this adapter can prove,
+  // and it reports `max_tokens` so the bridge already maps it to `finish_reason: "length"` (issue #354).
+  emit({ type: "done", stopReason: chatGptBrowserStopReason(outcome), endTurn: true, usage });
 }
 
 function emitTraceEvents(trace: ChatGptTraceEvent[], emit: (event: AdapterEvent) => void): void {
@@ -1064,7 +1066,18 @@ export function createChatGptWebAdapter(
         },
       );
     };
-    const runBrowserTurn = (turn: WebSurfaceTurn): Promise<string> => trackBrowserRun(transport.run(turn));
+    /**
+     * Whether the current browser turn concluded with a partial answer because its clock expired
+     * (issue #360 follow-up). The worker reports it through `onTruncated`; the transport result stays
+     * a plain string so no other seam has to change.
+     */
+    let browserTruncated = false;
+    const runBrowserTurn = (turn: WebSurfaceTurn): Promise<string> => trackBrowserRun(transport.run({
+      ...turn,
+      onTruncated: () => {
+        browserTruncated = true;
+      },
+    }));
     /**
      * Record the prompt one browser turn compiled: its kind (a fresh conversation or a delta on the
      * operation's conversation), the messages it carried and its compiled size. A continuation
@@ -1365,6 +1378,7 @@ export function createChatGptWebAdapter(
         mode: "read-only",
         capabilitySnapshot,
         browser: browserTurn.browser,
+        truncated: () => browserTruncated,
         physicalSettlement: browserTurn.physicalSettlement,
         trace,
         text,
@@ -1446,6 +1460,7 @@ export function createChatGptWebAdapter(
       token: token.promise,
       externalProgress,
       browser: browserTurn.browser,
+      truncated: () => browserTruncated,
       physicalSettlement: browserTurn.physicalSettlement,
       trace,
       text,

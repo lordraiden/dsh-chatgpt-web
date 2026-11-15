@@ -12,8 +12,36 @@ import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concur
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
 
 export type ChatGptBrowserOutcome =
-  | { type: "final"; answer: string }
+  | {
+    type: "final";
+    answer: string;
+    /**
+     * The answer is the visible partial text of a turn that ended on the bridge's own clock because
+     * the caller opted into `partialOnTurnTimeout` (issue #360 follow-up). It is a truncation signal,
+     * not a provider claim: the bridge reports `stopReason: "max_tokens"` so the caller sees
+     * `finish_reason: "length"` instead of mistaking the cut-off answer for a complete one.
+     */
+    truncated?: boolean;
+  }
   | { type: "error"; error: Error };
+
+/**
+ * The adapter `stopReason` one settled browser outcome reports.
+ *
+ * A truncated outcome is the only case where the bridge *proves* the answer was cut off (its own turn
+ * clock expired with visible text), so it is the only case that reports `"max_tokens"`. The Responses
+ * bridge already maps that to `status: "incomplete"` / `incomplete_details.reason: "max_output_tokens"`
+ * and the chat-completions surface to `finish_reason: "length"` (issue #354); this function must not
+ * duplicate that mapping.
+ *
+ * @param outcome - the settled `final` browser outcome.
+ * @returns `"max_tokens"` when the answer is a partial one, otherwise `"stop"`.
+ */
+export function chatGptBrowserStopReason(
+  outcome: Extract<ChatGptBrowserOutcome, { type: "final" }>,
+): "stop" | "max_tokens" {
+  return outcome.truncated === true ? "max_tokens" : "stop";
+}
 
 export interface ChatGptTraceEvent {
   kind: "reasoning" | "commentary";
@@ -117,6 +145,12 @@ export class ChatGptTextFeed {
 interface ChatGptTurnRuntimeBase {
   readonly capabilitySnapshot: CapabilitySnapshot;
   browser: Promise<string>;
+  /**
+   * Whether the browser turn concluded with a partial answer because its clock expired (issue #360
+   * follow-up). Read when the browser promise settles, so the truncation signal reaches the outcome
+   * without changing the promise's `string` contract every transport seam already depends on.
+   */
+  truncated?: () => boolean;
   /** Physical helper/Playwright settlement, including the launcher end/release acknowledgement. */
   physicalSettlement: Promise<void>;
   trace: ChatGptTraceFeed;
@@ -273,7 +307,11 @@ export class ChatGptTurnSession {
       },
     );
     this.browserOutcome = runtime.browser
-      .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
+      .then(answer => ({
+        type: "final",
+        answer,
+        ...(runtime.truncated?.() === true ? { truncated: true } : {}),
+      }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
       .then(outcome => {
       this.settledBrowserOutcome = outcome;

@@ -262,6 +262,71 @@ export function resolveTurnTimeoutMs(
   return parsed;
 }
 
+/** The environment variable that opts a deployment into returning a partial answer on timeout. */
+export const PARTIAL_ON_TIMEOUT_ENV = "DSH_CHATGPT_WEB_PARTIAL_ON_TIMEOUT";
+
+/**
+ * Resolve the opt-in "return the visible partial answer when the turn clock expires" switch.
+ *
+ * Precedence mirrors {@link resolveTurnTimeoutMs}: an explicit `chatgptWeb.partialOnTurnTimeout` wins
+ * over `DSH_CHATGPT_WEB_PARTIAL_ON_TIMEOUT`, and absent both the switch is **off**. The default is
+ * deliberate: a deployment that does not opt in keeps the existing `504 turn_timeout` behaviour
+ * exactly, so this change is invisible to it.
+ *
+ * The environment value is validated here, once, with a message that names the variable: `1`/`true`
+ * enable it, `0`/`false` disable it, and anything else is a configuration mistake that must fail
+ * closed and visibly rather than silently select one of the two behaviours.
+ *
+ * @param configured - the value authored in the provider configuration, if any.
+ * @param env - the environment to read (a seam for deterministic tests).
+ * @returns whether a timed-out turn that has visible text should return that text instead of failing.
+ * @throws {Error} when the configured value is not a boolean or the environment value is not one of
+ *   the accepted spellings.
+ */
+export function resolvePartialOnTurnTimeout(
+  configured: boolean | undefined,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  if (configured !== undefined) {
+    if (typeof configured !== "boolean") {
+      throw new Error("ChatGPT Web partialOnTurnTimeout must be a boolean");
+    }
+    return configured;
+  }
+  const raw = env[PARTIAL_ON_TIMEOUT_ENV];
+  if (raw === undefined || raw.trim() === "") return false;
+  const text = raw.trim().toLowerCase();
+  if (text === "1" || text === "true") return true;
+  if (text === "0" || text === "false") return false;
+  throw new Error(
+    `Invalid ${PARTIAL_ON_TIMEOUT_ENV}=${JSON.stringify(raw)}: expected 1 or true to return the `
+    + "visible partial answer when the bridge turn clock expires, or 0 or false to keep failing the "
+    + "turn with turn_timeout.",
+  );
+}
+
+/**
+ * What the main turn loop does when its absolute deadline expires (issue #360 follow-up).
+ *
+ * `partial` is the opt-in behaviour: the visible answer is concluded with a truncation signal so the
+ * caller receives `finish_reason: "length"` instead of a `504 turn_timeout` that discards it.
+ * `timeout` is the existing behaviour — and the only one reachable while the switch is off — which
+ * raises the bridge's own `turn_timeout` error.
+ *
+ * The other deadline checks (the observation loop and the Bigger Context transaction) keep throwing:
+ * they do not guard a turn whose visible answer could be returned.
+ *
+ * @param partialOnTurnTimeout - the resolved opt-in switch.
+ * @param visibleText - the last visible assistant text observed in this turn.
+ * @returns which behaviour the deadline check must apply.
+ */
+export function chatGptTurnTimeoutAction(
+  partialOnTurnTimeout: boolean,
+  visibleText: string,
+): "partial" | "timeout" {
+  return partialOnTurnTimeout && visibleText.trim().length > 0 ? "partial" : "timeout";
+}
+
 /**
  * Default bounded wait for a finalized answer during a read-only recovery of a retained
  * conversation. Callers that own a user-facing budget (the Advisor) pass their own value.
@@ -884,8 +949,10 @@ export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterErro
  * The affordance ChatGPT renders when a generation was cut off by the output budget.
  *
  * Localised labels are included because the surface follows the account language. This is the evidence
- * a future `stopReason: "max_tokens"` mapping needs; today the bridge still reports `"stop"` because it
- * cannot prove the reason, and this probe only records what the page shows (issue #360 follow-up).
+ * a `stopReason: "max_tokens"` mapping needs. The bridge reports `"stop"` for an ordinary completed
+ * turn because it cannot prove the reason there; the opt-in `partialOnTurnTimeout` path reports
+ * `"max_tokens"` because *its* truncation is proven by the bridge's own expired clock (issue #360
+ * follow-up). This probe only records what the page shows.
  */
 export const CHATGPT_TRUNCATION_AFFORDANCE =
   /continue generating|seguir generando|continuer la g[ée]n[ée]ration|weiter generieren|继续生成|繼續生成|続きを生成|계속 생성/i;
@@ -1536,6 +1603,12 @@ export interface BrowserTurn {
   onCommentary?: (text: string, continuation?: boolean) => void;
   /** Append-only, structurally stable Markdown chunks. */
   onTextDelta: (delta: string) => void;
+  /**
+   * The turn is concluding with a partial answer because the bridge's turn clock expired and the
+   * caller opted into `partialOnTurnTimeout` (issue #360 follow-up). The answer itself still travels
+   * through the normal result; this callback only carries the truncation signal.
+   */
+  onTruncated?: () => void;
   /** Proven current-turn MCP activity; never response content or completion. */
   externalProgress?: ChatGptTurnProgressReader;
   /** Atomically fences browser completion against concurrent MCP claims in the turn broker. */
@@ -1603,6 +1676,12 @@ export interface ResolvedBrowserConfig {
   chromeExecutablePath: string;
   /** The bridge's absolute turn ceiling; always resolved (issue #329). */
   turnTimeoutMs: number;
+  /**
+   * Opt-in: when the turn ceiling expires with visible assistant text, conclude the turn with that
+   * text and a truncation signal instead of failing it with `turn_timeout` (issue #360 follow-up).
+   * Defaults to false, so the existing 504 behaviour is unchanged for every deployment.
+   */
+  partialOnTurnTimeout: boolean;
   /**
    * The ChatGPT surface this worker's turns land on, resolved from the provider fact (issue #355).
    * `persistent` is the history-visible conversation surface and today's behaviour.
@@ -2256,6 +2335,9 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   // turn must be declared lost by the bridge, never left to a client's own timeout.
   const tuning = resolveChatGptWebTuning(configured.tuning);
   const turnTimeoutMs = resolveTurnTimeoutMs(configured.turnTimeoutMs ?? tuning.turnTimeoutMs);
+  // Opt-in and off by default: a deployment that does not ask for the partial answer keeps the
+  // existing 504 turn_timeout behaviour exactly (issue #360 follow-up).
+  const partialOnTurnTimeout = resolvePartialOnTurnTimeout(configured.partialOnTurnTimeout);
   if (browserHost === "launcher" && !browserHostDescriptorPath) {
     throw new Error("Launcher browser host requires chatgptWeb.browserHostDescriptorPath");
   }
@@ -2281,6 +2363,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     storageStatePath: resolveProviderStorageStatePath(configured.storageStatePath),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     turnTimeoutMs,
+    partialOnTurnTimeout,
     // Resolved once, here, from the provider fact: the navigation target and the surface assertion
     // both read this, so they cannot disagree about which ChatGPT surface a turn belongs on.
     chatVisibility: chatGptWebChatVisibility(provider),
@@ -5523,6 +5606,9 @@ export class ChatGptBrowserWorker {
 
       let lastHeartbeat = 0;
       let finalText = "";
+      // The deadline check runs before this iteration's snapshot, so a timed-out turn can only
+      // return what an earlier observation already saw (issue #360 follow-up).
+      let lastVisibleText = "";
       let sawRunning = false;
       let loggedCompletionWait = false;
       let loggedTruncationProbe = false;
@@ -5542,6 +5628,39 @@ export class ChatGptBrowserWorker {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
         console.warn(`[chatgpt-web] consistency warning handled gracefully ${safeErrorDescriptor(error)}`);
         return { markdown: "", delta: "" };
+      };
+      /**
+       * Conclude a timed-out turn with the visible answer instead of discarding it (issue #360
+       * follow-up).
+       *
+       * The answer must be exactly what the caller's text feed already received, so it is produced by
+       * flushing the same Markdown buffer a normal completion flushes — never by returning the raw DOM
+       * text, which the adapter would reject as an inconsistent Markdown stream. The truncation signal
+       * is published by the caller (`turn.onTruncated`), because only it knows the turn is ending on
+       * its own clock rather than on the provider's completion action.
+       */
+      const concludePartialTurn = (visibleText: string): string => {
+        const final = (() => {
+          try {
+            return markdownBuffer.finish();
+          } catch (error) {
+            return throwMarkdownConsistencyError(error);
+          }
+        })();
+        if (final.delta) emitMarkdownDelta(final.delta);
+        if (checkpointStream && final.markdown) {
+          // The Luna checkpoint tail is private provider state: reuse the normal completion path so a
+          // partial turn strips and validates it exactly as a complete one does.
+          const completed = checkpointStream.finishOptional(visibleText);
+          if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
+          return completed.answer;
+        }
+        if (final.markdown) return final.markdown;
+        // Nothing was committed yet (the deadline expired before the first stable segment): the
+        // visible text is the answer, and it must also reach the feed so the adapter's stream
+        // consistency check holds.
+        if (visibleText) turn.onTextDelta(visibleText);
+        return visibleText;
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
       const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
@@ -5568,6 +5687,15 @@ export class ChatGptBrowserWorker {
           throw new DOMException("ChatGPT web turn aborted", "AbortError");
         }
         if (deadline !== undefined && Date.now() >= deadline) {
+          // Opt-in only (issue #360 follow-up): a caller that asked for the partial answer receives
+          // the visible text with a truncation signal instead of a 504 that discards it. With the
+          // switch off — the default — this branch is unreachable and the turn still fails.
+          if (chatGptTurnTimeoutAction(this.config.partialOnTurnTimeout, lastVisibleText) === "partial") {
+            finalText = concludePartialTurn(lastVisibleText);
+            turn.onTruncated?.();
+            console.warn(`[chatgpt-web] turn_timeout partial=true chars=${finalText.length}`);
+            break;
+          }
           throw this.turnDeadlineExceeded("ChatGPT web turn timed out");
         }
         await throwIfChatGptSessionFailureAlert(page);
@@ -5629,6 +5757,11 @@ export class ChatGptBrowserWorker {
             await diagnostics.capture(page, "response-page-rebound");
             continue;
           }
+        }
+        if (snapshot.responsePresent && snapshot.visibleText) {
+          // Remember the last visible answer so a deadline that expires before the next observation
+          // can still conclude the turn with it (issue #360 follow-up).
+          lastVisibleText = snapshot.visibleText;
         }
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
         // The page was read successfully, so the fault budget is genuinely consecutive even when

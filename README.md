@@ -570,7 +570,10 @@ Rules this deployment enforces:
    failure. `/v1/chat/completions` streams standard SSE `: keep-alive` comments while the provider is
    working, so a healthy turn of 10–15 minutes does not trip a client's idle timer; **no client timeout
    needs to be raised**. An explicit `chatgptWeb.turnTimeoutMs` (or `tuning.turnTimeoutMs`) in
-   `config.json` wins over the environment variable.
+   `config.json` wins over the environment variable. `chatgptWeb.partialOnTurnTimeout` (or
+   `DSH_CHATGPT_WEB_PARTIAL_ON_TIMEOUT=1`) is **off by default**: when enabled, a timed-out turn that
+   already shows assistant text returns that partial answer with `finish_reason: "length"` instead of
+   failing with `turn_timeout`.
 
 The [`SECURITY.md`](./SECURITY.md) policy applies: this is a personal, single-account bridge, not a
 public multi-tenant service, and the provider's terms of service are yours to honour.
