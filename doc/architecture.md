@@ -1375,6 +1375,34 @@ deleted profile's path — fails closed with a typed refusal. It never falls bac
 endpoint's behaviour, because a silent fallback would put a hidden turn back into the account
 history the profile exists to keep it out of.
 
+### 16.2 The operator settings page is a client, never an authority
+
+`GET /v1/control/settings/` (and `/index.html`) is one static document served anonymously by design,
+exactly like the sign-in and endpoint-profiles pages: a browser navigation cannot carry an
+`Authorization` header, and the control token must never be put in a URL. Every data-carrying endpoint
+it calls stays control-token only.
+
+It owns no behaviour of its own:
+
+- **No second validator.** The chat form posts to the existing `PUT /v1/control/config`, so
+  `validateChatGptWebTuning` / `validateChatGptWebChatVisibility` and the provider-facts check remain
+  the only validation; the page renders the refusal it receives.
+- **No second catalogue or status owner.** The status section reads `/v1/control/status`,
+  `/v1/control/auth/health` and `/v1/control/catalogue`, and the catalogue route publishes the rows
+  `buildPublicModelCatalog` already produces for `/v1/models` (the native Codex catalogue is
+  deliberately not merged: it is an additive upstream view, not something this service routes).
+- **No second routing authority.** The memory-backend section only *writes an environment block*:
+  the bridge cannot configure its client, so the page renders the per-operation
+  `HINDSIGHT_API_<OP>_LLM_*` variables for the operator to copy, with placeholders for every secret.
+  It calls no external service and never sees the API key.
+- **No second probe.** `POST /v1/control/doctor` runs the CLI's own `runDoctor`, so the page triggers
+  exactly the probe `doctor` runs — including its one real browser turn, which the page states before
+  the operator clicks. It is a POST because it is not idempotent and consumes account quota.
+
+The page is one static document with no external asset and no absolute URL, so it works on an offline
+container; its inline script is compiled by a regression test, because a template-literal escape that
+resolves into the served script disables every handler at parse time.
+
 ---
 
 ## 17. Provider driver resolution
