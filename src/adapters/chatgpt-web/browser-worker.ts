@@ -5525,6 +5525,7 @@ export class ChatGptBrowserWorker {
       let finalText = "";
       let sawRunning = false;
       let loggedCompletionWait = false;
+      let loggedTruncationProbe = false;
       let capturedResponse = false;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
@@ -5758,6 +5759,22 @@ export class ChatGptBrowserWorker {
               finalText = final.markdown;
             }
             break;
+          }
+          // A generation cut by the output budget stops without the completion action and leaves a
+          // "continue generating" affordance instead. That state is the terminal evidence for a
+          // truncated turn: record it here, where it is observed, instead of waiting for an action
+          // that will never come (which stalls the turn until the bridge's own clock kills it).
+          if (!loggedTruncationProbe && !completionReady && !running
+            && snapshot.responsePresent && snapshot.visibleText.length > 0) {
+            loggedTruncationProbe = true;
+            const truncation = page.getByRole("button", { name: CHATGPT_TRUNCATION_AFFORDANCE });
+            const truncationCandidates = await truncation.count().catch(() => 0);
+            logChatGptSurfaceDiagnostic("truncation-affordance-stall", {
+              trace: turn.traceId,
+              present: truncationCandidates > 0,
+              candidates: truncationCandidates,
+              textChars: snapshot.visibleText.length,
+            });
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
             loggedCompletionWait = true;
