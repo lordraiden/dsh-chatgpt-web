@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.1.3
+
+- Normalize invalid JSON escapes in a structured reply. A consumer-web model renders JSON keys as if
+  they were Markdown, so a key `max_tokens` came back as `"max\\_tokens"`; JSON has no `\\_` escape, so
+  the reply was invalid and a structured caller (a memory backend's reflect loop) lost the turn on
+  every attempt. When the request asked for `response_format`, the surface now drops the backslash of
+  every escape JSON does not define. It is a **transport** normalization, not schema enforcement:
+  nothing is validated, reordered or invented, every valid escape is preserved byte-for-byte, and a
+  request without `response_format` still receives the model's text verbatim. Streaming replies are
+  not normalized (a delta boundary can split an escape); the documented structured caller path is
+  non-streaming.
+
 ## 1.1.2
 
 - Harden the structured-output instruction: it now explicitly forbids escaping characters inside JSON

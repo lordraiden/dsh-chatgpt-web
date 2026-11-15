@@ -2926,7 +2926,10 @@ export function startServer(
           return declareDropped(failed);
         }
         return declareDropped(
-          Response.json(toChatCompletion(payload, translation.model), { status: upstream.ok ? 200 : upstream.status }),
+          Response.json(
+            toChatCompletion(payload, translation.model, { normalizeStructuredJson: structuredOutputSoft }),
+            { status: upstream.ok ? 200 : upstream.status },
+          ),
         );
       }, req.signal, process.platform, "chat-completions", profile?.name);
     }
