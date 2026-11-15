@@ -5,14 +5,28 @@ import {
   type WebChatContinuationOutcome,
   type WebChatRetryRefusal,
 } from "../../web-chat/core";
+import { isEphemeralWebChatTurn } from "../../web-chat/core/turn-delivery";
 import {
   createConversationAdmissionGate,
   DEFAULT_TRANSPORT_ADMISSION_WAIT_MS,
   type ConversationAdmissionGate,
 } from "../../web-chat/transport/conversation-admission";
-import { ChatGptWebAdapterError, chatGptRetainedSurfaceBusyError } from "./adapter-error";
+import { fingerprintDiagnosticValue, safeErrorDescriptor } from "../../lib/safe-diagnostics";
+import {
+  ChatGptWebAdapterError,
+  chatGptRetainedSurfaceBusyError,
+  chatGptTurnQueueBackpressureError,
+} from "./adapter-error";
 import type { CapabilitySnapshot } from "./capability-projector";
 import { MAX_CHATGPT_BROWSER_TABS, chatGptBrowserTurnLimitError } from "./concurrency";
+import {
+  createChatGptTurnQueue,
+  resolveChatGptTurnQueueWaitMs,
+  type ChatGptTurnQueue,
+  type ChatGptTurnQueueOptions,
+  type ChatGptTurnQueueSnapshot,
+  type ChatGptTurnQueueTicket,
+} from "./turn-queue";
 
 export const CHATGPT_WEB_PROVIDER_CORE_SERVICE = "chatgpt-web" as const;
 
@@ -257,8 +271,40 @@ export class BrowserAccountLeaseRegistry {
    */
   private readonly accountLeases = new Map<string, Set<BrowserAccountLease>>();
 
-  private accountKey(descriptor: BrowserAccountLeaseDescriptor): string {
+  /**
+   * Listeners woken when a lease stops counting against its account.
+   *
+   * The turn queue (issue #358) is the one consumer: it never counts capacity itself, so it must learn
+   * about a release from the owner of the bound. A listener is never allowed to throw into the release
+   * path — a lease release is a settlement step and must not fail because an observer did.
+   */
+  private readonly releaseListeners = new Set<(accountKey: string) => void>();
+
+  /**
+   * The stable account grouping this registry bounds.
+   *
+   * One derivation, used by `acquire` and by the queue that waits in front of it, so a waiter and the
+   * lease it later acquires can never disagree about which account they belong to.
+   */
+  accountKeyFor(descriptor: Pick<BrowserAccountLeaseDescriptor, "serviceId" | "accountIdentity">): string {
     return `${descriptor.serviceId}:${fingerprint(descriptor.accountIdentity)}`;
+  }
+
+  /** Live leases for one account key, dropping settled entries a caller never handed back. */
+  activeForAccountKey(accountKey: string): number {
+    return this.liveAccountLeases(accountKey).size;
+  }
+
+  /** Observe lease releases. Returns an unsubscribe function; registration is idempotent per listener. */
+  onRelease(listener: (accountKey: string) => void): () => void {
+    this.releaseListeners.add(listener);
+    return () => {
+      this.releaseListeners.delete(listener);
+    };
+  }
+
+  private accountKey(descriptor: BrowserAccountLeaseDescriptor): string {
+    return this.accountKeyFor(descriptor);
   }
 
   /** Live account leases, dropping settled entries a caller never handed back. */
@@ -314,6 +360,15 @@ export class BrowserAccountLeaseRegistry {
     if (accountLeases) {
       accountLeases.delete(lease);
       if (accountLeases.size === 0) this.accountLeases.delete(accountKey);
+    }
+    // The bound's own release point: a waiter in front of it learns that one slot is free. The lease
+    // is already gone above, so an observer that re-checks capacity reads the post-release truth.
+    for (const listener of this.releaseListeners) {
+      try {
+        listener(accountKey);
+      } catch (error) {
+        console.warn(`[chatgpt-web] browser lease release listener failed ${safeErrorDescriptor(error)}`);
+      }
     }
   }
 
@@ -798,6 +853,14 @@ export interface ChatGptWebProviderCoreTurnInput {
   capabilitySnapshot: CapabilitySnapshot;
   retryPolicy?: RetryPolicy;
   recovery?: ProviderRecovery;
+  /**
+   * The account slot this turn waited for ({@link waitForTurnSlot}, issue #358).
+   *
+   * Optional: a direct `begin` (a test, a caller that skipped the wait) still takes the lease and is
+   * still refused by the bound. When present, the queue releases it at this turn's retirement, beside
+   * the lease, so the wait's capacity view and the bound can never drift apart.
+   */
+  turnSlot?: ChatGptTurnQueueTicket;
 }
 
 export class ChatGptWebProviderCore {
@@ -828,6 +891,17 @@ export class ChatGptWebProviderCore {
    * providers' transport lease composes too — one mechanism, one measured bound.
    */
   private readonly conversationAdmission: ConversationAdmissionGate;
+  /**
+   * The bounded wait queue in front of the account fan-out bound (issue #358).
+   *
+   * It owns *when* a turn may ask for a lease, never the lease itself: `waitForTurnSlot` waits for one
+   * of the account's `MAX_CHATGPT_BROWSER_TABS` slots, and the ticket it returns is committed by
+   * `begin` and released at the turn's retirement, beside the lease. The lease registry stays the only
+   * capacity owner; the queue reads its live count and is woken by its releases.
+   */
+  private readonly turnQueue: ChatGptTurnQueue;
+  /** The queue ticket each begun turn holds, so retirement (and `forget`) can release it. */
+  private readonly turnSlots = new Map<string, ChatGptTurnQueueTicket>();
   private closed = false;
 
   private rememberRetired(executionKey: string): void {
@@ -934,6 +1008,11 @@ export class ChatGptWebProviderCore {
      * bound in this provider.
      */
     conversationAdmissionWaitMs = DEFAULT_TRANSPORT_ADMISSION_WAIT_MS,
+    /**
+     * Turn-queue bounds (issue #358). The defaults are the production ones; a deterministic test
+     * injects a short budget instead of waiting the production minute out.
+     */
+    turnQueueOptions: Partial<Pick<ChatGptTurnQueueOptions, "waitBudgetMs" | "maxWaiters" | "maxPerCaller">> = {},
   ) {
     if (!Number.isFinite(shutdownSettlementGraceMs) || shutdownSettlementGraceMs < 0) {
       throw new Error("ProviderCore shutdown settlement grace must be a non-negative finite number");
@@ -947,6 +1026,20 @@ export class ChatGptWebProviderCore {
       abortError: conversationWaitAbortError,
       closedError: () => new Error("ChatGPT Web ProviderCore is shut down"),
     });
+    this.turnQueue = createChatGptTurnQueue({
+      capacity: MAX_CHATGPT_BROWSER_TABS,
+      waitBudgetMs: turnQueueOptions.waitBudgetMs ?? resolveChatGptTurnQueueWaitMs(),
+      ...(turnQueueOptions.maxWaiters !== undefined ? { maxWaiters: turnQueueOptions.maxWaiters } : {}),
+      ...(turnQueueOptions.maxPerCaller !== undefined ? { maxPerCaller: turnQueueOptions.maxPerCaller } : {}),
+      // The account's live leases are the bound's own count: the queue never keeps a second one.
+      activeLeases: accountKey => this.leases.activeForAccountKey(accountKey),
+      refusal: chatGptTurnQueueBackpressureError,
+      abortError: conversationWaitAbortError,
+      closedError: () => new Error("ChatGPT Web ProviderCore is shut down"),
+    });
+    // The bound's release point is the only wake-up a waiter needs: the queue holds nothing while it
+    // waits and is never polled.
+    this.leases.onRelease(accountKey => this.turnQueue.notifyReleased(accountKey));
   }
 
   get(executionKey: string): ProviderTurnLifecycle | undefined {
@@ -1010,6 +1103,61 @@ export class ChatGptWebProviderCore {
     return this.conversationAdmission.waiterCount();
   }
 
+  /**
+   * Wait for one of the account's fan-out slots, in front of `begin` (issue #358).
+   *
+   * This is the **only** new decision the queue makes: *when* a turn may ask for a lease. It runs after
+   * conversation admission (a turn on a busy conversation must not hold an account slot while it waits)
+   * and before the continuity decision, because that decision has side effects: a turn that never got a
+   * slot must not advance a conversation generation or record an unconfirmed conversation. Nothing was
+   * submitted, so the caller's retry after the advertised delay is safe.
+   *
+   * A reconnect of an already-begun turn already owns its lease and must not take a second slot; the
+   * caller skips this method when {@link get} returns a live turn. The returned ticket must be passed to
+   * {@link begin} so its release is tied to the turn's retirement, or abandoned when the turn does not
+   * become a provider turn.
+   *
+   * @param input - the account the turn will lease, its caller identity for fairness/metrics, the
+   *   caller's declared purpose (housekeeping is served first) and the turn's cancellation.
+   * @returns the granted slot ticket.
+   */
+  async waitForTurnSlot(input: {
+    readonly accountIdentity: string;
+    /** The caller's declared identity, raw: the queue stores only its fingerprint. */
+    readonly callerKey: string;
+    readonly purpose?: string;
+    readonly signal?: AbortSignal;
+  }): Promise<ChatGptTurnQueueTicket> {
+    if (this.closed) throw new Error("ChatGPT Web ProviderCore is shut down");
+    const accountKey = this.leases.accountKeyFor({
+      serviceId: this.serviceId,
+      accountIdentity: input.accountIdentity,
+    });
+    return await this.turnQueue.acquire({
+      accountKey,
+      // Fairness and metrics group by a fingerprint: no raw caller identity (and therefore no session
+      // id) ever reaches the queue or its control-surface snapshot.
+      callerKey: fingerprintDiagnosticValue(input.callerKey),
+      priority: isEphemeralWebChatTurn(input.purpose) ? "housekeeping" : "conversational",
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+  }
+
+  /** The deferral hint published with a queue refusal, in whole seconds. */
+  turnQueueRetryAfterSeconds(): number {
+    return this.turnQueue.retryAfterSeconds();
+  }
+
+  /**
+   * The queue's observable state, with the bound's own live lease count beside it.
+   *
+   * Counters and wait times only: callers are already fingerprints, and no prompt text, conversation
+   * key or credential can reach this shape.
+   */
+  turnQueueSnapshot(): ChatGptTurnQueueSnapshot & { readonly activeLeases: number } {
+    return { ...this.turnQueue.snapshot(), activeLeases: this.leases.activeCount() };
+  }
+
   /** The active turn holding a thread, excluding this execution's own. */
   private activeTurnForThread(
     nativeThreadId: string,
@@ -1056,6 +1204,9 @@ export class ChatGptWebProviderCore {
       if (existingRetryPolicy !== requestedRetryPolicy) {
         throw new Error("Provider execution key is already bound to a different retry policy");
       }
+      // A caller that waited for a slot but found its turn already begun owns no new slot: the existing
+      // turn's own retirement releases its own. Abandoning a redundant grant here keeps it from leaking.
+      input.turnSlot?.abandon();
       return existing;
     }
 
@@ -1137,6 +1288,11 @@ export class ChatGptWebProviderCore {
         // Retirement is the conversation's release point: a turn that held its admission slot has
         // stopped using it, and every waiter wakes to re-check instead of polling.
         this.releaseConversationAdmission(input.executionKey, input.nativeThreadId);
+        // The account slot is released at the same point as the lease (the lease itself is released
+        // just before this callback), so the queue's capacity view and the bound can never diverge.
+        const turnSlot = this.turnSlots.get(input.executionKey);
+        this.turnSlots.delete(input.executionKey);
+        this.turnQueue.release(turnSlot);
       },
     );
     const recovery = input.recovery ?? (this.wasRetired(input.executionKey) ? "REPLAY" : "NEW");
@@ -1144,6 +1300,14 @@ export class ChatGptWebProviderCore {
     turn.markLeased();
     this.capabilitySnapshotOwners.set(input.capabilitySnapshot.snapshotId, input.executionKey);
     this.turns.set(input.executionKey, turn);
+    // The slot ticket is recorded with the turn: a turn that never retires would otherwise hold an
+    // account slot forever, and `forget` (a turn removed outside retirement) must release it too.
+    if (input.turnSlot) {
+      this.turnSlots.set(input.executionKey, input.turnSlot);
+      // The lease exists, so the wait's grant becomes a held slot in the same synchronous step: the
+      // queue's capacity view and the bound cannot disagree even for a microtask.
+      input.turnSlot.commit();
+    }
     // The slot is recorded only once the turn really exists: everything above can throw (a lease
     // conflict, a capability conflict) and a failed `begin` must not leave a conversation reserved.
     if (input.nativeThreadId) {
@@ -1167,9 +1331,12 @@ export class ChatGptWebProviderCore {
       throw new Error(`Cannot forget provider turn before physical settlement: ${executionKey}`);
     }
     this.turns.delete(executionKey);
-    // A turn removed outside retirement still owns its conversation's admission slot; release it here
-    // too, so the slot can never outlive the turn it belongs to.
+    // A turn removed outside retirement still owns its conversation's admission slot and its account
+    // slot; release both here too, so neither can outlive the turn it belongs to.
     this.releaseConversationAdmission(executionKey, turn.snapshot().provenance.nativeThreadId);
+    const turnSlot = this.turnSlots.get(executionKey);
+    this.turnSlots.delete(executionKey);
+    this.turnQueue.release(turnSlot);
   }
 
   /**
@@ -1222,6 +1389,10 @@ export class ChatGptWebProviderCore {
     // Closing the admission owner clears every slot and wakes every waiter, so a waiter re-checks the
     // closed core and fails instead of holding a timer for the rest of its bound.
     this.conversationAdmission.close();
+    // The turn queue is closed the same way: a waiter that was still holding an HTTP connection is told
+    // the core is shutting down instead of waiting out its budget against a process that is going away.
+    this.turnQueue.close();
+    this.turnSlots.clear();
     this.capabilitySnapshotOwners.clear();
     this.retiredExecutions.clear();
     this.retiredCapabilitySnapshots.clear();

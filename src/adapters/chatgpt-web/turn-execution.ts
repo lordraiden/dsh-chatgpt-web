@@ -583,6 +583,11 @@ export class ChatGptTurnSessions {
       return existing;
     }
     const active = [...this.entries.values()].filter(session => session.isActive()).length;
+    // Last-resort guard, not the caller-facing bound (issue #358). A session is only created after its
+    // turn holds an account lease, so in the normal path this count is already bounded by the lease
+    // registry — and the bounded wait queue in front of that registry is what a caller actually meets.
+    // Reaching this refusal means a caller bypassed the queue; the shared sentence is kept so every
+    // enforcement site still says the same thing.
     if (active >= MAX_CHATGPT_BROWSER_TABS) throw chatGptBrowserTurnLimitError();
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
     const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId);

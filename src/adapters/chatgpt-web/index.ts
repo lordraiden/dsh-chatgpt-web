@@ -38,6 +38,7 @@ import { ChatGptToolStreamParser, type ParsedToolCall } from "./tool-stream-pars
 import { classifyChatGptWebRetry } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import type { ChatGptTurnQueueTicket } from "./turn-queue";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
@@ -1799,9 +1800,29 @@ export function createChatGptWebAdapter(
             : retired
               ? "REPLAY"
               : "NEW";
+        // The account fan-out bound is a rate, not a permanent condition (issue #358): wait for one of
+        // the account's slots instead of failing the instant five turns are in flight. The wait comes
+        // *after* conversation admission (a turn blocked on a busy conversation must not hold an account
+        // slot while it waits) and *before* the continuity decision below, because that decision has
+        // side effects: a turn that never got a slot must not advance a generation or record an
+        // unconfirmed conversation, so its caller's retry after the advertised delay is safe.
+        //
+        // A reconnect of an already-begun turn already owns its lease (and therefore its slot) and takes
+        // no second one; `begin` returns that same lifecycle.
+        const leaseInput = browserAccountLeaseInput(provider, traceId);
+        let turnSlot: ChatGptTurnQueueTicket | undefined;
         let providerTurn: ProviderTurnLifecycle;
         let webChatContinuity: ChatGptContinuity;
         try {
+          if (previousProviderTurn === undefined) {
+            turnSlot = await providerCore.waitForTurnSlot({
+              accountIdentity: leaseInput.accountIdentity,
+              // Fairness/metrics only: the provider fingerprints this before the queue ever sees it.
+              callerKey: nativeIdentity.dshSessionId ?? nativeIdentity.threadId ?? "anonymous",
+              ...(nativeIdentity.purpose !== undefined ? { purpose: nativeIdentity.purpose } : {}),
+              ...(incoming.abortSignal ? { signal: incoming.abortSignal } : {}),
+            });
+          }
           // The core owns the continuity decision (issue #192): the provider states its intent and the
           // core applies the shared rules, mapping the outcome back to the provider's vocabulary. The
           // store is resolved here, at the point of use, from the effective configuration (#193), so a
@@ -1832,19 +1853,27 @@ export function createChatGptWebAdapter(
             contextExhausted: Boolean(contextExhaustion),
             retired,
           });
+          // Another invocation may have begun this exact execution while the continuity decision was
+          // awaited. It owns the turn and its slot, so this invocation must not hold a second slot.
+          if (turnSlot && providerCore.get(executionKey) !== undefined) {
+            turnSlot.abandon();
+            turnSlot = undefined;
+          }
           providerTurn = providerCore.begin({
             executionKey,
             traceId,
             nativeTurnId,
             ...(nativeIdentity.threadId ? { nativeThreadId: nativeIdentity.threadId } : {}),
-            ...browserAccountLeaseInput(provider, traceId),
+            ...leaseInput,
             capabilitySnapshot,
             retryPolicy: parsed._compactionRequest ? "side_effect_free" : "strict",
             recovery,
+            ...(turnSlot ? { turnSlot } : {}),
           });
         } catch (error) {
-          // Nothing was begun: give the conversation's admission slot back, so a refusal leaves no
-          // trace and the next attempt can take it.
+          // Nothing was begun: give back the account slot and the conversation's admission slot, so a
+          // refusal leaves no trace and the next attempt can take them.
+          turnSlot?.abandon();
           providerCore.releaseConversationAdmission(executionKey, nativeIdentity.threadId);
           throw error;
         }
