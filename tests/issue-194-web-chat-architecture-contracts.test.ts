@@ -34,6 +34,10 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   // is answered and kept nowhere". They are in the pinned surface because a provider asks this instead
   // of comparing purpose strings itself — that is what keeps "what makes a turn ephemeral" owned once,
   // in the common layer, rather than re-decided per provider.
+  //
+  // Issue #354 added the structured-output expression: how a schema request becomes the plain text a
+  // text-only web provider can carry. It is pinned because the wire surface must not keep its own copy
+  // of that wording — a second provider (or a second ingress) asks the common layer instead.
   "AUTH_FRAME_MIME_TYPES",
   "AUTH_SESSION_STATES",
   "WEB_CHAT_AUXILIARY_TURN_PURPOSES",
@@ -75,6 +79,7 @@ const EXPECTED_CORE_RUNTIME_SURFACE = [
   "webChatError",
   "webChatReplayStateOwnedBy",
   "webChatRetrySafetyOf",
+  "webChatStructuredOutputInstruction",
   "webChatTurnDeliveryFor",
 ].sort();
 

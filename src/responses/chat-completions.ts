@@ -33,10 +33,21 @@
  * here reads a capability field when it builds the turn, so they cannot be forwarded even by
  * accident; what was discarded is declared on the response (`x-dsh-chatgpt-web-ignored-features`)
  * and in the log. Attached *content* still refuses — that distinction is not a policy.
+ *
+ * A fifth, added with issue #354: **structured output is a wire format**. `response_format`
+ * (`json_object`, or `json_schema` with a name/strict/schema) is accepted, and the request is carried
+ * into the turn as plain text on the internal `instructions` channel, because a consumer web chat has
+ * no native schema enforcement. The model's reply is returned **verbatim**: this surface never parses,
+ * repairs or re-serializes it, and never claims the enforcement it does not have — the response
+ * declares the soft mode (`x-dsh-chatgpt-web-structured-output`) so a caller can tell "asked for
+ * JSON" from "enforced JSON". A schema is neither content nor a capability declaration, so it
+ * neither refuses a request nor becomes a channel for dropping attached content.
  */
 import {
   rejectUnsupportedWebChatFeatures,
+  webChatStructuredOutputInstruction,
   type WebChatCapabilityFeature,
+  type WebChatStructuredOutputRequest,
 } from "../web-chat/core";
 import {
   ApiProjectionRefusalError,
@@ -91,6 +102,15 @@ export interface ChatCompletionsTranslation {
    * never a silent drop. Empty when the request carried none.
    */
   readonly droppedCapabilities: readonly WebChatCapabilityFeature[];
+  /**
+   * The structured-output request this surface accepted and carried into the turn as text.
+   *
+   * Present only when the caller asked for `json_object` or `json_schema`; absent for `{"type":"text"}`
+   * and for a request that sent no `response_format`, which stay byte-for-byte unchanged. Its presence
+   * is the "carried softly" fact the route publishes (`x-dsh-chatgpt-web-structured-output`), because
+   * this bridge has no native schema enforcement and must never imply it has.
+   */
+  readonly structuredOutput?: WebChatStructuredOutputRequest;
 }
 
 const MAX_MESSAGE_CHARS = 8 * 1024 * 1024;
@@ -150,6 +170,114 @@ function assertSize(text: string, index: number): string {
   return text;
 }
 
+/** A stable refusal code for a `response_format` this surface cannot serve. */
+const INVALID_RESPONSE_FORMAT = "invalid_response_format";
+
+/** A stable refusal code for a `max_tokens` / `max_completion_tokens` disagreement. */
+const CONFLICTING_MAX_TOKENS = "conflicting_max_tokens";
+
+/**
+ * Read the caller's `response_format` as a structured-output request, or refuse it.
+ *
+ * The accepted OpenAI shapes are exactly three: `{"type":"text"}` (no request at all, the historical
+ * behaviour), `{"type":"json_object"}`, and `{"type":"json_schema","json_schema":{"name"?,"strict"?,
+ * "schema":{...}}}`. Everything else is a typed refusal **before any provider work**, with the stable
+ * `invalid_response_format` code, so a caller can fix the request instead of matching message text.
+ *
+ * The schema is carried as data, never interpreted here: this function only proves the declaration is
+ * well-formed enough to hand to the common layer's renderer.
+ */
+function structuredOutputOf(body: Record<string, unknown>): WebChatStructuredOutputRequest | undefined {
+  const raw = body.response_format;
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ChatCompletionsRequestError("`response_format` must be a JSON object", INVALID_RESPONSE_FORMAT);
+  }
+  const format = raw as Record<string, unknown>;
+  const type = format.type;
+  // An absent `type` keeps the historical "plain text" reading, exactly like `{"type":"text"}`.
+  if (type === undefined || type === "text") return undefined;
+  if (type === "json_object") return { mode: "json_object" };
+  if (type !== "json_schema") {
+    throw new ChatCompletionsRequestError(
+      `\`response_format.type\` must be "text", "json_object" or "json_schema"; received ${JSON.stringify(type)}`,
+      INVALID_RESPONSE_FORMAT,
+    );
+  }
+  const declaration = format.json_schema;
+  if (declaration === undefined || declaration === null) {
+    throw new ChatCompletionsRequestError(
+      "`response_format.json_schema` is required when `response_format.type` is \"json_schema\"",
+      INVALID_RESPONSE_FORMAT,
+    );
+  }
+  if (typeof declaration !== "object" || Array.isArray(declaration)) {
+    throw new ChatCompletionsRequestError(
+      "`response_format.json_schema` must be a JSON object",
+      INVALID_RESPONSE_FORMAT,
+    );
+  }
+  const jsonSchema = declaration as Record<string, unknown>;
+  const name = jsonSchema.name;
+  if (name !== undefined && (typeof name !== "string" || name.trim() === "")) {
+    throw new ChatCompletionsRequestError(
+      "`response_format.json_schema.name` must be a non-empty string when present",
+      INVALID_RESPONSE_FORMAT,
+    );
+  }
+  const strict = jsonSchema.strict;
+  if (strict !== undefined && typeof strict !== "boolean") {
+    throw new ChatCompletionsRequestError(
+      "`response_format.json_schema.strict` must be a boolean when present",
+      INVALID_RESPONSE_FORMAT,
+    );
+  }
+  const schema = jsonSchema.schema;
+  if (schema === undefined || schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new ChatCompletionsRequestError(
+      "`response_format.json_schema.schema` is required and must be a JSON Schema object",
+      INVALID_RESPONSE_FORMAT,
+    );
+  }
+  return {
+    mode: "json_schema",
+    ...(typeof name === "string" ? { name } : {}),
+    ...(typeof strict === "boolean" ? { strict } : {}),
+    schema,
+  };
+}
+
+/**
+ * The caller's output-token budget, from `max_tokens` or its newer OpenAI alias.
+ *
+ * `max_completion_tokens` is the same field under the name current OpenAI clients use, so it is read
+ * as an alias and forwarded on the same internal field. Sending both with different values is
+ * ambiguous — there is no rule that says which one wins — so it is refused with a stable code instead
+ * of silently picking one. Forwarding is wire fidelity, not enforcement: no web provider enforces a
+ * token budget today, so a turn is not actually bounded by this value (issue #354).
+ */
+function outputTokenBudget(body: Record<string, unknown>): number | undefined {
+  const legacy = body.max_tokens;
+  const modern = body.max_completion_tokens;
+  const hasLegacy = legacy !== undefined && legacy !== null;
+  const hasModern = modern !== undefined && modern !== null;
+  if (hasLegacy && hasModern && legacy !== modern) {
+    throw new ChatCompletionsRequestError(
+      "`max_tokens` and `max_completion_tokens` are aliases; send one, or send both with the same value",
+      CONFLICTING_MAX_TOKENS,
+    );
+  }
+  if (typeof modern === "number") return modern;
+  if (typeof legacy === "number") return legacy;
+  return undefined;
+}
+
+/** What the common layer's admission discarded, and the structured-output request it admitted. */
+interface TopLevelAdmission {
+  readonly droppedCapabilities: readonly WebChatCapabilityFeature[];
+  readonly structuredOutput?: WebChatStructuredOutputRequest;
+}
+
 /**
  * Apply the common layer's admission to the OpenAI top-level fields and return the capability
  * declarations it discarded.
@@ -157,8 +285,8 @@ function assertSize(text: string, index: number): string {
  * The legacy aliases (`functions`, `function_call`) are folded into the same canonical vocabulary,
  * so a legacy tool request is discarded and declared exactly like the modern shape.
  */
-function applyTopLevelAdmission(body: Record<string, unknown>): readonly WebChatCapabilityFeature[] {
-  const dropped = rejectUnsupportedWebChatFeatures({
+function applyTopLevelAdmission(body: Record<string, unknown>): TopLevelAdmission {
+  const droppedCapabilities = rejectUnsupportedWebChatFeatures({
     tools: body.tools ?? body.functions,
     toolChoice: body.tool_choice ?? body.function_call,
     files: body.files,
@@ -180,14 +308,10 @@ function applyTopLevelAdmission(body: Record<string, unknown>): readonly WebChat
       throw new ChatCompletionsRequestError(`\`${field}\` is not supported`);
     }
   }
-  const responseFormat = body.response_format;
-  if (responseFormat !== undefined && responseFormat !== null) {
-    const type = asRecord(responseFormat, "response_format").type;
-    if (type !== undefined && type !== "text") {
-      throw new ChatCompletionsRequestError("`response_format` is only supported as plain text");
-    }
-  }
-  return dropped;
+  // `response_format` is a wire format, not content and not a capability: it is accepted and carried
+  // as text, never refused as content and never declared as a dropped capability.
+  const structuredOutput = structuredOutputOf(body);
+  return { droppedCapabilities, ...(structuredOutput === undefined ? {} : { structuredOutput }) };
 }
 
 /**
@@ -216,7 +340,7 @@ export function translateChatCompletionsRequest(
   headers?: NativeTurnHeaderSource,
 ): ChatCompletionsTranslation {
   const body = asRecord(raw, "request body");
-  const droppedCapabilities = applyTopLevelAdmission(body);
+  const { droppedCapabilities, structuredOutput } = applyTopLevelAdmission(body);
 
   const model = body.model;
   if (typeof model !== "string" || model.trim() === "") {
@@ -296,8 +420,25 @@ export function translateChatCompletionsRequest(
     },
   };
   if (typeof body.temperature === "number") internal.temperature = body.temperature;
-  if (typeof body.max_tokens === "number") internal.max_output_tokens = body.max_tokens;
+  const maxOutputTokens = outputTokenBudget(body);
+  if (maxOutputTokens !== undefined) internal.max_output_tokens = maxOutputTokens;
   if (typeof body.top_p === "number") internal.top_p = body.top_p;
+  // A structured-output request is carried as **text** on the internal instruction channel: a
+  // consumer web chat has no native schema enforcement, so the only honest thing this bridge can do
+  // is tell the model the shape the caller asked for. It is an instruction, never a message: the
+  // caller's conversation stays message-only, and the reply comes back verbatim (nothing here parses,
+  // repairs or re-serializes it). The route declares the soft mode so a caller can tell "asked for
+  // JSON" from "enforced JSON".
+  //
+  // Documented limit: `instructions` is a channel the ChatGPT ingress serializes into its transport
+  // prompt. The text-only WebChat ingresses (`qwen-code/*`, `qwen-chat/*`, `deepseek-web/*`) submit
+  // only the current user text and have no instruction channel at all, so on those routes the schema
+  // is not delivered — the same pre-existing limit `/v1/responses` has for `instructions`, and not
+  // something this wire surface can fix without giving those ingresses a system channel. What the
+  // header declares is the mode ("asked, not enforced"), which is true on every route.
+  if (structuredOutput !== undefined) {
+    internal.instructions = webChatStructuredOutputInstruction(structuredOutput);
+  }
   // A reasoning selection is an ordinary OpenAI chat-completions field. It is preserved so a provider
   // whose catalogue advertises reasoning levels can honour the caller's choice; a provider that has
   // none ignores it exactly as it ignores any other unhandled option. Nothing provider-specific is
@@ -315,6 +456,7 @@ export function translateChatCompletionsRequest(
     conversationIdentity: projected.conversationIdentity,
     droppedRoles: projected.droppedRoles,
     droppedCapabilities,
+    ...(structuredOutput === undefined ? {} : { structuredOutput }),
   };
 }
 
@@ -405,6 +547,35 @@ export function chatUsage(usage: unknown): Record<string, number> | undefined {
   };
 }
 
+/**
+ * The OpenAI `finish_reason` one internal Responses payload **proves** (issue #354).
+ *
+ * Only one signal is a proof that the output budget was exhausted: `status: "incomplete"` with
+ * `incomplete_details.reason === "max_output_tokens"` — the reason the Responses bridge publishes
+ * when an adapter reports its own `stopReason: "max_tokens"` (`src/bridge.ts`). That maps to `"length"`,
+ * which is what a caller like Hindsight keys on to distinguish a cut-off answer from a finished one.
+ *
+ * Everything else keeps `"stop"`, deliberately:
+ *
+ * - the other incomplete reasons (`content_filter`, `cancelled`, `adapter_eof`, `stream_ended`,
+ *   `upstream_stall_timeout`, and provider-specific ones) are cut-offs too, but they are **not** the
+ *   output-budget limit OpenAI's `"length"` names. Re-labelling them would invent a signal the
+ *   provider never reported, and a caller would retry a filtered or cancelled turn as if the model
+ *   had merely run out of room;
+ * - a completed turn is `"stop"`, as before.
+ *
+ * **Documented limit:** no current web adapter enforces a token budget (`maxOutputTokens` is parsed
+ * and forwarded but no provider consumes it), so in practice this surface cannot prove truncation for
+ * a consumer-web turn today. Until a provider reports a real limit, a truncated web answer is
+ * indistinguishable from a complete one here, and `"stop"` is the honest answer rather than a guess.
+ */
+export function chatFinishReason(payload: Record<string, unknown>): "stop" | "length" {
+  if (payload.status !== "incomplete") return "stop";
+  const details = payload.incomplete_details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return "stop";
+  return (details as Record<string, unknown>).reason === "max_output_tokens" ? "length" : "stop";
+}
+
 /** Shape one internal Responses payload as an OpenAI `chat.completion`. */
 export function toChatCompletion(payload: Record<string, unknown>, model: string): Record<string, unknown> {
   const failure = responseFailure(payload);
@@ -419,7 +590,7 @@ export function toChatCompletion(payload: Record<string, unknown>, model: string
     choices: [{
       index: 0,
       message: { role: "assistant", content: failure ? "" : responseText(payload) },
-      finish_reason: failure ? "stop" : "stop",
+      finish_reason: failure ? "stop" : chatFinishReason(payload),
     }],
     // Absent usage means absent, not a zero block a billing client would read as a measurement.
     ...(usage ? { usage } : {}),
@@ -534,7 +705,13 @@ export function toChatCompletionStream(upstream: ReadableStream<Uint8Array>, mod
                 }));
               } else if (type === "response.completed" || type === "response.incomplete") {
                 finished = true;
-                write(chunk({}, sawText ? "stop" : "stop"));
+                // The terminal frame carries the same proven finish reason the batch body does, so a
+                // streaming caller can tell a cut-off answer from a complete one (issue #354). An
+                // event without its `response` envelope proves nothing and keeps "stop".
+                const terminal = event.response && typeof event.response === "object"
+                  ? event.response as Record<string, unknown>
+                  : {};
+                write(chunk({}, chatFinishReason(terminal)));
               }
             }
           }
