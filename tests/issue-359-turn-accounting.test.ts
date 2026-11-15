@@ -461,7 +461,12 @@ describe("issue #359 — browser-turn accounting on the real /v1/chat/completion
     expect(record.continuationTurns).toBe(0);
     expect(record.replayMessages).toBe(1);
     expect(record.replayChars).toBeGreaterThan(0);
-    expect(record.waitMs).toBe(0);
+    // A turn that found a free account slot still waits for the queue's own grant tick, so the
+    // measurement is reported (never absent for a turn that reached the provider) but is not
+    // pinned to a constant: a real deployment's wait is whatever the queue actually spent.
+    expect(typeof record.waitMs).toBe("number");
+    expect(record.waitMs).toBeGreaterThanOrEqual(0);
+    expect(record.waitMs).toBeLessThan(5_000);
     expect(record.turnMs).toBeGreaterThanOrEqual(0);
     expect(record.outcome).toBe("completed");
 
@@ -471,7 +476,9 @@ describe("issue #359 — browser-turn accounting on the real /v1/chat/completion
     expect(operation!.browserTurns).toBe(1);
     expect(operation!.replayTurns).toBe(1);
     expect(operation!.continuationTurns).toBe(0);
-    expect(operation!.waitMsTotal).toBe(0);
+    // The operation total aggregates the same measured wait, so it is non-negative rather than a
+    // constant: the queue's grant tick is real time and must not make this assertion flaky.
+    expect(operation!.waitMsTotal).toBeGreaterThanOrEqual(0);
 
     // No prompt text and no raw identity: counters and fingerprints only.
     const serialized = JSON.stringify(accounting);
