@@ -89,7 +89,7 @@ export const WEB_CHAT_ENDPOINT_PROFILES_PAGE_HTML = `<!doctype html>
   <form id="profile-form">
     <label for="name">Name (URL segment; immutable once created)</label>
     <input id="name" name="name" type="text" autocomplete="off" autocapitalize="off"
-           spellcheck="false" placeholder="hindsight">
+           spellcheck="false" placeholder="hidden">
     <label for="visibility">Chat visibility</label>
     <select id="visibility" name="visibility">
       <option value="persistent">persistent — normal, history-visible chats</option>

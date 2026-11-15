@@ -44,7 +44,7 @@ import { processRunning } from "./process";
  * The outcome of one doctor check.
  *
  * `skipped` is not a failure: it says the check had nothing it could prove on this deployment — the
- * Hindsight integration probe (issue #357) is skipped when the deployment has no API key to
+ * structured-output probe (issue #357) is skipped when the deployment has no API key to
  * authenticate with or the service is not listening, and an absent service must never fail a doctor
  * run. It is therefore counted like `ok` by {@link runDoctor}, and it never prints a repair command.
  */
@@ -205,14 +205,13 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
 }
 
 /**
- * The catalogue model the Hindsight integration probe asks for (issue #357).
+ * The catalogue model the structured-output probe asks for (issue #357).
  *
  * `chatgpt-web/luna` is the route every account has; the Sol-only and Pro-gated routes would make the
- * probe fail on a deployment that is otherwise wired correctly, and Hindsight's own integration
- * profile names the same id (`HINDSIGHT_API_LLM_MODEL`, README.md §"Hindsight"). A caller that needs
- * another route passes `model` to {@link hindsightProbeCheck}.
+ * probe fail on a deployment that is otherwise wired correctly. A caller that needs another route
+ * passes `model` to {@link structuredOutputProbeCheck}.
  */
-export const HINDSIGHT_PROBE_MODEL = "chatgpt-web/luna";
+export const STRUCTURED_OUTPUT_PROBE_MODEL = "chatgpt-web/luna";
 
 /**
  * The conversation identity the probe declares.
@@ -221,15 +220,16 @@ export const HINDSIGHT_PROBE_MODEL = "chatgpt-web/luna";
  * `doctor` run, and keeps the probe out of every caller's conversation. It is a public label, not a
  * credential.
  */
-export const HINDSIGHT_PROBE_IDENTITY = "dsh-chatgpt-web-doctor";
+export const STRUCTURED_OUTPUT_PROBE_IDENTITY = "dsh-chatgpt-web-doctor";
 
 /**
  * The JSON Schema the probe asks for.
  *
  * Deliberately tiny: the point is the *shape* of the request (a named, strict `json_schema` on
- * `response_format`, exactly what Hindsight sends on every structured call), not a long extraction.
+ * `response_format`, exactly the shape an OpenAI-compatible client sends when it asks for a schema),
+ * not a long extraction.
  */
-const HINDSIGHT_PROBE_SCHEMA = {
+const STRUCTURED_OUTPUT_PROBE_SCHEMA = {
   type: "object",
   properties: { status: { type: "string" } },
   required: ["status"],
@@ -237,7 +237,7 @@ const HINDSIGHT_PROBE_SCHEMA = {
 } as const;
 
 /**
- * The request body the probe posts: a Hindsight-shaped structured chat completion.
+ * The request body the probe posts: a structured chat completion carrying a named, strict schema.
  *
  * Exported because the request shape *is* the contract this check proves — a test asserts it directly
  * instead of re-deriving it. It carries no credential: the API key travels in the `Authorization`
@@ -246,7 +246,7 @@ const HINDSIGHT_PROBE_SCHEMA = {
  * @param model - the catalogue model id to ask for.
  * @returns the JSON body for `POST /v1/chat/completions`.
  */
-export function hindsightProbeRequest(model: string): Record<string, unknown> {
+export function structuredOutputProbeRequest(model: string): Record<string, unknown> {
   return {
     model,
     messages: [
@@ -255,26 +255,26 @@ export function hindsightProbeRequest(model: string): Record<string, unknown> {
     ],
     response_format: {
       type: "json_schema",
-      json_schema: { name: "dsh_doctor_probe", strict: true, schema: HINDSIGHT_PROBE_SCHEMA },
+      json_schema: { name: "dsh_doctor_probe", strict: true, schema: STRUCTURED_OUTPUT_PROBE_SCHEMA },
     },
-    // The same alias Hindsight sends for its own budget (`HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS`),
-    // small here because the answer is one short object. This bridge forwards it and cannot enforce
-    // it (issue #354), which is exactly what the check reports rather than hides.
+    // The newer OpenAI alias for the output budget, small here because the answer is one short
+    // object. This bridge forwards it and cannot enforce it (issue #354), which is exactly what the
+    // check reports rather than hides.
     max_completion_tokens: 64,
     stream: false,
-    user: HINDSIGHT_PROBE_IDENTITY,
+    user: STRUCTURED_OUTPUT_PROBE_IDENTITY,
   };
 }
 
 /** Where the probe's HTTP call goes and what it authenticates with. */
-export interface HindsightProbeOptions {
+export interface StructuredOutputProbeOptions {
   /** The service's own base URL without the `/v1` suffix, e.g. `http://127.0.0.1:17841`. */
   readonly baseUrl: string;
-  /** The API key Hindsight sends as `HINDSIGHT_API_LLM_API_KEY`; absent means none is configured. */
+  /** The API key the caller authenticates with; absent means none is configured. */
   readonly apiKey?: string;
   /** Why there is no usable key, when the deployment has one it cannot authenticate with. */
   readonly apiKeyProblem?: string;
-  /** The catalogue model to ask for; defaults to {@link HINDSIGHT_PROBE_MODEL}. */
+  /** The catalogue model to ask for; defaults to {@link STRUCTURED_OUTPUT_PROBE_MODEL}. */
   readonly model?: string;
   /** Bound on the whole probe. A browser turn is slow, so the default is generous. */
   readonly timeoutMs?: number;
@@ -282,14 +282,14 @@ export interface HindsightProbeOptions {
   readonly fetchImpl?: typeof fetch;
 }
 
-const HINDSIGHT_PROBE_ID = "hindsight-probe";
-const HINDSIGHT_PROBE_TIMEOUT_MS = 120_000;
+const STRUCTURED_OUTPUT_PROBE_ID = "structured-output-probe";
+const STRUCTURED_OUTPUT_PROBE_TIMEOUT_MS = 120_000;
 
 function probeSkipped(reason: string): DoctorCheck {
   return {
-    id: HINDSIGHT_PROBE_ID,
+    id: STRUCTURED_OUTPUT_PROBE_ID,
     status: "skipped",
-    message: `Hindsight integration probe skipped: ${reason}`,
+    message: `structured-output probe skipped: ${reason}`,
   };
 }
 
@@ -375,23 +375,22 @@ function isJsonValue(text: string): boolean {
 
 function probeTimedOut(model: string, timeoutMs: number): DoctorCheck {
   return {
-    id: HINDSIGHT_PROBE_ID,
+    id: STRUCTURED_OUTPUT_PROBE_ID,
     status: "warning",
-    message: `Hindsight integration probe did not answer within ${elapsedLabel(timeoutMs)}`,
+    message: `structured-output probe did not answer within ${elapsedLabel(timeoutMs)}`,
     detail: `model ${model} · the turn may still be running on the account, and a browser turn has no `
       + "absolute deadline of its own",
   };
 }
 
 /**
- * Prove the Hindsight integration without running a memory operation (issue #357).
+ * Prove that an OpenAI-compatible client can use this service (issue #357).
  *
- * Hindsight sends every structured call as an OpenAI `chat/completions` request carrying a
- * `response_format` schema and authenticated with `HINDSIGHT_API_LLM_API_KEY`. This check sends
- * exactly that shape to the local service — one real browser turn, no retain/reflect/consolidation —
- * and reports what came back: the wire body must be a JSON `chat.completion`, and the reply is
- * reported as JSON or not, because this bridge carries a schema as text and cannot enforce it
- * (issue #354).
+ * Such a client sends a `chat/completions` request carrying a `response_format` schema and
+ * authenticated with the service's API key. This check sends exactly that shape to the local service
+ * — one real browser turn — and reports what came back: the wire body must be a JSON
+ * `chat.completion`, and the reply is reported as JSON or not, because this bridge carries a schema
+ * as text and cannot enforce it (issue #354).
  *
  * Classification, deliberately:
  *
@@ -408,17 +407,17 @@ function probeTimedOut(model: string, timeoutMs: number): DoctorCheck {
  * @param options - where to probe, with which credential, and through which `fetch`.
  * @returns the doctor check describing the outcome.
  */
-export async function hindsightProbeCheck(options: HindsightProbeOptions): Promise<DoctorCheck> {
+export async function structuredOutputProbeCheck(options: StructuredOutputProbeOptions): Promise<DoctorCheck> {
   const apiKey = options.apiKey?.trim();
   if (!apiKey) {
     return probeSkipped(options.apiKeyProblem
-      ?? "no API key is configured, so the authenticated request Hindsight makes cannot be proven "
+      ?? "no API key is configured, so the authenticated structured request cannot be proven "
         + "(set DSH_CHATGPT_WEB_API_KEY or <data dir>/api-key)");
   }
-  const model = options.model ?? HINDSIGHT_PROBE_MODEL;
+  const model = options.model ?? STRUCTURED_OUTPUT_PROBE_MODEL;
   const url = `${options.baseUrl.replace(/\/+$/, "")}/v1/chat/completions`;
   const fetchImpl = options.fetchImpl ?? fetch;
-  const timeoutMs = options.timeoutMs ?? HINDSIGHT_PROBE_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? STRUCTURED_OUTPUT_PROBE_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
@@ -428,7 +427,7 @@ export async function hindsightProbeCheck(options: HindsightProbeOptions): Promi
       response = await fetchImpl(url, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(hindsightProbeRequest(model)),
+        body: JSON.stringify(structuredOutputProbeRequest(model)),
         signal: controller.signal,
       });
     } catch (error) {
@@ -443,9 +442,9 @@ export async function hindsightProbeCheck(options: HindsightProbeOptions): Promi
     } catch {
       if (controller.signal.aborted) return probeTimedOut(model, timeoutMs);
       return {
-        id: HINDSIGHT_PROBE_ID,
+        id: STRUCTURED_OUTPUT_PROBE_ID,
         status: "error",
-        message: `Hindsight integration probe: the service answered HTTP ${response.status} with a body that is not JSON`,
+        message: `structured-output probe: the service answered HTTP ${response.status} with a body that is not JSON`,
         detail: `model ${model}`,
       };
     }
@@ -454,9 +453,9 @@ export async function hindsightProbeCheck(options: HindsightProbeOptions): Promi
       const code = safeRefusalCode((body as { error?: unknown } | undefined)?.error);
       const safeCode = code !== undefined && !code.includes(apiKey) ? code : undefined;
       return {
-        id: HINDSIGHT_PROBE_ID,
+        id: STRUCTURED_OUTPUT_PROBE_ID,
         status: "error",
-        message: `Hindsight integration probe: the service refused the structured request with HTTP ${response.status}`,
+        message: `structured-output probe: the service refused the structured request with HTTP ${response.status}`,
         detail: [
           `model ${model}`,
           ...(safeCode === undefined ? [] : [`error code ${safeCode}`]),
@@ -468,25 +467,25 @@ export async function hindsightProbeCheck(options: HindsightProbeOptions): Promi
     const answer = probeAnswer(body);
     if (answer.errorCode !== undefined && !answer.errorCode.includes(apiKey)) {
       return {
-        id: HINDSIGHT_PROBE_ID,
+        id: STRUCTURED_OUTPUT_PROBE_ID,
         status: "error",
-        message: `Hindsight integration probe: the turn failed with ${answer.errorCode}`,
+        message: `structured-output probe: the turn failed with ${answer.errorCode}`,
         detail: `model ${model}`,
       };
     }
     if (answer.content === undefined) {
       return {
-        id: HINDSIGHT_PROBE_ID,
+        id: STRUCTURED_OUTPUT_PROBE_ID,
         status: "error",
-        message: "Hindsight integration probe: the service answered without a chat completion body",
+        message: "structured-output probe: the service answered without a chat completion body",
         detail: `model ${model} · HTTP ${response.status}`,
       };
     }
     if (answer.content.trim() === "") {
       return {
-        id: HINDSIGHT_PROBE_ID,
+        id: STRUCTURED_OUTPUT_PROBE_ID,
         status: "error",
-        message: "Hindsight integration probe: the turn returned an empty answer",
+        message: "structured-output probe: the turn returned an empty answer",
         detail: `model ${model}`,
       };
     }
@@ -497,16 +496,16 @@ export async function hindsightProbeCheck(options: HindsightProbeOptions): Promi
     ].join(" · ");
     if (!isJsonValue(answer.content)) {
       return {
-        id: HINDSIGHT_PROBE_ID,
+        id: STRUCTURED_OUTPUT_PROBE_ID,
         status: "warning",
-        message: `Hindsight integration probe answered in ${latency}, but the reply was not JSON`,
+        message: `structured-output probe answered in ${latency}, but the reply was not JSON`,
         detail: `${detail} · the request was served, so a caller that validates the reply must tolerate prose`,
       };
     }
     return {
-      id: HINDSIGHT_PROBE_ID,
+      id: STRUCTURED_OUTPUT_PROBE_ID,
       status: "ok",
-      message: `Hindsight integration probe answered in ${latency}: a Hindsight-shaped structured request `
+      message: `structured-output probe answered in ${latency}: a structured request carrying `
         + "returned a JSON chat completion (one real browser turn)",
       detail,
     };
@@ -516,13 +515,13 @@ export async function hindsightProbeCheck(options: HindsightProbeOptions): Promi
 }
 
 /**
- * What the doctor offers the Hindsight probe: the deployment's API key, or why it has none.
+ * What the doctor offers the structured-output probe: the deployment's API key, or why it has none.
  *
  * A key that is too short never started the service (the server refuses it), so it is reported as a
  * reason rather than thrown: the `proxy` check owns the consequence, and this check must stay
  * skippable.
  */
-function probeCredential(): Pick<HindsightProbeOptions, "apiKey" | "apiKeyProblem"> {
+function probeCredential(): Pick<StructuredOutputProbeOptions, "apiKey" | "apiKeyProblem"> {
   try {
     const apiKey = resolveApiKey();
     return apiKey === undefined ? {} : { apiKey };
@@ -535,7 +534,7 @@ function probeCredential(): Pick<HindsightProbeOptions, "apiKey" | "apiKeyProble
 }
 
 /**
- * The host the Hindsight probe dials.
+ * The host the structured-output probe dials.
  *
  * The service may bind a wildcard inside its namespace (the authenticated Compose stack does), which
  * is not a dialable address, so the probe dials loopback in that case.
@@ -547,13 +546,13 @@ function localProbeHost(host: string): string {
 /** Options for {@link runDoctor}. */
 export interface DoctorOptions {
   /**
-   * Run the Hindsight integration probe (issue #357). Default `true`: `doctor` is the operator's
+   * Run the structured-output probe (issue #357). Default `true`: `doctor` is the operator's
    * proof that the wiring works, and it is skipped by itself when the deployment cannot authenticate.
    *
    * A suite that must not perform a real browser turn — or that runs on a machine where a live
    * service and an API key are both present — passes `false`.
    */
-  readonly hindsightProbe?: boolean;
+  readonly structuredOutputProbe?: boolean;
 }
 
 export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
@@ -662,12 +661,12 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
     checks.push({ id: "service", status: "ok", message: "macOS background service is loaded" });
   }
   checks.push(await proxyCheck(config));
-  // Issue #357: prove the Hindsight integration end to end. This is the one check that performs a
-  // real turn — a single Hindsight-shaped structured request on the default endpoint — so it is
+  // Issue #357: prove an OpenAI-compatible integration end to end. This is the one check that
+  // performs a real turn — a single structured request on the default endpoint — so it is
   // skipped, never failed, when the deployment has no API key to authenticate with or the service is
   // not listening.
-  if (options.hindsightProbe !== false) {
-    checks.push(await hindsightProbeCheck({
+  if (options.structuredOutputProbe !== false) {
+    checks.push(await structuredOutputProbeCheck({
       baseUrl: `http://${localProbeHost(config.host)}:${config.port}`,
       ...probeCredential(),
     }));

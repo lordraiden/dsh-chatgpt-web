@@ -1372,7 +1372,7 @@ A profile is deliberately not a new authority:
 A profile that cannot be honoured — an unknown catalogue model, a visibility mode the deployment
 cannot produce (a `temporary` profile on the launcher browser host, or a non-ChatGPT route), or a
 deleted profile's path — fails closed with a typed refusal. It never falls back to the default
-endpoint's behaviour, because a silent fallback would put a Hindsight turn back into the account
+endpoint's behaviour, because a silent fallback would put a hidden turn back into the account
 history the profile exists to keep it out of.
 
 ---

@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+## 1.1.0
+
+- `POST /v1/chat/completions` accepts the OpenAI structured-output shapes: `{"type":"json_object"}` and
+  `{"type":"json_schema","json_schema":{"name","strict","schema"}}`. A consumer web chat has no native
+  schema channel, so the schema is carried into the turn as text on the internal `instructions` field,
+  the reply is returned **verbatim** (never parsed, repaired or re-serialized), and the response
+  declares the soft mode with `x-dsh-chatgpt-web-structured-output: soft`. `{"type":"text"}` and a
+  request without `response_format` are unchanged, and a malformed or unknown shape is a typed `400`
+  (`error.code: invalid_response_format`) before any provider work.
+- `max_completion_tokens` is accepted as an alias of `max_tokens`; sending both with different values is
+  a typed `400` (`conflicting_max_tokens`) instead of silently picking one. `finish_reason` is
+  `"length"` only for the one provable truncation signal (`status:"incomplete"` with
+  `incomplete_details.reason:"max_output_tokens"`), in both the batch body and the streaming terminal
+  frame; every other incomplete reason keeps `"stop"`, because relabelling a filter, cancel or EOF
+  would invent a signal the provider never reported.
+- Configurable ChatGPT conversation visibility: `chatgptWeb.chatVisibility` is `persistent` (default,
+  history-visible, ChatGPT memory applies, provider continuity kept) or `temporary` (ChatGPT Temporary
+  Chat: no history, no memory, no continuity). It flows through the one provider-facts resolver, is
+  overridable through `webChat.providers["chatgpt-web"]`, and is readable and writable through
+  `GET`/`PUT /v1/control/config` with live reload. A temporary turn claims no conversation key, records
+  no installed-prefix fingerprint and publishes no conversation handle: it replays the caller's
+  canonical history explicitly, and the features that need a retained provider conversation fail closed.
+  `temporary` on the launcher browser host is refused rather than silently running persistent.
+- Endpoint profiles: `POST /v1/control/endpoint-profiles` (and the page at
+  `/v1/control/endpoints/`) exposes named public endpoints under `/p/<name>/v1`, each with its own chat
+  visibility, optional catalogue-model allow-list and optional turn budget. A profile is a host-owned
+  view over the configured catalogue — no new provider, route or execution engine — the API key stays
+  global, `/p/<name>/v1/models` advertises exactly what the profile serves, and a deleted profile's
+  path answers a typed `404` instead of falling back to the default endpoint.
+- The account fan-out bound is now a bounded wait instead of an immediate refusal: a turn that finds
+  all `MAX_CHATGPT_BROWSER_TABS` slots in use waits for one, and is refused with a typed `429`
+  (`turn_queue_timeout` / `turn_queue_full`) carrying `Retry-After` only when the wait budget or the
+  queue depth is exhausted. Housekeeping turns are served before conversational ones, one caller cannot
+  hold every slot while another waits, and `GET /v1/control/status` publishes `turnQueue` (depth,
+  grants, wait times, refusals, per caller). The bound itself is unchanged.
+- `GET /v1/control/status` publishes `turnAccounting`: per-request and per-operation browser turns,
+  continuations, replayed messages and characters, the wait for an account slot, and the operation
+  fingerprint. Fields are absent — never zero — when the fact never happened, and no prompt text, raw
+  identity, conversation key or credential appears in the snapshot.
+- `doctor` gains a structured-output probe that proves an authenticated OpenAI-compatible request end
+  to end (one real browser turn on a stable probe conversation) and reports `ok`, `warning`, `error` or
+  `skipped` — skipped, never failed, when the deployment has no API key or the service is not
+  listening. It reports the measured latency and the estimated token usage, and never prints the key.
+- Documentation: a real Configuration section (data volume, the fields an operator touches, the two
+  separate credentials), a ChatGPT setup walkthrough, an explicit
+  temporary-vs-persistent comparison, structured-output documentation with its documented limit, and
+  TROUBLESHOOTING §17–§21 for `400 response_format`, `finish_reason`, the queue `429`, an expired
+  provider session and the temporary-surface readiness risk.
+
 - The project header now opens the first turn that carries a **human message**, and the decision is
   recorded state instead of an inference from the provider's chat id (Qwen Chat, operator report on
   `chat.qwen.ai`). The install used to be "the turn that creates the chat"

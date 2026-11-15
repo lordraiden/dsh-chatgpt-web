@@ -553,7 +553,8 @@ export function chatUsage(usage: unknown): Record<string, number> | undefined {
  * Only one signal is a proof that the output budget was exhausted: `status: "incomplete"` with
  * `incomplete_details.reason === "max_output_tokens"` — the reason the Responses bridge publishes
  * when an adapter reports its own `stopReason: "max_tokens"` (`src/bridge.ts`). That maps to `"length"`,
- * which is what a caller like Hindsight keys on to distinguish a cut-off answer from a finished one.
+ * which is what an OpenAI-compatible caller keys on to distinguish a cut-off answer from a finished
+ * one.
  *
  * Everything else keeps `"stop"`, deliberately:
  *

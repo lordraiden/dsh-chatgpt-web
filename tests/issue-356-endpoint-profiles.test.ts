@@ -2,7 +2,7 @@
  * Issue #356 — endpoint profiles with chat visibility.
  *
  * The operator wants two API endpoints from the service's own web surface: one that answers in
- * ChatGPT's hidden Temporary Chats (for Hindsight) and one in normal visible chats. `chatVisibility`
+ * ChatGPT's hidden Temporary Chats and one in normal visible chats. `chatVisibility`
  * (issue #355) is a single global fact today, so this suite pins the host-owned view that turns it
  * into per-endpoint behaviour:
  *
@@ -198,7 +198,7 @@ describe("issue #356 — the endpoint-profile shape is validated by the configur
     const rejected: Array<{ value: unknown; message: RegExp }> = [
       { value: {}, message: /Invalid endpointProfiles in config\.json/ },
       { value: [null], message: /Invalid endpoint profile in config\.json \(endpointProfiles\[0\]\)/ },
-      { value: [{ name: "Hindsight", chatVisibility: "temporary" }], message: /Invalid endpoint profile name/ },
+      { value: [{ name: "Hidden", chatVisibility: "temporary" }], message: /Invalid endpoint profile name/ },
       { value: [{ name: "-hindsight", chatVisibility: "temporary" }], message: /Invalid endpoint profile name/ },
       { value: [{ name: "a".repeat(33), chatVisibility: "temporary" }], message: /Invalid endpoint profile name/ },
       { value: [{ name: "hindsight", chatVisibility: "hidden" }], message: /Invalid chatVisibility/ },

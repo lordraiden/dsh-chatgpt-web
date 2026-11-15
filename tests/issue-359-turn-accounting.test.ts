@@ -36,7 +36,7 @@ import { CONTROLLED_ACCOUNT, controlledProviderConfig } from "./support/chatgpt-
  *
  * 1. the accounting owner's own contract, driven directly so the bounds and the "absent is not zero"
  *    rule are deterministic;
- * 2. the real `/v1/chat/completions` route (the OpenAI-compatible surface Hindsight speaks) with only
+ * 2. the real `/v1/chat/completions` route (the OpenAI-compatible surface) with only
  *    the browser I/O replaced, so the counts are the production ones.
  *
  * The reuse boundary is asserted explicitly: a reflect loop that declares one operation identity

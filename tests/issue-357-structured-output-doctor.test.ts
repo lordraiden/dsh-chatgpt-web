@@ -1,10 +1,10 @@
 /**
- * Issue #357 — the doctor proves the Hindsight integration without a memory operation.
+ * Issue #357 — the doctor proves an OpenAI-compatible integration without a real workload.
  *
- * "Point Hindsight at the bridge" was tribal knowledge: which provider, which base-URL shape, which
- * model id, which token budget, and — the part this suite pins — how to prove the wiring before a
- * real retain fails. Hindsight sends every structured call as an OpenAI `chat/completions` request
- * carrying a `response_format` JSON schema, authenticated with `HINDSIGHT_API_LLM_API_KEY`, so the
+ * "Can an OpenAI-compatible client use this service?" was tribal knowledge: which base-URL shape,
+ * which model id, which token budget, and — the part this suite pins — how to prove the wiring before
+ * a real call fails. Such a client sends every structured call as a `chat/completions` request
+ * carrying a `response_format` JSON schema and authenticated with the service's API key, so the
  * doctor's probe sends exactly that shape to the local service and reports what came back.
  *
  * The classification is the contract, and it is deliberately asymmetric:
@@ -21,11 +21,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  HINDSIGHT_PROBE_IDENTITY,
-  HINDSIGHT_PROBE_MODEL,
+  STRUCTURED_OUTPUT_PROBE_IDENTITY,
+  STRUCTURED_OUTPUT_PROBE_MODEL,
   formatDoctorReport,
-  hindsightProbeCheck,
-  hindsightProbeRequest,
+  structuredOutputProbeCheck,
+  structuredOutputProbeRequest,
   runDoctor,
   type DoctorCheck,
 } from "../src/doctor";
@@ -51,7 +51,7 @@ function completion(content: string, usage?: Record<string, number>): Record<str
     id: "chatcmpl-probe",
     object: "chat.completion",
     created: 1,
-    model: HINDSIGHT_PROBE_MODEL,
+    model: STRUCTURED_OUTPUT_PROBE_MODEL,
     choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
     ...(usage === undefined ? {} : { usage }),
   };
@@ -71,13 +71,13 @@ function headersOf(init: RequestInit): Record<string, string> {
   return (init.headers ?? {}) as Record<string, string>;
 }
 
-describe("issue #357 — the Hindsight probe's request shape", () => {
-  test("it is the structured request Hindsight sends: json_schema, model, small output budget", () => {
-    const request = hindsightProbeRequest(HINDSIGHT_PROBE_MODEL);
+describe("issue #357 — the structured-output probe's request shape", () => {
+  test("it is the structured request an OpenAI-compatible client sends: json_schema, model, small output budget", () => {
+    const request = structuredOutputProbeRequest(STRUCTURED_OUTPUT_PROBE_MODEL);
     expect(request.model).toBe("chatgpt-web/luna");
     expect(request.stream).toBe(false);
     expect(request.max_completion_tokens).toBe(64);
-    expect(request.user).toBe(HINDSIGHT_PROBE_IDENTITY);
+    expect(request.user).toBe(STRUCTURED_OUTPUT_PROBE_IDENTITY);
     expect(request.response_format).toEqual({
       type: "json_schema",
       json_schema: {
@@ -97,7 +97,7 @@ describe("issue #357 — the Hindsight probe's request shape", () => {
 
   test("the probe posts it to /v1/chat/completions with the key in the Authorization header", async () => {
     const { impl, calls } = answering(completion('{"status":"ok"}'));
-    const check = await hindsightProbeCheck({
+    const check = await structuredOutputProbeCheck({
       baseUrl: `${BASE_URL}/`,
       apiKey: API_KEY,
       fetchImpl: impl,
@@ -111,7 +111,7 @@ describe("issue #357 — the Hindsight probe's request shape", () => {
     expect(headersOf(call!.init).authorization).toBe(`Bearer ${API_KEY}`);
     expect(headersOf(call!.init)["content-type"]).toBe("application/json");
     // The credential travels in the header, never in the body.
-    expect(call?.init.body).toBe(JSON.stringify(hindsightProbeRequest(HINDSIGHT_PROBE_MODEL)));
+    expect(call?.init.body).toBe(JSON.stringify(structuredOutputProbeRequest(STRUCTURED_OUTPUT_PROBE_MODEL)));
     expect(String(call?.init.body)).not.toContain(API_KEY);
   });
 });
@@ -119,9 +119,9 @@ describe("issue #357 — the Hindsight probe's request shape", () => {
 describe("issue #357 — the probe's pass/fail/skip classification", () => {
   test("a JSON answer is ok, with the measured latency and the service's estimate labelled", async () => {
     const { impl } = answering(completion('{"status":"ok"}', { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }));
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
-    expect(check.id).toBe("hindsight-probe");
+    expect(check.id).toBe("structured-output-probe");
     expect(check.status).toBe("ok");
     expect(check.message).toMatch(/answered in \d/);
     expect(check.message).toContain("JSON chat completion");
@@ -135,7 +135,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
 
   test("a served turn whose reply is not JSON is a warning, not a failure", async () => {
     const { impl } = answering(completion("Sure! Here is the JSON you asked for:"));
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("warning");
     expect(check.message).toContain("was not JSON");
@@ -144,7 +144,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
 
   test("a missing usage block is reported as absent, never as zero", async () => {
     const { impl } = answering(completion('{"status":"ok"}'));
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("ok");
     expect(check.detail).toContain("no usage block");
@@ -152,7 +152,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
 
   test("an HTTP refusal is an error that names the status and the service's code", async () => {
     const { impl } = answering({ error: { message: "Unauthorized", code: "invalid_api_key" } }, 401);
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("error");
     expect(check.message).toContain("HTTP 401");
@@ -162,7 +162,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
 
   test("a body that is not JSON is an error", async () => {
     const impl = (async () => new Response("not json at all", { status: 200 })) as unknown as typeof fetch;
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("error");
     expect(check.message).toContain("not JSON");
@@ -170,7 +170,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
 
   test("a body without a chat completion is an error", async () => {
     const { impl } = answering({ object: "something.else" });
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("error");
     expect(check.message).toContain("without a chat completion body");
@@ -178,7 +178,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
 
   test("an empty answer is an error", async () => {
     const { impl } = answering(completion("   "));
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("error");
     expect(check.message).toContain("empty answer");
@@ -191,7 +191,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
       choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }],
       error: { message: "the provider failed", code: "upstream_stall_timeout" },
     });
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("error");
     expect(check.message).toContain("upstream_stall_timeout");
@@ -203,7 +203,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
       called = true;
       return new Response("{}", { status: 200 });
     }) as unknown as typeof fetch;
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, fetchImpl: impl });
 
     expect(check.status).toBe("skipped");
     expect(check.message).toContain("no API key is configured");
@@ -211,7 +211,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
   });
 
   test("an unusable key skips with its own reason", async () => {
-    const check = await hindsightProbeCheck({
+    const check = await structuredOutputProbeCheck({
       baseUrl: BASE_URL,
       apiKeyProblem: "the configured API key is unusable (shorter than the minimum the service accepts)",
     });
@@ -226,7 +226,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
       error.code = "ECONNREFUSED";
       throw error;
     }) as unknown as typeof fetch;
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("skipped");
     expect(check.message).toContain("not reachable");
@@ -237,7 +237,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
     const impl = ((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
     })) as unknown as typeof fetch;
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, timeoutMs: 5, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, timeoutMs: 5, fetchImpl: impl });
 
     expect(check.status).toBe("warning");
     expect(check.message).toContain("did not answer within");
@@ -247,7 +247,7 @@ describe("issue #357 — the probe's pass/fail/skip classification", () => {
 describe("issue #357 — the probe never prints a secret", () => {
   test("a refusal that echoes the key back does not leak it into the report", async () => {
     const { impl } = answering({ error: { message: `bad key ${API_KEY}`, code: API_KEY } }, 401);
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     expect(check.status).toBe("error");
     const report = formatDoctorReport({ ok: false, checks: [check] });
@@ -259,7 +259,7 @@ describe("issue #357 — the probe never prints a secret", () => {
 
   test("the successful path never prints the key, the request body or the model's text", async () => {
     const { impl } = answering(completion('{"status":"ok"}'));
-    const check = await hindsightProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
+    const check = await structuredOutputProbeCheck({ baseUrl: BASE_URL, apiKey: API_KEY, fetchImpl: impl });
 
     const report = formatDoctorReport({ ok: true, checks: [check] });
     expect(report).not.toContain(API_KEY);
@@ -271,13 +271,13 @@ describe("issue #357 — the probe never prints a secret", () => {
 describe("issue #357 — the doctor report renders a skipped check honestly", () => {
   test("a skipped check is not an error, prints no repair command, and keeps the report ready", () => {
     const skipped: DoctorCheck = {
-      id: "hindsight-probe",
+      id: "structured-output-probe",
       status: "skipped",
-      message: "Hindsight integration probe skipped: no API key is configured",
+      message: "structured-output probe skipped: no API key is configured",
     };
     const report = formatDoctorReport({ ok: true, checks: [skipped] });
 
-    expect(report).toContain("– Hindsight integration probe skipped");
+    expect(report).toContain("– structured-output probe skipped");
     expect(report).toContain("Doctor result: ready");
     expect(report).not.toContain("Next step:");
   });
@@ -290,7 +290,7 @@ describe("issue #357 — the doctor report renders a skipped check honestly", ()
     try {
       saveConfig(defaultConfig());
       const report = await runDoctor();
-      const probe = report.checks.filter(check => check.id === "hindsight-probe");
+      const probe = report.checks.filter(check => check.id === "structured-output-probe");
       expect(probe).toHaveLength(1);
       expect(probe[0]?.status).toBe("skipped");
       expect(probe[0]?.message).toContain("no API key is configured");
@@ -306,8 +306,8 @@ describe("issue #357 — the doctor report renders a skipped check honestly", ()
     const home = useTemporaryChatGptWebHome("issue-357-doctor-off-", { clearFreeHome: true });
     try {
       saveConfig(defaultConfig());
-      const report = await runDoctor({ hindsightProbe: false });
-      expect(report.checks.some(check => check.id === "hindsight-probe")).toBe(false);
+      const report = await runDoctor({ structuredOutputProbe: false });
+      expect(report.checks.some(check => check.id === "structured-output-probe")).toBe(false);
     } finally {
       restoreChatGptWebHome(savedHome, home);
     }

@@ -2916,8 +2916,8 @@ export function startServer(
             { status: httpStatusFromTerminalError(error) },
           );
           // Issue #358: a turn-queue refusal is backpressure, not a provider failure. Publish the
-          // queue's own deferral hint beside the typed 429 so an OpenAI-compatible caller (Hindsight
-          // parallelises retain) sleeps instead of retrying into the same saturated account. The value
+          // queue's own deferral hint beside the typed 429 so a fan-out caller sleeps instead of
+          // retrying into the same saturated account. The value
           // comes from the listener's own ProviderCore, so it is the budget that actually refused.
           if (failure.code === CHATGPT_TURN_QUEUE_TIMEOUT_CODE
             || failure.code === CHATGPT_TURN_QUEUE_FULL_CODE) {

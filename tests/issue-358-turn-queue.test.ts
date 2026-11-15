@@ -42,7 +42,7 @@ import { CONTROLLED_ACCOUNT, controlledProviderConfig } from "./support/chatgpt-
  *
  * 1. the queue's own contract (capacity, budget, depth, priority, fair share, cancellation, metrics),
  *    driven directly so the bounds are deterministic;
- * 2. the real HTTP route (`/v1/chat/completions`, the OpenAI-compatible surface Hindsight speaks) with
+ * 2. the real HTTP route (`/v1/chat/completions`, the OpenAI-compatible surface) with
  *    only the browser I/O replaced, so "the sixth request waits and completes" and "the budget
  *    exhaustion is a 429 with Retry-After" are proven end to end.
  *
