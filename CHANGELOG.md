@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 1.2.0
+
+- `doctor` gains a `model-availability` check: it reports which catalogue rows the configured account
+  can actually serve (`available` / `unavailable` / `unknown`), from the one route authority the
+  refusal path uses. Pure configuration — no browser, no network, no credential — and an unknown
+  capability state is a `warning`, never a failure. Pointing a client at a row the account cannot
+  answer is a typed `400` on the first call; this surfaces it before a real request.
+- New operator **settings page** at `/v1/control/settings/`: status (version, account tier, session
+  health, catalogue, `turnQueue`, `turnAccounting`), chat visibility and the live-editable tuning
+  fields, a link to the endpoint profiles, a **memory-backend routing generator** (per operation:
+  bridge profile, external base URL or disabled, rendered as a copy-paste env block with placeholders
+  only) and a doctor button that warns it performs one real browser turn. Same authority boundary as
+  the other operator pages: served anonymously by design, every data endpoint control-token guarded,
+  no secret in the page, a URL or a log. New control endpoints: `GET /v1/control/catalogue` and
+  `POST /v1/control/doctor`.
+- README correction: `chatgpt-web/luna`/`think` are the **Luna-only** account's rows, not "every
+  account" — a Sol account is served `light`/`medium`/`high` instead. The catalogue table was already
+  correct; two prose claims were not.
+
 ## 1.1.3
 
 - Normalize invalid JSON escapes in a structured reply. A consumer-web model renders JSON keys as if
