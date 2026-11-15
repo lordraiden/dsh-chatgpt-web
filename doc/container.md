@@ -366,10 +366,18 @@ curl -fsSN http://127.0.0.1:17841/v1/chat/completions -H 'content-type: applicat
   response that dropped something carries `x-dsh-chatgpt-web-ignored-features` (canonical names, e.g.
   `tools,toolChoice`; JSON and SSE alike) and the service writes one log line per request.
 - **Content is still refused with a typed 400, never silently dropped:** `files`, `images`, `audio`,
-  `video`, `attachments`, non-text content parts (`image_url`, `input_audio`, `input_file`), `n > 1`,
-  `logprobs`/`top_logprobs`, and `response_format` other than plain text. Attached content is data the
-  caller meant the model to see, so it can never be dropped — that distinction is what stops "drop
-  capability declarations" from sliding into "drop attachments".
+  `video`, `attachments`, non-text content parts (`image_url`, `input_audio`, `input_file`), `n > 1` and
+  `logprobs`/`top_logprobs`. Attached content is data the caller meant the model to see, so it can never
+  be dropped — that distinction is what stops "drop capability declarations" from sliding into "drop
+  attachments".
+- **Structured output is a wire format, accepted since issue #354.** `response_format` may be
+  `{"type":"text"}`, `{"type":"json_object"}`, or `{"type":"json_schema","json_schema":{name?,strict?,schema}}`;
+  a malformed or unknown shape is a typed 400 (`error.code: invalid_response_format`) before any provider
+  work. A consumer web chat has no native schema channel, so the schema is carried into the turn as text
+  and the reply is returned **verbatim**: the response declares the soft mode with
+  `x-dsh-chatgpt-web-structured-output: soft`, and `finish_reason: "length"` is only ever reported when
+  the provider itself proves an exhausted output budget. A build predating #354 answers
+  `400 ... response_format is only supported as plain text` — see TROUBLESHOOTING.md §17.
 - The capability/content split is the **common layer's own** vocabulary
   (`WEB_CHAT_CAPABILITY_FEATURES` / `WEB_CHAT_CONTENT_FEATURES`, `src/web-chat/core/exchange.ts`), so the
   API keeps no second list.
@@ -506,6 +514,68 @@ docker compose run --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix chatgpt-web 
 
 The caveats in §5 still apply: this is a personal, single-account bridge and the provider's terms of
 service are yours to honour.
+
+### 5.6 A self-hosted Hindsight pointed at this service (issue #357)
+
+Hindsight is a memory service that drives its own LLM. This bridge can be that LLM, which is what
+[`docker-compose.hindsight.yml`](../docker-compose.hindsight.yml) runs: the bridge plus the self-hosted
+**FULL API** image (`ghcr.io/vectorize-io/hindsight-api:latest`), on one Compose network, reachable by
+service name, with **no port published for Hindsight**.
+
+```bash
+export DSH_CHATGPT_WEB_API_KEY="$(openssl rand -base64 32)"
+docker compose -f docker-compose.hindsight.yml up -d --wait
+docker compose -f docker-compose.hindsight.yml exec chatgpt-web node lib/cli.js doctor
+```
+
+Run that stack *instead of* `docker-compose.yml` / `docker-compose.exposed.yml`: all three end up on the
+host's port 17841. The data volume is shared by name, so a provider session established once is usable
+by any of them.
+
+Why the stack is shaped the way it is — each of these is a verified fact, not a preference:
+
+- **The bridge binds `0.0.0.0` in this stack.** The default stack uses host networking and loopback
+  because a published port cannot reach a loopback-only bind (F1); a second container cannot reach a
+  loopback-only bind either. The server refuses `0.0.0.0` without an API key, so the key is required
+  here — and it is the same value Hindsight sends as `HINDSIGHT_API_LLM_API_KEY`.
+- **Hindsight publishes nothing.** Its API listens on 8888 inside the Compose network only; the operator
+  reaches the bridge on host loopback (17841) for the sign-in page, the control surface and `doctor`. The
+  `ghcr.io/vectorize-io/hindsight` tag (API + control plane on 9999) is deliberately not used.
+- **The FULL image, not slim.** The full image embeds the BGE embedder (~130 MB) and the MiniLM
+  cross-encoder (~90 MB), so nothing else is needed. Budget **1.2–1.5 GB RSS under load** (idle
+  ~0.8–1.0 GB); `latest-slim` is ~500 MB but needs external embedding and reranker providers.
+- **`stop_grace_period: 75s` and a stable `HINDSIGHT_API_WORKER_ID`.** The worker needs up to 60 s to
+  hand its claimed tasks back, and Docker's default 10 s would orphan them under a hostname that no
+  longer exists.
+- **`shm_size: 1g`.** The image loads PyTorch/ONNX and the local models; Hindsight's own `docker run`
+  example passes the same value.
+- **The embedded database is a named volume** (`/home/hindsight/.pg0`). The image runs as UID 1000, so a
+  host bind mount must be chowned to match or pg0 fails with `Permission denied`.
+
+The LLM wiring is the integration profile documented in README.md §"Hindsight: one model per operation,
+one conversation per operation", and it is what the compose file sets:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `HINDSIGHT_API_LLM_PROVIDER` | `openai` | Hindsight's name for "any API that speaks Chat Completions" |
+| `HINDSIGHT_API_LLM_BASE_URL` | `http://chatgpt-web:17841/v1` | Hindsight appends `/chat/completions`, so the `/v1` suffix is required. The recommended `temporary` profile is `http://chatgpt-web:17841/p/hindsight/v1` |
+| `HINDSIGHT_API_LLM_API_KEY` | `$DSH_CHATGPT_WEB_API_KEY` | the bridge's API key *is* the LLM API key |
+| `HINDSIGHT_API_LLM_MODEL` | `chatgpt-web/luna` | the route every account serves |
+| `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS` | `16000` | retain asks for long structured output; it must stay above `HINDSIGHT_API_RETAIN_CHUNK_SIZE` (3000), which Hindsight checks on startup |
+| `HINDSIGHT_API_LLM_MAX_CONCURRENT` | `1` | one account, five browser turns at most, and a bounded wait queue in front of them |
+| `HINDSIGHT_API_LLM_TIMEOUT` | `600` | a browser turn is minutes, not seconds; Hindsight's 120 s default would abandon a turn the account is still running and then resubmit it |
+
+Two limits belong here rather than in a footnote:
+
+- **This bridge cannot enforce a token budget** (issue #354). `max_completion_tokens` is accepted and
+  forwarded, and no consumer-web adapter consumes it, so `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS`
+  shapes the request and not the answer. `finish_reason` is `"length"` only when the provider reports an
+  exhausted output budget, which a web turn never does (TROUBLESHOOTING.md §18).
+- **The doctor's Hindsight check is a real turn.** `node lib/cli.js doctor` posts one Hindsight-shaped
+  structured request to the running service, so it costs one browser turn, and it is `skipped` — never a
+  failure — when no API key is configured or the service is not listening. It declares a stable `user`
+  identity, so every run continues the same probe conversation; on a persistent endpoint that
+  conversation is visible in the account's history.
 
 ## 6. Evidence collected on the authoring host
 

@@ -1,0 +1,119 @@
+# Compose stack: this bridge + a self-hosted Hindsight FULL API (issue #357).
+#
+# It answers one question — "how do I point Hindsight at this service?" — with a working stack instead
+# of tribal knowledge. Two services on one Compose network:
+#
+#   chatgpt-web   the bridge, bound 0.0.0.0 *inside its own namespace* so another container can reach
+#                 it by service name. That bind is fail-closed: the server refuses to start without an
+#                 API key, so DSH_CHATGPT_WEB_API_KEY is required here (doc/container.md §5.2, #247).
+#   hindsight     the self-hosted FULL API image (local BGE embedder + MiniLM cross-encoder, no
+#                 control plane). It publishes NOTHING: the only route into it is the Compose network,
+#                 and the only route out of it is this bridge.
+#
+# Run it INSTEAD of docker-compose.yml / docker-compose.exposed.yml: all three end up on the host's
+# port 17841, so starting two of them is a visible port clash rather than a silent race. The data
+# volume is shared by name, so a provider session established once is usable by any of them.
+#
+#   export DSH_CHATGPT_WEB_API_KEY="$(openssl rand -base64 32)"
+#   docker compose -f docker-compose.hindsight.yml up -d --wait
+#   docker compose -f docker-compose.hindsight.yml exec chatgpt-web node lib/cli.js doctor
+#
+# The first `up` pulls a ~9 GB image (the FULL variant bundles PyTorch and the local models). Budget
+# 1.2–1.5 GB of RAM for Hindsight under load: the BGE embedder (~130 MB) and the MiniLM cross-encoder
+# (~90 MB) are loaded in-process, and idle RSS already settles around 0.8–1.0 GB. The `latest-slim`
+# tag is ~500 MB but needs external embedding and reranker providers, so it is not a drop-in.
+#
+# Recommended hardening, one line: create the `temporary` endpoint profile documented in README.md
+# §"Hindsight: one model per operation, one conversation per operation" and point
+# HINDSIGHT_API_LLM_BASE_URL at http://chatgpt-web:17841/p/hindsight/v1 instead. The default `/v1`
+# endpoint used below is a persistent chat surface, so every retain/reflect turn appears in the
+# account's chat history; a `temporary` profile runs them as Temporary Chats (hidden, no history, no
+# ChatGPT memory) and is the shape this integration is meant to run in.
+
+name: dsh-chatgpt-hindsight
+
+x-build: &build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    # Must match playwright-core in bun.lock; scripts/test-246-container-pin.mjs fails otherwise.
+    PLAYWRIGHT_VERSION: "1.63.0"
+
+services:
+  chatgpt-web:
+    build: *build
+    image: dsh-chatgpt-web:local
+    init: true
+    ipc: host
+    restart: unless-stopped
+    environment:
+      DSH_CHATGPT_WEB_HOME: /data
+      # Required, not optional: this stack reaches the bridge from another container, so the service
+      # must bind 0.0.0.0, and it refuses that without a key. The same value is Hindsight's
+      # HINDSIGHT_API_LLM_API_KEY below.
+      DSH_CHATGPT_WEB_API_KEY: "${DSH_CHATGPT_WEB_API_KEY:?set DSH_CHATGPT_WEB_API_KEY to a value of at least 16 characters}"
+    volumes:
+      - dsh-data:/data
+    command: ["serve", "--host", "0.0.0.0", "--port", "17841"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:17841/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    ports:
+      # Host loopback only, for the operator: the sign-in page, the control surface and `doctor`.
+      # Hindsight does not use this route — it dials the service name on the Compose network.
+      - "127.0.0.1:17841:17841"
+
+  hindsight:
+    # The FULL API image: `ghcr.io/vectorize-io/hindsight-api:latest` (Full) or
+    # `ghcr.io/vectorize-io/hindsight-api:latest-slim` (Slim, external models required). The
+    # `ghcr.io/vectorize-io/hindsight:latest` tag would additionally run the control-plane UI on 9999,
+    # which this stack deliberately does not publish.
+    image: ghcr.io/vectorize-io/hindsight-api:latest
+    init: true
+    restart: unless-stopped
+    depends_on:
+      chatgpt-web:
+        condition: service_healthy
+    # The worker needs up to 60 s to hand its claimed tasks back on shutdown; Docker's default 10 s
+    # would orphan them under a worker id that no longer exists.
+    stop_grace_period: 75s
+    # The docs' `docker run --shm-size=1g`: PyTorch/ONNX and the local models need it.
+    shm_size: 1g
+    environment:
+      # --- the LLM: this bridge ---------------------------------------------------------------
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      # `openai` is Hindsight's name for "any API that speaks Chat Completions", which this service
+      # does. The `/v1` suffix is part of the value: Hindsight appends `/chat/completions` to it, and
+      # a base URL without it answers 404 on every call.
+      HINDSIGHT_API_LLM_BASE_URL: http://chatgpt-web:17841/v1
+      # The bridge's API key IS the LLM API key: Hindsight authenticates like any OpenAI client.
+      HINDSIGHT_API_LLM_API_KEY: "${DSH_CHATGPT_WEB_API_KEY:?set DSH_CHATGPT_WEB_API_KEY to a value of at least 16 characters}"
+      HINDSIGHT_API_LLM_MODEL: chatgpt-web/luna
+      # One browser account serves at most five simultaneous browser turns, and the bridge puts a
+      # bounded wait queue in front of them (a saturated account answers 429 + Retry-After). Leaving
+      # Hindsight's default of 32 concurrent calls would only move that queue inside the bridge.
+      HINDSIGHT_API_LLM_MAX_CONCURRENT: "1"
+      # A browser turn is minutes, not seconds, and has no absolute deadline of its own. Hindsight's
+      # 120 s default would abandon a turn the account is still running — and then resubmit it.
+      HINDSIGHT_API_LLM_TIMEOUT: "600"
+      # Retain asks for long structured output. It must stay above HINDSIGHT_API_RETAIN_CHUNK_SIZE
+      # (default 3000) — Hindsight checks that on startup. This bridge cannot enforce it: a consumer
+      # web chat has no token budget (issue #354), so the value shapes the request, not the answer.
+      HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS: "16000"
+      # A stable worker identity. The container hostname changes on every restart, and tasks claimed
+      # under the old one would stay parked with no way for the new container to adopt them.
+      HINDSIGHT_API_WORKER_ID: hindsight
+    volumes:
+      # The embedded PostgreSQL (pg0). A named volume, not a bind mount: the image runs as UID 1000,
+      # and a host directory must be chowned to match or the database fails with `Permission denied`.
+      - hindsight-data:/home/hindsight/.pg0
+
+volumes:
+  dsh-data:
+    # Holds the provider session (credentials) and the durable conversation store — never commit it.
+    name: dsh-chatgpt-web-data
+  hindsight-data:
+    name: dsh-chatgpt-hindsight-data

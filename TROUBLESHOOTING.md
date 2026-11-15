@@ -24,7 +24,16 @@ The doctor should validate at least:
 - Chrome/Chromium availability;
 - authenticated ChatGPT browser evidence;
 - local sidecar health;
-- configured runtime prerequisites.
+- configured runtime prerequisites;
+- the Hindsight integration, when the deployment configures an API key: one Hindsight-shaped structured
+  request to `/v1/chat/completions`, reported `ok`, `warning` or `error`, and `skipped` — never failed —
+  when there is no API key or the service is not listening (§17–§21 cover what the outcomes mean).
+
+The Hindsight check is the only doctor check that performs a real browser turn, so a `doctor` run on a
+live deployment costs one turn on the account. It declares a stable `user` identity, so every run
+continues the same probe conversation instead of creating a new one — and on a persistent endpoint that
+conversation is visible in the account's history, which is one more reason to point Hindsight at a
+`temporary` profile (§21).
 
 If the doctor reports a failure, fix that failure before changing provider or browser logic.
 
@@ -264,7 +273,7 @@ Do not treat a provider rate limit as proof that changing WebChat retry logic is
 
 Resolved. `main` no longer has an account-level *exclusive* ChatGPT browser lease, so a second DSH chat on the same authenticated account leases normally instead of being rejected out of hand. The limitation was real and was tracked by issue #201 and its fix PR #202.
 
-Account fan-out is now **bounded**, not exclusive: one authenticated account serves up to `MAX_CHATGPT_BROWSER_TABS` (5) simultaneous browser turns. Past that bound every enforcement site (provider core, turn-session registry, browser worker) refuses with the same shared sentence:
+Account fan-out is now **bounded**, not exclusive: one authenticated account serves up to `MAX_CHATGPT_BROWSER_TABS` (5) simultaneous browser turns. Since issue #358 a turn that arrives while the bound is full does not fail at once: it waits in a bounded queue (60 s by default) and is refused only when that budget expires or the queue is already full — a typed HTTP 429 carrying `Retry-After` (`turn_queue_timeout` / `turn_queue_full`, §19). The bound itself still refuses a direct over-bound lease with the same shared sentence:
 
 ```text
 ChatGPT Web supports at most 5 simultaneous browser turns; close or finish a browser tab before starting another
@@ -283,7 +292,7 @@ Read the refusal to tell the two apart:
 - `retained_surface_lost` / `CONVERSATION_LOST` means the retained conversation was retired (its page died, or it was idle past the retention window / past the retention cap) and is deliberately **not** auto-replayed: re-send the canonical history as an explicit replay to re-establish it (`doc/architecture.md` §19.1);
 - `The last attempt on this conversation was never confirmed; the provider must reconcile it before it can be resumed` (`CONVERSATION_STATE_MISMATCH`) means a previous turn failed after its submission was accepted, so that attempt's remote outcome is not established yet. The next turn asks the provider to **reconcile** it structurally: when the retained page still holds that attempt's finalized reply the turn simply continues (nothing is resent), and when coherence cannot be proven the conversation is retired — a new conversation, or an explicit replay of the canonical history, is the way forward (`doc/architecture.md` §19.1);
 - a turn that failed **before** its prompt was submitted is not that case: nothing reached ChatGPT, so it marks nothing, needs no reconciliation and spends no reconciliation budget — retrying it is safe and is governed by the ordinary retry layer (`doc/architecture.md` §19.1, issue #317);
-- the bounded fan-out sentence means the authenticated account is at its 5-turn ceiling — wait for a browser turn to finish, then retry;
+- the bounded fan-out sentence means the authenticated account is at its 5-turn ceiling — wait for a browser turn to finish, then retry. A turn that *waited* for a slot and did not get one answers §19's typed 429 instead, which is the same fact with a deferral hint;
 - `ChatGPT Web has no recorded account identity for this deployment, ... sign in again at the operator sign-in surface (/v1/control/auth/)` means nothing recorded *which* account this deployment signed in as, so no physical account could be verified against it. Sign in again (or run `login`) to record it;
 - `Browser lease physical account does not match its logical account identity: expected <fingerprint>, actual <fingerprint>` means two *recorded* identities genuinely disagree — the browser session belongs to a different account than the one this deployment recorded. Re-authenticate that account, or point the deployment at the browser session it recorded.
 
@@ -514,7 +523,179 @@ client ignores. No client timeout was raised or needs to be raised.
 3. Do not raise any client-side `streamIdleTimeout`/idle timer as a workaround — the keep-alive is the
    fix for that, and the two clocks are independent.
 
-## 17. Reporting a bug
+## 17. A structured request fails with `400` on `response_format`
+
+### Symptom
+
+Hindsight (or any OpenAI-compatible client) sends a `response_format` and gets HTTP `400`,
+`type: invalid_request_error`, with the message:
+
+~~~text
+`response_format` is only supported as plain text
+~~~
+
+### Cause
+
+The running build predates issue #354. Until then the chat-completions surface accepted only
+`{"type":"text"}` and refused every other shape before any provider work, so a structured caller could
+not work at all.
+
+### Resolution
+
+Update the image (`docker compose pull`, or rebuild) and confirm the build accepts the shape:
+
+~~~bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:17841/v1/chat/completions \
+  -H "authorization: Bearer $DSH_CHATGPT_WEB_API_KEY" -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}],"response_format":{"type":"json_object"}}'
+~~~
+
+A `200` — or a provider failure, but **not** a 400 about `response_format` — means the build has #354.
+`dsh-chatgpt-web doctor` proves the same thing with one Hindsight-shaped structured request, and reports
+the latency and the estimated token usage.
+
+A current build still answers `400` for a *malformed* shape, with `error.code: invalid_response_format`.
+That is a request bug, not a build age: `json_schema` requires `json_schema.schema` to be a JSON Schema
+object, `name` to be a non-empty string when present, and `strict` to be a boolean when present.
+
+## 18. `finish_reason` is never `"length"`
+
+### Symptom
+
+A caller that keys on `finish_reason` — Hindsight's retain does — sees `"stop"` even when the answer is
+visibly cut off, so a truncated extraction looks like a complete one.
+
+### Cause
+
+This is the documented limit of issue #354. `"length"` is published only when the provider itself
+**proves** its output budget was exhausted: `status: "incomplete"` with
+`incomplete_details.reason === "max_output_tokens"`. A consumer web chat never reports that, and no web
+adapter enforces a token budget at all — `max_tokens` / `max_completion_tokens` are accepted and
+forwarded, never applied, so a truncated web answer is indistinguishable from a complete one here.
+
+### What to do
+
+1. Do not treat `"stop"` as proof of completeness on this bridge. Validate the **content** — a JSON
+   parse, a closing brace, a sentinel — instead of the finish reason. Hindsight parses every structured
+   reply itself (it is why `HINDSIGHT_API_LLM_STRICT_SCHEMA` exists), so a truncated answer fails there
+   as a parse error rather than being accepted because the finish reason said `"stop"`.
+2. Keep `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS` above `HINDSIGHT_API_RETAIN_CHUNK_SIZE` anyway
+   (defaults `64000` and `3000`): Hindsight checks that at startup, and a value below the chunk size is a
+   configuration error even though this bridge ignores the budget.
+3. Do not "fix" it by relabelling the other cut-offs (`content_filter`, `cancelled`,
+   `upstream_stall_timeout`, `adapter_eof`) as `"length"`. They are cut-offs, but they are not the
+   output-budget limit `"length"` names, and a caller would retry a filtered or cancelled turn as if the
+   model had merely run out of room.
+
+## 19. Hindsight gets `429` with `Retry-After` (`turn_queue_timeout` / `turn_queue_full`)
+
+### Symptom
+
+HTTP `429`, `type: rate_limit_error`, `error.code` either `turn_queue_timeout` or `turn_queue_full`, and
+a `Retry-After` header. The message says no ChatGPT Web browser slot became free within the wait budget,
+or that the queue was already full, and that the turn was **not started**. Hindsight logs the same 429
+and retries on its own backoff (`HINDSIGHT_API_LLM_MAX_RETRIES`, `HINDSIGHT_API_LLM_INITIAL_BACKOFF`).
+
+### Cause
+
+Issue #358. One authenticated account serves at most `MAX_CHATGPT_BROWSER_TABS` (5) simultaneous
+browser turns. A turn that arrives while all five are in use now *waits* — bounded by the queue's wait
+budget (60 s by default) — and is refused with this 429 only when the budget expires or the bounded
+queue is already full. It is **backpressure, not a provider failure**: nothing was submitted, ChatGPT
+never saw the request, and the conversation's continuity is untouched, so retrying after the advertised
+delay is safe.
+
+- `turn_queue_timeout` — the turn waited the whole budget and no slot became free.
+- `turn_queue_full` — the bounded queue already held its maximum number of waiters; refused immediately
+  with the same backpressure instead of growing without bound.
+- Housekeeping turns (a declared `purpose`, e.g. a session title or a compaction) are served before
+  conversational ones, and one caller cannot hold every slot while another caller waits.
+- `GET /v1/control/status` publishes `turnQueue` (depth, grants, wait times, refusals, per caller) and
+  `turnAccounting` (browser turns per request and per operation, and the wait for a slot).
+
+### What to do
+
+1. Honour `Retry-After` in your own client; do not retry immediately and do not raise the client's
+   concurrency. A fan-out client such as Hindsight should run `HINDSIGHT_API_LLM_MAX_CONCURRENT=1`
+   against a single account — its default of 32 only moves the same queue inside the bridge — and let
+   its own retry budget absorb the deferral.
+2. If the refusal is chronic, read `turnQueue` on `/v1/control/status`: a depth that never falls with no
+   grants usually means a stuck turn (§15), not a burst.
+3. Do not try to raise `MAX_CHATGPT_BROWSER_TABS`. It is an account-safety bound — each turn owns a real
+   browser document in the signed-in account — not a tuning knob.
+
+## 20. The ChatGPT session expires mid-run
+
+### Symptom
+
+A turn fails with HTTP `401`, `type: authentication_error`, `code: chatgpt_session_expired`, and a
+message saying the ChatGPT web login is expired or the Temporary Chat surface is unavailable. Hindsight
+logs the same 401 and retries.
+
+### Cause
+
+The authenticated browser session stopped being accepted while the service was running: the provider
+signed it out, expired it, or replaced it with a verification challenge. The provider detects it from the
+page's own expired-session alert, and that check runs both at surface readiness (before the prompt is
+submitted) and while it waits for the answer (after submission).
+
+### What to do
+
+1. Sign in again at the operator surface `http://127.0.0.1:17841/v1/control/auth/` (no display needed).
+   The running service picks the new session up on the next turn — no restart. `auth import` is the
+   route that still needs `docker compose restart chatgpt-web`.
+2. Confirm with `GET /v1/control/auth/health`, or run `doctor`: the `login` check and the per-provider
+   WebChat check both report the missing verified session.
+3. Retry only when the failure came from the readiness check: nothing reached ChatGPT then, so a retry is
+   safe. A turn that failed this way **after** its prompt was submitted is the ambiguous case of §11 —
+   the account may still be running it, so do not resend it blindly.
+
+## 21. A `temporary` profile's first real turn is the verification
+
+### Symptom
+
+A `temporary` endpoint profile (or `chatgptWeb.chatVisibility: "temporary"`) fails on a real account with
+a typed refusal naming the Temporary Chat surface, for example:
+
+~~~text
+ChatGPT Temporary Chat did not expose a structural personalization control before the readiness deadline
+~~~
+
+or the readiness error that says `ChatGPT web login is expired or the Temporary Chat surface is
+unavailable`, which is what the temporary surface reports when its composer never appears.
+
+### Cause
+
+This is the known risk of issue #355. The temporary surface is a *different* ChatGPT page
+(`?temporary-chat=true`) with its own readiness assertions: before submitting a turn the provider
+requires exactly one structural personalization control, a verifiable personalization state, and a
+confirmed connector-personalization state, and it refuses rather than guessing. Those assertions are
+pinned by a suite that simulates browser I/O, and the surface measured against a real account is the
+**persistent** one — there is no recorded live Temporary Chat turn in this repository. The first real
+temporary turn is therefore the verification, and a rejection there is a finding to report, not
+something to work around by disabling the assertions.
+
+### What to do
+
+1. Prove the surface before pointing a workload at it. Create the profile, then run `doctor` (its
+   Hindsight probe performs one real turn) or send a single request:
+
+   ~~~bash
+   curl -fsS http://127.0.0.1:17841/p/hindsight/v1/chat/completions \
+     -H 'content-type: application/json' \
+     -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}]}'
+   ~~~
+
+2. If the refusal names the personalization control or the connector state, the account's Temporary Chat
+   page differs from what the provider asserts. Capture the page's state — never cookies or storage
+   state — and report it. Do not silently switch the deployment to `persistent` to get past it: that
+   writes the workload's turns into the account's history, which is the thing the profile exists to
+   prevent.
+3. `temporary` is refused outright on a launcher browser host and on a non-ChatGPT route: those
+   deployments cannot honour it, and the refusal is typed rather than a silent fallback to the default
+   endpoint's behaviour.
+
+## 22. Reporting a bug
 
 Include:
 
@@ -545,7 +726,7 @@ Before sharing logs or screenshots, remove:
 - private prompts;
 - local filesystem secrets.
 
-## 18. Development versus user troubleshooting
+## 23. Development versus user troubleshooting
 
 If you are changing the implementation rather than operating an installed release, start with:
 

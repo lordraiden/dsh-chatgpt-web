@@ -156,7 +156,10 @@ describe("issue #193 — the doctor-facing provider check keeps identifiers shor
     try {
       saveConfig(defaultConfig());
 
-      const report = await runDoctor();
+      // The Hindsight probe (issue #357) is the one doctor check that performs a real browser turn.
+      // It is skipped without an API key, but a developer machine can have both a live service and a
+      // key, so this suite keeps the network probe out instead of depending on the ambient state.
+      const report = await runDoctor({ hindsightProbe: false });
       const provider = report.checks.filter(check => check.id === `webchat-${CHATGPT_WEB_DRIVER_ID}`);
       expect(provider).toHaveLength(1);
       // The provider facts are in the report; the status itself depends on the account state.

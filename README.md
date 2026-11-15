@@ -278,6 +278,24 @@ Rules:
 
 ### Hindsight: one model per operation, one conversation per operation
 
+Hindsight reaches this service as an OpenAI-compatible provider. The base wiring is four variables on
+the Hindsight side, and the `/v1` suffix is part of the base URL because Hindsight appends
+`/chat/completions` to it:
+
+```dotenv
+HINDSIGHT_API_LLM_PROVIDER=openai
+HINDSIGHT_API_LLM_BASE_URL=http://chatgpt-web:17841/v1
+HINDSIGHT_API_LLM_API_KEY=<the same value as DSH_CHATGPT_WEB_API_KEY>
+HINDSIGHT_API_LLM_MODEL=chatgpt-web/luna
+```
+
+`openai` is the right provider even though nothing here is OpenAI: it is Hindsight's name for "any API
+that speaks Chat Completions", and this service does. `chatgpt-web` is the Compose service name from
+[`docker-compose.hindsight.yml`](./docker-compose.hindsight.yml) — a working stack that runs the bridge
+and a self-hosted Hindsight on one network, with nothing of Hindsight published; from the host, the
+base URL is `http://127.0.0.1:17841/v1`. A base URL without `/v1` answers `404` on every call, which is
+the first thing to check when Hindsight logs a failed startup probe.
+
 Hindsight can point each of its operations at a different catalogue model, and can keep one operation's
 turns on one provider conversation:
 
@@ -308,6 +326,86 @@ turns, continuations, replay size and the wait for an account slot (a request th
 provider has no browser-turn field) — so both shapes are measurable. `chatgpt-web/light`/`high`
 require a Sol account; on a Luna-only account use `chatgpt-web/luna` and `chatgpt-web/think`. `usage`
 remains an **estimate** — see [The `usage` block is an estimate](#the-usage-block-is-an-estimate).
+
+#### Which catalogue id to point at
+
+Every id in the [model catalogue](#model-catalogue) is a valid `HINDSIGHT_API_LLM_MODEL`; the account
+decides which ones answer:
+
+| Id | Account |
+| --- | --- |
+| `chatgpt-web/luna` | every account — the safe default, and the id the Compose example uses |
+| `chatgpt-web/think` | every account (Luna's Think reasoning mode) |
+| `chatgpt-web/light`, `chatgpt-web/medium`, `chatgpt-web/high` | needs a **Sol** account |
+| `chatgpt-web/extra-high`, `chatgpt-web/pro` | **Pro**-gated |
+
+A route the account cannot serve is a typed `400` that names the accepted ones, never a silent
+downgrade, so a wrong id fails on the first call instead of quietly costing quality.
+
+#### The output budget, and the one thing this bridge cannot enforce
+
+Retain asks for long structured output, so Hindsight wants a large output budget:
+`HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS` (default `64000`) must stay **above**
+`HINDSIGHT_API_RETAIN_CHUNK_SIZE` (default `3000`), and Hindsight checks that on startup. Lower it for
+a model with a smaller output limit — the value is Hindsight's own request budget, not this service's.
+
+**This bridge cannot enforce a token budget.** Issue #354 made `max_tokens`/`max_completion_tokens`
+wire-faithful (accepted, forwarded, never refused), and no consumer-web adapter consumes the value, so
+a turn is not actually bounded by it. Two consequences, both documented limits rather than bugs:
+
+- `finish_reason` is `"length"` only when the provider itself reports an exhausted output budget, which
+  a web turn never does — so a cut-off answer reads as `"stop"` (TROUBLESHOOTING.md §18);
+- a retain that asks for 64000 tokens gets whatever the web surface produces: the value shapes the
+  request, not the answer.
+
+Two timing knobs matter for the same reason — a browser turn is minutes, not seconds:
+
+- `HINDSIGHT_API_LLM_TIMEOUT` (default `120` s) should sit **above** this service's own turn budget.
+  Hindsight retries after a timeout, and a turn that outlived it is still running on the account, so
+  the retry is a second submission of a prompt ChatGPT already accepted;
+- `HINDSIGHT_API_LLM_MAX_CONCURRENT` (default `32`) should be small — `1` in the Compose example. One
+  account serves at most five simultaneous browser turns, and the bridge answers a saturated account
+  with `429` + `Retry-After` (TROUBLESHOOTING.md §19), so a large fan-out only queues inside the bridge.
+
+#### The endpoint profile: hidden chats, no history, no ChatGPT memory
+
+Hindsight's turns are machine work, not conversations. On the default `/v1` endpoint they are ordinary
+persistent chats: they appear in the account's history, and ChatGPT's memory can read and write them. A
+`temporary` endpoint profile is the surface that does not (see
+[Endpoint profiles](#endpoint-profiles-one-service-several-endpoints)), so the recommended integration
+points Hindsight at the profile:
+
+```bash
+# one-time, with the control token — never the API key
+curl -fsS -X POST http://127.0.0.1:17841/v1/control/endpoint-profiles \
+  -H "Authorization: Bearer $CONTROL_TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"hindsight","chatVisibility":"temporary","models":["chatgpt-web/luna"],"maxConcurrentTurns":1}'
+```
+
+```dotenv
+HINDSIGHT_API_LLM_BASE_URL=http://chatgpt-web:17841/p/hindsight/v1
+```
+
+A Temporary Chat claims no provider conversation, so the mechanics are the ones the paragraph above
+describes: every turn replays the caller's canonical history and nothing reaches the account's history.
+A profile that does not exist is a typed `404` (`error.code: endpoint_profile_not_found`), never a silent
+fallback to `/v1`, so create it before starting Hindsight.
+
+#### What Hindsight checks at startup
+
+Hindsight sends one test call to **each configured model** when it starts — the global model and every
+`HINDSIGHT_API_<OPERATION>_LLM_*` member — so a wrong base URL, a wrong API key or a model id this
+account cannot serve shows up in Hindsight's log instead of in the first retain. A model that is down
+only logs a **warning**: Hindsight still starts. `HINDSIGHT_API_SKIP_LLM_VERIFICATION=true` skips those
+calls.
+
+Each of those probes is a real turn here, so a deployment that names three models pays three browser
+turns per Hindsight restart. That is the reason to keep the per-operation chains as small as the
+deployment needs — and the reason `dsh-chatgpt-web doctor` performs the same proof from this side: it
+posts one Hindsight-shaped structured request (`response_format` `json_schema`) to the default
+`/v1/chat/completions` (a profile serves the same contract) and reports the measured latency and the
+estimated token usage. It is `skipped` — never a failure — when the deployment has no API key or the
+service is not listening.
 
 ### Every CLI subcommand through the image
 
