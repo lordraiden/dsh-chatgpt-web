@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.4
+
+- The truncation probe now runs every 30 seconds while a turn is waiting, instead of only when the
+  generation has stopped. A live truncation kept `running=true` for ten minutes (the Stop control never
+  disappeared), so the previous probe could never fire; a periodic probe records the affordance the
+  moment it appears, with `running` and the visible character count. Only presence is logged: a
+  periodic "absent" line would drown the log, and the completion-time probe already proves absence on
+  ordinary turns.
+
 ## 1.2.3
 
 - The structured-output instruction now forbids web search. Observed live: a `response_format`
