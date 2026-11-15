@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.3
+
+- The structured-output instruction now forbids web search. Observed live: a `response_format`
+  request whose answer triggered ChatGPT's own web search came back as Markdown prose with a citation
+  and ignored the schema entirely, so a structured caller lost the turn. The instruction says "Do not
+  use web search or cite sources: answer from the conversation only", in both the `json_object` and
+  `json_schema` modes. Same soft enforcement as the rest of `response_format`: it is an instruction,
+  not a guarantee, and a reply that still ignores it is the caller's schema validation.
+
 ## 1.2.2
 
 - Record the truncation affordance where it actually appears. A generation cut by the output budget

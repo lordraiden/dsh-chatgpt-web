@@ -122,6 +122,9 @@ describe("issue #354 — response_format is accepted and carried as text", () =>
     expect(instructions).toContain("Emit raw JSON");
     expect(instructions).toContain("never escape characters inside string values");
     expect(instructions).toContain("never use Markdown escaping");
+    // A model that searched the web answered in prose with citations and ignored the schema, so the
+    // instruction forbids it explicitly (observed live: a structured request returned Markdown).
+    expect(instructions).toContain("Do not use web search or cite sources");
     expect(instructions).toContain("<dsh_output_schema_json>");
     expect(instructions).toContain(JSON.stringify(SCHEMA));
     expect(instructions).toContain("</dsh_output_schema_json>");
@@ -145,6 +148,7 @@ describe("issue #354 — response_format is accepted and carried as text", () =>
     expect(instructions).toContain("Do not wrap it in a Markdown code fence");
     expect(instructions).toContain("Emit raw JSON");
     expect(instructions).toContain("never use Markdown escaping");
+    expect(instructions).toContain("Do not use web search or cite sources");
     // There is no schema to carry, so no schema block is invented.
     expect(instructions).not.toContain("<dsh_output_schema_json>");
     expect(translation.body.input).toEqual([
