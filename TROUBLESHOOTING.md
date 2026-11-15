@@ -25,6 +25,10 @@ The doctor should validate at least:
 - authenticated ChatGPT browser evidence;
 - local sidecar health;
 - configured runtime prerequisites;
+- which model catalogue rows the configured account can serve: each row is reported `available`,
+  `unavailable` (the account tier cannot serve it) or `unknown` (the capability state does not say), so
+  a client is not pointed at a row that would be refused on its first call. An unknown state is a
+  warning, never a failure;
 - the OpenAI-compatible integration, when the deployment configures an API key: one structured request
   to `/v1/chat/completions`, reported `ok`, `warning` or `error`, and `skipped` — never failed — when
   there is no API key or the service is not listening (§17–§21 cover what the outcomes mean).

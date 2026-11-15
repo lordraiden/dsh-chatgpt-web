@@ -150,9 +150,11 @@ is wrong.
    complete ChatGPT's own sign-in in the page. The running service picks the session up on the next
    turn — no restart. `node lib/cli.js login` does the same from a terminal, and `auth import` adopts a
    capture from another machine (see [Sign in to ChatGPT](#sign-in-to-chatgpt)).
-2. **Pick the model.** `GET /v1/models` lists the catalogue: `chatgpt-web/luna` works on every account,
-   `chatgpt-web/light`/`medium`/`high` need a **Sol** account, and `chatgpt-web/extra-high`/`pro` are
-   **Pro**-gated. A route the account cannot serve is a typed `400` that names the accepted ones, never
+2. **Pick the model.** `GET /v1/models` lists the catalogue, and which rows an account is served depends
+   on its tier: `chatgpt-web/luna`/`think` are the **Luna-only** rows (an account without the Sol model
+   selector), `chatgpt-web/light`/`medium`/`high` are the **Sol** rows, and
+   `chatgpt-web/extra-high`/`pro` need **Sol + Pro**. A route the account cannot serve is a typed `400`
+   that names the accepted ones, never
    a silent downgrade.
 3. **Choose the chat visibility.** Default is `persistent`. Use `temporary` when the caller keeps its
    own transcript and its turns must not appear in the account's history or touch ChatGPT memory.
@@ -442,7 +444,8 @@ curl -fsS -X POST http://127.0.0.1:17841/v1/control/endpoint-profiles \
 - `chatVisibility: "temporary"` — every turn is a ChatGPT Temporary Chat: no history entry, no ChatGPT
   memory read or write, no training use.
 - `models` — pin the catalogue route Hindsight may use, so a wrong model id fails at the profile instead
-  of silently costing quality. `chatgpt-web/luna` works on every account.
+  of silently costing quality. Pick the row your account tier is served: `chatgpt-web/luna`/`think` on a
+  Luna-only account, `chatgpt-web/light`/`medium`/`high` on a Sol account (`doctor` reports which).
 - `maxConcurrentTurns: 1` — one account serves at most five browser turns; keeping Hindsight at one keeps
   it inside the queue instead of racing the account's other work.
 
