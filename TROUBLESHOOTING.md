@@ -25,15 +25,15 @@ The doctor should validate at least:
 - authenticated ChatGPT browser evidence;
 - local sidecar health;
 - configured runtime prerequisites;
-- the Hindsight integration, when the deployment configures an API key: one Hindsight-shaped structured
-  request to `/v1/chat/completions`, reported `ok`, `warning` or `error`, and `skipped` — never failed —
-  when there is no API key or the service is not listening (§17–§21 cover what the outcomes mean).
+- the OpenAI-compatible integration, when the deployment configures an API key: one structured request
+  to `/v1/chat/completions`, reported `ok`, `warning` or `error`, and `skipped` — never failed — when
+  there is no API key or the service is not listening (§17–§21 cover what the outcomes mean).
 
-The Hindsight check is the only doctor check that performs a real browser turn, so a `doctor` run on a
-live deployment costs one turn on the account. It declares a stable `user` identity, so every run
-continues the same probe conversation instead of creating a new one — and on a persistent endpoint that
-conversation is visible in the account's history, which is one more reason to point Hindsight at a
-`temporary` profile (§21).
+The structured-output check is the only doctor check that performs a real browser turn, so a `doctor`
+run on a live deployment costs one turn on the account. It declares a stable `user` identity, so every
+run continues the same probe conversation instead of creating a new one — and on a persistent endpoint
+that conversation is visible in the account's history, which is one more reason to use a `temporary`
+profile for machine workloads (§21).
 
 If the doctor reports a failure, fix that failure before changing provider or browser logic.
 
@@ -527,7 +527,7 @@ client ignores. No client timeout was raised or needs to be raised.
 
 ### Symptom
 
-Hindsight (or any OpenAI-compatible client) sends a `response_format` and gets HTTP `400`,
+An OpenAI-compatible client sends a `response_format` and gets HTTP `400`,
 `type: invalid_request_error`, with the message:
 
 ~~~text
@@ -551,8 +551,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:17841/v1/chat/completi
 ~~~
 
 A `200` — or a provider failure, but **not** a 400 about `response_format` — means the build has #354.
-`dsh-chatgpt-web doctor` proves the same thing with one Hindsight-shaped structured request, and reports
-the latency and the estimated token usage.
+`dsh-chatgpt-web doctor` proves the same thing with one structured request, and reports the latency
+and the estimated token usage.
 
 A current build still answers `400` for a *malformed* shape, with `error.code: invalid_response_format`.
 That is a request bug, not a build age: `json_schema` requires `json_schema.schema` to be a JSON Schema
@@ -562,8 +562,8 @@ object, `name` to be a non-empty string when present, and `strict` to be a boole
 
 ### Symptom
 
-A caller that keys on `finish_reason` — Hindsight's retain does — sees `"stop"` even when the answer is
-visibly cut off, so a truncated extraction looks like a complete one.
+A caller that keys on `finish_reason` sees `"stop"` even when the answer is visibly cut off, so a
+truncated reply looks like a complete one.
 
 ### Cause
 
@@ -576,25 +576,21 @@ forwarded, never applied, so a truncated web answer is indistinguishable from a 
 ### What to do
 
 1. Do not treat `"stop"` as proof of completeness on this bridge. Validate the **content** — a JSON
-   parse, a closing brace, a sentinel — instead of the finish reason. Hindsight parses every structured
-   reply itself (it is why `HINDSIGHT_API_LLM_STRICT_SCHEMA` exists), so a truncated answer fails there
-   as a parse error rather than being accepted because the finish reason said `"stop"`.
-2. Keep `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS` above `HINDSIGHT_API_RETAIN_CHUNK_SIZE` anyway
-   (defaults `64000` and `3000`): Hindsight checks that at startup, and a value below the chunk size is a
-   configuration error even though this bridge ignores the budget.
-3. Do not "fix" it by relabelling the other cut-offs (`content_filter`, `cancelled`,
+   parse, a closing brace, a sentinel — instead of the finish reason, so a truncated answer fails as a
+   parse error rather than being accepted because the finish reason said `"stop"`.
+2. Do not "fix" it by relabelling the other cut-offs (`content_filter`, `cancelled`,
    `upstream_stall_timeout`, `adapter_eof`) as `"length"`. They are cut-offs, but they are not the
    output-budget limit `"length"` names, and a caller would retry a filtered or cancelled turn as if the
    model had merely run out of room.
 
-## 19. Hindsight gets `429` with `Retry-After` (`turn_queue_timeout` / `turn_queue_full`)
+## 19. A fan-out client gets `429` with `Retry-After` (`turn_queue_timeout` / `turn_queue_full`)
 
 ### Symptom
 
 HTTP `429`, `type: rate_limit_error`, `error.code` either `turn_queue_timeout` or `turn_queue_full`, and
 a `Retry-After` header. The message says no ChatGPT Web browser slot became free within the wait budget,
-or that the queue was already full, and that the turn was **not started**. Hindsight logs the same 429
-and retries on its own backoff (`HINDSIGHT_API_LLM_MAX_RETRIES`, `HINDSIGHT_API_LLM_INITIAL_BACKOFF`).
+or that the queue was already full, and that the turn was **not started**. A well-behaved client logs
+the same 429 and retries on its own backoff.
 
 ### Cause
 
@@ -616,9 +612,9 @@ delay is safe.
 ### What to do
 
 1. Honour `Retry-After` in your own client; do not retry immediately and do not raise the client's
-   concurrency. A fan-out client such as Hindsight should run `HINDSIGHT_API_LLM_MAX_CONCURRENT=1`
-   against a single account — its default of 32 only moves the same queue inside the bridge — and let
-   its own retry budget absorb the deferral.
+   concurrency. Against a single account, keep the client's own concurrency low (1 is the safe value):
+   a large fan-out only moves the same queue inside the bridge. Let the client's retry budget absorb
+   the deferral.
 2. If the refusal is chronic, read `turnQueue` on `/v1/control/status`: a depth that never falls with no
    grants usually means a stuck turn (§15), not a burst.
 3. Do not try to raise `MAX_CHATGPT_BROWSER_TABS`. It is an account-safety bound — each turn owns a real
@@ -629,7 +625,7 @@ delay is safe.
 ### Symptom
 
 A turn fails with HTTP `401`, `type: authentication_error`, `code: chatgpt_session_expired`, and a
-message saying the ChatGPT web login is expired or the Temporary Chat surface is unavailable. Hindsight
+message saying the ChatGPT web login is expired or the Temporary Chat surface is unavailable. A client
 logs the same 401 and retries.
 
 ### Cause
@@ -654,7 +650,7 @@ submitted) and while it waits for the answer (after submission).
 
 ### Symptom
 
-A `temporary` endpoint profile (or `chatgptWeb.chatVisibility: "temporary"`) fails on a real account with
+A `temporary` endpoint profile (or `chatVisibility: "temporary"`) fails on a real account with
 a typed refusal naming the Temporary Chat surface, for example:
 
 ~~~text
@@ -678,10 +674,10 @@ something to work around by disabling the assertions.
 ### What to do
 
 1. Prove the surface before pointing a workload at it. Create the profile, then run `doctor` (its
-   Hindsight probe performs one real turn) or send a single request:
+   structured-output probe performs one real turn) or send a single request:
 
    ~~~bash
-   curl -fsS http://127.0.0.1:17841/p/hindsight/v1/chat/completions \
+   curl -fsS http://127.0.0.1:17841/p/hidden/v1/chat/completions \
      -H 'content-type: application/json' \
      -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}]}'
    ~~~

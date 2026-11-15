@@ -242,8 +242,7 @@ export const CHATGPT_TURN_QUEUE_FULL_CODE = "turn_queue_full";
  * ChatGPT never saw the request, so retrying after the advertised delay is safe. It is a 429 because
  * that is what an OpenAI-compatible caller already understands as "slow down and retry"; the stable
  * code says *which* limit answered, and the HTTP surface publishes the queue's own `Retry-After`
- * beside it so a fan-out client (Hindsight parallelises retain) defers instead of retrying into the
- * same saturated account.
+ * beside it so a fan-out client defers instead of retrying into the same saturated account.
  *
  * `retryable: false` is deliberate: the service's own retry authority must not spend the budget again
  * inside the same turn. The *caller* retries, after the delay, which is the retry boundary the

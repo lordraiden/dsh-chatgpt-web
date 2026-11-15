@@ -421,9 +421,9 @@ export function mergeChatGptWebProviderFacts(
  * models the endpoint serves and the turns it runs at once. It selects among the routes the service
  * already serves and adds no provider, no route and no execution path of its own.
  *
- * The operator's motivating case is two endpoints from one service: a `temporary` profile for a
- * caller that must not write the account's chat history (Hindsight) and a `persistent` profile for
- * normal visible chats, while the default `/v1/*` endpoint keeps the configured global behaviour.
+ * The motivating case is two endpoints from one service: a `temporary` profile for a caller that must
+ * not write the account's chat history and a `persistent` profile for normal visible chats, while the
+ * default `/v1/*` endpoint keeps the configured global behaviour.
  */
 export interface EndpointProfile {
   /**
@@ -451,7 +451,7 @@ export interface EndpointProfile {
 
 /**
  * A profile name is a lowercase, hyphen-separated path segment of at most 32 characters:
- * `hindsight`, `normal-chat`.
+ * `hidden`, `normal-chat`.
  */
 export const ENDPOINT_PROFILE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 

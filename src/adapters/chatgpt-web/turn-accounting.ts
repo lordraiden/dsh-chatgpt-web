@@ -3,13 +3,13 @@
  *
  * ## Why this owner exists
  *
- * Every Hindsight LLM call becomes one full ChatGPT browser turn: navigate/hydrate the surface,
- * select model and effort, submit, wait for generation, detect completion. Hindsight's volume is not
- * small — `retain` extracts per chunk, consolidation runs on its own schedule and `reflect` is a
- * multi-turn loop — so "fewer browser turns per operation" is only a measurement if the bridge
- * publishes the numbers. Before this module the control surface gave the operator no number to reason
- * about: how many browser turns did one `retain` cost, how much of the request was spent waiting for
- * an account slot, and how much context did a stateless caller replay?
+ * Every API call becomes one full ChatGPT browser turn: navigate/hydrate the surface, select model
+ * and effort, submit, wait for generation, detect completion. A client that runs many calls — per
+ * chunk, on a schedule, or in a multi-turn loop — makes that volume matter, so "fewer browser turns
+ * per operation" is only a measurement if the bridge publishes the numbers. Before this module the
+ * control surface gave the operator no number to reason about: how many browser turns did one
+ * operation cost, how much of the request was spent waiting for an account slot, and how much context
+ * did a stateless caller replay?
  *
  * This module owns exactly that: a bounded, read-only observation of the turns a request actually
  * started. It never decides reuse, never merges calls, never caches an answer and never touches a

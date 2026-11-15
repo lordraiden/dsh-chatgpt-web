@@ -6,9 +6,9 @@
  * `MAX_CHATGPT_BROWSER_TABS` (`concurrency.ts`) is an **account-safety** bound: every active turn owns a
  * real browser document in the signed-in account, so unbounded fan-out is indistinguishable from spam.
  * Until this module existed the bound was enforced as an *immediate refusal*: a caller that arrived
- * while five turns were in flight was told to go away. A fan-out client (Hindsight parallelises retain
- * across chunks) then retried, which made the burst worse — the refusal was honest but useless, because
- * the bound is a *rate*, not a permanent condition.
+ * while five turns were in flight was told to go away. A fan-out client (one that issues several
+ * requests at once) then retried, which made the burst worse — the refusal was honest but useless,
+ * because the bound is a *rate*, not a permanent condition.
  *
  * This module owns exactly one mechanism: a bounded, cancellable, event-driven **wait** for one of the
  * account's slots. It decides **when** a turn may ask for a lease; it never acquires one, never
