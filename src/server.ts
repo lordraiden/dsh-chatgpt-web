@@ -56,6 +56,21 @@ import {
 } from "./auth-health";
 import { WEB_CHAT_AUTH_PAGE_HTML, WEB_CHAT_AUTH_PAGE_PATHS } from "./web-chat/host/auth-page";
 import {
+  WEB_CHAT_ENDPOINT_PROFILES_PAGE_HTML,
+  WEB_CHAT_ENDPOINT_PROFILES_PAGE_PATHS,
+} from "./web-chat/host/endpoint-profiles-page";
+import {
+  ENDPOINT_PROFILE_CONCURRENCY_EXCEEDED_CODE,
+  applyEndpointProfile,
+  endpointProfileCredential,
+  endpointProfileModelRefusal,
+  endpointProfileView,
+  matchEndpointProfilePath,
+  resolveEndpointProfileRequest,
+  validateEndpointProfileCandidate,
+  validateEndpointProfileSet,
+} from "./web-chat/host/endpoint-profiles";
+import {
   createWebChatAuthSurface,
   type WebChatAuthSessionView,
   type WebChatAuthStreamEvent,
@@ -93,11 +108,12 @@ import {
   toChatCompletionStream,
   translateChatCompletionsRequest,
 } from "./responses/chat-completions";
-import type { AppConfig } from "./config";
+import type { AppConfig, EndpointProfile } from "./config";
 import {
   CHATGPT_WEB_TUNING_DEFAULTS,
   getConfigDir,
   isLoopbackHost,
+  persistEndpointProfiles,
   providerConfig,
   resolveApiKey,
   resolveChatGptWebTuning,
@@ -216,7 +232,20 @@ export class HttpTurnCounter {
     identity?: NativeCodexTurnIdentity;
   }>();
   private readonly interrupted = new Map<string, unknown>();
+  /**
+   * Active tracked turns per endpoint-profile scope (issue #356).
+   *
+   * The process-wide cap above is one resource budget; a profile may state a smaller one for its own
+   * endpoint. The scope is the profile name, and it is decremented by the same `release` that frees
+   * the turn, so a profile can never leak budget on a failed or cancelled request.
+   */
+  private readonly scopes = new Map<string, number>();
   private nextId = 1;
+
+  /** The number of active tracked turns admitted through one endpoint profile. */
+  countScope(scope: string): number {
+    return this.scopes.get(scope) ?? 0;
+  }
 
   private identityKey(identity: NativeCodexTurnIdentity): string {
     return `${identity.threadId}\u0000${identity.turnId}`;
@@ -282,6 +311,7 @@ export class HttpTurnCounter {
     clientSignal?: AbortSignal,
     platform: NodeJS.Platform = process.platform,
     endpoint: HttpTrackedEndpoint = "unspecified",
+    scope?: string,
   ): Promise<Response> {
     const id = this.nextId++;
     const abort = new AbortController();
@@ -294,6 +324,7 @@ export class HttpTurnCounter {
       identity?: NativeCodexTurnIdentity;
     } = { abort, done, finish };
     this.active.set(id, tracked);
+    if (scope !== undefined) this.scopes.set(scope, (this.scopes.get(scope) ?? 0) + 1);
     let released = false;
     let responseCompleted = false;
     let clientDisconnectLogged = false;
@@ -303,6 +334,11 @@ export class HttpTurnCounter {
       if (released) return;
       released = true;
       this.active.delete(id);
+      if (scope !== undefined) {
+        const remaining = (this.scopes.get(scope) ?? 1) - 1;
+        if (remaining > 0) this.scopes.set(scope, remaining);
+        else this.scopes.delete(scope);
+      }
       if (clientSignal && clientAbortListener) {
         clientSignal.removeEventListener("abort", clientAbortListener);
         clientAbortListener = undefined;
@@ -502,6 +538,15 @@ export interface ResponseRequestOptions {
    * a route that is not a ChatGPT Web route is forwarded to the native Codex path.
    */
   webChatProviders?: readonly ComposedWebChatProvider[];
+  /**
+   * The endpoint profile this request arrived through (issue #356), or absent for the default
+   * endpoint.
+   *
+   * It restricts the request to the profile's catalogue models and refuses a visibility mode the
+   * selected route cannot honour. It never routes, retries or executes anything itself: the request
+   * is served by exactly the same ingress, provider core and retry authority as the default endpoint.
+   */
+  endpointProfile?: EndpointProfile;
 }
 
 /**
@@ -543,19 +588,60 @@ export function resolveMaxInflightTurns(env: NodeJS.ProcessEnv = process.env): n
   return Number.isSafeInteger(configured) && configured > 0 ? configured : 0;
 }
 
+/** Options for {@link modelsRequest}. */
+export interface ModelsRequestOptions {
+  /**
+   * Endpoint profile (issue #356): publish only these public route ids, from the Web catalogue.
+   *
+   * A profile selects among the catalogue models this service already serves, so its `/v1/models`
+   * advertises exactly what it serves and never the native Codex catalogue a profile cannot route.
+   * Absent keeps the default endpoint's catalogue (Web routes plus the additive native upstream).
+   */
+  readonly allowedModels?: readonly string[];
+}
+
+/** The public route id of one catalogue row (`slug`, with `id` as the fallback shape). */
+function catalogueRowId(row: unknown): string | undefined {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return undefined;
+  const record = row as Record<string, unknown>;
+  const id = typeof record.slug === "string" ? record.slug : record.id;
+  return typeof id === "string" ? id : undefined;
+}
+
+/** Restrict one catalogue document to an explicit route-id set, keeping every other field. */
+function restrictModelCatalog(
+  catalog: Record<string, unknown>,
+  allowedModels: readonly string[] | undefined,
+): Record<string, unknown> {
+  if (allowedModels === undefined) return catalog;
+  const keep = new Set(allowedModels);
+  const models = (Array.isArray(catalog.models) ? catalog.models : [])
+    .filter(row => {
+      const id = catalogueRowId(row);
+      return id !== undefined && keep.has(id);
+    });
+  return { ...catalog, models };
+}
+
 export async function modelsRequest(
   req: Request,
   config: AppConfig,
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
+  options: ModelsRequestOptions = {},
 ): Promise<Response> {
   const override = contextOverride?.();
-  const webCatalog = buildPublicModelCatalog(config, override);
+  const allowedModels = options.allowedModels;
+  const webCatalog = restrictModelCatalog(buildPublicModelCatalog(config, override), allowedModels);
   let upstream: Response | undefined;
-  try {
-    upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
-  } catch {
-    upstream = undefined;
+  // A profile endpoint has no native-passthrough authority, so it never asks the native upstream
+  // for a catalogue it could not route; the Web catalogue it serves is the whole answer.
+  if (allowedModels === undefined) {
+    try {
+      upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
+    } catch {
+      upstream = undefined;
+    }
   }
 
   let catalog: Record<string, unknown> = webCatalog;
@@ -567,7 +653,10 @@ export async function modelsRequest(
 
   if (upstream?.ok) {
     try {
-      catalog = augmentNativeModelCatalog(await upstream.json(), config, override);
+      catalog = restrictModelCatalog(
+        augmentNativeModelCatalog(await upstream.json(), config, override),
+        allowedModels,
+      );
       headers = new Headers(upstream.headers);
       headers.delete("content-encoding");
       headers.delete("content-length");
@@ -580,8 +669,12 @@ export async function modelsRequest(
   }
 
   // Issue #248: the OpenAI `data` array is ADDITIVE. `models` and the top-level shape stay exactly as
-  // they are, so the Codex/DSH consumer needs no change.
-  catalog = { ...catalog, data: buildOpenAiModelsData(webCatalog) };
+  // they are, so the Codex/DSH consumer needs no change. A profile's `data` is derived from its own
+  // restricted catalogue, so the OpenAI shape advertises exactly what the profile serves.
+  catalog = {
+    ...catalog,
+    data: buildOpenAiModelsData(allowedModels === undefined ? webCatalog : catalog),
+  };
   const body = JSON.stringify(catalog);
   headers.set("content-type", "application/json");
   headers.set("etag", `W/"${createHash("sha256").update(body).digest("base64url")}"`);
@@ -644,6 +737,22 @@ export async function responseRequest(
     }
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  // An endpoint profile (issue #356) selects among the catalogue models this service already serves.
+  // The check happens before any dispatch, so a profile request can never reach the native Codex
+  // passthrough and a `temporary` profile can never silently run a route whose provider has no such
+  // surface. The refusal carries its own stable code.
+  if (options.endpointProfile !== undefined) {
+    const requested = typeof requestedModel === "string" ? requestedModel.trim() : "";
+    const profileRefusal = endpointProfileModelRefusal(config, options.endpointProfile, requested);
+    if (profileRefusal !== undefined) {
+      return formatErrorResponse(
+        profileRefusal.status,
+        "invalid_request_error",
+        profileRefusal.message,
+        profileRefusal.code,
+      );
+    }
   }
   // A second WebChat provider's public routes (`<providerId>/<modelId>`) are served by that
   // provider's own ingress. The dispatch is by the route's provider id against the compositions this
@@ -996,7 +1105,7 @@ export async function compactRequest(
 function controlCorsHeaders(): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": "http://127.0.0.1:3080",
-    "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Max-Age": "86400",
   };
@@ -1566,6 +1675,144 @@ function authPageResponse(): Response {
   });
 }
 
+/** The static endpoint-profiles page (issue #356). No data, no secret and no absolute URL. */
+function endpointProfilesPageResponse(): Response {
+  return new Response(WEB_CHAT_ENDPOINT_PROFILES_PAGE_HTML, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      // The page fetches only this origin's own control endpoints; it submits no form natively and
+      // loads no external asset, exactly like the sign-in page.
+      "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
+      ...controlCorsHeaders(),
+    },
+  });
+}
+
+/**
+ * The management view of the configured endpoint profiles (issue #356).
+ *
+ * It is the one owner of the response shape the page and any scripted operator read, so the two
+ * cannot disagree about what a profile is or what guards it. It carries no secret: `credential`
+ * reports the global API-key scheme and whether it is required, never a value.
+ *
+ * @param config - the live configuration.
+ * @param apiKeyConfigured - whether the service has an API key configured.
+ * @returns the JSON body.
+ */
+function endpointProfilesBody(config: AppConfig, apiKeyConfigured: boolean): Record<string, unknown> {
+  return {
+    profiles: (config.endpointProfiles ?? []).map(endpointProfileView),
+    credential: endpointProfileCredential(apiKeyConfigured),
+  };
+}
+
+/** One control-surface refusal in the shape the rest of the control API uses. */
+function endpointProfileErrorResponse(status: number, message: string): Response {
+  return Response.json(
+    { status: "error", error: message },
+    { status, headers: controlCorsHeaders() },
+  );
+}
+
+/**
+ * `POST /v1/control/endpoint-profiles` and `PUT /v1/control/endpoint-profiles/<name>` (issue #356).
+ *
+ * Both write paths share this handler: the body is validated by the host surface against the live
+ * catalogue and provider facts (so an unknown model or an unhonourable mode is refused before
+ * anything is persisted), the profile set is saved, and the in-memory configuration is mutated so the
+ * endpoint exists on the very next request — the same live-reload pattern as `tuning` in
+ * `PUT /v1/control/config`. The name is the endpoint's identity: a `PUT` cannot rename a profile.
+ *
+ * @param req - the request carrying the profile JSON body.
+ * @param config - the live configuration, mutated in place after a successful save.
+ * @param apiKeyConfigured - whether the service has an API key configured (for the response view).
+ * @param name - the profile name from the path for a `PUT`, absent for a `POST`.
+ * @returns the created/updated profile view, or a typed refusal.
+ */
+async function endpointProfileWriteRequest(
+  req: Request,
+  config: AppConfig,
+  apiKeyConfigured: boolean,
+  name?: string,
+): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return endpointProfileErrorResponse(400, "The request body must be valid JSON");
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return endpointProfileErrorResponse(400, "The request body must be a JSON object");
+  }
+  const record = body as Record<string, unknown>;
+  const existing = config.endpointProfiles ?? [];
+  if (name === undefined) {
+    if (record.name === undefined) {
+      return endpointProfileErrorResponse(400, "An endpoint profile requires a name");
+    }
+  } else {
+    if (record.name !== undefined && record.name !== name) {
+      return endpointProfileErrorResponse(400, "An endpoint profile cannot be renamed; delete it and create a new one");
+    }
+    if (!existing.some(profile => profile.name === name)) {
+      return endpointProfileErrorResponse(404, `Unknown endpoint profile ${JSON.stringify(name)}`);
+    }
+  }
+  let profile: EndpointProfile;
+  try {
+    profile = validateEndpointProfileCandidate(
+      config,
+      { ...record, ...(name === undefined ? {} : { name }) },
+      "control API",
+    );
+  } catch (error) {
+    return endpointProfileErrorResponse(400, error instanceof Error ? error.message : String(error));
+  }
+  if (name === undefined && existing.some(candidate => candidate.name === profile.name)) {
+    return endpointProfileErrorResponse(409, `Endpoint profile ${JSON.stringify(profile.name)} already exists`);
+  }
+  const nextProfiles = name === undefined
+    ? [...existing, profile]
+    : existing.map(candidate => candidate.name === name ? profile : candidate);
+  try {
+    persistEndpointProfiles(nextProfiles, config);
+  } catch (error) {
+    return endpointProfileErrorResponse(400, error instanceof Error ? error.message : String(error));
+  }
+  // Live reload: the next request resolves the profile from this same object, exactly like `tuning`.
+  config.endpointProfiles = nextProfiles;
+  return Response.json(
+    { status: "ok", profile: endpointProfileView(profile), ...endpointProfilesBody(config, apiKeyConfigured) },
+    { status: name === undefined ? 201 : 200, headers: controlCorsHeaders() },
+  );
+}
+
+/**
+ * `DELETE /v1/control/endpoint-profiles/<name>` (issue #356).
+ *
+ * The profile is removed from the configuration file and the in-memory configuration in one step, so
+ * its path answers a typed 404 on the very next request — never the default endpoint's behaviour.
+ *
+ * @param config - the live configuration, mutated in place after a successful save.
+ * @param name - the profile name from the path.
+ * @returns the removal acknowledgement, or a typed 404.
+ */
+function endpointProfileDeleteRequest(config: AppConfig, name: string): Response {
+  const existing = config.endpointProfiles ?? [];
+  if (!existing.some(profile => profile.name === name)) {
+    return endpointProfileErrorResponse(404, `Unknown endpoint profile ${JSON.stringify(name)}`);
+  }
+  const nextProfiles = existing.filter(profile => profile.name !== name);
+  try {
+    persistEndpointProfiles(nextProfiles, config);
+  } catch (error) {
+    return endpointProfileErrorResponse(400, error instanceof Error ? error.message : String(error));
+  }
+  config.endpointProfiles = nextProfiles;
+  return Response.json({ status: "ok", name }, { headers: controlCorsHeaders() });
+}
+
 /**
  * The import endpoint's body ceiling (512 KiB).
  *
@@ -2077,17 +2324,42 @@ export function startServer(
         ...activity(),
       });
     }
-    // The sign-in page (issue #276): a static document, deliberately readable without the control
-    // token — a browser cannot put a header on a navigation, and the page's whole token handling
-    // exists to keep the token out of the URL. It carries no data; every endpoint below is guarded.
+    // The sign-in page (issue #276) and the endpoint-profiles page (issue #356): static documents,
+    // deliberately readable without the control token — a browser cannot put a header on a
+    // navigation, and each page's whole token handling exists to keep the token out of the URL. They
+    // carry no data; every endpoint below is guarded.
     if (req.method === "GET" && WEB_CHAT_AUTH_PAGE_PATHS.includes(url.pathname)) {
       return authPageResponse();
+    }
+    if (req.method === "GET" && WEB_CHAT_ENDPOINT_PROFILES_PAGE_PATHS.includes(url.pathname)) {
+      return endpointProfilesPageResponse();
     }
     if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/control/")) {
       return new Response(null, { status: 204, headers: controlCorsHeaders() });
     }
     if (url.pathname.startsWith("/v1/control/") && !controlAuthorized(req)) {
       return new Response("Unauthorized", { status: 401, headers: controlCorsHeaders() });
+    }
+    // Endpoint profiles (issue #356): a host-owned public path prefix. It is resolved *before* the
+    // public API guard so the API key guards `/p/*` exactly like `/v1/*`, and the path is rewritten to
+    // the public contract path the existing dispatch already serves. The profile produces a
+    // request-scoped configuration; nothing else about the request is re-implemented here.
+    let profile: EndpointProfile | undefined;
+    let requestConfig = config;
+    const profileMatch = matchEndpointProfilePath(url.pathname);
+    if (profileMatch !== undefined) {
+      const resolution = resolveEndpointProfileRequest(config, profileMatch);
+      if (!resolution.ok) {
+        return formatErrorResponse(
+          resolution.status,
+          "invalid_request_error",
+          resolution.message,
+          resolution.code,
+        );
+      }
+      profile = resolution.profile;
+      requestConfig = applyEndpointProfile(config, profile);
+      url.pathname = resolution.path;
     }
     // The public API surface (issue #247). `/v1/control/*` above keeps the operator's control token:
     // the two are separate authorities and are never interchangeable.
@@ -2108,6 +2380,19 @@ export function startServer(
           429,
           "rate_limit_error",
           `The service is at its configured limit of ${maxInflightTurns} concurrent turns.`,
+        );
+      }
+      // A profile's own budget is a smaller, endpoint-scoped resource bound (issue #356). It is
+      // checked with the same shape as the process-wide cap above, and the scope is released by the
+      // tracked turn that admitted it.
+      if (profile !== undefined && profile.maxConcurrentTurns !== undefined && req.method === "POST"
+        && httpTurns.countScope(profile.name) >= profile.maxConcurrentTurns) {
+        return formatErrorResponse(
+          429,
+          "rate_limit_error",
+          `Endpoint profile ${JSON.stringify(profile.name)} is at its configured limit of`
+          + ` ${profile.maxConcurrentTurns} concurrent turns.`,
+          ENDPOINT_PROFILE_CONCURRENCY_EXCEEDED_CODE,
         );
       }
     }
@@ -2144,23 +2429,35 @@ export function startServer(
         chatVisibility: config.chatVisibility ?? "persistent",
         effectiveChatVisibility:
           effectiveChatGptWebProviderConfig(config).chatgptWeb?.chatVisibility ?? "persistent",
+        // Issue #356: the configured endpoint profiles, as the same view the management surface
+        // publishes. Absent profiles are an empty list, never a missing field.
+        endpointProfiles: (config.endpointProfiles ?? []).map(endpointProfileView),
       }, { headers: controlCorsHeaders() });
     }
     if (req.method === "PUT" && url.pathname === "/v1/control/config") {
       try {
-        const body = await req.json() as { tuning?: unknown; chatVisibility?: unknown };
-        // `tuning` stays required unless the request only states the visibility, so an empty body keeps
-        // today's refusal and an existing caller is unaffected by the added field.
-        const tuning = body.tuning === undefined && body.chatVisibility !== undefined
+        const body = await req.json() as {
+          tuning?: unknown;
+          chatVisibility?: unknown;
+          endpointProfiles?: unknown;
+        };
+        const statesEndpointProfiles = body.endpointProfiles !== undefined;
+        // `tuning` stays required unless the request only states one of the other facts, so an empty
+        // body keeps today's refusal and an existing caller is unaffected by the added fields.
+        const tuning = body.tuning === undefined && (body.chatVisibility !== undefined || statesEndpointProfiles)
           ? config.tuning
           : validateChatGptWebTuning(body.tuning, "control API");
         const chatVisibility = body.chatVisibility === undefined
           ? config.chatVisibility
           : validateChatGptWebChatVisibility(body.chatVisibility, "control API");
+        const endpointProfiles = statesEndpointProfiles
+          ? validateEndpointProfileSet(config, body.endpointProfiles, "control API")
+          : config.endpointProfiles;
         const next: AppConfig = {
           ...config,
           tuning,
           ...(chatVisibility !== undefined ? { chatVisibility } : {}),
+          ...(endpointProfiles !== undefined ? { endpointProfiles } : {}),
         };
         // The candidate is checked by the same provider-facts owner the loader uses, so an incoherent
         // combination (for example temporary visibility on the launcher host) is refused here instead of
@@ -2168,15 +2465,20 @@ export function startServer(
         validateChatGptWebProviderFacts(providerConfig(next).chatgptWeb, "control API");
         saveConfig(next);
         // Mutate the in-memory config so the next turn's effective provider configuration sees the
-        // new tuning and visibility without a sidecar restart (workers are keyed by the serialized
-        // provider config). The resolver reads the configuration per call, and a provider-scoped block
-        // still wins over these flat fields, exactly as it wins over the loaded ones (issue #193).
+        // new tuning, visibility and profiles without a sidecar restart (workers are keyed by the
+        // serialized provider config). The resolver reads the configuration per call, and a
+        // provider-scoped block still wins over these flat fields, exactly as it wins over the loaded
+        // ones (issue #193).
         config.tuning = tuning;
         if (chatVisibility !== undefined) config.chatVisibility = chatVisibility;
+        if (statesEndpointProfiles && endpointProfiles !== undefined) config.endpointProfiles = endpointProfiles;
         return Response.json({
           status: "ok",
           tuning,
           chatVisibility: chatVisibility ?? "persistent",
+          // Only when the write stated them: an existing caller's response stays byte-for-byte the
+          // shape it already parses.
+          ...(statesEndpointProfiles ? { endpointProfiles: (endpointProfiles ?? []).map(endpointProfileView) } : {}),
         }, { headers: controlCorsHeaders() });
       } catch (error) {
         return Response.json(
@@ -2184,6 +2486,27 @@ export function startServer(
           { status: 400, headers: controlCorsHeaders() },
         );
       }
+    }
+    if (url.pathname === "/v1/control/endpoint-profiles" && req.method === "GET") {
+      return Response.json(endpointProfilesBody(config, apiKey !== undefined), {
+        headers: controlCorsHeaders(),
+      });
+    }
+    if (url.pathname === "/v1/control/endpoint-profiles" && req.method === "POST") {
+      return endpointProfileWriteRequest(req, config, apiKey !== undefined);
+    }
+    if (url.pathname.startsWith("/v1/control/endpoint-profiles/")) {
+      const name = decodeURIComponent(url.pathname.slice("/v1/control/endpoint-profiles/".length));
+      if (!name || name.includes("/")) {
+        return endpointProfileErrorResponse(400, "An endpoint profile name is required");
+      }
+      if (req.method === "PUT") {
+        return endpointProfileWriteRequest(req, config, apiKey !== undefined, name);
+      }
+      if (req.method === "DELETE") {
+        return endpointProfileDeleteRequest(config, name);
+      }
+      return new Response("Method not allowed", { status: 405, headers: controlCorsHeaders() });
     }
     if (req.method === "GET" && url.pathname === "/v1/control/recent-turns") {
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 10) || 10, 1), 25);
@@ -2413,8 +2736,8 @@ export function startServer(
         let catalogConfig: AppConfig;
         try {
           catalogConfig = {
-            ...config,
-            subagentProtocol: readCodexSubagentProtocol(config.subagentProtocol),
+            ...requestConfig,
+            subagentProtocol: readCodexSubagentProtocol(requestConfig.subagentProtocol),
           };
         } catch (error) {
           return formatErrorResponse(
@@ -2428,6 +2751,11 @@ export function startServer(
           catalogConfig,
           dependencies.fetchUpstream,
           readCodexModelContextOverride,
+          // A profile endpoint always publishes its own catalogue view — its allow-list, or the whole
+          // Web catalogue when it states none — and never the native Codex catalogue it cannot route.
+          profile === undefined
+            ? {}
+            : { allowedModels: profile.models ?? publicModelRouteIds(requestConfig) },
         );
         if (response.ok) {
           successfulModelCatalogRequests += 1;
@@ -2447,13 +2775,18 @@ export function startServer(
       return httpTurns.track(
         (signal, bindIdentity) => responseRequest(
           new Request(req, { signal }),
-          config,
+          requestConfig,
           adapterFactory,
-          { onTurnIdentity: bindIdentity, webChatProviders },
+          {
+            onTurnIdentity: bindIdentity,
+            webChatProviders,
+            ...(profile === undefined ? {} : { endpointProfile: profile }),
+          },
         ),
         req.signal,
         process.platform,
         "responses",
+        profile?.name,
       );
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
@@ -2472,16 +2805,31 @@ export function startServer(
         const code = error instanceof ChatCompletionsRequestError ? error.code : undefined;
         return formatErrorResponse(400, "invalid_request_error", message, code);
       }
-      // An unknown model names the accepted ids instead of falling through to the native passthrough.
-      // The list is the deployment's composed public catalogue, so a route a composed provider serves
-      // is accepted here by exactly the owner that serves it (issue #299, slice 2).
-      const accepted = publicModelRouteIds(config);
-      if (!accepted.includes(translation.model)) {
-        return formatErrorResponse(
-          400,
-          "invalid_request_error",
-          `Unknown model ${JSON.stringify(translation.model)}. Available models: ${accepted.join(", ")}.`,
-        );
+      // An endpoint profile (issue #356) first: the model must be one the profile serves, and a
+      // `temporary` profile cannot honour a route whose provider has no such surface. The refusal
+      // carries its own stable code and happens before the turn exists.
+      if (profile !== undefined) {
+        const profileRefusal = endpointProfileModelRefusal(requestConfig, profile, translation.model);
+        if (profileRefusal !== undefined) {
+          return formatErrorResponse(
+            profileRefusal.status,
+            "invalid_request_error",
+            profileRefusal.message,
+            profileRefusal.code,
+          );
+        }
+      } else {
+        // An unknown model names the accepted ids instead of falling through to the native
+        // passthrough. The list is the deployment's composed public catalogue, so a route a composed
+        // provider serves is accepted here by exactly the owner that serves it (issue #299, slice 2).
+        const accepted = publicModelRouteIds(requestConfig);
+        if (!accepted.includes(translation.model)) {
+          return formatErrorResponse(
+            400,
+            "invalid_request_error",
+            `Unknown model ${JSON.stringify(translation.model)}. Available models: ${accepted.join(", ")}.`,
+          );
+        }
       }
       // Capability declarations are discarded by design (this bridge is a text chat with no execution
       // or return channel), but never silently: they never enter the internal request and are
@@ -2515,9 +2863,10 @@ export function startServer(
           body: JSON.stringify(translation.body),
           signal,
         });
-        const upstream = await responseRequest(internalRequest, config, adapterFactory, {
+        const upstream = await responseRequest(internalRequest, requestConfig, adapterFactory, {
           onTurnIdentity: bindIdentity,
           webChatProviders,
+          ...(profile === undefined ? {} : { endpointProfile: profile }),
         });
         if (translation.stream) {
           return declareDropped(new Response(
@@ -2554,7 +2903,7 @@ export function startServer(
         return declareDropped(
           Response.json(toChatCompletion(payload, translation.model), { status: upstream.ok ? 200 : upstream.status }),
         );
-      }, req.signal, process.platform, "chat-completions");
+      }, req.signal, process.platform, "chat-completions", profile?.name);
     }
     if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
       if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");

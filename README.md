@@ -115,6 +115,7 @@ docker compose down -v                     # stop and DROP the credentials volum
 | `POST /v1/responses` | Responses-compatible text endpoint with SSE streaming. |
 | `POST /v1/chat/completions` | OpenAI-compatible text chat, streaming and non-streaming. |
 | `GET /v1/models` | The provider-qualified catalogue (`models[]`, plus an additive OpenAI `data[]`). |
+| `/p/<name>/v1/*` | Optional operator-defined endpoint profiles: the same public contract with that profile's chat visibility, model allow-list and concurrency budget — see [Endpoint profiles](#endpoint-profiles-one-service-several-endpoints). |
 | `GET /healthz` | Liveness metadata. Deliberately open: Docker's healthcheck and any load balancer need it. |
 | `/v1/control/*`, `/admin/*` | Operator routes, authorized with the control token. The sign-in page alone is served anonymously by design — see [Sign in to ChatGPT](#sign-in-to-chatgpt). |
 
@@ -213,6 +214,67 @@ If you are sending no identity at all, read the limit above literally: the servi
 not session continuity** — the same content stays in one conversation, but different content becomes a
 different one. Forwarding the session identity (the native metadata above, `prompt_cache_key`, or the
 affinity headers) is what turns a harness session into **one** web chat.
+
+### Endpoint profiles: one service, several endpoints
+
+The operator can expose **more than one API endpoint** from the same service, each with its own
+ChatGPT conversation-visibility mode. A profile is a named public base path:
+
+```text
+http://127.0.0.1:17841/p/<name>/v1
+```
+
+Point an OpenAI-compatible client at that base URL and its own `/chat/completions` and `/models` calls
+land on that profile. The motivating case is two endpoints from one account: a `temporary` profile for
+a caller that must not write the account's chat history (Hindsight), and a `persistent` profile for
+normal, visible chats. The default `/v1/*` endpoint keeps the configured global behaviour
+(`chatgptWeb.chatVisibility`, `PUT /v1/control/config`).
+
+Manage profiles from the service's own page — enter the **control token**:
+
+```text
+http://127.0.0.1:17841/v1/control/endpoints/
+```
+
+or from the control API (control token, never the API key):
+
+```bash
+# create: hidden Temporary Chats, only the Luna route, at most one turn at a time
+curl -fsS -X POST http://127.0.0.1:17841/v1/control/endpoint-profiles \
+  -H "Authorization: Bearer $CONTROL_TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"hindsight","chatVisibility":"temporary","models":["chatgpt-web/luna"],"maxConcurrentTurns":1}'
+
+# use it exactly like /v1
+curl -fsS http://127.0.0.1:17841/p/hindsight/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"chatgpt-web/luna","messages":[{"role":"user","content":"hola"}]}'
+
+# list, replace, delete
+curl -fsS http://127.0.0.1:17841/v1/control/endpoint-profiles -H "Authorization: Bearer $CONTROL_TOKEN"
+curl -fsS -X PUT http://127.0.0.1:17841/v1/control/endpoint-profiles/hindsight \
+  -H "Authorization: Bearer $CONTROL_TOKEN" -H 'content-type: application/json' \
+  -d '{"chatVisibility":"persistent"}'
+curl -fsS -X DELETE http://127.0.0.1:17841/v1/control/endpoint-profiles/hindsight \
+  -H "Authorization: Bearer $CONTROL_TOKEN"
+```
+
+Rules:
+
+1. **A profile is a view, not a second registry.** It selects among the catalogue models the service
+   already serves (`GET /v1/models`); it adds no provider, route or execution engine, and the turn runs
+   through the same ingress, provider core and retry authority as `/v1/*`. A profile request never
+   reaches the native Codex passthrough.
+2. **The API key stays global.** Profiles mint no credential of their own: `/p/*` is guarded by the
+   same API key as `/v1/*` (and needs none on a loopback-only service). The management routes stay
+   control-token only.
+3. **`/v1/models` is per profile.** `GET /p/<name>/v1/models` advertises exactly the models that
+   profile serves (its allow-list, or the whole Web catalogue when it states none).
+4. **Fail closed.** An unknown model in a profile, a `temporary` profile on a deployment that cannot
+   honour it (the launcher browser host, or a non-ChatGPT route), and a deleted profile's path all
+   answer typed refusals (`endpoint_profile_*` codes) — never a silent fallback to the default
+   endpoint's behaviour.
+5. **Live reload.** Profiles live in `config.json` (`endpointProfiles`) and a create/edit/delete takes
+   effect on the next request without a restart; `PUT /v1/control/config` accepts the whole set too.
 
 ### Every CLI subcommand through the image
 

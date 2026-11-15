@@ -412,6 +412,127 @@ export function mergeChatGptWebProviderFacts(
   return merged;
 }
 
+/**
+ * One operator-defined public endpoint profile (issue #356).
+ *
+ * A profile is a **host-owned view** over the configured provider catalogue, never a second
+ * catalogue: it binds a public path prefix (`/p/<name>/v1`), the ChatGPT conversation-visibility
+ * provider fact a turn on that endpoint uses (issue #355), and optionally restricts the catalogue
+ * models the endpoint serves and the turns it runs at once. It selects among the routes the service
+ * already serves and adds no provider, no route and no execution path of its own.
+ *
+ * The operator's motivating case is two endpoints from one service: a `temporary` profile for a
+ * caller that must not write the account's chat history (Hindsight) and a `persistent` profile for
+ * normal visible chats, while the default `/v1/*` endpoint keeps the configured global behaviour.
+ */
+export interface EndpointProfile {
+  /**
+   * URL segment: the endpoint is served under `/p/<name>/v1/...`.
+   *
+   * Lowercase letters, digits and inner hyphens only, so the name is a safe path segment and cannot
+   * collide with the reserved `/v1` or `/v1/control` prefixes. Immutable once created: it is the
+   * endpoint's identity.
+   */
+  name: string;
+  /** The `chatVisibility` provider fact a turn on this endpoint uses (`persistent` | `temporary`). */
+  chatVisibility: ChatGptWebChatVisibility;
+  /**
+   * Public catalogue model ids this endpoint serves. Absent means every catalogue model the service
+   * currently serves. An id that is not in the catalogue makes the profile unhonourable: the
+   * endpoint refuses with a typed error instead of silently serving a different set (issue #356).
+   */
+  models?: string[];
+  /**
+   * Per-profile cap on concurrently active turns. Absent means only the process-wide cap
+   * (`DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS`) applies.
+   */
+  maxConcurrentTurns?: number;
+}
+
+/**
+ * A profile name is a lowercase, hyphen-separated path segment of at most 32 characters:
+ * `hindsight`, `normal-chat`.
+ */
+export const ENDPOINT_PROFILE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+
+/** The largest per-profile concurrency budget a configuration may state. */
+export const ENDPOINT_PROFILE_MAX_CONCURRENT_TURNS_LIMIT = 1_024;
+
+/** The keys one serialized profile may state; anything else is refused, not ignored. */
+const ENDPOINT_PROFILE_KEYS = ["name", "chatVisibility", "models", "maxConcurrentTurns"] as const;
+
+/**
+ * Validate one authored endpoint-profile set (config file or control API) and return a normalized
+ * copy.
+ *
+ * The shape is validated here, in the configuration module, because the profiles are a persisted
+ * format. Whether a profile can actually be honoured against the live catalogue and the deployment's
+ * provider facts is decided by the host surface (`src/web-chat/host/endpoint-profiles.ts`), which is
+ * the only place that knows the catalogue; keeping that split means this validator never needs to
+ * build a model catalogue (and so never creates a config -> catalogue cycle).
+ *
+ * @param value - the authored `endpointProfiles` value.
+ * @param path - where the value was read from, named in the refusal.
+ * @returns the normalized profiles, in authored order.
+ * @throws {Error} when the value is not a valid profile set.
+ */
+export function validateEndpointProfiles(value: unknown, path = "config"): EndpointProfile[] {
+  if (!Array.isArray(value)) throw new Error(`Invalid endpointProfiles in ${path}`);
+  const profiles: EndpointProfile[] = [];
+  const names = new Set<string>();
+  for (const [index, entry] of value.entries()) {
+    const location = `${path} (endpointProfiles[${index}])`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`Invalid endpoint profile in ${location}`);
+    }
+    const record = entry as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (!(ENDPOINT_PROFILE_KEYS as readonly string[]).includes(key)) {
+        throw new Error(`Unknown endpoint profile key ${key} in ${location}`);
+      }
+    }
+    const name = record.name;
+    if (typeof name !== "string" || !ENDPOINT_PROFILE_NAME_PATTERN.test(name)) {
+      throw new Error(`Invalid endpoint profile name in ${location}`);
+    }
+    if (names.has(name)) {
+      throw new Error(`Duplicate endpoint profile name ${JSON.stringify(name)} in ${path}`);
+    }
+    names.add(name);
+    const profile: EndpointProfile = {
+      name,
+      chatVisibility: validateChatGptWebChatVisibility(record.chatVisibility, location),
+    };
+    if (record.models !== undefined) {
+      if (!Array.isArray(record.models) || record.models.length === 0) {
+        throw new Error(`Invalid endpoint profile models in ${location}`);
+      }
+      const models: string[] = [];
+      for (const model of record.models) {
+        if (typeof model !== "string" || !model.trim() || model !== model.trim()
+          || model.length > 200 || /\s/.test(model)) {
+          throw new Error(`Invalid endpoint profile model in ${location}`);
+        }
+        if (models.includes(model)) {
+          throw new Error(`Duplicate endpoint profile model ${JSON.stringify(model)} in ${location}`);
+        }
+        models.push(model);
+      }
+      profile.models = models;
+    }
+    if (record.maxConcurrentTurns !== undefined) {
+      const limit = record.maxConcurrentTurns;
+      if (!Number.isSafeInteger(limit) || (limit as number) < 1
+        || (limit as number) > ENDPOINT_PROFILE_MAX_CONCURRENT_TURNS_LIMIT) {
+        throw new Error(`Invalid endpoint profile maxConcurrentTurns in ${location}`);
+      }
+      profile.maxConcurrentTurns = limit as number;
+    }
+    profiles.push(profile);
+  }
+  return profiles;
+}
+
 export interface AppConfig {
   version: 3;
   purpose?: "dev-harness";
@@ -479,6 +600,16 @@ export interface AppConfig {
    * provider-scoped `webChat.providers["chatgpt-web"]` block wins over this flat field field-by-field.
    */
   chatVisibility?: ChatGptWebChatVisibility;
+  /**
+   * Operator-defined public endpoint profiles (issue #356).
+   *
+   * Absent means exactly today's surface: only the default `/v1/*` endpoints exist, and every turn
+   * uses the configured `chatVisibility`. Each profile adds a `/p/<name>/v1` endpoint that serves
+   * the same public contract with the profile's visibility fact and optional model/concurrency
+   * restrictions. Profiles are host routing views, not provider configuration: they never enter
+   * `providerConfig`, the provider-scoped `webChat` block or the provider's execution namespace.
+   */
+  endpointProfiles?: EndpointProfile[];
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   /** Optional browser transport tuning; defaults apply per field when absent. */
@@ -1044,17 +1175,29 @@ function parseConfig(value: unknown, path: string): AppConfig {
   assertDurableRuntimeCommand(parsed.runtimeCommand as string[]);
   // The capability and browser-mode facts of the flat ChatGPT block are validated by the single owner
   // of those rules (issue #193), which the provider-scoped block uses too, so the two cannot drift.
-  validateChatGptWebProviderFacts({
+  const providerFacts = {
     browserInteractionMode,
     browserHost: parsed.browserHost,
     browserHostDescriptorPath: parsed.browserHostDescriptorPath,
-    chatVisibility: parsed.chatVisibility,
     solAvailable: parsed.solAvailable,
     proAvailable: parsed.proAvailable,
     capabilityState: parsed.capabilityState,
     zeroRiskProEnabled: parsed.zeroRiskProEnabled,
     experimentalBiggerContext: parsed.experimentalBiggerContext,
-  }, path);
+  };
+  validateChatGptWebProviderFacts({ ...providerFacts, chatVisibility: parsed.chatVisibility }, path);
+  // Endpoint profiles (issue #356) state the same visibility provider fact per endpoint, so each one
+  // is checked by the same cross-field owner: a `temporary` profile on a launcher browser host is
+  // refused here instead of being saved and failing every turn on that endpoint.
+  const endpointProfiles = parsed.endpointProfiles === undefined
+    ? undefined
+    : validateEndpointProfiles(parsed.endpointProfiles, path);
+  for (const profile of endpointProfiles ?? []) {
+    validateChatGptWebProviderFacts(
+      { ...providerFacts, chatVisibility: profile.chatVisibility },
+      `${path} (endpointProfiles["${profile.name}"])`,
+    );
+  }
   if (parsed.stallTimeoutSec !== undefined
     && (!Number.isFinite(parsed.stallTimeoutSec) || parsed.stallTimeoutSec <= 0)) {
     throw new Error(`Invalid stallTimeoutSec in ${path}`);
@@ -1114,6 +1257,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
     capabilityState,
     experimentalBiggerContext,
     zeroRiskProEnabled,
+    ...(endpointProfiles !== undefined ? { endpointProfiles } : {}),
   } as AppConfig;
   const scopedProvider = result.webChat?.providers?.[CHATGPT_WEB_ROUTE_ID];
   if (scopedProvider && typeof scopedProvider === "object" && !Array.isArray(scopedProvider)) {
@@ -1156,6 +1300,33 @@ export function persistAccountIdentityFingerprint(fingerprint: string): boolean 
   config.accountIdentityFingerprint = normalized;
   saveConfig(config);
   return true;
+}
+
+/**
+ * Persist the endpoint-profile set (issue #356).
+ *
+ * The management surface writes one field, so it read-modify-writes through `loadConfigForSetup`
+ * exactly like {@link persistAccountIdentityFingerprint}: every other authored field — including the
+ * *configured* `storageStatePath`, which `loadConfig` resolves for reads only — is preserved as
+ * authored. When no configuration file exists yet (an in-process listener composed from an in-memory
+ * configuration), there is no authored document to preserve, so the caller's own configuration is
+ * written.
+ *
+ * The caller remains responsible for mutating its in-memory configuration so the next turn sees the
+ * change without a restart; this function only owns the file.
+ *
+ * @param profiles - the full profile set to persist.
+ * @param fallback - the live configuration, used only when no file exists.
+ * @throws {Error} when the existing document is invalid or the write fails.
+ */
+export function persistEndpointProfiles(profiles: EndpointProfile[], fallback: AppConfig): void {
+  if (!existsSync(getConfigPath())) {
+    saveConfig({ ...fallback, endpointProfiles: profiles });
+    return;
+  }
+  const config = loadConfigForSetup();
+  config.endpointProfiles = profiles;
+  saveConfig(config);
 }
 
 function accountIdentityFingerprint(config: AppConfig): string {

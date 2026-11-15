@@ -116,6 +116,7 @@ export const WEB_CHAT_AUTH_PAGE_HTML = `<!doctype html>
 <header>
   <h1>Interactive sign-in</h1>
   <p id="status" role="status" aria-live="polite">Enter the operator control token.</p>
+  <p class="hint"><a href="../endpoints/">API endpoints &rarr;</a></p>
 </header>
 
 <section id="token-card">
