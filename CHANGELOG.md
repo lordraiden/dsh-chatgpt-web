@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.1.2
+
+- Harden the structured-output instruction: it now explicitly forbids escaping characters inside JSON
+  string values (no backslashes before underscores or asterisks, no Markdown escaping). A consumer-web
+  model that Markdown-escaped a key (`"max\\_results"`) produced invalid JSON, and a structured caller
+  rejected every such reply as a parse error. The instruction is the only lever this bridge has — it
+  carries a schema as text and never parses or repairs the reply — so the wording is now explicit.
+
 ## 1.1.1
 
 - Fix the endpoint-profiles page at `/v1/control/endpoints/`: an escaped quote written inside the

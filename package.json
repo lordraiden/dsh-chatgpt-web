@@ -1,6 +1,6 @@
 {
   "name": "@lordraiden/dsh-chatgpt-web",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Containerised ChatGPT Web sidecar: a logged-in ChatGPT Web browser session exposed as an OpenAI-compatible HTTP API (/v1/responses, /v1/chat/completions, /v1/models) with its own CLI.",
   "repository": {
     "type": "git",

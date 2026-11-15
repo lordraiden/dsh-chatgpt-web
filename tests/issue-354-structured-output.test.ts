@@ -116,6 +116,11 @@ describe("issue #354 — response_format is accepted and carried as text", () =>
     expect(instructions).toContain("verdict");
     expect(instructions).toContain("one JSON value matching the supplied schema");
     expect(instructions).toContain("Do not wrap it in a Markdown code fence");
+    // A model that Markdown-escapes a string value ("max\\_results") emits invalid JSON: a real
+    // provider rejected every reflect call that way, so the instruction forbids escaping explicitly.
+    expect(instructions).toContain("Emit raw JSON");
+    expect(instructions).toContain("never escape characters inside string values");
+    expect(instructions).toContain("never use Markdown escaping");
     expect(instructions).toContain("<dsh_output_schema_json>");
     expect(instructions).toContain(JSON.stringify(SCHEMA));
     expect(instructions).toContain("</dsh_output_schema_json>");
@@ -137,6 +142,8 @@ describe("issue #354 — response_format is accepted and carried as text", () =>
     const instructions = translation.body.instructions as string;
     expect(instructions).toContain("one JSON object");
     expect(instructions).toContain("Do not wrap it in a Markdown code fence");
+    expect(instructions).toContain("Emit raw JSON");
+    expect(instructions).toContain("never use Markdown escaping");
     // There is no schema to carry, so no schema block is invented.
     expect(instructions).not.toContain("<dsh_output_schema_json>");
     expect(translation.body.input).toEqual([
