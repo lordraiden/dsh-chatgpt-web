@@ -362,6 +362,33 @@ Rules:
 5. **Live reload.** Profiles live in `config.json` (`endpointProfiles`) and a create/edit/delete takes
    effect on the next request without a restart; `PUT /v1/control/config` accepts the whole set too.
 
+### Operator console
+
+One entry point for every operator surface, and the map that explains each setting:
+
+```text
+http://127.0.0.1:17841/v1/control/
+```
+
+Enter the **control token** (kept in that tab's session storage, never in a URL). The console has
+seven sections:
+
+1. **Overview** — version, mode, whether the service is accepting turns, the live turn counters and
+   the effective chat visibility.
+2. **Chat** — what visibility and each transport tuning field does, and a link to the settings page
+   that owns the controls.
+3. **Endpoints** — what an endpoint profile is, and a link to its editor.
+4. **Memory** — what the routing generator writes, and a link to it.
+5. **Sign-in** — why the sign-in surface stays a separate page (a live session stream), and a link.
+6. **Doctor** — what the probe checks and what it costs (one real browser turn).
+7. **Reference** — **every** setting with what it does, when to change it, what it affects, its
+   default, and which value wins when two overlap (global vs profile visibility, profile concurrency
+   vs the process-wide limit, the bridge's turn clock vs the memory backend's timeout).
+
+The console is a client like the pages it links to: it owns no validator, no routing decision and no
+probe. The explanations come from one catalogue (`src/web-chat/host/console-content.ts`), so a
+setting cannot be described one way in a section and another way in the reference.
+
 ### Operator settings page
 
 One page shows the service's live state and edits the two facts that are safe to change at runtime:
