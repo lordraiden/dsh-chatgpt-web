@@ -113,34 +113,34 @@ export const WEB_CHAT_CONSOLE_PAGE_HTML = `<!doctype html>
   <h2>Chat</h2>
   <p class="hint">Visibility and the transport tuning. The controls are on the settings page; every field is explained in the reference below.</p>
   <div id="chat-cards"></div>
-  <div class="row"><a href="../settings/"><button class="primary" type="button">Open the chat controls</button></a></div>
+  <div class="row"><a href="/v1/control/settings/"><button class="primary" type="button">Open the chat controls</button></a></div>
 </section>
 
 <section id="endpoints" hidden>
   <h2>Endpoints</h2>
   <p class="hint">Profiles give a client its own path (<code>/p/&lt;name&gt;/v1</code>) with its own visibility, model allowlist and concurrency. They add no provider and no model: the rows still come from the public catalogue.</p>
   <div id="endpoint-cards"></div>
-  <div class="row"><a href="../endpoints/"><button class="primary" type="button">Open the profile editor</button></a></div>
+  <div class="row"><a href="/v1/control/endpoints/"><button class="primary" type="button">Open the profile editor</button></a></div>
 </section>
 
 <section id="memory" hidden>
   <h2>Memory</h2>
   <p class="hint">The bridge cannot configure its client. This section renders the environment block the client (Hindsight) needs, per operation, with placeholders for every secret.</p>
   <div id="memory-cards"></div>
-  <div class="row"><a href="../settings/"><button class="primary" type="button">Open the routing generator</button></a></div>
+  <div class="row"><a href="/v1/control/settings/"><button class="primary" type="button">Open the routing generator</button></a></div>
 </section>
 
 <section id="signin" hidden>
   <h2>Sign-in</h2>
   <p class="hint">The sign-in surface drives the provider's own browser from this page. It is a live session surface with its own stream, so it stays a separate page: open it in a tab and keep it open until the session is captured.</p>
-  <div class="row"><a href="../auth/"><button class="primary" type="button">Open the sign-in surface</button></a></div>
+  <div class="row"><a href="/v1/control/auth/"><button class="primary" type="button">Open the sign-in surface</button></a></div>
 </section>
 
 <section id="doctor" hidden>
   <h2>Doctor</h2>
   <p class="hint">The CLI's own doctor: it checks the configuration, the session and the catalogue, and performs one real browser turn.</p>
   <p class="warn">It costs one real turn. Run it when a turn fails and you need to know where the problem is.</p>
-  <div class="row"><a href="../settings/"><button class="primary" type="button">Run the doctor</button></a></div>
+  <div class="row"><a href="/v1/control/settings/"><button class="primary" type="button">Run the doctor</button></a></div>
 </section>
 
 <section id="reference" hidden>
@@ -257,7 +257,7 @@ export const WEB_CHAT_CONSOLE_PAGE_HTML = `<!doctype html>
     var headers = { authorization: "Bearer " + state.token };
     var facts = document.getElementById("overview-facts");
     facts.textContent = "";
-    fetch("../status", { headers: headers }).then(function (response) {
+    fetch("/v1/control/status", { headers: headers }).then(function (response) {
       if (!response.ok) throw new Error("status " + response.status);
       return response.json();
     }).then(function (status) {
@@ -266,7 +266,7 @@ export const WEB_CHAT_CONSOLE_PAGE_HTML = `<!doctype html>
       fact(facts, "Mode", status.mode);
       fact(facts, "Accepting turns", status.accepting_turns === true ? "yes" : "no");
       fact(facts, "Active turns", text(status.active_browser_turns) + " browser, " + text(status.active_http_turns) + " http");
-      return fetch("../config", { headers: headers });
+      return fetch("/v1/control/config", { headers: headers });
     }).then(function (response) {
       if (!response.ok) throw new Error("config " + response.status);
       return response.json();

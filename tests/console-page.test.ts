@@ -112,6 +112,20 @@ describe("operator console", () => {
     expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain("HINDSIGHT_API_LLM_TIMEOUT");
   });
 
+  test("every data path and link is a same-origin absolute path", () => {
+    // The console is served at /v1/control/ AND /v1/control/console/, so a relative "../status" would
+    // resolve to /v1/status from the first alias and 401. Absolute same-origin paths are the only
+    // shape that works from both.
+    const script = scriptOf(WEB_CHAT_CONSOLE_PAGE_HTML);
+    expect(script).toContain('fetch("/v1/control/status"');
+    expect(script).toContain('fetch("/v1/control/config"');
+    expect(script).not.toContain('fetch("../');
+    for (const link of ["/v1/control/settings/", "/v1/control/endpoints/", "/v1/control/auth/"]) {
+      expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain(`href="${link}"`);
+    }
+    expect(WEB_CHAT_CONSOLE_PAGE_HTML).not.toContain('href="../');
+  });
+
   test("carries no data, secret or absolute URL", () => {
     expect(WEB_CHAT_CONSOLE_PAGE_HTML).not.toContain("http://");
     expect(WEB_CHAT_CONSOLE_PAGE_HTML).not.toContain("https://");
