@@ -364,30 +364,35 @@ Rules:
 
 ### Operator console
 
-One entry point for every operator surface, and the map that explains each setting:
+One page, one token, every surface:
 
 ```text
 http://127.0.0.1:17841/v1/control/
 ```
 
-Enter the **control token** (kept in that tab's session storage, never in a URL). The console has
-seven sections:
+Enter the **control token** once (kept in that tab's session storage, never in a URL, never in
+localStorage); the same token unlocks the standalone pages, and the API key that clients use is a
+different credential that will not work here. The console has seven sections:
 
-1. **Overview** — version, mode, whether the service is accepting turns, the live turn counters and
-   the effective chat visibility.
-2. **Chat** — what visibility and each transport tuning field does, and a link to the settings page
-   that owns the controls.
-3. **Endpoints** — what an endpoint profile is, and a link to its editor.
-4. **Memory** — what the routing generator writes, and a link to it.
-5. **Sign-in** — why the sign-in surface stays a separate page (a live session stream), and a link.
-6. **Doctor** — what the probe checks and what it costs (one real browser turn).
+1. **Overview** — version, mode, whether the service is accepting turns, the live counters, the
+   effective visibility and the catalogue size.
+2. **Visibility** — the global default **and** every profile's override in one table, so the
+   precedence is visible instead of guessed: a profile's value wins for turns on that profile.
+3. **Profiles** — the endpoint-profile editor (`/p/<name>/v1`): create, edit and delete, with the
+   visibility, model allowlist and concurrency of each profile.
+4. **Tuning** — the transport knobs grouped by the stage they affect (compose, first response, send,
+   generation, turn clock), each with its explanation.
+5. **Memory** — the per-operation routing generator for the memory backend, with placeholders only.
+6. **Doctor** — the CLI's probe, with its cost stated (one real browser turn).
 7. **Reference** — **every** setting with what it does, when to change it, what it affects, its
-   default, and which value wins when two overlap (global vs profile visibility, profile concurrency
-   vs the process-wide limit, the bridge's turn clock vs the memory backend's timeout).
+   default, and which value wins when two overlap.
 
-The console is a client like the pages it links to: it owns no validator, no routing decision and no
-probe. The explanations come from one catalogue (`src/web-chat/host/console-content.ts`), so a
-setting cannot be described one way in a section and another way in the reference.
+The console is a client like the pages it replaces: it owns no validator, no routing decision and no
+probe. Writes go through the existing `PUT /v1/control/config` and `/v1/control/endpoint-profiles*`,
+and a refusal is shown as the owner returned it. The explanations come from one catalogue
+(`src/web-chat/host/console-content.ts`), so a setting cannot be described one way in a section and
+another way in the reference. The standalone pages (`/v1/control/settings/`,
+`/v1/control/endpoints/`, `/v1/control/auth/`) still work and remain the sign-in surface's home.
 
 ### Operator settings page
 

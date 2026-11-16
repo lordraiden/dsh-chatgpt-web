@@ -97,7 +97,8 @@ export const WEB_CHAT_SETTINGS_PAGE_HTML = `<!doctype html>
            spellcheck="false" placeholder="Operator control token">
     <button type="submit">Use token</button>
   </form>
-  <p class="hint">Kept in this tab's session storage only: never in the URL, never in local storage.</p>
+  <p class="hint">Kept in this tab's session storage only: never in the URL, never in local storage.
+    The API key that clients use is a different credential and will not work here.</p>
 </section>
 
 <section id="status-card" hidden>
