@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.3.0
+
+- New **operator console** at `/v1/control/`: one entry point for every operator surface, with a
+  navigation that names each one and a reference that explains **every** setting — what it does, when
+  to change it, what it affects, its default, and which value wins when two overlap (global vs profile
+  visibility, profile concurrency vs the process-wide limit, the bridge's turn clock vs the memory
+  backend's timeout). The console is a client like the pages it links to: it owns no validator, no
+  routing decision and no probe, and the controls stay on their own pages. The explanations come from
+  one catalogue (`src/web-chat/host/console-content.ts`), so a setting cannot be described one way in
+  a section and another way in the reference. Served anonymously by design, control token in
+  `sessionStorage`, no data, no secret, no absolute URL; the inline script compiles (the 1.1.1 lesson).
+
 ## 1.2.5
 
 - Optional: return the **partial answer** when the turn clock expires, instead of discarding it. A

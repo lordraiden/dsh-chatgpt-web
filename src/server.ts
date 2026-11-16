@@ -64,6 +64,10 @@ import {
   WEB_CHAT_SETTINGS_PAGE_PATHS,
 } from "./web-chat/host/settings-page";
 import {
+  WEB_CHAT_CONSOLE_PAGE_HTML,
+  WEB_CHAT_CONSOLE_PAGE_PATHS,
+} from "./web-chat/host/console-page";
+import {
   ENDPOINT_PROFILE_CONCURRENCY_EXCEEDED_CODE,
   applyEndpointProfile,
   endpointProfileCredential,
@@ -1699,6 +1703,18 @@ function endpointProfilesPageResponse(): Response {
   });
 }
 
+/** The operator console: one entry point that explains and links; it owns no control. */
+function consolePageResponse(): Response {
+  return new Response(WEB_CHAT_CONSOLE_PAGE_HTML, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
+      ...controlCorsHeaders(),
+    },
+  });
+}
+
 /** The static operator settings page (issue #360). No data, no secret and no absolute URL. */
 function settingsPageResponse(): Response {
   return new Response(WEB_CHAT_SETTINGS_PAGE_HTML, {
@@ -2361,6 +2377,9 @@ export function startServer(
     // (issue #360): static documents, deliberately readable without the control token — a browser
     // cannot put a header on a navigation, and each page's whole token handling exists to keep the
     // token out of the URL. They carry no data; every endpoint below is guarded.
+    if (req.method === "GET" && WEB_CHAT_CONSOLE_PAGE_PATHS.includes(url.pathname)) {
+      return consolePageResponse();
+    }
     if (req.method === "GET" && WEB_CHAT_AUTH_PAGE_PATHS.includes(url.pathname)) {
       return authPageResponse();
     }
