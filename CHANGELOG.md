@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.3.1
+
+- Fix the operator console's data paths and links. The console is served at `/v1/control/` **and**
+  `/v1/control/console/`, so the relative `../status` inherited from the settings page resolved to
+  `/v1/status` from the first alias and the page answered `401` after the token was accepted. Every
+  data path and link is now a same-origin absolute path (`/v1/control/status`, `/v1/control/config`,
+  `/v1/control/settings/`, …), which is the only shape that works from both aliases; the test pins it.
+
 ## 1.3.0
 
 - New **operator console** at `/v1/control/`: one entry point for every operator surface, with a
