@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.4.0
+
+- The operator console becomes **one page with one authentication**. It replaces the "three documents
+  and no map" shape (and the per-page token cards) with a single document that authenticates once and
+  then shows, explains and edits everything:
+  - **Overview** — version, mode, accepting turns, live counters, effective visibility, catalogue size.
+  - **Visibility** — the global default **and** every profile's override in one table, so the
+    precedence is visible: a profile's value wins for turns on that profile.
+  - **Profiles** — the endpoint-profile editor, moved in (create, edit, delete).
+  - **Tuning** — the transport knobs grouped by the stage they affect.
+  - **Memory** — the per-operation routing generator.
+  - **Doctor** — the probe, with its cost stated.
+  - **Reference** — every setting: what, when, affects, default, precedence.
+  The token is the same `sessionStorage` key the standalone pages use, so one entry unlocks both; the
+  API key is explicitly named as a different credential. Writes still go through the existing
+  `PUT /v1/control/config` and `/v1/control/endpoint-profiles*`, and a refusal is shown as the owner
+  returned it. The standalone pages keep working.
+
 ## 1.3.1
 
 - Fix the operator console's data paths and links. The console is served at `/v1/control/` **and**

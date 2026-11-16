@@ -93,7 +93,7 @@ describe("operator console", () => {
   });
 
   test("the navigation names every surface", () => {
-    for (const section of ["overview", "chat", "endpoints", "memory", "signin", "doctor", "reference"]) {
+    for (const section of ["overview", "visibility", "profiles", "tuning", "memory", "doctor", "reference"]) {
       expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain(`data-section="${section}"`);
       expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain(`id="${section}"`);
     }
@@ -117,13 +117,25 @@ describe("operator console", () => {
     // resolve to /v1/status from the first alias and 401. Absolute same-origin paths are the only
     // shape that works from both.
     const script = scriptOf(WEB_CHAT_CONSOLE_PAGE_HTML);
-    expect(script).toContain('fetch("/v1/control/status"');
-    expect(script).toContain('fetch("/v1/control/config"');
-    expect(script).not.toContain('fetch("../');
-    for (const link of ["/v1/control/settings/", "/v1/control/endpoints/", "/v1/control/auth/"]) {
-      expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain(`href="${link}"`);
+    for (const path of ["/v1/control/config", "/v1/control/status", "/v1/control/catalogue", "/v1/control/endpoint-profiles", "/v1/control/doctor"]) {
+      expect(script).toContain(`"${path}"`);
     }
-    expect(WEB_CHAT_CONSOLE_PAGE_HTML).not.toContain('href="../');
+    expect(script).not.toContain('fetch("../');
+    expect(script).not.toContain('api("../');
+  });
+
+  test("one authentication for the whole page", () => {
+    // One token card, one shared key: a token entered here also unlocks the standalone pages.
+    expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain('id="auth-card"');
+    expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain('dsh-chatgpt-web.control-token');
+    expect(WEB_CHAT_CONSOLE_PAGE_HTML.match(/id="token"/g)).toHaveLength(1);
+    expect(WEB_CHAT_CONSOLE_PAGE_HTML.match(/id="unlock"/g)).toHaveLength(1);
+  });
+
+  test("the unified sections expose the controls that used to live on separate pages", () => {
+    for (const marker of ['id="visibility-select"', 'id="profiles-table"', 'id="save-profile"', 'id="tuning"', 'id="memory-ops"', 'id="run-doctor"']) {
+      expect(WEB_CHAT_CONSOLE_PAGE_HTML).toContain(marker);
+    }
   });
 
   test("carries no data, secret or absolute URL", () => {
