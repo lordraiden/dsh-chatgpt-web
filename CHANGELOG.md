@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.4.2
+
+- Fix the turn that failed with "ChatGPT conversation turn has no stable identity". The identity
+  resolution **threw** when a turn element did not expose a `conversation-turn-*` / `fallback-turn-*`
+  attribute, which the Temporary Chat surface does after a re-render — aborting a turn whose answer was
+  already visible (observed live on a consolidation turn). The identity is used for change detection
+  and duplicate detection, not as a protocol value, so it now falls back to the element's position
+  (`position-turn-<n>`), which is stable for an ordered, append-only conversation and cannot collide
+  with a provider id. A repeated provider id is still refused.
+
 ## 1.4.1
 
 - A failed browser turn now logs a **sanitized message** next to its descriptor. The line said

@@ -3339,14 +3339,23 @@ export class ChatGptBrowserWorker {
       })();
       const observerKey = `${observerState.id}:${observerState.revision}`;
       if (options.knownKey === observerKey) return { key: observerKey };
+      // A turn's provider identity is preferred, but the surface does not always expose it: a
+      // Temporary Chat re-render can drop the attribute from a turn that is already on screen, and
+      // throwing there aborted a turn whose answer was already visible (observed live: a
+      // consolidation turn failed with "ChatGPT conversation turn has no stable identity"). The
+      // element's position is a stable-enough identity for change detection — the conversation is
+      // ordered and append-only — and its "position-turn-" prefix can never collide with a provider
+      // id, so the duplicate check still catches a surface that repeats the same id.
       const identities = (selector: string): string[] => {
-        const values = [...document.querySelectorAll(selector)].map(element =>
-          element.getAttribute("data-chatgpt-search-unit-key") ?? element.getAttribute("data-testid"));
-        if (values.some(value => typeof value !== "string"
-          || (!value.startsWith("conversation-turn-") && !value.startsWith("fallback-turn-")))) {
-          throw new Error("ChatGPT conversation turn has no stable identity");
-        }
-        const typed = values as string[];
+        const typed = [...document.querySelectorAll(selector)].map((element, index) => {
+          const raw = element.getAttribute("data-chatgpt-search-unit-key")
+            ?? element.getAttribute("data-testid");
+          if (typeof raw === "string"
+            && (raw.startsWith("conversation-turn-") || raw.startsWith("fallback-turn-"))) {
+            return raw;
+          }
+          return "position-turn-" + index;
+        });
         if (new Set(typed).size !== typed.length) {
           throw new Error("ChatGPT exposed duplicate conversation turn identities");
         }
