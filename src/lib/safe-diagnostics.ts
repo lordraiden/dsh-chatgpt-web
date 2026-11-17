@@ -102,6 +102,23 @@ const DIAGNOSTIC_URL_PATTERNS = [
  * bounded to 300 characters. This is the one sanitizer every provider's sign-in detail goes through —
  * a second copy would be a second authority over what may leak.
  */
+/**
+ * A sanitized, truncated error message for a log line.
+ *
+ * {@link safeErrorDescriptor} deliberately carries no message, so a failure logged only with it says
+ * `name=Error code=unknown` and cannot be diagnosed. This adds the message through the same
+ * redaction the sign-in diagnostics use: URLs are removed, whitespace collapsed and the text cut to
+ * 300 characters, which is enough to name the failing check without carrying page text.
+ *
+ * @param error - the thrown value.
+ * @returns the sanitized message, or an empty string when there is nothing to add.
+ */
+export function safeErrorMessage(error: unknown): string {
+  if (error === null || error === undefined) return "";
+  const text = nonSecretDiagnosticText(error);
+  return text === "The sign-in browser reported an unknown failure" ? "" : text;
+}
+
 export function nonSecretDiagnosticText(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   let sanitized = raw;
