@@ -1,0 +1,20 @@
+# Bundle patch for the DSH plugin half of @lordraiden/dsh-chatgpt-web (doc/plugin.md §9).
+#
+# The row `id` below IS the plugin's settings namespace: the host publishes the loader row id
+# (`ctx.fiber.entry.options.id`) as the settings `ns`, and the browser half registers its
+# `settings.section` under the same value. Keep the row id and the settings page id equal.
+#
+# `name` is the specifier the loader imports and must stay equal to package.json `name`; the client
+# bundle id must match it too. `config` is replaced whole when a profile overrides it (never merged),
+# so every non-secret field the plugin needs has its default here; `apiKey` and `controlToken` are
+# optional secrets with no default (the host reports them as unset until the operator stores one).
+- insert:
+    - id: dsh-chatgpt-web
+      name: '@lordraiden/dsh-chatgpt-web'
+      config:
+        # Service root. May include an endpoint profile: http://127.0.0.1:17842/p/<profile>.
+        baseUrl: 'http://127.0.0.1:17842'
+        # Catalogue model id served by the service (chatgpt-web/* or qwen-chat/*).
+        model: chatgpt-web/luna
+        # 0 = no client-side timeout; the service sends SSE keep-alives while a turn runs.
+        requestTimeoutMs: 0

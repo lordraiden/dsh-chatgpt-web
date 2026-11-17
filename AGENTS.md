@@ -2,8 +2,9 @@
 
 ## Project identity
 
-This repository implements `@lordraiden/dsh-chatgpt-web`, a **container-only** product: a
-self-contained service distributed as a Docker image plus Compose stacks.
+This repository implements `@lordraiden/dsh-chatgpt-web`, a **container-first** product: a
+self-contained service distributed as a Docker image plus Compose stacks, with an optional thin
+DeepSeek Harness plugin from the same package.
 
 **Product surface:**
 
@@ -14,12 +15,20 @@ self-contained service distributed as a Docker image plus Compose stacks.
   which drives a provider's own sign-in browser from the operator's page;
 - the ChatGPT-Web browser adapter;
 - the WebChat core contracts and the durable conversation store;
+- the optional DSH plugin (`lib/plugin.js`, `client.js`, `cordis.patch.yml`), a thin provider over the
+  HTTP API;
 - the container artifacts (`Dockerfile`, the Compose stacks, `docker/**`).
 
-**The DeepSeek Harness Cordis plugin is abandoned.** There is no DSH plugin, no Cordis bundle, no
-`client.js`, no `cordis.patch.yml`, no `lib/plugin.js`, no `ctx.llm` provider, and no
-private-npm-registry or `dsh plugin update` release contract. Do not reintroduce any of them, and do
-not describe the product as a DSH plugin.
+**The DeepSeek Harness Cordis plugin is a supported, thin surface.** The same package ships a DSH
+plugin (`src/plugin.ts`, `src/plugin/**`, `client.js`, `cordis.patch.yml`, built to `lib/plugin.js`)
+that registers the running service as a text-only LLM provider (`chatgpt-web/*`, `qwen-chat/*`). It is
+a **provider, not a second execution engine**: the service still owns the browser, the provider
+conversations, continuity, retries and concurrency, and the plugin keeps no transcript and no
+conversation state. Its limits are deliberate — text only (no tools/MCP, no Advisor, no
+Codex/native, no Responses compatibility), no streaming `usage`, and a same-origin status route
+(`/plugins/dsh-chatgpt-web/status`) so the control token never reaches the browser. Do not grow it
+into a second execution path, and do not move provider selection, conversation state or retry
+authority into it. Full design: `doc/plugin.md`.
 
 **Architectural direction:** a provider-neutral **WebChat Core** for authenticated, text-only
 consumer-web chat. ChatGPT Web, **Qwen Code** (`qwen-code/<model>`, issue #299 slice 2) and **Qwen
@@ -389,6 +398,20 @@ bun run test
 check (`scripts/test-246-container-pin.mjs`), the authority check
 (`scripts/test-issue-75-authority.ts`) and the tarball smoke test that `bun run test` includes.
 
+For the DSH plugin (`src/plugin.ts`, `src/plugin/**`, `client.js`, `cordis.patch.yml`):
+
+```bash
+bun run test:plugin
+```
+
+That suite is separate from `bun run test` and CI runs both. Packaging changes also need the tarball
+smoke test, which asserts the plugin entry, `client.js`, `cordis.patch.yml` and the
+`dsh.bundle.patch` / `dsh.client` manifest fields:
+
+```bash
+node scripts/smoke-tarball.mjs
+```
+
 For container changes:
 
 ```bash
@@ -486,6 +509,17 @@ The **container image is the shipping distribution**. `.github/workflows/contain
 production image and waits for health on every change to `Dockerfile`, the Compose
 stacks, `docker/**`, `package.json`, `bun.lock` or `src/**`. Nothing is pushed to an image registry and
 there is no private-registry or plugin-update release contract to maintain; do not add one.
+
+The same tag also carries the built DSH plugin bundles, which an operator installs straight from
+GitHub:
+
+```bash
+dsh plugin add github:lordraiden/dsh-chatgpt-web#vX.Y.Z
+```
+
+That is a git install of the tagged artifact, not a registry publication and not a second release
+contract: the tag remains the single release, and the container remains the primary distribution. A
+git install runs the package's `prepare` script, so the plugin manager asks for build approval once.
 
 Before any manual release operation:
 

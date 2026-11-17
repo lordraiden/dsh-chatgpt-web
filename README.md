@@ -21,6 +21,7 @@ text-only HTTP API. It is not the official OpenAI API and is not affiliated with
   - [Chat visibility: temporary (hidden) vs persistent (visible)](#chat-visibility-temporary-hidden-vs-persistent-visible)
 - [API surface](#api-surface)
 - [Using it as a memory backend (Hindsight)](#using-it-as-a-memory-backend-hindsight)
+- [DSH plugin](#dsh-plugin)
 - [Authentication and exposure](#authentication-and-exposure)
 - [Sign in to ChatGPT](#sign-in-to-chatgpt)
 - [Model catalogue](#model-catalogue)
@@ -43,6 +44,9 @@ API as its surface.
 - **Provider:** ChatGPT Web, driven through the authenticated website UI in headless Chromium.
 - **Storage:** one data volume holds the configuration, the provider session (credentials) and the
   durable conversation store.
+- **DSH plugin (optional):** the same package also ships a thin DeepSeek Harness plugin that
+  registers the service as a text-only model provider — see [DSH plugin](#dsh-plugin). The container
+  remains the primary distribution.
 
 The shared semantics of the exchange live in a provider-neutral WebChat core. ChatGPT Web, Qwen Code
 and Qwen Chat are served routes; DeepSeek Web is implemented — its turn transport, page-owned proof of
@@ -477,6 +481,14 @@ docker run --rm -v dsh-chatgpt-web-data:/data dsh-chatgpt-web:local serve --port
 speaks the OpenAI Chat Completions API, so it can use this service as that LLM: the bridge answers each
 of Hindsight's calls with a real ChatGPT Web turn.
 
+One account per instance, and the recommended layout runs **two instances**: instance A on `:17841`
+is Hindsight's backend, reached through the `hidden` endpoint profile, and instance B on `:17842` is
+the [DSH plugin](#dsh-plugin) backend. They share no browser profile, no conversation store and no
+concurrency budget, so the machine workload and the interactive one cannot sign each other out or
+queue behind each other — see
+[`doc/container.md` §5.6](./doc/container.md#56-two-accounts-a-second-instance). The rest of this
+section describes instance A.
+
 ### What Hindsight expects from the LLM
 
 - `POST {base}/chat/completions`, non-streaming, carrying a **`response_format` JSON schema on every
@@ -567,6 +579,75 @@ curl -fsS http://127.0.0.1:17841/v1/control/status | jq .turnAccounting
 `skipped` (no API key, or the service is not listening). `turnAccounting` then shows how many browser
 turns each request and operation actually cost, how long it waited for an account slot, and how much
 context it replayed — the numbers to compare a `temporary` profile against a `persistent` one.
+
+## DSH plugin
+
+The same package also ships a **thin DeepSeek Harness (DSH) plugin** that registers the running
+service as a text-only model provider (`chatgpt-web/*` and `qwen-chat/*`). It is a provider, not a
+second execution engine: it forwards every turn to the service over HTTP and keeps no transcript, no
+browser and no conversation state of its own. The full design, contracts and limits are in
+[`doc/plugin.md`](./doc/plugin.md); this section is the short version.
+
+The container is still the product; the plugin is an optional artifact for a DSH profile.
+
+### Install
+
+```bash
+dsh plugin add github:lordraiden/dsh-chatgpt-web#vX.Y.Z
+# or use the plugin manager UI with the same spec
+```
+
+Tags are created by CI from the verified `main` commit, so a tag contains the built plugin bundles.
+A git install runs the package's `prepare` script, so the plugin manager asks for build approval
+(`allowBuilds`) once; a `bun` on the host is required. `engines.dsh` pins the supported DSH range and
+refuses an unsupported release instead of loading it.
+
+### Configure
+
+The plugin has a settings page in the DSH GUI (Settings → ChatGPT Web). It owns five fields and a
+read-only status panel:
+
+| Field | What it is |
+|---|---|
+| `baseUrl` | service root, e.g. `http://127.0.0.1:17842`; may include `/p/<profile>` |
+| `apiKey` | the service API key (`DSH_CHATGPT_WEB_API_KEY`); optional on a loopback service without one |
+| `controlToken` | the service control token, used only for the status panel and the sign-in link |
+| `model` | the default catalogue route, e.g. `chatgpt-web/luna` |
+| `requestTimeoutMs` | client-side timeout; `0` means none (the service sends keep-alive while a turn runs) |
+
+Saving applies the change live, without a restart. Both secrets are write-only: the Host never
+returns them, and the page holds a typed value only until it is saved — never in browser storage,
+never in a URL.
+
+The same page shows service health, the account's sign-in state and the catalogue, and links to the
+service's own sign-in page (`{baseUrl}/v1/control/auth/`). The browser never contacts the service
+directly: the plugin host answers the page on `/plugins/dsh-chatgpt-web/status` and proxies the
+service server-side, so the control token never leaves the host.
+
+### Two accounts
+
+The plugin is meant to run against its **own** service instance, so its chats do not share an account
+with the memory backend:
+
+```text
+instance A  :17841  Hindsight, endpoint profile `hidden` (temporary chat)
+instance B  :17842  the DSH plugin (persistent chat)
+```
+
+Start instance B with `docker compose -f docker-compose.plugin.yml up -d --wait` and sign its account
+in at `http://127.0.0.1:17842/v1/control/auth/`. Both instances run the same image with separate
+volumes; see [`doc/container.md` §5.6](./doc/container.md#56-two-accounts-a-second-instance).
+
+### Limits
+
+- **Text only.** Tools, MCP, Advisor, Codex/native and Responses compatibility are not part of the
+  plugin. DSH tool declarations are ignored and no tool call is ever emitted; attached images, files
+  and audio are refused rather than dropped.
+- **No streaming `usage`.** The service does not report token usage in a stream, so DSH accounting
+  for this provider is absent; the service's own counters are on `/v1/control/status`.
+- **Continuity lives in the service.** A DSH session maps to one durable provider conversation;
+  losing it is a typed failure, never a silent new chat.
+- **A git install needs build approval**, once, and the host needs `bun`.
 
 ## Authentication and exposure
 

@@ -515,6 +515,66 @@ docker compose run --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix chatgpt-web 
 The caveats in §5 still apply: this is a personal, single-account bridge and the provider's terms of
 service are yours to honour.
 
+### 5.6 Two accounts: a second instance
+
+One account per instance. Two ChatGPT accounts therefore mean two service instances, each with its own
+data volume, its own loopback port and its own sign-in:
+
+| | Instance A | Instance B |
+| --- | --- | --- |
+| Compose file | `docker-compose.yml` | `docker-compose.plugin.yml` |
+| Compose project | directory-derived (default) | `dsh-chatgpt-plugin` |
+| Service | `chatgpt-web` | `chatgpt-web-plugin` |
+| Port (host loopback) | `17841` | `17842` |
+| Data volume | `dsh-chatgpt-web-data` | `dsh-chatgpt-web-data-plugin` |
+| Consumer | Hindsight, endpoint profile `hidden` (`temporary` chat) | the DSH plugin, `persistent` chat |
+| Base URL | `http://127.0.0.1:17841/p/hidden/v1` | `http://127.0.0.1:17842/v1` |
+
+```bash
+docker compose up -d --wait                                 # instance A, :17841
+docker compose -f docker-compose.plugin.yml up -d --wait     # instance B, :17842
+curl -fsS http://127.0.0.1:17841/healthz
+curl -fsS http://127.0.0.1:17842/healthz
+```
+
+Both instances run the same image (`dsh-chatgpt-web:local`) and the same build, so one build serves
+both. Both use host networking; they can run at the same time only because their loopback ports differ.
+The second stack is a **separate Compose project** (`dsh-chatgpt-plugin`) for the same reason
+`docker-compose.exposed.yml` is one (§5.2): `down` on one stack must not take the other's container with
+it, and a port clash stays a visible error instead of a silent race.
+
+Each instance signs in **its own account** through its own page (§5.5):
+
+```text
+http://127.0.0.1:17841/v1/control/auth/   # account A
+http://127.0.0.1:17842/v1/control/auth/   # account B
+```
+
+The control token is per volume (`controlToken` in that volume's `config.json`), so each page asks for
+its own instance's token; a configured API key is likewise per instance. Signing in on one port leaves
+the other account untouched.
+
+What the two instances never share:
+
+- **storage state** — `providers/chatgpt-web/storage-state.json` and its verified marker live in the
+  instance's own volume, so signing account B in cannot overwrite account A's session;
+- **conversation store** — each volume keeps its own durable continuity, so a conversation is continued
+  only by the instance that started it;
+- **concurrency budget** — `MAX_CHATGPT_BROWSER_TABS` fan-out and `DSH_CHATGPT_WEB_MAX_INFLIGHT_TURNS`
+  are per process, so one account's load is not charged to the other's.
+
+The `hidden` in instance A's URL is an **endpoint profile** (`/p/<name>/v1`) whose `chatVisibility` is
+`"temporary"`, not a container setting: it is why Hindsight's turns do not land in that account's chat
+history, and it needs no extra container. Instance B uses the default `/v1` route, whose visibility is
+the configured `persistent` default.
+
+Back up the two volumes separately (§5, §4.1) — they hold different credentials:
+
+```bash
+docker run --rm -v dsh-chatgpt-web-data:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-data-$(date +%F).tgz -C /data .
+docker run --rm -v dsh-chatgpt-web-data-plugin:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-plugin-data-$(date +%F).tgz -C /data .
+```
+
 ## 6. Evidence collected on the authoring host
 
 Local paths are sanitised. The sidecar was exercised with Node 24.21.0 from the checked-in `lib/`.

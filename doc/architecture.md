@@ -1,6 +1,6 @@
 # dsh-chatgpt-web Architecture
 
-**Status:** Architecture of the container-only product  
+**Status:** Architecture of the container-first product (with the optional thin DSH plugin)  
 **Implementation status:** Delivered — the provider-neutral core, durable continuation, the exchange lifecycle, the ChatGPT-Web adapter and the provider conformance suite are implemented; the ChatGPT-specific product layer and the Advisor are implemented; the containerised service is the shipping distribution (§32; issues #245–#250 merged and closed); Qwen and DeepSeek remain roadmap providers  
 **Document role:** Single architectural source of truth for the Web Chat provider architecture  
 **Repository:** lordraiden/dsh-chatgpt-web  

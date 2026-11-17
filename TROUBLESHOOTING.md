@@ -760,3 +760,163 @@ Then run the focused test associated with the behavior being changed.
 For browser/session changes, use deterministic transport fixtures where possible and use live authenticated browser sessions only where they are required to prove provider-specific behavior.
 
 For architecture work, read doc/architecture.md before modifying ownership boundaries.
+
+## 24. The DSH plugin
+
+The plugin is a thin DSH provider over the service HTTP API; its design and contracts are in
+[`doc/plugin.md`](./doc/plugin.md). Its failures are almost always one of the seven below, and each
+one is visible from the plugin's settings page (Settings → ChatGPT Web) or from the service's own
+endpoints.
+
+### 24.1 The plugin reports the service as unreachable
+
+**Symptom.** A turn fails with a `TRANSPORT` error whose message says the service cannot be reached,
+and the settings page's status panel shows the service as `unreachable` with a sanitized reason
+(`unreachable` or `timeout`).
+
+**Cause.** The plugin host cannot open an HTTP connection to the configured `baseUrl`: the instance
+is not running, the port is wrong, or the URL points at the wrong instance. The two-instance layout
+makes this easy to get wrong — `:17841` is Hindsight's instance, `:17842` is the plugin's.
+
+**What to do.**
+
+1. Prove the service from the same host the plugin runs on:
+
+   ```bash
+   curl -fsS http://127.0.0.1:17842/healthz
+   docker compose -f docker-compose.plugin.yml ps
+   ```
+
+2. Check `baseUrl` in the plugin settings. It is the service root, not the API base: the plugin
+   appends `/v1/...` itself. An endpoint profile belongs in the URL as `/p/<profile>`.
+3. If the service is up but the plugin still times out, check `requestTimeoutMs`: `0` disables the
+   client deadline, which is the normal setting because a browser turn takes minutes. A small
+   non-zero value aborts a healthy turn.
+
+### 24.2 A turn fails with `401` / authentication
+
+**Symptom.** The turn fails with `AUTH`. The service's own error code is either `invalid_api_key`
+(the service has an API key configured and the plugin did not send it) or `chatgpt_session_expired`
+(the service is reachable but its ChatGPT account is signed out).
+
+**Cause.** Two different credentials, easily confused: the **API key** authenticates the plugin to
+the service, and the **control token** guards only `/v1/control/*` (status and sign-in). The account's
+provider session is a third thing, stored in the instance's data volume.
+
+**What to do.**
+
+1. If the service was started with `DSH_CHATGPT_WEB_API_KEY`, set the same value as `apiKey` in the
+   plugin settings. A loopback instance without an API key needs no `apiKey`.
+2. If the code is `chatgpt_session_expired`, sign the instance's account in again at
+   `http://127.0.0.1:17842/v1/control/auth/` (the plugin's status panel links to it). The running
+   service picks the new session up on the next turn; no restart is needed.
+3. Do not put the control token in `apiKey`, or the API key in `controlToken`: the first is rejected
+   by the service, and the second makes the status panel report a rejected control token.
+
+### 24.3 The catalogue is empty, or the model is not available
+
+**Symptom.** The model selector is empty, or a turn fails with `UNKNOWN_MODEL` saying the service
+catalogue is unavailable / does not list the model / does not declare a `context_window`.
+
+**Cause.** The service's catalogue is derived from the authenticated account's capability state and
+from the configured providers. A service that is up but not signed in publishes no ChatGPT Web rows;
+a model id that is not an exact catalogue slug is refused; a row without `context_window` cannot be
+resolved, because DSH compaction depends on a declared window.
+
+**What to do.**
+
+1. Read the catalogue directly: `curl -fsS http://127.0.0.1:17842/v1/models | jq '.models[].slug'`.
+   The plugin serves `chatgpt-web/*` and `qwen-chat/*` only; other rows are never offered.
+2. If the list is empty or missing `chatgpt-web/*`, the instance's account is not signed in or its
+   capability state is unverifiable — fix the sign-in first (§24.2), then refresh the page.
+3. Use an exact slug from the catalogue. A backend id such as `gpt-5.6-luna` is not a route.
+4. The plugin caches a successful catalogue read for 30 s and never falls back to a stale one, so a
+   model that just disappeared fails resolution until the catalogue recovers. Wait a moment and
+   retry; a persistent failure is a service-side catalogue problem, not a plugin one.
+
+### 24.4 The settings page asks for a control token / the account state is unknown
+
+**Symptom.** The status panel shows "control token required" (or the account row stays `not checked`)
+even though the service is reachable.
+
+**Cause.** The guarded control surface cannot be read without the control token, so the plugin
+deliberately reports `auth: null` instead of guessing an account state. The sign-in page itself is
+anonymous by design (a browser navigation cannot carry a header), but every endpoint that carries
+data is guarded.
+
+**What to do.**
+
+1. Copy the instance's `controlToken` (from that volume's `config.json`) into the plugin's
+   `controlToken` field and save. The page applies it without a restart.
+2. Open `{baseUrl}/v1/control/auth/` and enter the control token there to sign the account in. The
+   token is never put in a URL, and the plugin never sends it to the browser.
+3. If the token is rejected, the panel says so (`control token rejected or control status
+   unavailable`). Confirm you are using the token of the instance in `baseUrl` — each volume has its
+   own.
+
+### 24.5 A turn is refused with `429` (`turn_queue_timeout` / `turn_queue_full`)
+
+**Symptom.** The turn fails with `RATE_LIMIT`, and the service's `error.code` is
+`turn_queue_timeout` or `turn_queue_full`. The service's message says the turn was **not started**
+and advertises a `retry-after`.
+
+**Cause.** One authenticated account serves at most five simultaneous browser turns. A turn that
+arrives while all five are in use waits for the queue's budget (60 s by default) and is then refused;
+if the bounded queue is already full it is refused immediately. This is backpressure, not a provider
+failure: nothing was submitted and continuity is untouched.
+
+**What to do.**
+
+1. Wait out the advertised delay and retry the turn yourself. The plugin deliberately disables DSH's
+   retry layer, so it will not resend a turn behind your back — and it must not: a turn that reached
+   the service may already have been submitted to the provider.
+2. Keep DSH's own concurrency low against one account. A large fan-out only moves the same queue
+   inside the service.
+3. Read `turnQueue` on the service's `/v1/control/status` if the refusal is chronic: a depth that
+   never falls with no grants is a stuck turn (§15), not a burst.
+4. Do not raise `MAX_CHATGPT_BROWSER_TABS`. It is an account-safety bound, not a tuning knob.
+
+### 24.6 Context pressure and compaction
+
+**Symptom.** DSH starts a compaction, or a long session is refused by the service with
+`context_exhausted` / `context_length_exceeded` (mapped to `CONTEXT_WINDOW_EXCEEDED`).
+
+**Cause.** The plugin declares the `contextWindow` the service's catalogue publishes, so DSH
+compaction measures pressure against the same window the provider reports. A compaction is an
+ordinary auxiliary call (`purpose: "compaction"`) served by the same route; its system instruction is
+prepended to the user text because the service has no system slot.
+
+**What to do.**
+
+1. Let DSH compact. A `CONTEXT_WINDOW_EXCEEDED` that survives a compaction means the conversation
+   genuinely exceeds the route's window: start a new session or pick a route with a larger
+   `context_window`.
+2. A compaction that ends with `max-tokens` is reported as an error, not as a summary — the plugin
+   never truncates silently. If it repeats, point DSH's summarization route at another provider
+   (`dsh-compaction-basic` configuration) or shorten the session.
+3. The compaction prompt can carry the service's own `Project: "dsh-chatgpt-web"` install header,
+   because an auxiliary call declares no workspace. It is internal context for a summarization call
+   and is never shown to the user; do not "fix" it by declaring the workspace on auxiliary calls,
+   which would pollute the summary instruction.
+
+### 24.7 "plugin status endpoint unavailable"
+
+**Symptom.** The settings page's status panel reads `plugin status endpoint unavailable` (optionally
+with an HTTP status), while the connection fields stay editable.
+
+**Cause.** The page reads the plugin host's same-origin route `GET /plugins/dsh-chatgpt-web/status`,
+not the service. That route is missing when the plugin is not loaded in this profile, when the host
+has no web server (the route is optional), when an old build without the route is installed, or when
+the GUI is served under a path prefix that the route does not match. A `404` is the usual signal; a
+transport failure (status `0`) means the page could not reach its own origin.
+
+**What to do.**
+
+1. Confirm the plugin is enabled in the profile and that the build is current: the route exists in
+   the same release that ships `lib/plugin.js` and `client.js`.
+2. Reload the page. The form does not depend on the probe, so saving and turns still work while the
+   panel is unavailable — the panel is diagnostic only.
+3. If the GUI is behind a reverse proxy under a subpath, the route must be reachable at
+   `/plugins/dsh-chatgpt-web/status` on the same origin the GUI is served from.
+4. A `500`-class answer is not expected: the route always answers `200 application/json`, even when
+   the service is down. A non-200 therefore points at the host or the proxy, not at the service.

@@ -148,6 +148,12 @@ export interface QwenChatResolvedTurn {
   readonly turnId: string;
   /** The caller's declared turn purpose, when it sent one. */
   readonly purpose?: string;
+  /**
+   * The workspace the caller declared for this conversation, when it declared one (doc/plugin.md
+   * §3.3). Initialization context for the install header, never identity: it does not key the
+   * conversation and is unused by a continuation.
+   */
+  readonly workspace?: string;
   /** Whether this turn is housekeeping: answered, kept nowhere. */
   readonly ephemeral: boolean;
 }
@@ -691,7 +697,11 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
       // sent) sends only the new human text. The ephemeral path above and the Advisor's neutral
       // `openTextExchange` seam never record the fact, so neither can install.
       const installsConversation = !planned.replay && !planned.humanMessageSent;
-      const text = installsConversation ? compileQwenChatInstallPrompt(humanText, projectIdentityHeader()) : humanText;
+      // A declared workspace wins over the package identity on the install header (doc/plugin.md
+      // §3.3); without one the existing header is unchanged. The continuation sends only `humanText`.
+      const text = installsConversation
+        ? compileQwenChatInstallPrompt(humanText, projectIdentityHeader(), turn.workspace)
+        : humanText;
       const handoff = exchangeFor({
         conversationKey: identity.key,
         turnId: turn.turnId,
@@ -921,6 +931,9 @@ export function createQwenChatProvider(options: QwenChatProviderOptions): QwenCh
         threadId,
         turnId,
         ...(resolved.purpose !== undefined ? { purpose: resolved.purpose } : {}),
+        // The declared workspace is already normalized to a bare name by the host reader; it is
+        // carried to the install compiler and never used to key the conversation.
+        ...(resolved.workspace !== undefined ? { workspace: resolved.workspace } : {}),
         ephemeral,
       };
     },

@@ -2,9 +2,11 @@
 // Smoke test for the published npm artifact (issue #4).
 //
 // Flow: pack (or accept a tarball) -> clean install in a temp dir -> run the
-// installed CLI (--help, doctor) -> check the tarball for build-environment
-// path contamination -> check runtime dependency resolution from the clean
-// install. Exits non-zero on any failure so the publish workflow is blocked.
+// installed CLI (--help, doctor) -> assert the DSH plugin surface (lib/plugin.js,
+// client.js, cordis.patch.yml and the dsh.bundle.patch / dsh.client manifest
+// fields) -> check the tarball for build-environment path contamination -> check
+// runtime dependency resolution from the clean install. Exits non-zero on any
+// failure so the publish workflow is blocked.
 //
 // Usage: node scripts/smoke-tarball.mjs [tarball.tgz]
 // Without an argument the script runs `npm pack` in the repo root first.
@@ -38,6 +40,15 @@ const fail = (msg) => {
 function run(cmd, args, options = {}) {
   return spawnSync(cmd, args, { encoding: "utf8", ...options });
 }
+
+// Paths that only exist on a build machine (GitHub Actions runners and the local checkout): a
+// published artifact must never carry them into a user's install.
+const contaminationPatterns = [
+  /\/home\/runner\/work\//,
+  /\/Users\/runner\/work\//,
+  /D:\\a\//i,
+  /\/home\/runner\//,
+];
 
 // 1. Obtain the tarball.
 let tarball = process.argv[2];
@@ -127,14 +138,57 @@ try {
     }
   }
 
-  // 6. Build-environment contamination check on the packed artifact.
+  // 6. DSH plugin surface (doc/plugin.md §9). One package ships two artifacts: the container CLI
+  //    and the thin DSH plugin. A tarball missing the plugin host entry, the browser half or the
+  //    Cordis bundle patch is not installable as a plugin, so it must fail here instead of at
+  //    `dsh plugin add` on the operator's machine.
+  const pluginBundlePath = join(pkgDir, "lib", "plugin.js");
+  const clientBundlePath = join(pkgDir, "client.js");
+  const patchPath = join(pkgDir, "cordis.patch.yml");
+  for (const [label, path] of [
+    ["plugin host entry", pluginBundlePath],
+    ["client bundle", clientBundlePath],
+    ["Cordis bundle patch", patchPath],
+  ]) {
+    if (existsSync(path)) ok(`${label} is present in the installed package`);
+    else fail(`${label} is missing from the installed package (${path})`);
+  }
+
+  // The DSH host discovers the plugin through these manifest fields; a package that declares
+  // neither is only a CLI, not a plugin.
+  const installedManifestPath = join(pkgDir, "package.json");
+  let installedManifest;
+  try {
+    installedManifest = JSON.parse(readFileSync(installedManifestPath, "utf8"));
+  } catch (error) {
+    fail(`installed package.json is unreadable: ${error.message}`);
+  }
+  if (installedManifest) {
+    const declaredPatch = installedManifest.dsh?.bundle?.patch;
+    if (typeof declaredPatch === "string" && declaredPatch.length > 0) {
+      ok(`package.json declares dsh.bundle.patch (${declaredPatch})`);
+    } else {
+      fail("package.json does not declare dsh.bundle.patch");
+    }
+    const declaredClient = installedManifest.dsh?.client;
+    if (declaredClient && typeof declaredClient === "object" && declaredClient.platform === "web") {
+      ok(`package.json declares dsh.client (platform ${declaredClient.platform})`);
+    } else {
+      fail('package.json does not declare dsh.client with platform "web"');
+    }
+  }
+
+  // The plugin bundle is built on the CI runner like the CLI, so it must not leak the builder's
+  // paths either. Same patterns, checked on the file the host actually imports.
+  if (existsSync(pluginBundlePath)) {
+    const pluginBundle = readFileSync(pluginBundlePath, "utf8");
+    const leaked = contaminationPatterns.find(pattern => pattern.test(pluginBundle));
+    if (leaked) fail(`plugin bundle carries a build-environment path matching ${leaked}`);
+    else ok("plugin bundle carries no build-environment path");
+  }
+
+  // 7. Build-environment contamination check on the packed artifact.
   execFileSync("tar", ["-xzf", tarball, "-C", extractDir]);
-  const contaminationPatterns = [
-    /\/home\/runner\/work\//,
-    /\/Users\/runner\/work\//,
-    /D:\\a\//i,
-    /\/home\/runner\//,
-  ];
   const files = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir)) {
@@ -162,7 +216,7 @@ try {
   }
   if (contaminated === 0) ok("no build-environment paths found in the tarball");
 
-  // 7. Runtime dependency resolution from the clean install. Only the production closure the
+  // 8. Runtime dependency resolution from the clean install. Only the production closure the
   // container actually needs is asserted here; the retired DSH packages are gone from the artifact.
   const depCheck = run(
     process.execPath,
@@ -189,7 +243,7 @@ try {
     }
   }
 
-  // 8. tiktoken actually loads (wasm) from the clean install.
+  // 9. tiktoken actually loads (wasm) from the clean install.
   const twLoad = run(
     process.execPath,
     [

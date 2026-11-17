@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Reintroduce the **DSH plugin** as a thin, text-only DeepSeek Harness provider over the service HTTP
+  API (`doc/plugin.md`). One package ships two artifacts again: the container service and
+  `lib/plugin.js` + `client.js` + `cordis.patch.yml`. The plugin registers `chatgpt-web/*` and
+  `qwen-chat/*` with `ctx.llm`, forwards each turn to `POST /v1/chat/completions` as SSE, reads the
+  catalogue (and its `context_window`) from `GET /v1/models`, and keeps no transcript, no browser and
+  no conversation state — the service still owns continuity, retries and concurrency. It is a
+  provider, not a second execution engine.
+  - **Settings page** in the DSH GUI: `baseUrl`, `apiKey`, `controlToken`, `model` and
+    `requestTimeoutMs`, all live (volatile) and applied without a restart; both secrets are write-only
+    and never reach browser storage.
+  - **Status route** `GET /plugins/dsh-chatgpt-web/status`: the host proxies the service server-side
+    and answers the page on its own origin, so the browser never contacts the service and the control
+    token never leaves the host. The route is read-only, bounded, always JSON, and redacts secrets.
+  - **Workspace header**: the service accepts an optional `workspace` in the native turn metadata and
+    both install compilers emit `Project: "<workspace>"` (no `github:` line) on the first message,
+    falling back to the existing package-identity header when none is declared. The workspace is a
+    name, never a path, and never participates in the conversation key.
+  - **Two accounts**: `docker-compose.plugin.yml` adds a second instance (`:17842`, its own volume) so
+    the plugin's persistent chats do not share an account with Hindsight's temporary-chat workload.
+  - Text only: no tools/MCP, no Advisor, no Codex/native, no Responses compatibility; attached
+    content is refused rather than dropped. Streaming carries no `usage`.
+- Fix quota classification: a `429` whose service `error.code` is `insufficient_quota` now maps to
+  `QUOTA` instead of the generic `RATE_LIMIT`, so a quota exhaustion is not retried as backpressure.
+
 ## 1.4.3
 
 - Survive a Temporary Chat re-render mid-turn. 1.4.2's position fallback stopped the abort but exposed

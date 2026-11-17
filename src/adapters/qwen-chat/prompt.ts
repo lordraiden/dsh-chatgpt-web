@@ -20,8 +20,15 @@
  * the identical deterministic identity. It carries the project name and its authoritative repository
  * URL and nothing else — never a host-context snapshot, a runtime block, a tool definition or a
  * system prompt. When that metadata cannot be resolved the header is omitted, never fabricated.
+ *
+ * A **declared workspace** replaces it (doc/plugin.md §3.3): the caller's conversation is about its
+ * own workspace, so the first message introduces that name (`Project: "<workspace>"`, no `github:`
+ * line) instead of this service's package. The name is normalized by the host owner
+ * (`projectContextName`), so a path arrives as its last segment, and a declared workspace that
+ * normalizes to nothing falls back to the package identity rather than fabricating a name.
  */
 import { withProjectIdentityHeader } from "../../project-identity";
+import { workspaceInstallHeader } from "../../web-chat/host/turn-identity";
 import type { WebChatReplayMessage } from "../../web-chat/core";
 
 /**
@@ -59,14 +66,20 @@ export function compileQwenChatReplayPrompt(history: readonly WebChatReplayMessa
  *   production), or `undefined` when the package metadata resolves no identity; the explicit
  *   parameter is what makes the "metadata cannot be resolved" rule testable without faking the
  *   installed package.
+ * @param workspace - the workspace the caller declared for this conversation, when it declared one
+ *   (doc/plugin.md §3.3). A declared workspace wins over the package identity: the header becomes
+ *   `Project: "<workspace>"` with no `github:` line, normalized to a bare name by the host owner
+ *   (`projectContextName`), so a path can never reach the provider. Without one, `header` is used
+ *   unchanged.
  * @throws {Error} when there is no human message to install.
  */
 export function compileQwenChatInstallPrompt(
   currentUserText: string,
   header: string | undefined,
+  workspace?: string,
 ): string {
   if (currentUserText.trim().length === 0) {
     throw new Error("A Qwen Chat normal Chat Mode install must carry a human message");
   }
-  return withProjectIdentityHeader(currentUserText, header);
+  return withProjectIdentityHeader(currentUserText, workspaceInstallHeader(workspace) ?? header);
 }

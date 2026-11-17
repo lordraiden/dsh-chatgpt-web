@@ -58,6 +58,15 @@
  * `dsh_session_id`, a native `thread_id`, or OpenAI's own `user` keeps winning exactly as before, and
  * the retirement condition is the same for both — a caller that states a native identity does not need
  * them, and the day the harness sends `dsh_session_id` directly they contribute nothing.
+ *
+ * ## Declared workspace (doc/plugin.md §3.3)
+ *
+ * The same metadata payload may declare a `workspace`: the name of the workspace the caller's
+ * conversation is about. It is **initialization context, not identity** — it never keys a
+ * conversation — and it is used by exactly one thing: the first-message header an install compiler
+ * emits (`Project: "<workspace>"`). It is normalized to a bare name here, so a caller that sends a
+ * path can never put a local filesystem path into a provider's first message, and it is carried
+ * through {@link nativeTurnMetadataFor} so a surface that re-emits the metadata does not lose it.
  */
 import { isEphemeralWebChatTurn } from "../core/turn-delivery";
 
@@ -72,6 +81,46 @@ export const NATIVE_THREAD_ID_KEY = "thread_id";
 
 /** The turn-classification field on the wire, shared with the provider's own reader. */
 export const NATIVE_TURN_PURPOSE_KEY = "purpose";
+
+/**
+ * The declared workspace name on the wire (doc/plugin.md §3.3).
+ *
+ * Initialization context for the first message of a conversation, never identity: it is read from the
+ * same native metadata payload as the identity fields and it never participates in the conversation
+ * key. The value is a **name**, so it is normalized by {@link projectContextName} before anyone uses
+ * it.
+ */
+export const NATIVE_WORKSPACE_KEY = "workspace";
+
+/**
+ * Derive a conversation name from a declared workspace: the last non-empty path segment.
+ *
+ * The workspace is a name, never a path (doc/plugin.md §3.3): a caller that sends an absolute path
+ * must not put that local filesystem path into a provider's first message. The retained ChatGPT
+ * install derives its project reference from its cwd with this same rule, which is why the rule lives
+ * in the host owner both install compilers reach rather than in one adapter.
+ */
+export function projectContextName(workspace: string | undefined): string | undefined {
+  if (workspace === undefined) return undefined;
+  const segments = workspace.split(/[\\/]+/).filter(segment => segment.length > 0);
+  const name = segments[segments.length - 1];
+  return name && name.length > 0 ? name : undefined;
+}
+
+/**
+ * The first-message header a declared workspace compiles to, or `undefined` when none is declared.
+ *
+ * The exact text is the workspace form of the project header (doc/plugin.md §3.3):
+ * `Project: "<workspace>"` with no `github:` line. Only an install emits it; a continuation sends no
+ * header at all. A workspace that normalizes to no name yields no header, so an unusable declaration
+ * falls back to the caller's own header instead of fabricating one.
+ */
+export function workspaceInstallHeader(workspace: string | undefined): string | undefined {
+  // A whitespace-only declaration is absence, not a header with blank quotes: the metadata reader
+  // already trims, and a direct caller (a provider's install compiler) must get the same rule.
+  const name = projectContextName(workspace?.trim());
+  return name !== undefined && name.trim() !== "" ? `Project: "${name}"` : undefined;
+}
 
 /**
  * The body field an OpenAI-compatible caller declares its stable session affinity in.
@@ -176,6 +225,14 @@ export interface ResolvedNativeTurnIdentity {
   readonly threadId?: string;
   /** The declared turn purpose, trimmed. `undefined` when the caller declared none. */
   readonly purpose?: string;
+  /**
+   * The declared workspace as a conversation name, normalized (a path collapses to its last segment).
+   *
+   * Initialization context for the first message, never identity: it does not key a conversation and
+   * is resolved even on an ephemeral turn, which never installs one. `undefined` when the caller
+   * declared none (or declared one that is not a usable name).
+   */
+  readonly workspace?: string;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -262,6 +319,10 @@ export function nativeTurnMetadataString(
  * An **ephemeral** turn resolves to no identity at all even when the metadata carries one:
  * housekeeping work is addressed to no conversation.
  *
+ * The declared `workspace` is not part of this precedence — it is initialization context, not an
+ * identity — so it is resolved from the metadata on its own and normalized to a bare name
+ * ({@link projectContextName}).
+ *
  * @param metadata - the caller's native turn metadata, if it sent any.
  * @param bodySessionId - the OpenAI-compatible identity the surface already parsed, if any.
  * @param threadId - the surface's own derived identity, used only when the caller chose none.
@@ -288,10 +349,15 @@ export function resolveNativeTurnIdentity(
     ?? promptCacheKey
     ?? headerAffinity
     ?? trimmedString(threadId);
+  // The workspace is initialization context rather than identity, so it is resolved independently of
+  // the ephemeral classification: an ephemeral turn never installs a conversation, so the value is
+  // carried but never emitted.
+  const workspace = projectContextName(metadataString(metadata, NATIVE_WORKSPACE_KEY));
   return {
     ...(dshSessionId !== undefined ? { dshSessionId } : {}),
     ...(resolved !== undefined ? { threadId: resolved } : {}),
     ...(purpose !== undefined ? { purpose } : {}),
+    ...(workspace !== undefined ? { workspace } : {}),
   };
 }
 
@@ -306,14 +372,21 @@ export function resolveNativeTurnIdentity(
  *
  * `purpose` is written only when the resolver derived one that the caller's own metadata did not carry
  * (a declared purpose header): the native field already preserved above stays the caller's word.
+ *
+ * A declared `workspace` is carried through in its normalized form: the caller's raw spelling (which
+ * may be a path) is not what an install may emit, and a surface that re-emits the metadata must not
+ * lose the declaration on the way through. A payload that declares no usable workspace keeps whatever
+ * it had (an unusable value is ignored by every reader, never turned into a name).
  */
 export function nativeTurnMetadataFor(
   metadata: Record<string, unknown> | undefined,
   threadId: string,
   purpose?: string,
 ): Record<string, unknown> {
+  const workspace = projectContextName(metadataString(metadata, NATIVE_WORKSPACE_KEY));
   return {
     ...metadata,
+    ...(workspace !== undefined ? { [NATIVE_WORKSPACE_KEY]: workspace } : {}),
     ...(purpose !== undefined && metadataString(metadata, NATIVE_TURN_PURPOSE_KEY) === undefined
       ? { [NATIVE_TURN_PURPOSE_KEY]: purpose }
       : {}),
