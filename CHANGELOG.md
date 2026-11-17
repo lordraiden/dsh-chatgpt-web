@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.4.1
+
+- A failed browser turn now logs a **sanitized message** next to its descriptor. The line said
+  `name=Error code=unknown` and nothing else, which is exactly the case that cannot be diagnosed: a
+  plain `Error` (the Markdown-consistency and DOM-health checks are the usual ones) carries its reason
+  in the message, and the descriptor deliberately omits it. The message goes through the same
+  redaction the sign-in diagnostics use — URLs removed, whitespace collapsed, cut to 300 characters —
+  so a failure names its check without carrying page text.
+
 ## 1.4.0
 
 - The operator console becomes **one page with one authentication**. It replaces the "three documents

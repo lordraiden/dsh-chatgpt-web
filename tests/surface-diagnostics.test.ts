@@ -15,6 +15,7 @@ import {
   CHATGPT_TRUNCATION_AFFORDANCE,
   logChatGptSurfaceDiagnostic,
 } from "../src/adapters/chatgpt-web/browser-worker";
+import { safeErrorMessage } from "../src/lib/safe-diagnostics";
 
 describe("surface diagnostics", () => {
   test("one sanitized line per event, with the event name and its detail", () => {
@@ -39,6 +40,16 @@ describe("surface diagnostics", () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     expect(() => logChatGptSurfaceDiagnostic("rate-limit-dialog", circular)).not.toThrow();
+  });
+
+  test("a failure log carries a sanitized message, not just a name", () => {
+    // The descriptor alone says "name=Error code=unknown" and cannot be diagnosed.
+    expect(safeErrorMessage(new Error("ChatGPT completed with visible text that could not be serialized as Markdown")))
+      .toContain("could not be serialized");
+    // A URL is redacted and the text is cut to 300 characters.
+    expect(safeErrorMessage(new Error("see https://example.test/x for details"))).toContain("[url]");
+    expect(safeErrorMessage(new Error("x".repeat(400))).length).toBe(300);
+    expect(safeErrorMessage(null)).toBe("");
   });
 
   test("the truncation affordance matches the localised labels and nothing else", () => {

@@ -18,7 +18,7 @@ import {
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
 import { isHttpClientDisconnectedReason } from "../../lib/errors";
-import { safeErrorDescriptor } from "../../lib/safe-diagnostics";
+import { safeErrorDescriptor, safeErrorMessage } from "../../lib/safe-diagnostics";
 import type { ChatGptWebChatVisibility, CodexProviderConfig } from "../../types";
 import { accountIdentityFromUnknownSession } from "../../chatgpt-web-authority";
 import { parseDataUrl } from "../image";
@@ -5994,9 +5994,11 @@ export class ChatGptBrowserWorker {
       // page) publishes no settlement for the operation that held the retained conversation, so the
       // surface is retired; every ordinary failure only marks it (issue #314).
       turnTornDown = chatGptBrowserTurnRetiresRetainedSurface(error, turn.abortSignal?.reason);
+      const failureMessage = safeErrorMessage(error);
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
-        + ` ${safeErrorDescriptor(error)}`,
+        + ` ${safeErrorDescriptor(error)}`
+        + (failureMessage ? ` message=${JSON.stringify(failureMessage)}` : ""),
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
