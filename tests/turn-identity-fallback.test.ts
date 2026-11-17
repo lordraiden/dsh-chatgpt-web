@@ -14,6 +14,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { chatGptAssistantTurnLocator } from "../src/adapters/chatgpt-web/browser-worker";
 
 const SOURCE = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
 const START = "const identities = (selector: string): string[] => {";
@@ -54,6 +55,32 @@ describe("turn identity resolution", () => {
 
   test("falls back when the attribute is not a turn identity", () => {
     expect(identitiesFor([["data-testid", "some-other-node"]])).toEqual(["position-turn-0"]);
+  });
+
+  test("a position identity resolves by position, a provider identity by attribute", () => {
+    const selectors: string[] = [];
+    const positions: number[] = [];
+    const page = {
+      locator: (selector: string) => {
+        selectors.push(selector);
+        return {
+          nth: (index: number) => {
+            positions.push(index);
+            return { selector, nth: index };
+          },
+        };
+      },
+    } as never;
+
+    chatGptAssistantTurnLocator(page, "position-turn-3");
+    expect(selectors).toHaveLength(1);
+    expect(selectors[0]).toContain('[data-testid^="conversation-turn-"]');
+    expect(positions).toEqual([3]);
+
+    chatGptAssistantTurnLocator(page, "conversation-turn-abc");
+    expect(selectors).toHaveLength(2);
+    expect(selectors[1]).toContain('data-testid="conversation-turn-abc"');
+    expect(positions).toEqual([3]);
   });
 
   test("a repeated provider identity is still refused", () => {

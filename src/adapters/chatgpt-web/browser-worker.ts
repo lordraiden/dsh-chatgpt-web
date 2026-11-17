@@ -1807,6 +1807,26 @@ export function chatGptReboundTurnIdentity(
   return chatGptNewTurnIdentity(initial, current);
 }
 
+/**
+ * The locator for one assistant turn identity.
+ *
+ * A provider identity is an attribute selector. A `position-turn-<n>` identity — the fallback used
+ * when the surface drops the attribute — has no attribute to select, so it resolves by position on the
+ * assistant-turn selector, the same order the identity was derived from. Without this, a rebound turn
+ * would carry a locator that matches nothing and the turn would fail later with a detached response.
+ *
+ * @param page - the page the turn runs on.
+ * @param identity - a provider identity or a `position-turn-<n>` fallback.
+ * @returns the locator for that turn.
+ */
+export function chatGptAssistantTurnLocator(page: Page, identity: string): Locator {
+  const position = /^position-turn-([0-9]+)$/.exec(identity);
+  if (position) return page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).nth(Number(position[1]));
+  return page.locator(
+    `[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`,
+  );
+}
+
 export class ChatGptCompletionTracker {
   private candidate?: { signature: string; since: number };
   private lastToolBatchRevision = 0;
@@ -3428,7 +3448,7 @@ export class ChatGptBrowserWorker {
       state.responseIdentities,
     );
     if (!identity) return "";
-    const locator = page.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`);
+    const locator = chatGptAssistantTurnLocator(page, identity);
     return (await this.responseDomSnapshot(locator, {})).visibleText;
   }
 
@@ -3587,7 +3607,7 @@ export class ChatGptBrowserWorker {
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
         const boundaryText = identity
           ? (await this.responseDomSnapshot(
-            observationPage.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`),
+            chatGptAssistantTurnLocator(observationPage, identity),
             {},
           )).visibleText
           : "";
@@ -3596,7 +3616,7 @@ export class ChatGptBrowserWorker {
       }
       if (identity) return {
         identity,
-        locator: observationPage.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`),
+        locator: chatGptAssistantTurnLocator(observationPage, identity),
         acceptedUserTurnIdentities: state.userIdentities,
       };
       await this.waitForTurnDomOrExternalProgress(
@@ -3623,7 +3643,12 @@ export class ChatGptBrowserWorker {
     }
     const state = await this.submissionDomState(page, baseline.domCache, signal);
     const acceptedUsers = new Set(binding.acceptedUserTurnIdentities);
-    if (state.userIdentities.some(identity => !acceptedUsers.has(identity))) {
+    const unknownUsers = state.userIdentities.filter(identity => !acceptedUsers.has(identity));
+    // A re-render can change an identity's *scheme* without adding a turn: the Temporary Chat surface
+    // sometimes drops the conversation-turn-* attribute, so the position fallback takes over and the
+    // string no longer matches the accepted one (observed live). A genuinely new user turn also
+    // increases the count, which is the signal this check is really about.
+    if (unknownUsers.length > 0 && state.userIdentities.length > binding.acceptedUserTurnIdentities.length) {
       throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
     }
     const identity = chatGptReboundTurnIdentity(
@@ -3634,7 +3659,7 @@ export class ChatGptBrowserWorker {
     if (!identity || identity === binding.identity) return binding;
     return {
       identity,
-      locator: page.locator(`[data-testid=${JSON.stringify(identity)}], [data-chatgpt-search-unit-key=${JSON.stringify(identity)}]`),
+      locator: chatGptAssistantTurnLocator(page, identity),
       acceptedUserTurnIdentities: state.userIdentities,
     };
   }
