@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.4.3
+
+- Survive a Temporary Chat re-render mid-turn. 1.4.2's position fallback stopped the abort but exposed
+  the next assumption: a re-render can change an identity's **scheme** (the provider attribute
+  disappears and the position fallback takes over) without adding a turn, and the bridge read that as
+  "another user turn" and aborted. The check now compares counts, so a scheme change is a re-render and
+  a genuinely new turn (which increases the count) is still refused. A rebound turn whose identity is
+  `position-turn-<n>` now resolves its locator by position on the assistant-turn selector instead of an
+  attribute selector that would match nothing.
+
 ## 1.4.2
 
 - Fix the turn that failed with "ChatGPT conversation turn has no stable identity". The identity
