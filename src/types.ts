@@ -11,6 +11,12 @@ export interface DshNativeTurnContext {
   turnId: string;
   /** DSH auxiliary-call classification, when present. */
   purpose?: "compaction" | "session-title";
+  /**
+   * Declared workspace name for the first-message header (doc/plugin.md §3.3), when the caller declared
+   * one. Initialization context, not identity: it never keys a conversation and is emitted only by an
+   * install, never by a continuation.
+   */
+  workspace?: string;
   /** DSH-authoritative sandbox projection used by the ChatGPT capability bridge. */
   environment?: {
     cwd: string;

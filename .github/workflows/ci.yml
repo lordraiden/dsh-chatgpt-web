@@ -119,8 +119,15 @@ jobs:
             git reset --hard origin/main
           fi
 
-          # The Cordis plugin bundle is retired; a stale copy must not survive the regeneration.
-          rm -f lib/plugin.js
+          # The package ships two artifacts from the same checked-in lib: the container CLI
+          # (lib/cli.js) and the DSH plugin host (lib/plugin.js). A build that produced only one of
+          # them must not be committed as the release bundle.
+          for bundle in lib/cli.js lib/plugin.js; do
+            if [ ! -f "$bundle" ]; then
+              echo "bun run build did not produce $bundle; refusing to synchronize lib" >&2
+              exit 1
+            fi
+          done
 
           if git diff --quiet -- lib; then
             echo "Checked-in lib is already synchronized with src"
@@ -140,6 +147,9 @@ jobs:
 
       - name: Issue #10-B capability transport tests
         run: bun scripts/test-issue-10b-capability-transport.ts
+
+      - name: Plugin contract tests
+        run: bun run test:plugin
 
       - name: Pack validated artifact
         id: package

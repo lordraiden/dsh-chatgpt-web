@@ -20,7 +20,9 @@ ARG PLAYWRIGHT_VERSION=1.63.0
 FROM oven/bun:1 AS build
 WORKDIR /app
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+# --ignore-scripts: the package's `prepare` builds the plugin bundle from src/, which is not copied
+# yet at this point. The explicit `bun run build` below is the one build this image needs.
+RUN bun install --frozen-lockfile --ignore-scripts
 COPY . .
 # Rebuilds lib/ from src/; the image therefore never ships a stale checked-in bundle.
 RUN bun run build && bun lib/cli.js --version
@@ -43,7 +45,8 @@ WORKDIR /app
 COPY package.json bun.lock ./
 # --omit=peer keeps the production closure free of any optional peer the package may declare; the
 # service distribution must run from the CLI bundle alone, and the assertion below proves it does.
-RUN bun install --production --frozen-lockfile --omit=peer
+# --ignore-scripts: the runtime never builds; it copies the already-built lib/ from the build stage.
+RUN bun install --production --frozen-lockfile --omit=peer --ignore-scripts
 
 COPY --from=build /app/lib ./lib
 COPY src ./src

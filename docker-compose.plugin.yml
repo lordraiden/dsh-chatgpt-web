@@ -1,0 +1,62 @@
+# Second service instance — one per ChatGPT account (doc/plugin.md §8, doc/container.md §5.6).
+#
+# Why this is a separate file and not a profile of docker-compose.yml:
+#
+#   - two accounts, two volumes, two ports. `chatgpt-web` (:17841, volume dsh-chatgpt-web-data) is
+#     account A — Hindsight, reached through the `hidden` endpoint profile (temporary chat).
+#     `chatgpt-web-plugin` (:17842, volume dsh-chatgpt-web-data-plugin) is account B — the DSH plugin,
+#     persistent chat.
+#   - the accounts share nothing: not the browser profile (the storage state lives in the volume), not
+#     the conversation store, not the concurrency budget. One volume would mean one signed-in account
+#     overwriting the other's session.
+#   - a separate Compose project (`name:` below, as docker-compose.exposed.yml does) keeps `up`/`down`
+#     of one stack away from the other's container. Both stacks use host networking, so they can run
+#     at the same time only because the loopback ports differ — 17841 for that stack, 17842 here.
+#
+#   docker compose -f docker-compose.plugin.yml up -d --wait
+#   curl -fsS http://127.0.0.1:17842/healthz
+#   # sign the second account in at http://127.0.0.1:17842/v1/control/auth/ (§5.5, §5.6)
+#
+# The image and build are the same as docker-compose.yml: one build, two instances. Compose does not
+# share anchors between files, so the two anchors below are local copies of that file's.
+name: dsh-chatgpt-plugin
+
+x-build: &build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    # Must match playwright-core in bun.lock; scripts/test-246-container-pin.mjs fails otherwise.
+    PLAYWRIGHT_VERSION: "1.63.0"
+
+x-healthcheck: &healthcheck
+  test: ["CMD", "curl", "-fsS", "http://127.0.0.1:17842/healthz"]
+  interval: 30s
+  timeout: 5s
+  start_period: 20s
+  retries: 3
+
+services:
+  chatgpt-web-plugin:
+    build: *build
+    image: dsh-chatgpt-web:local
+    init: true
+    ipc: host
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      DSH_CHATGPT_WEB_HOME: /data
+    # Host networking means the service binds 127.0.0.1 in the host's own namespace, so this port must
+    # differ from the default stack's 17841. The API key is optional on loopback; add
+    # DSH_CHATGPT_WEB_API_KEY to `environment` if this instance should require one too.
+    command: ["serve", "--port", "17842"]
+    healthcheck: *healthcheck
+    volumes:
+      - dsh-plugin-data:/data
+
+volumes:
+  dsh-plugin-data:
+    # Account B's credentials (the provider session) and its durable conversation store, deliberately
+    # separate from dsh-chatgpt-web-data. Back it up with
+    # `docker run --rm -v dsh-chatgpt-web-data-plugin:/data -v "$PWD:/backup" alpine tar czf /backup/dsh-plugin-data.tgz -C /data .`
+    # and never commit it.
+    name: dsh-chatgpt-web-data-plugin

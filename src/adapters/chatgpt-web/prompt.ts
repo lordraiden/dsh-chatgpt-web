@@ -4,6 +4,13 @@ import { projectIdentityHeader, withProjectIdentityHeader } from "../../project-
 import { sanitizeConversationText } from "../../conversation-sanitizer";
 import { type CodexMessage, type CodexParsedRequest } from "../../types";
 import {
+  NATIVE_WORKSPACE_KEY,
+  nativeTurnMetadataFromBody,
+  nativeTurnMetadataString,
+  projectContextName,
+  workspaceInstallHeader,
+} from "../../web-chat/host/turn-identity";
+import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
   chatGptPromptJsonBytes,
   selectCompactionMessagesDeterministically,
@@ -270,19 +277,12 @@ export function projectRetainedComposerDelta(messages: readonly CodexMessage[]):
 }
 
 /**
- * Derive a minimal PROJECT identifier from the workspace root: the last
- * non-empty path segment (the repository/project directory name). The retained
- * install exposes this as context data — `Project: "<name>"` — never an
- * absolute local filesystem path (issue #172: no private local paths in the
- * transport prompt). Returns `undefined` when the workspace cannot be
- * resolved to a useful name; the caller then omits the line.
+ * The workspace-name rule lives in the host owner
+ * (`src/web-chat/host/turn-identity.ts`, `projectContextName`): the retained install derives its
+ * `Project: "<name>"` reference from the cwd with it, and both providers' install compilers use it
+ * for a declared workspace. Re-exported here for the ChatGPT suite that pins the rule.
  */
-export function projectContextName(cwd: string | undefined): string | undefined {
-  if (cwd === undefined) return undefined;
-  const segments = cwd.split(/[\\/]+/).filter(segment => segment.length > 0);
-  const name = segments[segments.length - 1];
-  return name && name.length > 0 ? name : undefined;
-}
+export { projectContextName };
 
 /**
  * The deterministic project identity and its first-message header are provider-neutral
@@ -337,6 +337,20 @@ function currentChatUserMessage(messages: readonly CodexMessage[]): { text: stri
 }
 
 /**
+ * The workspace a caller declared for this turn, if any (doc/plugin.md §3.3).
+ *
+ * The trusted native projection is the channel when the surface built one; otherwise the declaration
+ * arrives on the one native metadata channel every surface carries
+ * (`client_metadata["x-codex-turn-metadata"]`, read through the host's own reader). It is the same
+ * declared field either way, never a second channel, and a blank value is absence.
+ */
+function declaredWorkspace(parsed: CodexParsedRequest): string | undefined {
+  const native = parsed._dshContext?.workspace;
+  if (native !== undefined && native.trim() !== "") return native.trim();
+  return nativeTurnMetadataString(nativeTurnMetadataFromBody(parsed._rawBody), NATIVE_WORKSPACE_KEY);
+}
+
+/**
  * Normal Chat Mode install (the first physical message of a conversation): the
  * deterministic project header — compiled by the provider-neutral owner
  * (`src/project-identity.ts`, so Qwen Chat's install carries the identical
@@ -344,13 +358,19 @@ function currentChatUserMessage(messages: readonly CodexMessage[]): { text: stri
  * user/assistant history, and no runtime, repository, tool or memory context:
  * ChatGPT Web owns the conversation from here on. Advisor Mode and the DSH
  * tool-execution route keep their own compilers.
+ *
+ * A declared workspace wins over the package identity (doc/plugin.md §3.3): the conversation is about
+ * the caller's workspace, so the first message introduces that name (`Project: "<workspace>"`, no
+ * `github:` line) instead of this service's own package. Without a declaration the existing header is
+ * unchanged. Only this install emits the header; a continuation never does.
  */
 export function compileChatGptWebInstall(parsed: CodexParsedRequest): CompiledChatGptWebPrompt {
   if (parsed._compactionRequest) throw new Error("A compaction request cannot use normal Chat Mode install");
   const current = currentChatUserMessage(parsed.context.messages);
   if (!current.text) throw new Error("A normal Chat Mode install must carry a human message");
+  const header = workspaceInstallHeader(declaredWorkspace(parsed)) ?? projectIdentityHeader();
   return {
-    text: withProjectIdentityHeader(current.text, projectIdentityHeader()),
+    text: withProjectIdentityHeader(current.text, header),
     images: current.images,
   };
 }
