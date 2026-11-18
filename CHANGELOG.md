@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.5.3
+
+- The stored-session verifier now presents the same Windows desktop user agent as the managed turn
+  browser. Headless Chromium was reaching ChatGPT without the composer, so the probe timed out and
+  reported a working capture as `expired`; the agent string now lives in one shared owner
+  (`src/headless-user-agent.ts`) used by the verifier and the sign-in controller.
+
+
 ## 1.5.2
 
 - Fix the stored-session verifier's browser launch: the auth import and the session-health probe

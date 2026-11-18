@@ -44,6 +44,7 @@ import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 
 import { persistAccountIdentityFingerprint, providerCredentialsDir, type AppConfig } from "../../config";
+import { HEADLESS_USER_AGENT } from "../../headless-user-agent";
 import {
   CHATGPT_CHAT_URL,
   assertAuthenticatedChatGptPage,
@@ -135,9 +136,6 @@ export const CHATGPT_WEB_AUTH_NAVIGATION_TIMEOUT_MS = 60_000;
 /** What the default launch sends into the page's own capability probe. */
 const CAPABILITY_PROBE_TIMEOUT_MS = 15_000;
 
-/** The Windows desktop user agent the managed headless browser already presents. */
-const HEADLESS_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
 /** A viewport in the provider's own frame geometry. */
 export interface ChatGptWebAuthViewport {

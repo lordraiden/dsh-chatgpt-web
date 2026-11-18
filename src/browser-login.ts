@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } f
 import { dirname, join } from "node:path";
 import { chromium, type BrowserContext, type BrowserContextOptions, type Page } from "playwright-core";
 import type { AppConfig } from "./config";
+import { HEADLESS_USER_AGENT } from "./headless-user-agent";
 import {
   atomicWriteFile,
   DEFAULT_CREDENTIAL_PROVIDER_ID,
@@ -256,7 +257,13 @@ async function inspectStoredState(
     // then reports a working capture as `expired` while the real turn browser keeps working.
     headless: false,
     ignoreDefaultArgs: ["--enable-automation", "--password-store=basic", "--use-mock-keychain"],
-    args: ["--headless=new", "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
+    args: [
+      "--headless=new",
+      `--user-agent=${HEADLESS_USER_AGENT}`,
+      "--disable-blink-features=AutomationControlled",
+      "--no-first-run",
+      "--no-default-browser-check",
+    ],
   });
   try {
     const verifierContext = await verifierBrowser.newContext({ storageState });
