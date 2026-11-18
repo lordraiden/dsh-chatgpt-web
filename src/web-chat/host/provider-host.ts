@@ -36,6 +36,10 @@ export interface WebChatHostConfig {
     readonly providers?: Readonly<Record<string, unknown>>;
     /** Durable continuity location; omit to keep continuity in memory. */
     readonly conversationStorePath?: string;
+    readonly conversationRetention?: {
+      readonly maxAgeDays?: number;
+      readonly maxEntries?: number;
+    };
   };
   /** Historical flat ChatGPT Web configuration (kept compatible). */
   readonly chatgptWeb?: unknown;
@@ -105,7 +109,12 @@ export async function closeSharedConversationStores(): Promise<void> {
 export function createWebChatConversationStore(config: WebChatHostConfig): WebChatConversationStore {
   const path = config.webChat?.conversationStorePath;
   if (typeof path === "string" && path.trim().length > 0) {
-    return createFileConversationStore({ file: path });
+    return createFileConversationStore({
+      file: path,
+      ...(config.webChat?.conversationRetention === undefined
+        ? {}
+        : { retention: config.webChat.conversationRetention }),
+    });
   }
   return createMemoryConversationStore();
 }

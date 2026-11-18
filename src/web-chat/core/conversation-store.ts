@@ -114,10 +114,30 @@ export interface WebChatConversationStore {
   close?(): Promise<void>;
 }
 
+/**
+ * Optional bounded retention for a durable conversation store.
+ *
+ * Retention is a deployment decision: a store without it keeps every record forever (today's
+ * behaviour). A store with it drops old **confirmed** records when it opens and after every write;
+ * an `unconfirmed` record (an attempt whose outcome is unknown) is never pruned, because dropping it
+ * would lose the reconciliation the next turn needs.
+ */
+export interface WebChatConversationRetention {
+  /** Drop confirmed records whose last update is older than this many days. */
+  readonly maxAgeDays?: number;
+  /** Keep at most this many confirmed records, dropping the oldest first. */
+  readonly maxEntries?: number;
+}
+
 /** Options shared by the store implementations. */
 export interface WebChatConversationStoreOptions {
   /** Clock, injectable so identity and timing are deterministic in tests. */
   readonly now?: () => number;
+  /**
+   * Optional bounded retention. A function is resolved per prune, so a live configuration change
+   * applies without rebuilding the store.
+   */
+  readonly retention?: WebChatConversationRetention | (() => WebChatConversationRetention | undefined);
 }
 
 /** Field names that must never appear in a stored record. */
