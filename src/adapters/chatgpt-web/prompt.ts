@@ -415,7 +415,13 @@ export function compileRetainedChatGptWebInstall(
   const system = (parsed.context.systemPrompt ?? [])
     .map(part => sanitizeConversationText(part))
     .filter(part => part.length > 0);
-  const project = projectContextName(parsed._dshContext?.environment?.cwd);
+  // A declared workspace wins over the cwd-derived project reference (doc/plugin.md §3.3). This is
+  // the install a chat/completions turn actually uses, so the header must be applied here too, not
+  // only in the normal-chat install.
+  const declared = declaredWorkspace(parsed);
+  const project = declared !== undefined
+    ? projectContextName(declared)
+    : projectContextName(parsed._dshContext?.environment?.cwd);
   const humanMessages: Array<{ role: "user" | "assistant"; text: string }> = [];
   const images: ChatGptWebPromptImage[] = [];
   for (const message of parsed.context.messages) {
