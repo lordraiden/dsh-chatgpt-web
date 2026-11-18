@@ -26,8 +26,15 @@ import type { PluginConfig, PluginLogger } from './contract'
 /** Exact route the settings page reads; it must match the plugin row id in `cordis.patch.yml`. */
 export const STATUS_ROUTE_PATH = '/plugins/dsh-chatgpt-web/status'
 
-/** One status read is bounded so a page load cannot hang on a wedged service. */
-export const STATUS_TIMEOUT_MS = 5_000
+/**
+ * One status read is bounded so a page load cannot hang on a wedged service.
+ *
+ * The bound covers the slowest read: the service's session-health probe launches a browser and
+ * proves the stored capture, which takes ~20 s on a cold cache (a warm verdict is instant). A 5 s
+ * bound cut that probe off and the page showed "auth health unavailable (timeout)" on every cold
+ * load even though the session was valid.
+ */
+export const STATUS_TIMEOUT_MS = 25_000
 
 /** Longest diagnostic string this route will echo. */
 const MAX_TEXT = 200
