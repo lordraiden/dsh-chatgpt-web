@@ -5,6 +5,7 @@ import type { AdapterEvent, CodexParsedRequest } from "../../src/types";
 import {
   compileChatGptWebContinuation,
   compileChatGptWebInstall,
+  compileRetainedChatGptWebInstall,
 } from "../../src/adapters/chatgpt-web/prompt";
 import { compileQwenChatInstallPrompt } from "../../src/adapters/qwen-chat/prompt";
 import {
@@ -194,6 +195,24 @@ describe("declared workspace — ChatGPT install header", () => {
       chatGptParsed("again", { dsh_session_id: "session-1", workspace: WORKSPACE }),
     );
     expect(compiled.text).toBe("again");
+    expect(compiled.text).not.toContain("Project:");
+  });
+
+  test("the retained install carries the declared workspace header too", () => {
+    // The retained composer install is the path a chat/completions turn actually uses when the
+    // minimal install is unavailable; it must not fall back to the cwd reference and drop the
+    // declaration on the floor.
+    const compiled = compileRetainedChatGptWebInstall(
+      chatGptParsed("hola", { dsh_session_id: "session-1", workspace: WORKSPACE }),
+      {},
+    );
+    expect(compiled.text).toContain(`${WORKSPACE_HEADER}\n\nhola`);
+    expect(compiled.text).not.toContain("github:");
+  });
+
+  test("the retained install invents no project header without a declaration", () => {
+    const compiled = compileRetainedChatGptWebInstall(chatGptParsed("hola"), {});
+    expect(compiled.text).toContain("hola");
     expect(compiled.text).not.toContain("Project:");
   });
 });

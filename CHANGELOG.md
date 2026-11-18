@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.5.1
+
+- Fix the session-health surface for a capture that appears after the service started: the provider
+  list (and each capture path) is resolved per snapshot instead of frozen at construction, so an
+  interactive sign-in is reported as verified without a restart. The verdict cache is keyed by
+  provider id **and** capture path, so a pre-sign-in "absent" is never served for the new path. The
+  turns themselves already used the live path; only the diagnostic surface was stale.
+
+## 1.5.0
+
 - Reintroduce the **DSH plugin** as a thin, text-only DeepSeek Harness provider over the service HTTP
   API (`doc/plugin.md`). One package ships two artifacts again: the container service and
   `lib/plugin.js` + `client.js` + `cordis.patch.yml`. The plugin registers `chatgpt-web/*` and

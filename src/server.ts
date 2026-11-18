@@ -2336,7 +2336,10 @@ export function startServer(
    * the rows say `absent` without launching anything, so composing it is inert.
    */
   const authHealth: AuthHealthSurface = createAuthHealthSurface({
-    providers: dependencies.authHealth?.providers ?? defaultAuthHealthProviders(config),
+    // Resolved per snapshot, not captured here: an interactive sign-in moves the provider capture to
+    // its per-provider path after this surface exists, and a frozen list would keep reporting the
+    // pre-sign-in path as absent (the turns themselves already use the live path).
+    providers: dependencies.authHealth?.providers ?? (() => defaultAuthHealthProviders(config)),
     ...(dependencies.authHealth?.now === undefined ? {} : { now: dependencies.authHealth.now }),
     ...(dependencies.authHealth?.cacheTtlMs === undefined ? {} : { cacheTtlMs: dependencies.authHealth.cacheTtlMs }),
     ...(dependencies.authHealth?.probeTimeoutMs === undefined ? {} : { probeTimeoutMs: dependencies.authHealth.probeTimeoutMs }),
