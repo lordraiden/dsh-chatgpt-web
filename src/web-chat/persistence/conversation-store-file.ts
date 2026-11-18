@@ -27,6 +27,7 @@ import {
   type WebChatConversationDraft,
   type WebChatConversationIdentity,
   type WebChatConversationRecord,
+  type WebChatConversationRetention,
   type WebChatConversationStore,
   type WebChatConversationStoreOptions,
 } from "../core";
@@ -77,6 +78,39 @@ export function defaultWebChatConversationStorePath(): string {
 /** The identity tuple a record is addressed by (never the provider handle). */
 function identityKey(identity: WebChatConversationIdentity): string {
   return `${identity.providerId}\u0000${identity.bindingId}\u0000${identity.key}`;
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Apply bounded retention to a record set.
+ *
+ * Only `confirmed` records are eligible: an `unconfirmed` record is an attempt whose outcome is
+ * unknown, and dropping it would lose the reconciliation the next turn needs. The age bound is
+ * applied first, then the entry cap keeps the newest confirmed records.
+ */
+function pruneRecords(
+  records: readonly WebChatConversationRecord[],
+  retention: WebChatConversationRetention | undefined,
+  now: number,
+): WebChatConversationRecord[] {
+  if (!retention) return [...records];
+  const { maxAgeDays, maxEntries } = retention;
+  if (maxAgeDays === undefined && maxEntries === undefined) return [...records];
+  const cutoff = maxAgeDays === undefined ? undefined : now - maxAgeDays * DAY_MS;
+  let kept = records.filter((record) =>
+    record.checkpoint === "unconfirmed" || cutoff === undefined || record.updatedAt >= cutoff);
+  if (maxEntries !== undefined) {
+    const confirmed = kept.filter((record) => record.checkpoint !== "unconfirmed");
+    if (confirmed.length > maxEntries) {
+      const newest = [...confirmed]
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, maxEntries);
+      const keep = new Set(newest.map((record) => identityKey(record.identity)));
+      kept = kept.filter((record) => record.checkpoint === "unconfirmed" || keep.has(identityKey(record.identity)));
+    }
+  }
+  return kept;
 }
 
 /** Read and validate the whole document. */
@@ -169,6 +203,8 @@ export function createFileConversationStore(
   ownedStoreFiles.add(file);
   let closed = false;
   const now = options.now ?? (() => Date.now());
+  const retentionOf = (): WebChatConversationRetention | undefined =>
+    typeof options.retention === "function" ? options.retention() : options.retention;
   // One writer per store instance: every mutation is a whole-document read-modify-write.
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -177,6 +213,20 @@ export function createFileConversationStore(
     queue = run.catch(() => undefined);
     return run;
   };
+
+  // Bound the file at startup too: a deployment that only reads for a while must not keep an
+  // oversized store until the next write. A corrupt file still fails explicitly, as on any read.
+  const pruneFile = (): void => {
+    const retention = retentionOf();
+    if (!retention || (retention.maxAgeDays === undefined && retention.maxEntries === undefined)) return;
+    if (!existsSync(file)) return;
+    const { document, raw } = readDocumentWithRaw(file);
+    const pruned = pruneRecords(document.records, retention, now());
+    if (pruned.length === document.records.length) return;
+    assertUnchangedSinceRead(file, raw);
+    writeDocument(file, { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records: pruned });
+  };
+  pruneFile();
 
   return {
     async read(identity) {
@@ -197,7 +247,10 @@ export function createFileConversationStore(
           ? document.records.map((record) => (identityKey(record.identity) === key ? committed : record))
           : [...document.records, committed];
         assertUnchangedSinceRead(file, raw);
-        writeDocument(file, { version: WEB_CHAT_CONVERSATION_STORE_VERSION, records });
+        writeDocument(file, {
+          version: WEB_CHAT_CONVERSATION_STORE_VERSION,
+          records: pruneRecords(records, retentionOf(), now()),
+        });
         return committed;
       });
     },

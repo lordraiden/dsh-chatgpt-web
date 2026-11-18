@@ -112,6 +112,7 @@ export {
   type WebChatConversationIdentity,
   type WebChatConversationInitialization,
   type WebChatConversationRecord,
+  type WebChatConversationRetention,
   type WebChatConversationStore,
   type WebChatConversationStoreOptions,
 } from "./conversation-store";

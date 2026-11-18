@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.5.6
+
+- Bounded retention for the durable conversation store: `webChat.conversationRetention` accepts
+  `maxAgeDays` and/or `maxEntries`. A store with retention prunes old **confirmed** records when it
+  opens and after every write; an `unconfirmed` attempt is never pruned, because dropping it would
+  lose the reconciliation the next turn needs. Absent keeps today's behaviour (every record forever).
+
+
 ## 1.5.5
 
 - The plugin's status route now allows 25 s for its reads (the client 30 s), so the service's cold

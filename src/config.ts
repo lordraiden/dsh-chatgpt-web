@@ -632,6 +632,17 @@ export interface AppConfig {
     providers?: Record<string, unknown>;
     /** Durable continuity location; omit to keep continuity in memory. */
     conversationStorePath?: string;
+    /**
+     * Optional bounded retention for the durable conversation store. Absent keeps every record
+     * forever (today's behaviour). Only confirmed records are pruned; an unconfirmed attempt is
+     * never dropped.
+     */
+    conversationRetention?: {
+      /** Drop confirmed records whose last update is older than this many days. */
+      maxAgeDays?: number;
+      /** Keep at most this many confirmed records, dropping the oldest first. */
+      maxEntries?: number;
+    };
   };
   tunnel?: TunnelConfig;
   automaticTunnel?: TunnelConfig;
@@ -1235,6 +1246,23 @@ function parseConfig(value: unknown, path: string): AppConfig {
     if (record.conversationStorePath !== undefined
       && (typeof record.conversationStorePath !== "string" || !record.conversationStorePath.trim())) {
       throw new Error(`Invalid webChat.conversationStorePath in ${path}`);
+    }
+    if (record.conversationRetention !== undefined) {
+      const retention = record.conversationRetention;
+      if (typeof retention !== "object" || retention === null || Array.isArray(retention)) {
+        throw new Error(`Invalid webChat.conversationRetention in ${path}`);
+      }
+      const keys = Object.keys(retention);
+      if (keys.length === 0) throw new Error(`Invalid webChat.conversationRetention in ${path}`);
+      for (const key of keys) {
+        if (key !== "maxAgeDays" && key !== "maxEntries") {
+          throw new Error(`Unknown webChat.conversationRetention.${key} in ${path}`);
+        }
+        const value = (retention as Record<string, unknown>)[key];
+        if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+          throw new Error(`Invalid webChat.conversationRetention.${key} in ${path}`);
+        }
+      }
     }
   }
   const solAvailable = parsed.solAvailable === true;
