@@ -466,6 +466,38 @@ describe("session health — cached, single-flight and bounded", () => {
     expect(() => createAuthHealthSurface({ providers: [], cacheTtlMs: -1 })).toThrow(TypeError);
     expect(() => createAuthHealthSurface({ providers: [], probeTimeoutMs: 0 })).toThrow(TypeError);
   });
+
+  test("a provider list resolved per snapshot observes a capture that appeared after construction", async () => {
+    // The production surface is created before an operator signs in. The sign-in writes the capture
+    // to its per-provider path and moves the live config there; a list frozen at construction keeps
+    // checking the pre-sign-in path and reports a working session as absent.
+    const captured = writeCapture(QWEN_CHAT_PROVIDER_ID, qwenChatCapture());
+    const missing = join(home, "not-yet", "storage-state.json");
+    const qwenChat = countingAuthenticate(state => ({ storageState: state }));
+    let currentPath = missing;
+    const surface = createAuthHealthSurface({
+      providers: () => [{
+        storageStatePath: currentPath,
+        importProvider: {
+          ...qwenChatAuthImportProvider({}),
+          authenticate: qwenChat.authenticate,
+        } as AuthImportProvider,
+      }],
+      now: () => NOW,
+    });
+
+    const before = await surface.snapshot();
+    expect(before.providers[0]?.state).toBe("absent");
+    expect(before.providers[0]?.capturePresent).toBe(false);
+
+    currentPath = captured;
+    const after = await surface.snapshot();
+    // The move is observed without rebuilding the surface, and the pre-move "absent" verdict is not
+    // served for the new path (the cache is keyed by id AND capture path).
+    expect(after.providers[0]?.state).toBe("verified");
+    expect(after.providers[0]?.capturePresent).toBe(true);
+    expect(qwenChat.calls()).toBe(1);
+  });
 });
 
 describe("session health — one writer, one cache, one authority", () => {

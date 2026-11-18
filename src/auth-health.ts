@@ -103,7 +103,15 @@ export interface AuthHealthSnapshot {
 
 /** Options for {@link createAuthHealthSurface}. */
 export interface AuthHealthSurfaceOptions {
-  readonly providers: readonly AuthHealthProvider[];
+  /**
+   * The providers to report, or a resolver read on every snapshot.
+   *
+   * The resolver form exists for a capture path that moves while the process runs: an interactive
+   * sign-in writes the per-provider capture after the service started, so a list captured at
+   * construction would keep checking the path that existed before the sign-in and report a verified
+   * session as absent. A live deployment passes the resolver; tests pass the fixed list.
+   */
+  readonly providers: readonly AuthHealthProvider[] | (() => readonly AuthHealthProvider[]);
   /** Clock seam; tests inject one. Defaults to `Date.now`. */
   readonly now?: () => number;
   /** How long one verdict is reused. Default {@link DEFAULT_AUTH_HEALTH_CACHE_TTL_MS}. */
@@ -225,14 +233,33 @@ export function createAuthHealthSurface(options: AuthHealthSurfaceOptions): Auth
   if (!Number.isSafeInteger(probeTimeoutMs) || probeTimeoutMs < 1) {
     throw new TypeError("A session-health surface requires a positive probe timeout");
   }
-  const providers = [...options.providers];
-  const byId = new Map<string, AuthHealthProvider>();
-  for (const provider of providers) {
-    const id = provider.importProvider.id;
-    if (byId.has(id)) throw new TypeError(`Provider ${id} is registered twice for session health`);
-    byId.set(id, provider);
-  }
-  /** A warm verdict, keyed by provider id. */
+  const staticProviders = Array.isArray(options.providers) ? [...options.providers] : undefined;
+  /**
+   * Resolve the providers the surface reports right now.
+   *
+   * A fixed list is validated once; a resolver is re-read (and re-validated) on every snapshot, so a
+   * sign-in that moved the capture path is observed without a restart.
+   */
+  const resolveProviders = (): readonly AuthHealthProvider[] => {
+    const resolved: readonly AuthHealthProvider[] = staticProviders
+      ?? (options.providers as () => readonly AuthHealthProvider[])();
+    const seen = new Set<string>();
+    for (const provider of resolved) {
+      const id = provider.importProvider.id;
+      if (seen.has(id)) throw new TypeError(`Provider ${id} is registered twice for session health`);
+      seen.add(id);
+    }
+    return resolved;
+  };
+  /**
+   * The verdict key of one provider: its id **and** its capture path.
+   *
+   * A warm verdict is only reusable for the path it was produced against. Keying by the id alone
+   * would serve a pre-sign-in "absent" for the new capture for the whole cache TTL.
+   */
+  const providerKey = (provider: AuthHealthProvider): string =>
+    `${provider.importProvider.id}\u0000${provider.storageStatePath}`;
+  /** A warm verdict, keyed by provider id and capture path. */
   const cache = new Map<string, { readonly at: number; readonly value: ProviderSessionHealth }>();
   /** A check that is already running, so concurrent page loads share one browser. */
   const inflight = new Map<string, Promise<ProviderSessionHealth>>();
@@ -376,20 +403,20 @@ export function createAuthHealthSurface(options: AuthHealthSurfaceOptions): Auth
   };
 
   const checked = async (provider: AuthHealthProvider): Promise<ProviderSessionHealth> => {
-    const id = provider.importProvider.id;
-    const warm = cache.get(id);
+    const key = providerKey(provider);
+    const warm = cache.get(key);
     if (warm !== undefined && now() - warm.at < cacheTtlMs) return warm.value;
-    const running = inflight.get(id);
+    const running = inflight.get(key);
     if (running !== undefined) return await running;
     const run = check(provider).then(value => {
-      cache.set(id, { at: now(), value });
+      cache.set(key, { at: now(), value });
       return value;
     });
-    inflight.set(id, run);
+    inflight.set(key, run);
     try {
       return await run;
     } finally {
-      if (inflight.get(id) === run) inflight.delete(id);
+      if (inflight.get(key) === run) inflight.delete(key);
     }
   };
 
@@ -397,7 +424,7 @@ export function createAuthHealthSurface(options: AuthHealthSurfaceOptions): Auth
     async snapshot(): Promise<AuthHealthSnapshot> {
       const rows: ProviderSessionHealth[] = [];
       // Sequential on purpose: one browser at a time, so opening the page cannot spawn three.
-      for (const provider of providers) rows.push(await checked(provider));
+      for (const provider of resolveProviders()) rows.push(await checked(provider));
       return {
         checkedAt: new Date(now()).toISOString(),
         cache: { ttlMs: cacheTtlMs },
@@ -406,10 +433,10 @@ export function createAuthHealthSurface(options: AuthHealthSurfaceOptions): Auth
     },
 
     noteVerified(providerId, verifiedAt) {
-      const provider = byId.get(providerId);
+      const provider = resolveProviders().find(candidate => candidate.importProvider.id === providerId);
       if (provider === undefined) return;
       const at = now();
-      cache.set(providerId, {
+      cache.set(providerKey(provider), {
         at,
         value: {
           providerId,
