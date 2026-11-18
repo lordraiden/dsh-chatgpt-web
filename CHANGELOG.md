@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.5.4
+
+- The stored-session verifier waits on the same canonical composer selector the turn browser uses,
+  instead of the stale accessible-name locator ("Chat with ChatGPT"), which never matched on a valid
+  session and made the health probe time out and report a working capture as `expired`.
+
+
 ## 1.5.3
 
 - The stored-session verifier now presents the same Windows desktop user agent as the managed turn

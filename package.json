@@ -1,6 +1,6 @@
 {
   "name": "@lordraiden/dsh-chatgpt-web",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Containerised ChatGPT Web / Qwen Chat bridge: an authenticated consumer-web chat exposed as an OpenAI-compatible HTTP API (/v1/responses, /v1/chat/completions, /v1/models) with its own CLI, plus an optional thin DeepSeek Harness plugin.",
   "repository": {
     "type": "git",

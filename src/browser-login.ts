@@ -16,6 +16,7 @@ import {
   assertAuthenticatedChatGptPage,
   assertChatGptPage,
   CHATGPT_CHAT_URL,
+  CHATGPT_COMPOSER_SELECTOR,
   detectChatGptAccountCapabilities,
   detectChatGptAuthenticatedAccountIdentity,
 } from "./chatgpt-session";
@@ -270,7 +271,10 @@ async function inspectStoredState(
     try {
       const verifierPage = await verifierContext.newPage();
       await verifierPage.goto(CHATGPT_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
-      await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 60_000 });
+      // Wait on the canonical composer selector the turn browser uses. The accessible-name locator
+      // ("Chat with ChatGPT") is stale: on a valid session it never matches, so the health probe
+      // reported a working capture as expired even after the browser finally launched headless.
+      await verifierPage.locator(CHATGPT_COMPOSER_SELECTOR).first().waitFor({ state: "visible", timeout: 60_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
       await assertChatGptPage(verifierPage);
       return { ...await detectChatGptAccountCapabilities(verifierPage), url: verifierPage.url() };
