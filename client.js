@@ -31,8 +31,11 @@ window.__ModuleLoader__.load({
     const STATUS_PATH = '/plugins/dsh-chatgpt-web/status';
     /** Catalogue routes this plugin serves (doc/plugin.md §1). */
     const SUPPORTED_MODEL_PREFIXES = ['chatgpt-web/', 'qwen-chat/'];
-    /** Bound for the page read when `requestTimeoutMs` is 0 ("no client timeout" is for turns). */
-    const STATUS_TIMEOUT_MS = 8000;
+    /**
+     * Bound for the page read when `requestTimeoutMs` is 0 ("no client timeout" is for turns).
+     * It must outlast the host route's own bound (25 s), which covers the cold session-health probe.
+     */
+    const STATUS_TIMEOUT_MS = 30000;
     /** A token an older build may have left in browser storage; removed on mount, never written. */
     const LEGACY_TOKEN_KEY = 'dsh-chatgpt-web.controlToken';
     /** Longest diagnostic text rendered; longer answers are truncated, never echoed whole. */

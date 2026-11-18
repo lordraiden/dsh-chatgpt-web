@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.5.5
+
+- The plugin's status route now allows 25 s for its reads (the client 30 s), so the service's cold
+  session-health probe (~20 s: it launches a browser and proves the capture) fits. With the previous
+  5 s bound the settings page showed "auth health unavailable (timeout)" on every cold load even
+  though the session was valid; a warm verdict is still instant.
+
+
 ## 1.5.4
 
 - The stored-session verifier waits on the same canonical composer selector the turn browser uses,
