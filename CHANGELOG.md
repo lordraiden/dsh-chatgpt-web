@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.5.2
+
+- Fix the stored-session verifier's browser launch: the auth import and the session-health probe
+  launch with `--headless=new` (the container's established headless shape) instead of a headed
+  browser, so a display-less container can prove a stored capture. Before this, the probe reported a
+  working session as `expired` with a headed-browser launch error while the real turn browser kept
+  working.
+
+
 ## 1.5.1
 
 - Fix the session-health surface for a capture that appears after the service started: the provider

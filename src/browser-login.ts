@@ -250,9 +250,13 @@ async function inspectStoredState(
 ): Promise<ChatGptWebAccountCapabilities & { url: string }> {
   const verifierBrowser = await chromium.launch({
     executablePath: config.chromeExecutablePath,
+    // The container's established headless shape: a normal launch whose headless mode is requested
+    // with `--headless=new` in `args` rather than Playwright's `headless: true`. Without the flag the
+    // verifier is a headed browser, which a display-less container cannot launch — the health probe
+    // then reports a working capture as `expired` while the real turn browser keeps working.
     headless: false,
     ignoreDefaultArgs: ["--enable-automation", "--password-store=basic", "--use-mock-keychain"],
-    args: ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
+    args: ["--headless=new", "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
   });
   try {
     const verifierContext = await verifierBrowser.newContext({ storageState });
