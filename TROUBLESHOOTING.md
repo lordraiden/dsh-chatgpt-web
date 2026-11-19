@@ -920,3 +920,38 @@ transport failure (status `0`) means the page could not reach its own origin.
    `/plugins/dsh-chatgpt-web/status` on the same origin the GUI is served from.
 4. A `500`-class answer is not expected: the route always answers `200 application/json`, even when
    the service is down. A non-200 therefore points at the host or the proxy, not at the service.
+
+## 25. A large prompt fails with `ChatGPT response DOM disappeared`, or the send control never arms
+
+Two different browser-surface failures used to share one generic outcome. They are now distinct, and
+each names the bound that was actually hit.
+
+**Symptom A — `502` `chatgpt_submitted_turn_failed` ("ChatGPT stopped responding after the task
+started") roughly one minute after the send, on a large prompt.** The answer loop's window for "the
+assistant turn element is gone and no Stop control is visible" was the flat 60 s floor, while the
+first-token wait already scaled with the prompt size. On a Free account a large prompt spends longer
+than that in the work/commentary phase, where the assistant turn element is replaced with the
+activity view: ChatGPT is working, the bridge declared it silent.
+
+**What to do.** Nothing on the prompt: since issue #699 the answer loop uses the same size-scaled
+grace (`chatGptResponseDomGraceMs`, floored by `responseDomGraceMs`, capped by
+`responseDomGraceMaxMs`), so a large prompt is no longer failed at 60 s. If it still happens, the DOM
+really did not return before the scaled grace, and the diagnostics under `diagnostics/browser-turns/`
+(`12-turn-failed*`) show what the page displayed.
+
+**Symptom B — `503` `composer_send_not_armed` with a `Retry-After` header.** The composer accepted and
+preserved the complete prompt (the readback matched), but ChatGPT never armed its send control within
+`sendEnableGraceMs`. **Nothing was submitted**: the submission is never activated in that state, so the
+retry is safe. This is a transient surface or account state — it was observed live in bursts on a Free
+account, with prompts far below the composer boundary (4.3k–9.3k characters) on the same day the same
+prompt sizes sent fine — not a prompt-size refusal and not a provider failure. Honour `Retry-After`
+instead of retrying immediately; if the bursts repeat, check the account's message quota in the
+ChatGPT tab.
+
+**Symptom C — `400` `context_compaction_required` with `[limit_chars=… actual_chars=… next_action=compact]`.**
+The prompt exceeds the measured composer boundary and is refused before the browser is opened. The
+clause is machine-readable on purpose: compact to below `limit_chars` (the same number the
+`x-dsh-chatgpt-web-context-budget` header and the `/v1/models` row publish) and retry. The refusal is
+not retryable — the identical prompt can never fit — and do not raise `composerCharLimit` past the
+measured boundary to "fix" it: above it the composer takes the text and the send control never arms,
+which is exactly symptom B.

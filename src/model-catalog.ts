@@ -1,4 +1,5 @@
-import { providerConfig, type AppConfig } from "./config";
+import { providerConfig, resolveChatGptWebTuning, type AppConfig } from "./config";
+import { chatGptWebContextBudgetReport } from "./adapters/chatgpt-web/context-budget";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebRoutes,
@@ -81,14 +82,23 @@ export function buildChatGptWebModel(
   route: ChatGptWebModelRoute,
   config: AppConfig,
 ): JsonObject {
-  return buildChatGptWebModelFromProvider(route, effectiveChatGptWebProviderConfig(config));
+  return buildChatGptWebModelFromProvider(
+    route,
+    effectiveChatGptWebProviderConfig(config),
+    resolveChatGptWebTuning(config.tuning).composerCharLimit,
+  );
 }
 
 function buildChatGptWebModelFromProvider(
   route: ChatGptWebModelRoute,
   provider: ReturnType<typeof providerConfig>,
+  composerCharLimit: number,
 ): JsonObject {
   const capabilities = webCapabilities(provider);
+  // Issue #699 / D1.2: the composer character wall this deployment enforces, and the token figure
+  // derived from it, travel with the row so a caller that sizes prompts from the catalogue sees the
+  // bound that will actually refuse the turn. `context_window` stays the model's own window.
+  const budget = chatGptWebContextBudgetReport(route.backendModel, composerCharLimit);
   const limits = resolveChatGptWebContextLimits(
     route.backendModel,
     route.adapterEffort,
@@ -117,6 +127,11 @@ function buildChatGptWebModelFromProvider(
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,
     auto_compact_token_limit: limits.autoCompactTokenLimit,
+    ...(budget === undefined ? {} : {
+      composer_char_limit: budget.composer_char_limit,
+      effective_input_tokens: budget.effective_input_tokens,
+      chars_per_token: budget.chars_per_token,
+    }),
     additional_speed_tiers: [],
     service_tiers: [],
     default_service_tier: null,
@@ -128,10 +143,11 @@ export function buildChatGptWebModelCatalog(
   contextOverride?: CodexModelContextOverride,
 ): JsonObject {
   const provider = effectiveChatGptWebProviderConfig(config);
+  const composerCharLimit = resolveChatGptWebTuning(config.tuning).composerCharLimit;
   const routes = availableChatGptWebRoutes(createChatGptWebRouteAuthorityFromProvider(provider));
   const catalog: JsonObject = {
     object: "list",
-    models: routes.map(route => buildChatGptWebModelFromProvider(route, provider)),
+    models: routes.map(route => buildChatGptWebModelFromProvider(route, provider, composerCharLimit)),
   };
   if (contextOverride) {
     for (const candidate of catalog.models as JsonObject[]) {

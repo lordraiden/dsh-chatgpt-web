@@ -158,8 +158,44 @@ export function chatGptSettlementWaitTimeoutError(graceMs: number, phase: string
   );
 }
 
-export const CHATGPT_TURN_TIMEOUT_CODE = "turn_timeout";
+export const CHATGPT_COMPOSER_SEND_NOT_ARMED_CODE = "composer_send_not_armed";
 
+/**
+ * The composer accepted and preserved the complete prompt, but ChatGPT never armed its send control
+ * (issue #699).
+ *
+ * Observed live as the send-enable grace expiring on prompts far below the measured composer boundary
+ * (4.3k–9.3k characters): the text was in the ProseMirror composer and the exact readback matched,
+ * while the send button stayed disabled until the turn gave up. Nothing was submitted — the send was
+ * never activated — so retrying the turn is safe, and this is a transient surface/account state.
+ *
+ * Deliberately **not** an input-size refusal: mapping it to INPUT_TOO_LARGE would make a caller
+ * compact a prompt that was never too large.
+ */
+export function chatGptComposerSendNotArmedError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "ChatGPT kept its send control disabled after the complete prompt was attached and verified, so nothing was submitted."
+    + " The browser surface was not ready to accept a message; this is a transient surface or account state, not a"
+    + " prompt-size refusal. Retry the turn after a short wait.",
+    {
+      status: 503,
+      errorType: "server_error",
+      code: CHATGPT_COMPOSER_SEND_NOT_ARMED_CODE,
+      retryable: true,
+    },
+  );
+}
+
+/**
+ * How long a caller should wait before retrying a turn whose send control never armed (issue #699).
+ *
+ * The observed condition is minutes-long, but a short hint is the right shape for a *retryable*
+ * surface state: it tells a fan-out caller to sleep instead of hammering the same account, without
+ * pretending the bridge knows when ChatGPT will accept a message again.
+ */
+export const CHATGPT_COMPOSER_SEND_RETRY_AFTER_SECONDS = 15;
+
+export const CHATGPT_TURN_TIMEOUT_CODE = "turn_timeout";
 /**
  * The bridge's own absolute turn clock expired (issue #329).
  *

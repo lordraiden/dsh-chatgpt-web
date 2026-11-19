@@ -279,6 +279,10 @@ export function httpStatusFromTerminalError(error: {
   ) return 403;
   if (error.type === "insufficient_quota" || error.code === "insufficient_quota") return 429;
   if (error.type === "server_error" && error.code === "server_is_overloaded") return 503;
+  // Issue #699: the ChatGPT surface kept its send control disabled after the verified prompt was
+  // attached, so nothing was submitted. A retry-safe surface unavailability (503), never a provider
+  // failure and never an input-size refusal.
+  if (error.code === "composer_send_not_armed") return 503;
   // Client-closed messages often arrive as invalid_request_error after classifyError; check message
   // before treating every invalid_request_error as HTTP 400.
   const message = error.message ?? "";

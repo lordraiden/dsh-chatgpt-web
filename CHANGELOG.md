@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 1.5.7
+
+- The browser turn's answer loop now uses the size-scaled response-DOM grace instead of the flat 60 s
+  floor. A large Free-account prompt spends longer than that in ChatGPT's work/commentary phase, where
+  the assistant turn element is replaced with the activity view and no Stop control proves the model is
+  still generating; the flat floor declared such a turn silent ~65 s after the send. The loop now uses
+  the same bound the first-token wait already used (floor `responseDomGraceMs`, growth
+  `responseDomGracePerCharMs`, ceiling `responseDomGraceMaxMs`), through one construction point.
+- The send control that never arms is its own typed failure: `composer_send_not_armed`, HTTP `503`
+  `server_error`, **retryable**, with `Retry-After` on `/v1/chat/completions`. The composer held the
+  complete verified prompt and nothing was submitted, so a retry is safe; the message says so. It is
+  deliberately **not** an input-size refusal — the observed cases carried prompts far below the
+  composer boundary, and compacting would not help.
+- The endpoint-profile concurrency refusal (`429`) now publishes the same `Retry-After` hint the turn
+  queue does, instead of leaving a fan-out caller to guess or retry into the same saturated account.
+- The effective context budget is published, not discovered from a `400`: every ChatGPT Web response on
+  `/v1/chat/completions` and `/v1/responses` carries `x-dsh-chatgpt-web-context-budget` (the hard
+  `composer_char_limit`, the advisory `effective_input_tokens` derived from it at the measured
+  `chars_per_token`, the pre-compaction budget and the model's window), the `/v1/models` row states the
+  same values, and `GET /v1/control/status` exposes them as `contextBudget`. Size prompts from
+  `effective_input_tokens`, not from `context_window`.
+- A prompt over the composer boundary keeps its `400` (not retryable, never a `429`) and now names the
+  bound in a machine-readable clause on the message — `[limit_chars=… actual_chars=… next_action=compact]`,
+  or the token form when the token bound is the one exceeded — so a caller can compact to the right
+  number instead of parsing prose.
+- The bridge's own `504 turn_timeout` path is covered by tests: the clock starts at the turn (never at
+  arrival, admission or queue wait), expires exactly at its deadline, and publishes the same typed
+  code/log line both public ingresses report.
+
 ## 1.5.6
 
 - Bounded retention for the durable conversation store: `webChat.conversationRetention` accepts

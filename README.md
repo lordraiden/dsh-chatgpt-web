@@ -966,6 +966,28 @@ The capability/content split belongs to the common layer's own vocabulary
 (`WEB_CHAT_CAPABILITY_FEATURES` / `WEB_CHAT_CONTENT_FEATURES`), so the API does not maintain a second
 list. Embeddings, audio, images and batch are not offered at all.
 
+## Context budget and prompt-size refusals
+
+The Web routes are budgeted by the **ChatGPT composer's measured character boundary**, not by the
+model's nominal window: a Free-account Luna route accepts a little over 119k characters and stops
+arming the send control above ~120k, because the composer takes the text and the send button never
+becomes usable. That bound is enforced before the browser turn starts, and it is published instead of
+being discovered:
+
+- A prompt over the limit is a **`400`** (`context_compaction_required`) that names the bound in a
+  machine-readable clause on the message, e.g. `[limit_chars=120000 actual_chars=136991
+  next_action=compact]`. It is not retryable: the identical prompt can never fit — compact first.
+- Every `/v1/chat/completions` and `/v1/responses` response whose model is a `chatgpt-web/...` route
+  carries `x-dsh-chatgpt-web-context-budget`, a compact JSON object stating the hard
+  `composer_char_limit`, the advisory `effective_input_tokens` derived from it at the measured
+  `chars_per_token`, the `pre_compaction_input_tokens` and the `theoretical_context_window`. The same
+  values sit on the `/v1/models` row as `composer_char_limit` / `effective_input_tokens` /
+  `chars_per_token`, and on `GET /v1/control/status` as `contextBudget`. Size prompts from
+  `effective_input_tokens`, not from `context_window`.
+- If the composer accepts the prompt but ChatGPT never arms its send control, nothing was submitted:
+  that is a retry-safe surface state, answered with `503` `composer_send_not_armed` and a `Retry-After`
+  header. It is deliberately **not** an input-size refusal — compacting would not help.
+
 ## The `usage` block is an estimate
 
 `usage` is produced locally (tiktoken) for clients that read it. It is **not** consumer-web accounting.
