@@ -120,6 +120,7 @@ import {
   extractCodexTurnIdentityFromBody,
 } from "./adapters/chatgpt-web/environment";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
+import { createReadinessProbe } from "./web-chat/host/readiness";
 import {
   buildOpenAiModelsData,
   ChatCompletionsRequestError,
@@ -2192,6 +2193,51 @@ export function startServer(
     active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0),
   });
+  /**
+   * The last turn this listener completed successfully, and how many it has completed (issue #699 /
+   * D1.4).
+   *
+   * Recorded from the provider's own terminal event (`done`), which is the adapter's statement that
+   * the turn finished — not an HTTP status that a streaming client could have aborted midway. It is
+   * deliberately per listener: an in-process test listener starts with an empty record, and a restart
+   * honestly reports "no turn yet" instead of a timestamp from a previous process.
+   */
+  let lastSuccessfulTurn: {
+    readonly at: string;
+    readonly model: string | null;
+    readonly endpoint: "responses" | "chat-completions";
+    readonly stopReason: string | null;
+  } | undefined;
+  let successfulTurns = 0;
+  const observeTurnHealth = (
+    endpoint: "responses" | "chat-completions",
+    model: string | undefined,
+  ): ((event: AdapterEvent) => void) => (event): void => {
+    if (event.type !== "done") return;
+    successfulTurns += 1;
+    lastSuccessfulTurn = {
+      at: new Date().toISOString(),
+      model: model ?? null,
+      endpoint,
+      stopReason: typeof event.stopReason === "string" ? event.stopReason : null,
+    };
+  };
+  /**
+   * Readiness (issue #699 / D1.4): cheap, browser-free, quota-free.
+   *
+   * The three probes are distinct on purpose — liveness (`/healthz`) says the process answers,
+   * readiness (`/readyz`) says the listener can take a turn now, and the canary (a real minimal turn)
+   * is the only one that spends a provider message and is never automatic.
+   */
+  const readiness = createReadinessProbe({
+    config,
+    version: VERSION,
+    isAcceptingTurns: () => !draining,
+    turnQueue: () => {
+      const snapshot = sharedProviderCore.turnQueueSnapshot();
+      return { waiting: snapshot.depth, maxWaiters: snapshot.maxWaiters, active: snapshot.activeLeases };
+    },
+  });
   const controlAuthorized = (req: Request): boolean => {
     const header = req.headers.get("authorization") ?? "";
     const expected = Buffer.from(`Bearer ${config.controlToken}`);
@@ -2413,7 +2459,24 @@ export function startServer(
         accepting_turns: !draining,
         successful_model_catalog_requests: successfulModelCatalogRequests,
         last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
+        // Issue #699 / D1.4: the last completed provider turn, so a supervisor can alert on "no turn
+        // in N hours" without spending a message on a canary. `null` means none since this process
+        // started.
+        last_successful_turn_at: lastSuccessfulTurn?.at ?? null,
+        last_successful_turn_model: lastSuccessfulTurn?.model ?? null,
+        last_successful_turn_endpoint: lastSuccessfulTurn?.endpoint ?? null,
+        successful_turns: successfulTurns,
         ...activity(),
+      });
+    }
+    if (req.method === "GET" && url.pathname === "/readyz") {
+      // Issue #699 / D1.4: readiness is not liveness. It answers 503 the moment the listener cannot
+      // take a turn (draining, data directory not writable, the ChatGPT Web capture gone, a saturated
+      // turn queue, or an empty catalogue), and it never opens a browser or spends provider quota.
+      const report = readiness.snapshot();
+      return Response.json(report.body, {
+        status: report.httpStatus,
+        headers: { "cache-control": "no-store" },
       });
     }
     // The sign-in page (issue #276), the endpoint-profiles page (issue #356) and the settings page
@@ -2541,6 +2604,11 @@ export function startServer(
         port: boundPort(),
         uptime: (Date.now() - startedAt) / 1_000,
         accepting_turns: !draining,
+        // Issue #699 / D1.4: the same last-successful-turn facts `/healthz` publishes.
+        last_successful_turn_at: lastSuccessfulTurn?.at ?? null,
+        last_successful_turn_model: lastSuccessfulTurn?.model ?? null,
+        last_successful_turn_endpoint: lastSuccessfulTurn?.endpoint ?? null,
+        successful_turns: successfulTurns,
         ...activity(),
         storageDir: getConfigDir(),
         storageStatePath: config.storageStatePath,
@@ -2969,6 +3037,9 @@ export function startServer(
               onTurnIdentity: bindIdentity,
               webChatProviders,
               ...(profile === undefined ? {} : { endpointProfile: profile }),
+              // Issue #699 / D1.4: record the provider's own terminal `done` event as the last
+              // successful turn, for `/healthz` and `/v1/control/status`.
+              onAdapterEvent: observeTurnHealth("responses", requestedModel),
             },
           ),
           requestedModel,
@@ -3057,6 +3128,7 @@ export function startServer(
           onTurnIdentity: bindIdentity,
           webChatProviders,
           ...(profile === undefined ? {} : { endpointProfile: profile }),
+          onAdapterEvent: observeTurnHealth("chat-completions", translation.model),
         });
         if (translation.stream) {
           return declareDropped(declareContextBudget(new Response(
