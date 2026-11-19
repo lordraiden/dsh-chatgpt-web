@@ -998,6 +998,38 @@ A turn that the provider could not account for does not get a fabricated `0`: a 
 Handle both — absent and `null` both mean "not reported", and neither is a measurement. When the field
 is present its numbers are the local estimate; treat them as an estimate, not as billing or quota truth.
 
+## Health, readiness and the canary
+
+Three checks answer three different questions, and they are not interchangeable:
+
+| probe | question | cost | what it does |
+|---|---|---|---|
+| `GET /healthz` | is the process alive and answering? | none | Liveness only: version, uptime, accepting/draining, active turns, last successful turn, catalogue-request counter. It never touches the browser, a credential or a provider. |
+| `GET /readyz` | can the listener accept a turn **now**? | none | Readiness: not draining, data directory writable (real write+unlink, cached 10 s), the ChatGPT Web session capture present, turn queue not saturated, catalogue resolved in memory. `200`/`503` with one compact entry per check — no browser, no provider call, no quota, no path or credential in the body. |
+| a **canary turn** | can the account actually *send*? | one provider message | A minimal real turn. The only check that proves the authenticated session can complete a message, so it is deliberately **not** part of `/readyz` and never automatic: run it as an explicit, low-frequency operator action (a tiny `/v1/chat/completions` request, or the doctor's provider check) when readiness is green but turns fail. |
+
+`/readyz` fails with `503` and names the failing check:
+
+```json
+{"status":"not_ready","service":"dsh-chatgpt-web","version":"1.5.8","checked_at":"…",
+ "checks":{"lifecycle":{"ok":true,"accepting_turns":true},
+           "storage":{"ok":true},
+           "auth":{"ok":false,"required":["chatgpt-web"],"present":[],"missing":["chatgpt-web"]},
+           "turn_queue":{"ok":true,"waiting":0,"max_waiters":20,"active":0},
+           "catalogue":{"ok":true,"models":3}}}
+```
+
+`storage` reports `storage_missing` (the data directory vanished — bootstrap the volume) or
+`storage_unwritable` (fix its permissions). `auth` gates the ChatGPT Web capture of the routes this
+deployment serves; the other providers' captures are reported beside it, because a composed but
+unauthenticated provider is a localised failure rather than a reason to take the listener out of
+rotation.
+
+`GET /healthz` and `GET /v1/control/status` also publish `last_successful_turn_at`,
+`last_successful_turn_model`, `last_successful_turn_endpoint` and `successful_turns`. The timestamp is
+recorded from the provider's own terminal completion event, and it is `null` until this process
+completes its first turn: alerting on its age replaces a polling canary.
+
 ## Troubleshooting
 
 - [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) — login state, browser executable paths, port

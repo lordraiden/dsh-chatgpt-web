@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.5.8
+
+- New `GET /readyz` readiness probe: cheap, browser-free and quota-free. It answers `200` only when
+  the listener can accept a turn now — not draining, data directory writable (a real write+unlink
+  probe, cached for 10 s), the ChatGPT Web session capture present, the turn queue not saturated and
+  the model catalogue resolved in memory — and `503` with one compact entry per check naming the
+  failing precondition (`lifecycle`, `storage`, `auth`, `turn_queue`, `catalogue`). It never opens a
+  browser, never calls a provider and carries no credential, prompt or filesystem path.
+- `last_successful_turn_at` (with model, endpoint and a completed-turn count) is published on
+  `GET /healthz` and `GET /v1/control/status`, recorded from the provider's own terminal `done` event.
+  Supervisors can alert on "no successful turn in N hours" instead of spending a provider message on a
+  canary, and a restart honestly reports `null` until its first completed turn.
+- The real canary (a minimal turn) stays the only check that proves the account can *send*; it is
+  deliberately not part of readiness and is documented as an explicit, low-frequency operator action.
+
 ## 1.5.7
 
 - The browser turn's answer loop now uses the size-scaled response-DOM grace instead of the flat 60 s

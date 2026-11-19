@@ -955,3 +955,33 @@ clause is machine-readable on purpose: compact to below `limit_chars` (the same 
 not retryable — the identical prompt can never fit — and do not raise `composerCharLimit` past the
 measured boundary to "fix" it: above it the composer takes the text and the send control never arms,
 which is exactly symptom B.
+
+## 26. Liveness, readiness and the canary are three different questions
+
+`GET /healthz` is **liveness**: the process answers HTTP. It never opens a browser, never reads a
+credential and never spends provider quota. A supervisor restarts a container that fails it.
+
+`GET /readyz` is **readiness**: the listener can accept a turn *now*. It is still browser-free and
+quota-free, and it answers `503` with one entry per check so the failing precondition is named:
+
+| check | `ok: false` means | what to do |
+|---|---|---|
+| `lifecycle` | the service is draining (a requested operation) | wait for the operation; do not route new work to it |
+| `storage` | `storage_missing` (data directory gone) or `storage_unwritable` (permissions / read-only mount) | bootstrap the volume or fix ownership/permissions on the data directory |
+| `auth` | the ChatGPT Web capture the served routes need is absent (`missing` names it) | sign in again (`dsh-chatgpt-web login`, or the control sign-in page) or re-import the capture |
+| `turn_queue` | the bounded wait queue is full, so the next turn would be refused immediately | let in-flight turns finish; `waiting`/`max_waiters`/`active` say how full it is |
+| `catalogue` | no model route resolved in memory | check the provider configuration; this one is a deployment error, not a session one |
+
+A single failed check is enough for `503`. `auth` gates the ChatGPT Web capture of the routes this
+deployment serves; a composed provider that is merely unauthenticated is reported in `missing` without
+flipping readiness, because a turn routed to it fails on its own.
+
+**The canary is not readiness.** A real minimal turn is the only check that proves the authenticated
+account can actually *send* a message, and it costs one provider message. It is therefore never part of
+`/readyz` and never automatic: run it deliberately and infrequently (a tiny `/v1/chat/completions`
+request, or the doctor's provider check) when readiness is green but real turns fail.
+
+To alert on a silent account without a canary, watch `last_successful_turn_at` from `GET /healthz` (or
+`/v1/control/status`): it is recorded from the provider's own terminal completion event, it is `null`
+until this process completes its first turn, and a stale timestamp with a green `/readyz` points at the
+provider side, not at the listener.
