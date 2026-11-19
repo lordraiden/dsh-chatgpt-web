@@ -94,6 +94,7 @@ import {
   chatGptBrowserTabClosedError,
   chatGptContextExhaustedError,
   chatGptAnswerRecoveryUnavailableError,
+  chatGptComposerSendNotArmedError,
   chatGptContinuationPromptMissingError,
   chatGptRetainedConversationUnavailableError,
   chatGptRetainedSurfaceBusyError,
@@ -171,6 +172,26 @@ export function chatGptResponseDomGraceMs(maxChars: number, tuning: ResolvedChat
     tuning.responseDomGraceMaxMs,
     Math.max(tuning.responseDomGraceMs, maxChars * tuning.responseDomGracePerCharMs),
   );
+}
+/**
+ * The answer-loop DOM health bound for one turn (issue #699).
+ *
+ * The same size-scaled grace the first-token wait already uses ({@link chatGptResponseDomGraceMs}),
+ * for the same reason: on a Free account a large prompt spends longer before the assistant turn's
+ * stable render, and its work/commentary phase can replace the assistant turn element with the
+ * activity view — with no Stop control visible to prove the model is still generating — for longer
+ * than the flat floor. Sizing the answer loop from the flat floor failed 33 of 36 large-prompt turns
+ * observed on 2026-11-19 with "response DOM disappeared" while ChatGPT was still working, even
+ * though the same turn had already been given the scaled grace to *find* that assistant turn.
+ *
+ * One construction point only: the floor, the per-character growth and the ceiling stay owned by
+ * {@link chatGptResponseDomGraceMs} and the tuning, never re-derived here.
+ */
+export function createChatGptTurnDomHealthTracker(
+  maxMessageChars: number,
+  tuning: ResolvedChatGptWebTuning,
+): ChatGptTurnDomHealthTracker {
+  return new ChatGptTurnDomHealthTracker(chatGptResponseDomGraceMs(maxMessageChars, tuning));
 }
 /**
  * How long the temporary-chat surface may keep showing its "Loading chats" / "Loading profile"
@@ -1202,7 +1223,20 @@ export function assertChatGptWebInputWithinLimits(
       && estimatedMessageTokens > budget.browserMessageTokenLimit
       ? `This prompt requires ${estimatedMessageTokens.toLocaleString("en-US")} visible message tokens, which exceeds the measured ${budget.browserMessageTokenLimit.toLocaleString("en-US")}-token ChatGPT browser message boundary for this account and effort. The model context window is ${budget.theoreticalContextWindow.toLocaleString("en-US")} tokens.${nextAction}`
       : `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${budget.preCompactionInputBudget.toLocaleString("en-US")}-token effective ChatGPT Web input budget. The theoretical model context window is ${budget.theoreticalContextWindow.toLocaleString("en-US")} tokens and ${budget.outputHeadroomTokens.toLocaleString("en-US")} tokens are reserved as output/control headroom.${nextAction}`;
-  throw new ChatGptWebAdapterError(message, {
+  // Issue #699 / D1.1a: the refusal stays a 400 (retrying the identical prompt can never fit), and it
+  // names the bound in a machine-readable clause so a caller can compact to the right number instead of
+  // parsing prose. This follows the convention the bridge already uses for its retry hint
+  // (`parseRetryAfterFromMessage`): a stable `key=value` suffix on the same message, never a second
+  // payload shape on a route that must stay wire-compatible.
+  const detail = budget.browserComposerCharLimit !== undefined
+    && promptChars !== undefined
+    && promptChars > budget.browserComposerCharLimit
+    ? ` [limit_chars=${budget.browserComposerCharLimit} actual_chars=${promptChars} next_action=compact]`
+    : budget.browserMessageTokenLimit !== undefined
+      && estimatedMessageTokens > budget.browserMessageTokenLimit
+      ? ` [limit_tokens=${budget.browserMessageTokenLimit} estimated_tokens=${estimatedMessageTokens} next_action=compact]`
+      : ` [limit_tokens=${budget.preCompactionInputBudget} estimated_tokens=${estimatedInputTokens} next_action=compact]`;
+  throw new ChatGptWebAdapterError(message + detail, {
     status: 400,
     errorType: "invalid_request_error",
     code,
@@ -2463,6 +2497,43 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
     return false;
   }
   return document.execCommand("insertText", false, value);
+}
+
+/**
+ * The bridge's own absolute turn deadline (issue #329; scope pinned by #699).
+ *
+ * The clock starts when this browser turn **begins executing**, which is after the conversation
+ * admission, the account-slot wait and the request's own queue time. Those waits therefore never
+ * consume the turn's budget: a turn that queued for 300 s before it started still receives the full
+ * `turnTimeoutMs` from its own start. The turn owner is the only caller, and it passes its own
+ * start; nothing else may derive a turn deadline from request arrival.
+ */
+export function chatGptBrowserTurnDeadline(turnTimeoutMs: number, now = Date.now()): number {
+  return now + turnTimeoutMs;
+}
+
+/** Whether the bridge's own turn clock has expired (`>=` matches the loop's historical check). */
+export function chatGptBrowserTurnDeadlineExceeded(
+  deadline: number | undefined,
+  now = Date.now(),
+): boolean {
+  return deadline !== undefined && now >= deadline;
+}
+
+/**
+ * The typed 504 failure and its one log line (issue #329, #699).
+ *
+ * Kept as one pure function so the invariant "the bridge's clock names itself in the log and in the
+ * error" is testable without a page: the loop only decides *when* to call it.
+ */
+export function chatGptBrowserTurnTimeoutFailure(
+  turnTimeoutMs: number,
+  detail: string,
+): ChatGptWebAdapterError {
+  console.warn(
+    `[chatgpt-web] turn_timeout limitMs=${turnTimeoutMs} detail=${JSON.stringify(detail)}`,
+  );
+  return chatGptTurnTimeoutError(turnTimeoutMs, detail);
 }
 
 export class ChatGptBrowserWorker {
@@ -4118,7 +4189,10 @@ export class ChatGptBrowserWorker {
       if (await sendButton.isEnabled()) break;
       if (Date.now() >= sendEnableDeadline) {
         await captureDiagnostic?.("send-disabled");
-        throw new Error("ChatGPT send button remained disabled after the complete prompt was attached");
+        // Issue #699: a typed failure instead of a bare Error. Nothing was submitted — the composer
+        // holds the verified prompt, but the send control never armed — so this is a retry-safe,
+        // transient surface/account state, not an input-size refusal and not a provider failure.
+        throw chatGptComposerSendNotArmedError();
       }
       await settleChatGptUi();
     }
@@ -5015,11 +5089,7 @@ export class ChatGptBrowserWorker {
    * outcome. The error carries the same code to the API caller.
    */
   private turnDeadlineExceeded(detail: string): ChatGptWebAdapterError {
-    const timeoutMs = this.config.turnTimeoutMs;
-    console.warn(
-      `[chatgpt-web] turn_timeout limitMs=${timeoutMs} detail=${JSON.stringify(detail)}`,
-    );
-    return chatGptTurnTimeoutError(timeoutMs, detail);
+    return chatGptBrowserTurnTimeoutFailure(this.config.turnTimeoutMs, detail);
   }
 
   private async runBrowserTurn(
@@ -5197,7 +5267,7 @@ export class ChatGptBrowserWorker {
           turn.compaction === true,
         );
       }
-      const deadline = Date.now() + this.config.turnTimeoutMs;
+      const deadline = chatGptBrowserTurnDeadline(this.config.turnTimeoutMs);
       let page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
         if (maintenancePage) return maintenancePage;
         if (!launcherSurfaceId) {
@@ -5696,7 +5766,9 @@ export class ChatGptBrowserWorker {
         if (visibleText) turn.onTextDelta(visibleText);
         return visibleText;
       };
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      // Issue #699: the answer loop uses the same size-scaled grace as the first-token wait. The
+      // flat floor is only the floor — it is not a per-turn bound on a large Free-account prompt.
+      const domHealthTracker = createChatGptTurnDomHealthTracker(maxMessageChars, this.config.tuning);
       const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
@@ -5720,7 +5792,7 @@ export class ChatGptBrowserWorker {
           if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
           throw new DOMException("ChatGPT web turn aborted", "AbortError");
         }
-        if (deadline !== undefined && Date.now() >= deadline) {
+        if (chatGptBrowserTurnDeadlineExceeded(deadline)) {
           // Opt-in only (issue #360 follow-up): a caller that asked for the partial answer receives
           // the visible text with a truncation signal instead of a 504 that discards it. With the
           // switch off — the default — this branch is unreachable and the turn still fails.

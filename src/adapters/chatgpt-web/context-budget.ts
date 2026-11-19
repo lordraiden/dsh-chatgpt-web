@@ -254,3 +254,66 @@ export function selectCompactionMessagesDeterministically(
 export const CONTEXT_BUDGET_EXCEEDED_CODE = "context_budget_exceeded";
 export const CONTEXT_COMPACTION_REQUIRED_CODE = "context_compaction_required";
 
+/**
+ * The public header that carries the effective ChatGPT Web context budget (issue #699 / D1.2).
+ *
+ * A caller that sizes its prompts from the nominal model window produces payloads the composer
+ * boundary refuses before the browser turn starts. The bound travels with the response so the
+ * caller can compact to it instead of learning it from a 400.
+ */
+export const CHATGPT_WEB_CONTEXT_BUDGET_HEADER = "x-dsh-chatgpt-web-context-budget";
+
+/**
+ * Estimated input tokens per inline character measured on this bridge's JSON transport.
+ *
+ * 136,991 inline characters produced 47,449 estimated input tokens on the 2026-11-19 Free-account
+ * observation (issue #699). The **composer character limit is the hard bound**; the token figure
+ * derived from this ratio is advisory — a denser transport (prose, non-ASCII) buys fewer tokens per
+ * character, which is exactly why the character bound is the one enforced.
+ */
+export const CHATGPT_WEB_OBSERVED_CHARS_PER_TOKEN = 2.89;
+
+/** The effective budget one ChatGPT Web turn is measured against, as published (issue #699 / D1.2). */
+export interface ChatGptWebContextBudgetReport {
+  readonly model: string;
+  readonly composer_char_limit: number;
+  readonly effective_input_tokens: number;
+  readonly pre_compaction_input_tokens: number;
+  readonly theoretical_context_window: number;
+  readonly chars_per_token: number;
+  readonly next_action: "compact";
+}
+
+/**
+ * Build the budget report for the model this bridge's browser budgeting owns.
+ *
+ * @param modelId - the provider's backend model (the catalogue route's backend model).
+ * @param composerCharLimit - the resolved tuning value: a deployment or profile override of the
+ *   measured composer boundary, which is the number the preflight actually enforces.
+ * @returns the report, or `undefined` for a model whose budget this module does not own (another
+ *   provider must never receive a ChatGPT-shaped budget).
+ */
+export function chatGptWebContextBudgetReport(
+  modelId: string,
+  composerCharLimit: number,
+): ChatGptWebContextBudgetReport | undefined {
+  if (modelId !== CHATGPT_WEB_LUNA_BACKEND_MODEL) return undefined;
+  const budget = resolveChatGptWebContextBudget(modelId, "low");
+  const limit = Number.isFinite(composerCharLimit) && composerCharLimit > 0
+    ? Math.floor(composerCharLimit)
+    : budget.browserComposerCharLimit ?? CHATGPT_WEB_LUNA_COMPOSER_CHAR_LIMIT;
+  return {
+    model: modelId,
+    composer_char_limit: limit,
+    effective_input_tokens: Math.floor(limit / CHATGPT_WEB_OBSERVED_CHARS_PER_TOKEN),
+    pre_compaction_input_tokens: budget.preCompactionInputBudget,
+    theoretical_context_window: budget.theoreticalContextWindow,
+    chars_per_token: CHATGPT_WEB_OBSERVED_CHARS_PER_TOKEN,
+    next_action: "compact",
+  };
+}
+
+/** The header value for one report: compact JSON, stable key order, no request content. */
+export function chatGptWebContextBudgetHeaderValue(report: ChatGptWebContextBudgetReport): string {
+  return JSON.stringify(report);
+}

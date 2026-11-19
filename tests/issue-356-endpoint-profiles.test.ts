@@ -646,6 +646,10 @@ describe("issue #356 — profiles persist and take effect on the next turn witho
     });
     expect(refused.status).toBe(429);
     expect((await errorBody(refused)).code).toBe(ENDPOINT_PROFILE_CONCURRENCY_EXCEEDED_CODE);
+    // Issue #699 / D1.5a: this refusal is backpressure, not a provider failure, so it publishes the
+    // same deferral hint the turn queue uses (its default wait budget, 60 s) instead of leaving the
+    // caller to guess or retry into the same saturated account.
+    expect(refused.headers.get("retry-after")).toBe("60");
 
     // The default endpoint is not governed by the profile's budget.
     release();

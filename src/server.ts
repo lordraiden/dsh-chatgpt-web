@@ -102,11 +102,18 @@ import {
   cancelStructuredCompactionTrace,
 } from "./adapters/chatgpt-web/compaction-handoff";
 import {
+  CHATGPT_COMPOSER_SEND_NOT_ARMED_CODE,
+  CHATGPT_COMPOSER_SEND_RETRY_AFTER_SECONDS,
   CHATGPT_TURN_QUEUE_FULL_CODE,
   CHATGPT_TURN_QUEUE_TIMEOUT_CODE,
   ChatGptWebAdapterError,
   chatGptBrowserTabClosedError,
 } from "./adapters/chatgpt-web/adapter-error";
+import {
+  CHATGPT_WEB_CONTEXT_BUDGET_HEADER,
+  chatGptWebContextBudgetHeaderValue,
+  chatGptWebContextBudgetReport,
+} from "./adapters/chatgpt-web/context-budget";
 import {
   CHATGPT_TURN_REVISION_CONFLICT_MESSAGE,
   extractChatGptTurnIdentity,
@@ -149,6 +156,7 @@ import {
 } from "./codex-integration";
 import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+  chatGptWebModelRoute,
   isChatGptWebInternalBackendModel,
   isChatGptWebModelSlug,
   type ChatGptWebModelRoute,
@@ -1863,6 +1871,16 @@ function endpointProfileDeleteRequest(config: AppConfig, name: string): Response
  */
 export const AUTH_IMPORT_MAX_BODY_BYTES = 512 * 1024;
 
+/**
+ * The largest body `/v1/responses` will clone just to read its `model` (issue #699 / D1.2).
+ *
+ * The public context-budget header is resolved from the requested model, but that route hands the
+ * body straight to the streaming turn. Peeking a small body is cheap; peeling a 64 MiB canonical
+ * context would make this convenience a cost. Above this size the response omits the header and the
+ * request is served exactly as before.
+ */
+const REQUEST_MODEL_PEEK_LIMIT_BYTES = 1024 * 1024;
+
 /** One control-surface refusal: the existing `{ ok: false, code, message }` shape plus a status. */
 function authImportErrorResponse(code: string, message: string, status: number): Response {
   return Response.json(
@@ -2196,6 +2214,28 @@ export function startServer(
   };
   const maxInflightTurns = resolveMaxInflightTurns();
   /**
+   * The `model` of a JSON request body, read from a clone (issue #699 / D1.2).
+   *
+   * The public budget header is resolved from the requested model, and `/v1/responses` does not
+   * parse the body before the streaming turn starts. Only small bodies are peeked: this is a
+   * convenience for a client that sizes its prompts, and it must never turn a supported large native
+   * context into a second full parse. A request without a usable `Content-Length` (chunked) is not
+   * peeked either; the response simply omits the header.
+   */
+  const peekRequestedModel = async (req: Request): Promise<string | undefined> => {
+    const declared = Number(req.headers.get("content-length") ?? "");
+    if (!Number.isFinite(declared) || declared <= 0 || declared > REQUEST_MODEL_PEEK_LIMIT_BYTES) {
+      return undefined;
+    }
+    try {
+      const body = await req.clone().json() as Record<string, unknown>;
+      const model = body?.model;
+      return typeof model === "string" ? model : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  /**
    * The provider composition the Advisor resolves routes against.
    *
    * It is rebuilt per Advisor operation so a configuration change (tuning, browser host) is picked up
@@ -2419,6 +2459,36 @@ export function startServer(
       requestConfig = applyEndpointProfile(config, profile);
       url.pathname = resolution.path;
     }
+    /**
+     * The effective ChatGPT Web context budget for the requested model, as the public header value
+     * (issue #699 / D1.2).
+     *
+     * A caller that sizes its prompts from the nominal model window produces payloads the composer
+     * boundary refuses before the browser turn starts, so the measured bound travels with the
+     * response instead of being discovered by a 400. Absent for a model this deployment's ChatGPT
+     * Web routes do not own: another provider must not receive a ChatGPT-shaped budget.
+     */
+    const contextBudgetHeaderFor = (model: string | undefined): string | undefined => {
+      if (model === undefined) return undefined;
+      const route = chatGptWebModelRoute(model);
+      if (route === undefined) return undefined;
+      const report = chatGptWebContextBudgetReport(
+        route.backendModel,
+        resolveChatGptWebTuning(requestConfig.tuning).composerCharLimit,
+      );
+      return report === undefined ? undefined : chatGptWebContextBudgetHeaderValue(report);
+    };
+    const declareContextBudget = (response: Response, model: string | undefined): Response => {
+      const value = contextBudgetHeaderFor(model);
+      if (value === undefined) return response;
+      try {
+        response.headers.set(CHATGPT_WEB_CONTEXT_BUDGET_HEADER, value);
+      } catch {
+        // A proxied response can carry immutable headers. The budget is advisory: it must never turn
+        // a successful turn into a failure.
+      }
+      return response;
+    };
     // The public API surface (issue #247). `/v1/control/*` above keeps the operator's control token:
     // the two are separate authorities and are never interchangeable.
     if (url.pathname.startsWith("/v1/") && !url.pathname.startsWith("/v1/control/")) {
@@ -2445,13 +2515,18 @@ export function startServer(
       // tracked turn that admitted it.
       if (profile !== undefined && profile.maxConcurrentTurns !== undefined && req.method === "POST"
         && httpTurns.countScope(profile.name) >= profile.maxConcurrentTurns) {
-        return formatErrorResponse(
+        const refused = formatErrorResponse(
           429,
           "rate_limit_error",
           `Endpoint profile ${JSON.stringify(profile.name)} is at its configured limit of`
           + ` ${profile.maxConcurrentTurns} concurrent turns.`,
           ENDPOINT_PROFILE_CONCURRENCY_EXCEEDED_CODE,
         );
+        // Issue #699 / D1.5a: this refusal is backpressure, not a provider failure, so the caller is
+        // told when to come back. The hint is the same deferral authority the turn queue publishes
+        // (one bound of "how long a turn may wait"), never a second local number.
+        refused.headers.set("retry-after", String(sharedProviderCore.turnQueueRetryAfterSeconds()));
+        return refused;
       }
     }
     if (req.method === "GET" && url.pathname === "/v1/control/status") {
@@ -2475,6 +2550,13 @@ export function startServer(
         solAvailable: config.solAvailable,
         proAvailable: config.proAvailable,
         tuning: resolveChatGptWebTuning(config.tuning),
+        // Issue #699 / D1.2: the effective ChatGPT Web budget an agent can size its prompts from
+        // instead of learning it from a 400. The composer character bound is hard; the token figure
+        // derived from it is advisory and names the ratio it used.
+        contextBudget: chatGptWebContextBudgetReport(
+          CHATGPT_WEB_LUNA_BACKEND_MODEL,
+          resolveChatGptWebTuning(config.tuning).composerCharLimit,
+        ) ?? null,
         // Issue #358: the bounded wait queue in front of the account fan-out bound, per caller.
         // Counters and wait times only — caller keys are fingerprints the provider computed before the
         // queue saw them, so no prompt text, conversation key, credential or raw session identity can
@@ -2873,16 +2955,23 @@ export function startServer(
     }
     if (req.method === "POST" && url.pathname === "/v1/responses") {
       if (draining) return formatErrorResponse(503, "server_error", "dsh-chatgpt-web is draining for a requested service operation");
+      // Issue #699 / D1.2: the budget header describes the model this request asked for. The model
+      // is read from a clone *before* the turn consumes the body; a body too large to peek simply
+      // omits the header (see `peekRequestedModel`).
+      const requestedModel = await peekRequestedModel(req);
       return httpTurns.track(
-        (signal, bindIdentity) => responseRequest(
-          new Request(req, { signal }),
-          requestConfig,
-          adapterFactory,
-          {
-            onTurnIdentity: bindIdentity,
-            webChatProviders,
-            ...(profile === undefined ? {} : { endpointProfile: profile }),
-          },
+        async (signal, bindIdentity) => declareContextBudget(
+          await responseRequest(
+            new Request(req, { signal }),
+            requestConfig,
+            adapterFactory,
+            {
+              onTurnIdentity: bindIdentity,
+              webChatProviders,
+              ...(profile === undefined ? {} : { endpointProfile: profile }),
+            },
+          ),
+          requestedModel,
         ),
         req.signal,
         process.platform,
@@ -2970,13 +3059,13 @@ export function startServer(
           ...(profile === undefined ? {} : { endpointProfile: profile }),
         });
         if (translation.stream) {
-          return declareDropped(new Response(
+          return declareDropped(declareContextBudget(new Response(
             toChatCompletionStream(upstream.body ?? new ReadableStream(), translation.model),
             {
               status: upstream.status,
               headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
             },
-          ));
+          ), translation.model));
         }
         let payload: Record<string, unknown> = {};
         try {
@@ -3008,13 +3097,19 @@ export function startServer(
             || failure.code === CHATGPT_TURN_QUEUE_FULL_CODE) {
             failed.headers.set("retry-after", String(sharedProviderCore.turnQueueRetryAfterSeconds()));
           }
-          return declareDropped(failed);
+          // Issue #699 / D1.1b: the send control never armed, so nothing was submitted. That is a
+          // retry-safe surface/account state, published as 503 with the deferral hint its own owner
+          // declares — never as an input-size refusal that would make the caller compact for nothing.
+          if (failure.code === CHATGPT_COMPOSER_SEND_NOT_ARMED_CODE) {
+            failed.headers.set("retry-after", String(CHATGPT_COMPOSER_SEND_RETRY_AFTER_SECONDS));
+          }
+          return declareDropped(declareContextBudget(failed, translation.model));
         }
         return declareDropped(
-          Response.json(
+          declareContextBudget(Response.json(
             toChatCompletion(payload, translation.model, { normalizeStructuredJson: structuredOutputSoft }),
             { status: upstream.ok ? 200 : upstream.status },
-          ),
+          ), translation.model),
         );
       }, req.signal, process.platform, "chat-completions", profile?.name);
     }

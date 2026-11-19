@@ -173,6 +173,10 @@ const CHATGPT_WEB_CHAT_CATEGORY_BY_CODE: Readonly<Record<string, WebChatErrorCat
   // settlement stayed unproven past the settlement-wait grace (issue #301): the same resource
   // unavailability as a busy surface, never an upstream failure.
   settlement_wait_timeout: "TRANSPORT_UNAVAILABLE",
+  // The ChatGPT surface kept its send control disabled after the verified prompt was attached, so
+  // nothing was submitted (issue #699). A surface that cannot accept the message is transport
+  // unavailability, not an upstream failure and never an input-size refusal.
+  composer_send_not_armed: "TRANSPORT_UNAVAILABLE",
   // Submission and response.
   chatgpt_submission_ambiguous: "SUBMISSION_AMBIGUOUS",
   chatgpt_submitted_turn_failed: "UPSTREAM_ERROR",
