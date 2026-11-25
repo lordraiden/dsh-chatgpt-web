@@ -165,6 +165,46 @@ describe('normal turn payload', () => {
     expect(messagesOf(request)).toEqual([{ role: 'user', content: 'the real turn' }])
   })
 
+  test('skips a trailing user message that is only the harness time snapshot', async () => {
+    const service = completionService()
+
+    // The harness appends its time context as a `user` message after the human turn. Its text is not
+    // blank, but the service strips it as host context, so sending it would be an empty turn and the
+    // service would refuse the request with `host_context_only_turn` (regression: a real session lost
+    // its question this way).
+    const timeSnapshot = [
+      'Time sampled while preparing turn 1, step 1: 2026-11-25T08:41:25+01:00[Europe/Madrid]',
+      'Browser time zone for this request: Europe/Madrid. Interpret otherwise-unqualified dates and times in this zone.',
+      'Elapsed since the preceding model-visible message: unavailable.',
+    ].join('\n')
+
+    const { request } = await exchange(service, {
+      messages: [userMessage('the real turn'), userMessage(timeSnapshot)],
+      sessionId: 'ses-1',
+    })
+
+    expect(messagesOf(request)).toEqual([{ role: 'user', content: 'the real turn' }])
+  })
+
+  test('skips a trailing user message that is only a runtime-context snapshot', async () => {
+    const service = completionService()
+
+    const runtimeSnapshot = [
+      'Current runtime context:',
+      '',
+      'Current working directory: "/home/raiden/Projects/homeserver".',
+      '',
+      'Current DSH file policy: workspace-write.',
+    ].join('\n')
+
+    const { request } = await exchange(service, {
+      messages: [userMessage('the real turn'), userMessage(runtimeSnapshot)],
+      sessionId: 'ses-1',
+    })
+
+    expect(messagesOf(request)).toEqual([{ role: 'user', content: 'the real turn' }])
+  })
+
   test('appends the API path to a baseUrl that carries an endpoint profile', async () => {
     const service = completionService()
     const adapter = adapterFor({

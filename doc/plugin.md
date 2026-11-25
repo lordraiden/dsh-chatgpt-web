@@ -132,6 +132,11 @@ accept: text/event-stream
   service projects exactly that message, so sending the whole history would be redundant. An
   auxiliary call sends the full user/assistant conversation, because the service treats a declared
   `purpose` as an ephemeral turn.
+- "Human text" is the service's rule, not a local one: the adapter selects with the same
+  `sanitizeConversationText` the service uses, so a trailing runtime or time snapshot the harness
+  appended as a `user` message is skipped instead of being sent as the turn. Selecting on raw
+  non-empty text would send that snapshot and the service would refuse the request with
+  `host_context_only_turn`, losing the human instruction that was still in the conversation.
 - SSE: tolerate `: keep-alive` comments, `data: <json>`, `data: [DONE]`, the empty terminal `delta`
   and the absence of `usage`. Errors mid-stream arrive as `data: {"error":{message,type}}` with HTTP
   200 and **no `code`**; non-streaming errors carry `error.code`. Map by code, honour `retry-after`
