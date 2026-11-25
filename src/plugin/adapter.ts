@@ -37,6 +37,7 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import { sanitizeConversationText } from '../conversation-sanitizer'
 import { PROVIDERS, type AdapterDeps, type PluginConfig, type ProviderId } from './contract'
 import {
   MODEL_NOT_FOUND_CODE,
@@ -534,13 +535,23 @@ function requestPurpose(options: GenerateOptions): string | undefined {
   return typeof purpose === 'string' && purpose.trim() !== '' ? purpose.trim() : undefined
 }
 
-/** Project a normal turn onto the single newest user message that still carries human text. */
+/**
+ * Project a normal turn onto the single newest user message that still carries human text.
+ *
+ * "Human text" is the service's own rule, not a local one: the harness appends its runtime and time
+ * snapshots as `user` messages *after* the human turn, and the service strips those blocks before it
+ * decides whether a turn exists (`sanitizeConversationText`, the one owner of what host context is).
+ * Selecting on raw non-empty text here would pick such a snapshot, send it as the turn, and the
+ * service would refuse the request with `host_context_only_turn` — the human instruction would be
+ * lost even though it was in the conversation. Reusing the sanitizer keeps the two rules identical by
+ * construction, so a snapshot-only message is skipped and the human turn behind it is sent.
+ */
 function normalTurnMessages(messages: readonly RequestMessage[]): WireMessage[] {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message.role !== 'user') continue
     const text = userTextOf(message.content)
-    if (text.trim() !== '') return [{ role: 'user', content: text }]
+    if (sanitizeConversationText(text) !== '') return [{ role: 'user', content: text }]
   }
   throw new LlmError(`${PKG}: the request carries no human user message to send`, 'INVALID_REQUEST')
 }

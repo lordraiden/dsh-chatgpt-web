@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.5.9
+
+- The plugin now selects the current human turn with the service's own host-context rule
+  (`sanitizeConversationText`) instead of raw non-empty text. The harness appends its runtime and time
+  snapshots as `user` messages after the human turn; the plugin used to send such a snapshot as the
+  turn, and the service refused the request with `host_context_only_turn` (HTTP 400), losing the
+  question even though it was in the conversation. A snapshot-only trailing message is now skipped and
+  the human turn behind it is sent.
 
 ## 1.5.8
 
